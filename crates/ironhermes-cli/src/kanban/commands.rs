@@ -1658,6 +1658,13 @@ pub async fn cmd_decompose(
         // Single-id mode: require explicit id.
         let task_id = id.ok_or_else(|| anyhow!("task id required when --all is not set"))?;
 
+        // WR-02 fix: capture the original title BEFORE invoking the kernel
+        // so the failure branch can report it; re-read after success so the
+        // success branch reports the rewritten title.
+        let original_title = {
+            let s = store_arc.lock().await;
+            s.get_task(&task_id).map(|t| t.title).unwrap_or_default()
+        };
         match decompose_triage_task(
             store_arc.clone(),
             &task_id,
@@ -1665,6 +1672,10 @@ pub async fn cmd_decompose(
             &kanban_config,
         ).await {
             Ok(ids) => {
+                let new_title = {
+                    let s = store_arc.lock().await;
+                    s.get_task(&task_id).map(|t| t.title).unwrap_or_default()
+                };
                 if json {
                     println!("{}", serde_json::to_string_pretty(&serde_json::json!({
                         "ok": true,
@@ -1672,7 +1683,7 @@ pub async fn cmd_decompose(
                         "reason": serde_json::Value::Null,
                         "fanout": ids.child_ids.len(),
                         "child_ids": ids.child_ids,
-                        "new_title": "",
+                        "new_title": new_title,
                     }))?);
                 } else {
                     println!("[{}] decomposed (children: {})", task_id, ids.child_ids.len());
@@ -1688,7 +1699,7 @@ pub async fn cmd_decompose(
                         "reason": e.to_string(),
                         "fanout": 0,
                         "child_ids": [],
-                        "new_title": "",
+                        "new_title": original_title,
                     }))?);
                 }
                 Ok(1)
@@ -1792,6 +1803,13 @@ pub async fn cmd_specify(
     } else {
         let task_id = id.ok_or_else(|| anyhow!("task id required when --all is not set"))?;
 
+        // WR-02 fix: capture the original title BEFORE invoking the kernel
+        // so the failure branch can report it; re-read after success so the
+        // success branch reports the rewritten title.
+        let original_title = {
+            let s = store_arc.lock().await;
+            s.get_task(&task_id).map(|t| t.title).unwrap_or_default()
+        };
         match specify_triage_task(
             store_arc.clone(),
             &task_id,
@@ -1799,12 +1817,16 @@ pub async fn cmd_specify(
             &kanban_config,
         ).await {
             Ok(_ids) => {
+                let new_title = {
+                    let s = store_arc.lock().await;
+                    s.get_task(&task_id).map(|t| t.title).unwrap_or_default()
+                };
                 if json {
                     println!("{}", serde_json::to_string_pretty(&serde_json::json!({
                         "ok": true,
                         "task_id": task_id,
                         "reason": serde_json::Value::Null,
-                        "new_title": "",
+                        "new_title": new_title,
                     }))?);
                 } else {
                     println!("[{}] specified (promoted to todo)", task_id);
@@ -1818,7 +1840,7 @@ pub async fn cmd_specify(
                         "ok": false,
                         "task_id": task_id,
                         "reason": e.to_string(),
-                        "new_title": "",
+                        "new_title": original_title,
                     }))?);
                 }
                 Ok(1)
