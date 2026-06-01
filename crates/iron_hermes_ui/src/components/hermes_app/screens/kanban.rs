@@ -1,15 +1,19 @@
-//! Phase 36.3.7.11 Plan 01 (D-02 / D-09) — Kanban dashboard screen.
+//! Phase 36.3.7.11 Plan 02 (D-02 / D-09 / D-06 / D-07) — Kanban dashboard screen.
 //!
-//! Walking skeleton: fetches the board via `fetch_board(None)` (D-18 — None
-//! resolves to default board), opens a WebSocket to `/api/ws/kanban` to
-//! receive live `KanbanWsEvent::TaskEventBatch` pushes from the dashboard
-//! tail consumer, and calls `board_resource.restart()` on every event (D-08
-//! minimal Plan 01 behavior — Plan 02 will swap to delta-apply).
-//!
-//! Plan 04 ships the wheel-nav 11th-wedge (`WheelWedge::Kanban`) and the
-//! Agents-page `KANBAN BOARD →` button that drives `active_screen` to
-//! `Screen::Kanban`; Plans 02 / 03 layer on drag-and-drop + detail drawer
-//! + modals on top of this screen.
+//! Walking skeleton (Plan 01) + drag-and-drop wiring (Plan 02):
+//! - Fetches the board via `fetch_board(None)` (D-18 — None resolves to
+//!   default board).
+//! - Opens a WebSocket to `/api/ws/kanban` to receive live
+//!   `KanbanWsEvent::TaskEventBatch` pushes from the dashboard tail
+//!   consumer (D-08); calls `board_resource.restart()` on every event
+//!   (Plan 02 minimal behavior — Plan 03 will swap to delta-apply).
+//! - Owns the shared drag-and-drop signals: `dragged_task_id`,
+//!   `pending_task_ids`, `toast_msg`, `live_region_msg`,
+//!   `archive_modal_task` — all passed down to `KanbanBoard` for the
+//!   column + card components.
+//! - Renders a hidden `role="log" aria-live="polite"` live region per
+//!   UI-SPEC §6.5 for screen-reader announcements of board updates,
+//!   move confirmations, and disallowed-transition hints.
 
 // Submodules in the sibling `kanban/` directory — board/column/card form
 // the visual shell. Drawer + modals land in Plan 03.
@@ -20,6 +24,7 @@ pub mod column;
 use crate::components::hermes_app::screens::kanban::board::KanbanBoard;
 use crate::protocol::TaskRow;
 use dioxus::prelude::*;
+use std::collections::HashSet;
 
 /// Phase 36.3.7.11 Plan 01: stylesheet for the kanban dashboard. Defines
 /// the `.kn-card` cyan-glow rules, `.kn-board` layout, chip styles, and
@@ -37,11 +42,12 @@ pub enum WsState {
     Disconnected,
 }
 
-/// Phase 36.3.7.11 Plan 01: kanban dashboard screen.
+/// Phase 36.3.7.11 Plan 02: kanban dashboard screen.
 ///
-/// Renders six columns (D-09), an archive-toggle toolbar button, and a
-/// WS status indicator. Subscribes to `/api/ws/kanban` and re-fetches
-/// the board on every TaskEventBatch (Plan 02 will switch to delta-apply).
+/// Renders six columns (D-09), an archive-toggle toolbar button, a WS
+/// status indicator, and the off-screen live region for ARIA
+/// announcements. Subscribes to `/api/ws/kanban` and re-fetches the
+/// board on every TaskEventBatch.
 #[component]
 pub fn ScreenKanban(is_active: bool) -> Element {
     // ALL hooks register unconditionally on every render (Pattern E from
@@ -51,22 +57,26 @@ pub fn ScreenKanban(is_active: bool) -> Element {
     let mut board_resource =
         use_resource(move || async move { crate::server::kanban_api::fetch_board(None).await });
 
-    // Local Signal<Vec<TaskRow>> — Plan 02 will use this for optimistic
-    // updates. Plan 01 mirrors board_resource via the use_effect below.
+    // Local Signal<Vec<TaskRow>> — Plan 02 mutates this optimistically
+    // on drop. The use_effect below syncs it from `board_resource`.
     let mut tasks: Signal<Vec<TaskRow>> = use_signal(Vec::<TaskRow>::new);
 
-    // Reserved for Plan 02 (drag source) — declared so the signal is in
-    // scope and the hook ordering is stable across plans.
-    let _dragged_task_id: Signal<Option<String>> = use_signal(|| None);
+    // Plan 02 drag-and-drop signals.
+    let dragged_task_id: Signal<Option<String>> = use_signal(|| None);
+    let pending_task_ids: Signal<HashSet<String>> = use_signal(HashSet::new);
+    let toast_msg: Signal<Option<String>> = use_signal(|| None);
+    let live_region_msg: Signal<Option<String>> = use_signal(|| None);
+
+    // Plan 03 archive-confirm modal target. Plan 02 sets `Some(task_id)`
+    // when a card is dragged to ARCHIVED; Plan 03 reads it to open the
+    // confirm modal.
+    let archive_modal_task: Signal<Option<String>> = use_signal(|| None);
 
     // Reserved for Plan 03 (drawer open state).
     let mut open_drawer_task_id: Signal<Option<String>> = use_signal(|| None);
 
     // Archive toggle — drives the 7th column visibility (D-09).
     let mut archived_visible: Signal<bool> = use_signal(|| false);
-
-    // Reserved for Plan 02 toast surface.
-    let _toast_msg: Signal<Option<String>> = use_signal(|| None);
 
     // WS connection state indicator.
     let mut ws_state: Signal<WsState> = use_signal(|| WsState::Connecting);
@@ -83,7 +93,7 @@ pub fn ScreenKanban(is_active: bool) -> Element {
 
     // WS client — opens to `/api/ws/kanban` and calls
     // `board_resource.restart()` on every TaskEventBatch (D-08 minimal
-    // Plan 01 behavior; Plan 02 swaps to delta-apply). Mirrors the
+    // Plan 01 behavior; later plans may delta-apply). Mirrors the
     // canonical `/api/ws/chat` pattern from hermes_app/mod.rs lines 160-168.
     let mut ws = dioxus_fullstack::use_websocket(move || {
         crate::server::kanban_ws::ws_kanban(
@@ -112,8 +122,7 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                             };
                         match event {
                             crate::protocol::KanbanWsEvent::TaskEventBatch { .. } => {
-                                // Plan 01: full re-fetch on any event. Plan
-                                // 02 will swap to delta-apply per Q11.
+                                // Plan 01 behavior preserved: full re-fetch.
                                 board_resource.restart();
                             }
                             crate::protocol::KanbanWsEvent::Error { message } => {
@@ -123,9 +132,7 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                                 );
                                 let _ = message;
                             }
-                            crate::protocol::KanbanWsEvent::Ping {} => {
-                                // Server liveness — no client action needed.
-                            }
+                            crate::protocol::KanbanWsEvent::Ping {} => {}
                         }
                     }
                     Ok(dioxus_fullstack::Message::Close { .. }) => {
@@ -136,7 +143,6 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                         ws_state.set(WsState::Reconnecting);
                         break;
                     }
-                    // Skip Ping/Pong/Binary silently.
                     Ok(_) => continue,
                 }
             }
@@ -155,13 +161,15 @@ pub fn ScreenKanban(is_active: bool) -> Element {
     };
 
     let archived_visible_ro: ReadSignal<bool> = archived_visible.into();
-    let tasks_ro: ReadSignal<Vec<TaskRow>> = tasks.into();
 
     let on_open_drawer = move |task_id: String| {
-        // Plan 03 wires the drawer; Plan 01 just records the id so the
+        // Plan 03 wires the drawer; Plan 02 just records the id so the
         // hook is in place + the click is observable.
         open_drawer_task_id.set(Some(task_id));
     };
+
+    let live_msg_str = live_region_msg.read().clone().unwrap_or_default();
+    let toast_text = toast_msg.read().clone();
 
     rsx! {
         section {
@@ -190,6 +198,18 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                     }
                 }
             }
+            // UI-SPEC §6.1 / §6.5: off-screen live region for board
+            // updates and disallowed-transition announcements. `polite`
+            // = announce when the user is idle. Hidden visually but
+            // accessible to assistive tech.
+            div {
+                class: "kn-live-region",
+                role: "log",
+                aria_live: "polite",
+                "aria-atomic": "false",
+                "aria-label": "Board updates",
+                "{live_msg_str}"
+            }
             if has_error {
                 div { class: "kn-error",
                     "Failed to load board. Retrying via WebSocket reconnect…"
@@ -198,9 +218,23 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                 div { class: "kn-loading", "Loading board…" }
             } else {
                 KanbanBoard {
-                    tasks: tasks_ro,
+                    tasks: tasks,
                     archived_visible: archived_visible_ro,
                     on_open_drawer: on_open_drawer,
+                    dragged_task_id: dragged_task_id,
+                    pending_task_ids: pending_task_ids,
+                    toast_msg: toast_msg,
+                    live_region_msg: live_region_msg,
+                    archive_modal_task: archive_modal_task,
+                }
+            }
+            // UI-SPEC §7.5: optimistic-revert toast surface (visible).
+            if let Some(toast) = toast_text {
+                div {
+                    class: "kn-toast",
+                    role: "status",
+                    aria_live: "polite",
+                    "{toast}"
                 }
             }
         }
