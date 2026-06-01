@@ -4,8 +4,8 @@ milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
 stopped_at: Phase 36.3.7.11 UI-SPEC approved
-last_updated: "2026-06-01T04:52:58.184Z"
-last_activity: 2026-06-01 -- Phase 36.3.7.11 planning complete
+last_updated: "2026-06-01T07:59:24.913Z"
+last_activity: 2026-06-01 -- Phase 36.3.7.11 execution started
 progress:
   total_phases: 55
   completed_phases: 21
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.3.7.11 — dashboard plugin spa rest websocket live update
+**Current focus:** Phase 36.3.7.11 — dashboard-plugin-spa-rest-websocket-live-update
 
 ## Current Position
 
-Phase: 36.3.7.11
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-06-01 -- Phase 36.3.7.11 planning complete
+Phase: 36.3.7.11 (dashboard-plugin-spa-rest-websocket-live-update) — EXECUTING
+Plan: 1 of 5
+Status: Executing Phase 36.3.7.11
+Last activity: 2026-06-01 -- Phase 36.3.7.11 execution started
 
 ## Recent close-out summary (2026-05-30 — Phase 36.3.7.6 closed PASS)
 

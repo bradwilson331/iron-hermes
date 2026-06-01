@@ -714,13 +714,13 @@ Plans:
 
 **Requirements**: D-01 through D-23 from .planning/phases/36.3.7.11-dashboard-plugin-spa-rest-websocket-live-update/36.3.7.11-CONTEXT.md (no canonical REQ-IDs — phase scope is fully captured by D-NN locked decisions)
 **Depends on:** Phase 36.3.7.6 (CLOSED — full 9-tool LLM surface available). Phase 36.3.7.10 referenced for Decompose/Specify wiring (Q9 branch decision in Plan 02).
-**Plans:** 5 plans
+**Plans:** 2/5 plans executed
 
 Plans:
-- [ ] 36.3.7.11-01-PLAN.md — Walking skeleton: read-side #[server] fns (fetch_board/fetch_task/fetch_task_events/fetch_task_runs/fetch_comments) + /api/ws/kanban WS tail consumer + ScreenKanban with 6 columns + Screen::Kanban variant + list_all_events_after + DashboardConfig + Cargo.toml deps. Foundational. Covers D-02, D-04, D-05, D-08, D-09, D-15, D-16, D-17, D-18, D-19, D-22, D-23.
+- [x] 36.3.7.11-01-PLAN.md — Walking skeleton: read-side #[server] fns (fetch_board/fetch_task/fetch_task_events/fetch_task_runs/fetch_comments) + /api/ws/kanban WS tail consumer + ScreenKanban with 6 columns + Screen::Kanban variant + list_all_events_after + DashboardConfig + Cargo.toml deps. Foundational. Covers D-02, D-04, D-05, D-08, D-09, D-15, D-16, D-17, D-18, D-19, D-22, D-23.
 - [ ] 36.3.7.11-02-PLAN.md — Drag-and-drop + four write #[server] fns (patch_task_status / post_comment / create_task / run_decompose_or_specify) + kanban::transitions shared validator + keyboard DnD alternative. Depends on 01. Covers D-06, D-07, D-10, D-11, D-13, D-14, D-19.
 - [ ] 36.3.7.11-03-PLAN.md — Detail drawer (7 sections per D-20) + four modals (Complete/Block/Archive/Create) + per-task event counter (D-21) + comment compose + TRIAGE Decompose/Specify wiring. Depends on 01. Covers D-12, D-13, D-20, D-21.
-- [ ] 36.3.7.11-04-PLAN.md — WheelWedge::Kanban (atomic 6-method modulo-11 update — Risk 1) + wheel.rs geometry + Agents page KANBAN BOARD → button. No deps; can ship first. Covers D-02, D-03.
+- [x] 36.3.7.11-04-PLAN.md — WheelWedge::Kanban (atomic 6-method modulo-11 update — Risk 1) + wheel.rs geometry + Agents page KANBAN BOARD → button. No deps; can ship first. Covers D-02, D-03.
 - [ ] 36.3.7.11-05-PLAN.md — UAT: full workspace gate (build/test/clippy) + kanban_ws_lifecycle.rs + kanban_full_suite.rs aggregating must_haves invariants + blocking manual UAT checkpoint with 14-row checklist. Depends on 01-04.
 
 ### Phase 36.3.6: Smart home — Home Assistant ha_* suite (INSERTED)
