@@ -4512,6 +4512,7 @@ dependencies = [
  "ironhermes-exec",
  "ironhermes-gateway",
  "ironhermes-hooks",
+ "ironhermes-kanban",
  "ironhermes-state",
  "ironhermes-tools",
  "js-sys",

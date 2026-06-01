@@ -365,6 +365,74 @@ pub struct Config {
     /// gateway runner treats as all-defaults.
     #[serde(default)]
     pub kanban: serde_yaml::Value,
+    /// Phase 36.3.7.11 (D-17): dashboard tail consumer configuration.
+    ///
+    /// `dashboard.kanban.tail_interval_ms` controls the dashboard tail
+    /// consumer's polling interval (default 250 ms). Pre-36.3.7.11 configs
+    /// parse cleanly via `#[serde(default)]`.
+    #[serde(default)]
+    pub dashboard: DashboardConfig,
+}
+
+// =============================================================================
+// DashboardConfig + DashboardKanbanConfig (Phase 36.3.7.11 D-17)
+// =============================================================================
+
+/// Phase 36.3.7.11 (D-17): dashboard configuration block.
+///
+/// Surfaced in `config.yaml` as a top-level `dashboard:` block with a
+/// `kanban:` sub-block. `#[serde(default)]` on the field site in
+/// [`Config`] makes pre-36.3.7.11 configs parse cleanly with the
+/// defaults applied.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DashboardConfig {
+    pub kanban: DashboardKanbanConfig,
+}
+
+/// Phase 36.3.7.11 (D-17): kanban-specific dashboard configuration.
+///
+/// `tail_interval_ms` controls the tail consumer's polling interval in
+/// milliseconds. Default 250 ms (sub-second perceived latency). The
+/// tail loop is spawned in `AppState::init` at this cadence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardKanbanConfig {
+    /// Tail consumer polling interval in milliseconds. Default: 250 ms.
+    pub tail_interval_ms: u64,
+}
+
+impl Default for DashboardKanbanConfig {
+    fn default() -> Self {
+        Self {
+            tail_interval_ms: 250,
+        }
+    }
+}
+
+#[cfg(test)]
+mod dashboard_config_tests {
+    use super::*;
+
+    /// Phase 36.3.7.11 (D-17): YAML without `dashboard:` key parses with
+    /// the canonical default `tail_interval_ms = 250`.
+    #[test]
+    fn dashboard_default_tail_interval_is_250() {
+        let yaml = "model:\n  default: gpt-4\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse base config");
+        assert_eq!(
+            cfg.dashboard.kanban.tail_interval_ms, 250,
+            "missing `dashboard:` key must default to 250 ms (D-17)"
+        );
+    }
+
+    /// Phase 36.3.7.11 (D-17): YAML override of
+    /// `dashboard.kanban.tail_interval_ms` deserializes correctly.
+    #[test]
+    fn dashboard_yaml_override() {
+        let yaml = "dashboard:\n  kanban:\n    tail_interval_ms: 500\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse override config");
+        assert_eq!(cfg.dashboard.kanban.tail_interval_ms, 500);
+    }
 }
 
 // =============================================================================

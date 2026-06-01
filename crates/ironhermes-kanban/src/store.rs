@@ -2094,6 +2094,37 @@ impl KanbanStore {
         Ok(events)
     }
 
+    /// Return ALL `task_events` rows whose `id > watermark`, ordered by `id ASC`.
+    ///
+    /// Used by the dashboard tail consumer (Phase 36.3.7.11 D-15), which must
+    /// push EVERY event kind to the WS client (board-level feed + drawer event
+    /// stream). Contrast with [`list_terminal_events_after`](Self::list_terminal_events_after)
+    /// which filters to 5 terminal kinds only.
+    pub fn list_all_events_after(
+        &self,
+        watermark: i64,
+    ) -> Result<Vec<crate::events::KanbanEvent>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, run_id, kind, payload, created_at \
+             FROM task_events \
+             WHERE id > ?1 \
+             ORDER BY id ASC",
+        )?;
+        let events = stmt
+            .query_map(params![watermark], |r| {
+                Ok(crate::events::KanbanEvent {
+                    id: r.get(0)?,
+                    task_id: r.get(1)?,
+                    run_id: r.get(2)?,
+                    kind: r.get(3)?,
+                    payload: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(events)
+    }
+
     /// Return `MAX(id) FROM task_events`, or `0` when the table is empty.
     ///
     /// Used by the notifier loop at startup to initialize its in-memory
@@ -2449,5 +2480,70 @@ mod open_tasks_count_tests {
         }
 
         assert_eq!(store.open_tasks_count().unwrap(), 3);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 36.3.7.11 Plan 01 (D-15) — dashboard tail consumer helper test
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod list_all_events_after_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Phase 36.3.7.11 Plan 01 (D-15): `list_all_events_after` returns ALL
+    /// event kinds — NOT filtered to the 5 terminal kinds. Proves the SQL
+    /// is missing the `kind IN (...)` filter that `list_terminal_events_after`
+    /// applies.
+    #[test]
+    fn list_all_events_after_returns_all_kinds() {
+        let dir = TempDir::new().unwrap();
+        let mut store = KanbanStore::open(dir.path().join("test.db")).unwrap();
+
+        // Create 3 tasks — each create appends a non-terminal `created` event.
+        for i in 0..3 {
+            store
+                .create_task(
+                    &format!("Task {}", i),
+                    "alice",
+                    CreateTaskOptions::default(),
+                )
+                .unwrap();
+        }
+
+        let events = store.list_all_events_after(0).unwrap();
+        assert_eq!(events.len(), 3, "expected 3 `created` events");
+        for ev in &events {
+            assert_eq!(
+                ev.kind, "created",
+                "list_all_events_after must return non-terminal kinds (D-15)"
+            );
+        }
+
+        // Empty when watermark is past the highest id.
+        let high = events.last().unwrap().id + 1000;
+        let none = store.list_all_events_after(high).unwrap();
+        assert!(
+            none.is_empty(),
+            "list_all_events_after past max id must be empty"
+        );
+
+        // Watermark in the middle returns only events with id > watermark.
+        let mid_id = events[0].id;
+        let after_mid = store.list_all_events_after(mid_id).unwrap();
+        assert_eq!(after_mid.len(), 2);
+        for ev in &after_mid {
+            assert!(ev.id > mid_id);
+        }
+    }
+
+    /// Empty `task_events` table → empty Vec, not Err.
+    #[test]
+    fn list_all_events_after_empty_table_returns_empty_vec() {
+        let dir = TempDir::new().unwrap();
+        let store = KanbanStore::open(dir.path().join("test.db")).unwrap();
+        let events = store.list_all_events_after(0).unwrap();
+        assert!(events.is_empty());
     }
 }

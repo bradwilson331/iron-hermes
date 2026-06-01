@@ -35,6 +35,10 @@ web-sys = { version = "0.3", features = [
     "CssStyleDeclaration",
     "DomRect",
     "PointerEvent",
+    # Phase 36.3.7.11 Plan 01 (Risk 3): explicit drag-and-drop bindings.
+    # Transitive today but must be explicit before Plan 02 needs them.
+    "DragEvent",
+    "DataTransfer",
 ] }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
@@ -53,6 +57,13 @@ ironhermes-tools = { path = "../ironhermes-tools" }
 # Phase 36.17.4 Plan 03 (D-01): need SessionQueue from gateway — the concrete
 # MessageQueue<SessionKey> implementor instantiated in AppState::init.
 ironhermes-gateway = { path = "../ironhermes-gateway" }
+# Phase 36.3.7.11 Plan 01: dashboard `#[server]` fns + tail consumer read
+# directly from the per-board KanbanStore. Behind the cfg gate so the WASM
+# client build stays unaffected (D-05 / Pattern A in PATTERNS.md).
+ironhermes-kanban = { path = "../ironhermes-kanban" }
+# Phase 36.3.7.11 Plan 01: CancellationToken for the dashboard tail loop
+# shutdown signal in AppState::init.
+tokio-util = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
