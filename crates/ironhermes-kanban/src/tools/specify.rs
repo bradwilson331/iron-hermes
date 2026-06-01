@@ -57,10 +57,14 @@ impl Tool for KanbanSpecifyTool {
     }
 
     fn description(&self) -> &str {
-        "Run the LLM specifier on a triage task. Rewrites the task body with a structured spec \
-         (goal/approach/acceptance/risk/skills) + promotes triage→todo. No fan-out. Returns \
-         {ok, task_id, new_title}. v1: returns `no_aux_client` if the specifier is not wired in \
-         this runtime — use `hermes kanban specify <id>` CLI verb instead."
+        // WR-08 fix: lead with "[v1: NOT YET WIRED — use CLI]" so LLMs that
+        // skim long descriptions cannot pick this tool expecting it to
+        // execute. The runtime DecomposeFn is not yet wired into the LLM
+        // tool runtime; orchestrators must use the CLI verb in v1.
+        "[v1: NOT YET WIRED — use CLI] Run the LLM specifier on a triage task. Rewrites the task \
+         body with a structured spec (goal/approach/acceptance/risk/skills) + promotes \
+         triage→todo. No fan-out. Returns {ok, task_id, new_title}. Returns `no_aux_client` \
+         rejection envelope in v1 — use `hermes kanban specify <id>` CLI verb instead."
     }
 
     fn schema(&self) -> ToolSchema {

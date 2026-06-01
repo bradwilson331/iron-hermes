@@ -56,10 +56,14 @@ impl Tool for KanbanDecomposeTool {
     }
 
     fn description(&self) -> &str {
-        "Run the LLM decomposer on a triage task. Fans the task out into a child-task swarm + \
-         promotes the parent triage→todo. Returns {ok, task_id, child_ids, new_title}. v1: \
-         returns `no_aux_client` if the decomposer is not wired in this runtime — use \
-         `hermes kanban decompose <id>` CLI verb instead."
+        // WR-08 fix: lead with "[v1: NOT YET WIRED — use CLI]" so LLMs that
+        // skim long descriptions cannot pick this tool expecting it to
+        // execute. The runtime DecomposeFn is not yet wired into the LLM
+        // tool runtime; orchestrators must use the CLI verb in v1.
+        "[v1: NOT YET WIRED — use CLI] Run the LLM decomposer on a triage task. Fans the task \
+         out into a child-task swarm + promotes the parent triage→todo. Returns \
+         {ok, task_id, child_ids, new_title}. Returns `no_aux_client` rejection envelope in v1 \
+         — use `hermes kanban decompose <id>` CLI verb instead."
     }
 
     fn schema(&self) -> ToolSchema {
