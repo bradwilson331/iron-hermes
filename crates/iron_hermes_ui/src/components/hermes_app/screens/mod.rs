@@ -19,3 +19,6 @@ pub mod schedules;
 pub mod gateway;
 pub mod office;
 pub mod providers;
+// Phase 36.3.7.11 Plan 01 (D-02): Kanban dashboard screen + child components
+// (board / column / card). Plans 02-03 add drawer + modals + drag-and-drop.
+pub mod kanban;

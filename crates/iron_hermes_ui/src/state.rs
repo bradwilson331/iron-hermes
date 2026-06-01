@@ -603,6 +603,12 @@ pub enum Screen {
     Office,
     Settings,
     Providers,
+    /// Phase 36.3.7.11 Plan 01 (D-02): kanban dashboard tab. Wheel-nav
+    /// wedge (11th variant) is wired in Plan 04 — Plan 01 leaves
+    /// `WheelWedge` at 10 variants; this Screen variant is reachable
+    /// only by direct `active_screen.set(Screen::Kanban)` (e.g. from
+    /// the Agents-page `KANBAN BOARD →` button added in Plan 04).
+    Kanban,
 }
 
 /// The 10 wheel wedges in CONTEXT D-10 canonical order:

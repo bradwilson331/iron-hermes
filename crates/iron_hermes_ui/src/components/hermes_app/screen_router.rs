@@ -37,5 +37,9 @@ pub fn ScreenRouter() -> Element {
         screens::office::ScreenOffice { is_active: cur == Screen::Office }
         screens::settings::ScreenSettings { is_active: cur == Screen::Settings }
         screens::providers::ScreenProviders { is_active: cur == Screen::Providers }
+        // Phase 36.3.7.11 Plan 01 (D-02): always-mounted kanban screen.
+        // `is-active` class gates visibility — Plan 04 wires the wheel-nav
+        // and the Agents-page `KANBAN BOARD →` button drives the active_screen.
+        screens::kanban::ScreenKanban { is_active: cur == Screen::Kanban }
     }
 }

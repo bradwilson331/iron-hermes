@@ -52,5 +52,7 @@ fn screen_short_name(s: Screen) -> &'static str {
         Screen::Office => "OFFICE",
         Screen::Settings => "SYSTEM",
         Screen::Providers => "PROVIDERS",
+        // Phase 36.3.7.11 Plan 01 (D-02): kanban dashboard breadcrumb label.
+        Screen::Kanban => "KANBAN",
     }
 }

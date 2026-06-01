@@ -87,7 +87,9 @@ pub struct AppState {
     pub kanban_tail_broadcast: tokio::sync::broadcast::Sender<String>,
     /// Phase 36.3.7.11 Plan 01 (D-15): cancellation token for the kanban
     /// tail loop. Triggered at shutdown via `cancel()`; the tail loop's
-    /// `tokio::select!` exits on observation.
+    /// `tokio::select!` exits on observation. Plan 04 wires the shutdown
+    /// path that calls `.cancel()`.
+    #[allow(dead_code)]
     pub kanban_tail_cancel: tokio_util::sync::CancellationToken,
 }
 
