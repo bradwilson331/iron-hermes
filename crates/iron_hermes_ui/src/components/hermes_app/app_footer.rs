@@ -94,7 +94,7 @@ fn screen_label(s: Screen) -> &'static str {
         Screen::Office => "OFFICE",
         Screen::Settings => "SYSTEM",
         Screen::Providers => "PROVIDERS",
-        // Phase 36.3.7.11 D-02: Kanban wheel-nav addition.
+        // Phase 36.3.7.11 D-02: Kanban wheel-nav + dashboard short-name.
         Screen::Kanban => "KANBAN",
     }
 }

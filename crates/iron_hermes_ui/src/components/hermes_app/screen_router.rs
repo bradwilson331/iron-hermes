@@ -37,8 +37,9 @@ pub fn ScreenRouter() -> Element {
         screens::office::ScreenOffice { is_active: cur == Screen::Office }
         screens::settings::ScreenSettings { is_active: cur == Screen::Settings }
         screens::providers::ScreenProviders { is_active: cur == Screen::Providers }
-        // Phase 36.3.7.11 Plan 04 — placeholder mount; Plan 01 replaces the
-        // body of ScreenKanban with the live KanbanBoard.
+        // Phase 36.3.7.11 D-02: always-mounted Kanban screen — Plan 04 wires
+        // the wheel-nav wedge + Agents-page `KANBAN BOARD →` button to drive
+        // active_screen; Plan 01 supplies the live KanbanBoard body.
         screens::kanban::ScreenKanban { is_active: cur == Screen::Kanban }
     }
 }
