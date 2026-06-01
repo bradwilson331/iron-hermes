@@ -2280,6 +2280,19 @@ impl KanbanStore {
             return Ok(crate::decomposer::DecomposedIds::already_processed());
         }
 
+        // WR-03 fix: propagate parent's tenant to children. The previous
+        // INSERT hard-coded `tenant = NULL`, which left decomposed children
+        // outside any tenant-scoped list/dispatch queries and bypassed
+        // `KanbanError::TenantMismatch` for downstream link operations.
+        let parent_tenant: Option<String> = tx
+            .query_row(
+                "SELECT tenant FROM tasks WHERE id = ?1",
+                params![parent_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(None);
+
         // Insert child tasks and links.
         let mut child_ids: Vec<String> = Vec::with_capacity(children.len());
 
@@ -2300,8 +2313,8 @@ impl KanbanStore {
                  (id, title, body, assignee, status, priority, tenant, workspace, skills, \
                   consecutive_failures, created_by, created_at) \
                  VALUES \
-                 (?1, ?2, ?3, ?4, 'todo', 0, NULL, NULL, NULL, 0, ?5, ?6)",
-                params![child_id, child.title, child.body, assignee, parent_id, now],
+                 (?1, ?2, ?3, ?4, 'todo', 0, ?5, NULL, NULL, 0, ?6, ?7)",
+                params![child_id, child.title, child.body, assignee, parent_tenant, parent_id, now],
             )?;
 
             // Child creation event.
