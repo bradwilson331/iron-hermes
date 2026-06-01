@@ -1610,6 +1610,14 @@ pub async fn cmd_decompose(
                 &kanban_config,
             ).await {
                 Ok(ids) => {
+                    // WR-01 fix: re-read the task after success so the JSON
+                    // envelope reports the LLM's rewritten title rather than
+                    // the stale pre-decomposition `task.title` captured by
+                    // `list_tasks` BEFORE the kernel rewrote it.
+                    let new_title = {
+                        let s = store_arc.lock().await;
+                        s.get_task(&task_id).map(|t| t.title).unwrap_or_default()
+                    };
                     if json {
                         output_rows.push(serde_json::json!({
                             "ok": true,
@@ -1617,7 +1625,7 @@ pub async fn cmd_decompose(
                             "reason": serde_json::Value::Null,
                             "fanout": ids.child_ids.len(),
                             "child_ids": ids.child_ids,
-                            "new_title": task.title,
+                            "new_title": new_title,
                         }));
                     } else {
                         println!("[{}] decomposed (children: {})", task_id, ids.child_ids.len());
@@ -1627,6 +1635,8 @@ pub async fn cmd_decompose(
                     eprintln!("[{}] decompose failed: {}", task_id, e);
                     any_err = true;
                     if json {
+                        // On failure the task was retained in `triage`; the
+                        // original title is still the correct value to surface.
                         output_rows.push(serde_json::json!({
                             "ok": false,
                             "task_id": task_id,
