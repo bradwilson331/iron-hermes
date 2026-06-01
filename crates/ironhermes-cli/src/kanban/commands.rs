@@ -1510,13 +1510,24 @@ fn build_runtime_decompose_fn(
                     preview
                 )))?;
 
+            // CR-02 fix: reject the LLM output when required fields are missing,
+            // rather than silently substituting `(untitled)` / `""` defaults.
+            // The latter behaviour would permanently overwrite the operator's
+            // original triage body with the empty string AND promote
+            // `triage → todo` in the same transaction — silent data loss.
+            // Bubble up `Err(...)` so the kernel appends a `decompose_failed`
+            // event and the task is retained in `triage`.
             let new_title = parsed["new_title"]
                 .as_str()
-                .unwrap_or("(untitled)")
+                .ok_or_else(|| ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
+                    "schema_error: LLM response missing required `new_title` field"
+                )))?
                 .to_string();
             let new_body = parsed["new_body"]
                 .as_str()
-                .unwrap_or("")
+                .ok_or_else(|| ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
+                    "schema_error: LLM response missing required `new_body` field"
+                )))?
                 .to_string();
 
             let empty_vec = vec![];
