@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: executing
-stopped_at: Phase 36.3.7.7 context gathered
-last_updated: "2026-05-31T22:21:28.558Z"
+status: ready_to_plan
+stopped_at: Phase 36.3.7.10 complete (6/6) — ready to discuss Phase 36.3.7.11
+last_updated: 2026-06-01T02:38:03.311Z
 last_activity: 2026-05-31 -- Phase 36.3.7.10 execution started
 progress:
   total_phases: 55
   completed_phases: 20
   total_plans: 105
-  completed_plans: 96
+  completed_plans: 102
   percent: 36
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.3.7.10 — auto-decompose-triage-decomposer-specifier
+**Current focus:** Phase 36.3.7.11 — dashboard plugin spa rest websocket live update
 
 ## Current Position
 
-Phase: 36.3.7.10 (auto-decompose-triage-decomposer-specifier) — EXECUTING
-Plan: 1 of 6
-Status: Executing Phase 36.3.7.10
-Last activity: 2026-05-31 -- Phase 36.3.7.10 execution started
+Phase: 36.3.7.11
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-06-01
 
 ## Recent close-out summary (2026-05-30 — Phase 36.3.7.6 closed PASS)
 
@@ -100,7 +100,7 @@ Last activity: 2026-05-31 -- Phase 36.3.7.10 execution started
 
 **Velocity:**
 
-- Total plans completed: 139
+- Total plans completed: 145
 - Average duration: — min
 - Total execution time: 0 hours
 
@@ -142,6 +142,7 @@ Last activity: 2026-05-31 -- Phase 36.3.7.10 execution started
 | 28.1 | 6 | - | - |
 | 34b | 4 | - | - |
 | 36.3.7.9 | 9 | - | - |
+| 36.3.7.10 | 6 | - | - |
 
 **Recent Trend:**
 
