@@ -2252,7 +2252,7 @@ async fn mention_registered_eleventh_tool() {
     );
     assert_eq!(
         names.iter().filter(|n| n.starts_with("kanban_")).count(),
-        11,
-        "exactly 11 kanban_* tools must be registered: {names:?}"
+        13,
+        "exactly 13 kanban_* tools must be registered (kanban_decompose + kanban_specify added in Phase 36.3.7.10): {names:?}"
     );
 }
