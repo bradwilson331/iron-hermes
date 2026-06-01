@@ -52,6 +52,7 @@ pub fn is_drag_allowed(from: KanbanStatus, to: KanbanStatus) -> bool {
 /// paraphrase. Returns `None` for targets that have no per-column hint
 /// (callers fall back to "cross-skip" / "backwards-move" copy from the
 /// general hint table).
+#[allow(dead_code)] // Task 3 consumer wires this into KanbanColumn's disallowed-target overlay.
 pub fn drag_blocked_hint(to: KanbanStatus) -> Option<&'static str> {
     match to {
         KanbanStatus::Done => {
