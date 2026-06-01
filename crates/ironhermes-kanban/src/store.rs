@@ -2357,7 +2357,13 @@ impl KanbanStore {
         }
 
         // Decomposed event on the parent.
+        // WR-06 fix: include `new_title` to mirror the `specified` event
+        // payload (apply_specify writes `{ "new_title": new_title }`). Without
+        // it, downstream consumers (notifier, dashboard, audit log) must
+        // perform a second DB read to display "Decomposed task '<new title>'
+        // into N children" — doubling the read load on the events feed.
         let decomposed_payload = serde_json::json!({
+            "new_title": new_title,
             "child_count": children.len(),
             "child_ids": child_ids,
         });
