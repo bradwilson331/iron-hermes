@@ -79,6 +79,16 @@ pub struct AppState {
     /// scope per CONTEXT.md.
     pub subagent_callback_slot:
         Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<crate::protocol::ChatStreamEvent>>>>,
+    /// Phase 36.3.7.11 Plan 01 (D-08 / D-15): dashboard kanban tail
+    /// broadcaster. The tail loop (`run_kanban_tail_loop`) holds the
+    /// `Sender`; every `/api/ws/kanban` connection creates its own
+    /// `Receiver` via `.subscribe()`. `SendError` when no receivers is
+    /// silently discarded (Q1).
+    pub kanban_tail_broadcast: tokio::sync::broadcast::Sender<String>,
+    /// Phase 36.3.7.11 Plan 01 (D-15): cancellation token for the kanban
+    /// tail loop. Triggered at shutdown via `cancel()`; the tail loop's
+    /// `tokio::select!` exits on observation.
+    pub kanban_tail_cancel: tokio_util::sync::CancellationToken,
 }
 
 static GLOBAL_APP_STATE: OnceLock<AppState> = OnceLock::new();
@@ -173,6 +183,27 @@ impl AppState {
         .await
         .context("building AgentRuntime for web UI")?;
 
+        // Phase 36.3.7.11 Plan 01 (D-15 / D-17): construct the kanban
+        // tail broadcaster + cancellation token, then spawn the tail
+        // loop unconditionally (no lazy-on-first-client) so the first WS
+        // subscriber's connect sees the live event stream immediately.
+        // `config.dashboard.kanban.tail_interval_ms` is the source-of-
+        // truth interval (default 250 ms via DashboardKanbanConfig::Default).
+        let (kanban_tail_broadcast, _initial_rx) =
+            tokio::sync::broadcast::channel::<String>(256);
+        let kanban_tail_cancel = tokio_util::sync::CancellationToken::new();
+        let tail_tx = kanban_tail_broadcast.clone();
+        let tail_cancel = kanban_tail_cancel.clone();
+        let tail_interval_ms = config.dashboard.kanban.tail_interval_ms;
+        tokio::spawn(async move {
+            crate::server::kanban_ws::run_kanban_tail_loop(
+                tail_tx,
+                tail_cancel,
+                tail_interval_ms,
+            )
+            .await;
+        });
+
         Ok(Self {
             config: Arc::new(config),
             command_router,
@@ -201,6 +232,11 @@ impl AppState {
             // installs the per-turn sender before run_web_turn, RAII guard clears
             // it on return/panic.
             subagent_callback_slot,
+            // Phase 36.3.7.11 Plan 01 (D-15): dashboard kanban tail state —
+            // broadcaster + cancellation token created above; tail loop
+            // already spawned.
+            kanban_tail_broadcast,
+            kanban_tail_cancel,
         })
     }
 

@@ -92,6 +92,7 @@ pub struct KanbanEventRow {
 /// `#[server]` fn carries this in lieu of separate `complete` / `block` write
 /// fns. Plan 02 wires this up; Plan 01 just defines the type so the wire
 /// contract is stable.
+#[allow(dead_code)] // Plan 02 consumes this via the write-side `#[server]` fns.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub enum PromptPayload {
     Complete {

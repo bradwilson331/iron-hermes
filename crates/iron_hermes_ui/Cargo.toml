@@ -64,6 +64,11 @@ ironhermes-kanban = { path = "../ironhermes-kanban" }
 # Phase 36.3.7.11 Plan 01: CancellationToken for the dashboard tail loop
 # shutdown signal in AppState::init.
 tokio-util = { workspace = true }
+# Phase 36.3.7.11 Plan 01: kanban_api fetches join task_links / task_runs /
+# task_comments using prepared statements on the KanbanStore's pub Connection
+# (the show.rs analog at lines 144-216). The kanban crate re-exports
+# `KanbanStore.conn: Connection` so this dep is required to call query_map.
+rusqlite = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }

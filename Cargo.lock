@@ -4516,6 +4516,7 @@ dependencies = [
  "ironhermes-state",
  "ironhermes-tools",
  "js-sys",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
