@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: ready_to_plan
-stopped_at: Phase 36.3.7.10 complete (6/6) — ready to discuss Phase 36.3.7.11
-last_updated: 2026-06-01T02:38:03.311Z
-last_activity: 2026-05-31 -- Phase 36.3.7.10 execution started
+status: planning
+stopped_at: Phase 36.3.7.11 context gathered
+last_updated: "2026-06-01T03:28:29.507Z"
+last_activity: 2026-06-01
 progress:
   total_phases: 55
-  completed_phases: 20
+  completed_phases: 21
   total_plans: 105
   completed_plans: 102
-  percent: 36
+  percent: 38
 ---
 
 # Project State
@@ -580,6 +580,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-05-30T14:37:59.510Z
-Stopped at: Phase 36.3.7.7 context gathered
-Resume file: .planning/phases/36.3.7.7-kanban-swarm-helper-multi-task-fan-out-for-orchestrators/36.3.7.7-CONTEXT.md
+Last session: 2026-06-01T03:28:29.499Z
+Stopped at: Phase 36.3.7.11 context gathered
+Resume file: .planning/phases/36.3.7.11-dashboard-plugin-spa-rest-websocket-live-update/36.3.7.11-CONTEXT.md
