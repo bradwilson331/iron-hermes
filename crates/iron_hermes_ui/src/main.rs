@@ -1,6 +1,10 @@
 mod app;
 mod components;
 mod fonts;
+// Phase 36.3.7.11 Plan 02: client-side kanban utilities (transition
+// validator + drag-blocked hint copy). The server-side `kanban_api`
+// imports `kanban::transitions::is_drag_allowed` for D-14 defense-in-depth.
+mod kanban;
 mod mocks;
 mod platform;
 mod protocol;

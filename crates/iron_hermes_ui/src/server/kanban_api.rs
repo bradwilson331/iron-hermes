@@ -15,11 +15,19 @@
 use dioxus::prelude::*;
 
 #[cfg(feature = "server")]
-use ironhermes_kanban::store::{KanbanStore, ListFilters};
+use ironhermes_kanban::store::{CreateTaskOptions, KanbanStore, ListFilters};
 
 use crate::protocol::{
-    CommentRow, KanbanEventRow, TaskRow, TaskRunRow, WorkerContextEnvelope,
+    CommentRow, CreateTaskPayload, DecomposeOrSpecify, DecomposeResult, KanbanEventRow,
+    KanbanStatus, PromptPayload, TaskRow, TaskRunRow, WorkerContextEnvelope,
 };
+
+// Phase 36.3.7.11 Plan 02 (D-14): server-side defense-in-depth — the
+// `patch_task_status` write fn enforces the SAME D-10 allowed-table the
+// client uses for drag UX. KEEP IN SYNC: both call sites consume this
+// single `is_drag_allowed` definition so the canonical table cannot drift
+// between client and server.
+use crate::kanban::transitions::is_drag_allowed;
 
 // ---------------------------------------------------------------------------
 // fetch_board — D-09 read-side board fetch
@@ -422,6 +430,444 @@ pub async fn fetch_comments(
         let _ = (task_id, board);
         Err(ServerFnError::new(
             "fetch_comments unavailable without `server` feature",
+        ))
+    }
+}
+
+// ===========================================================================
+// Phase 36.3.7.11 Plan 02 — write-side `#[server]` fns
+// ===========================================================================
+//
+// D-13 surface (four write fns):
+//   - patch_task_status   — status transitions + Complete/Block via PromptPayload
+//   - post_comment        — append a comment to a task
+//   - create_task         — create a new task (D-06 default status logic)
+//   - run_decompose_or_specify — Q9 BRANCH (b): NotWired (see below)
+//
+// D-14 defense-in-depth: patch_task_status calls `is_drag_allowed` BEFORE
+// any mutation; Done/Blocked require the matching PromptPayload variant
+// AND a non-empty summary/reason (Risk 8). The client-side validator runs
+// the same predicate for UX; the server is truth (D-14).
+//
+// D-19: every fn takes `board: Option<String>` — `None` resolves to the
+// default board via `KanbanStore::open_default`.
+//
+// Pattern A (PATTERNS.md): the `ironhermes_kanban` imports are
+// `#[cfg(feature = "server")]`-gated; client builds get an `Err` stub.
+
+// ---------------------------------------------------------------------------
+// patch_task_status — D-13 / D-14 / Risk 8
+// ---------------------------------------------------------------------------
+
+/// Phase 36.3.7.11 Plan 02 (D-13 / D-14 / D-19 / Risk 8): apply a kanban
+/// status transition to a task.
+///
+/// Validates server-side against the SAME `is_drag_allowed` predicate the
+/// client uses (D-14). For Done / Blocked targets the matching
+/// `PromptPayload` is required AND must be non-empty (Risk 8 — the
+/// canonical `kanban_complete` / `kanban_block` contracts both reject
+/// empty summary / empty reason).
+///
+/// Allowed paths:
+/// - `prompt_payload = None` + `is_drag_allowed(cur, new) == true`
+///   → direct status update (Triage→Todo, Todo→Ready, Blocked→Ready, *→Archived).
+/// - `prompt_payload = Some(Complete { summary, metadata })` + new == Done
+///   + !summary.is_empty()  → `KanbanStore::complete_task`.
+/// - `prompt_payload = Some(Block { reason })` + new == Blocked
+///   + !reason.is_empty()   → `KanbanStore::block_task`.
+///
+/// Everything else returns `ServerFnError` with a descriptive message.
+#[server]
+pub async fn patch_task_status(
+    task_id: String,
+    board: Option<String>,
+    new_status: KanbanStatus,
+    prompt_payload: Option<PromptPayload>,
+) -> Result<TaskRow, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        let task_id_owned = task_id.clone();
+        let board_owned = board.clone();
+        let new_status_owned = new_status;
+        let prompt_payload_owned = prompt_payload.clone();
+
+        let row = tokio::task::spawn_blocking(move || -> Result<TaskRow, String> {
+            // Open store (D-18: None → default).
+            let mut store = match board_owned {
+                Some(ref slug) => KanbanStore::open_for_board(slug)
+                    .map_err(|e| format!("open_for_board('{}'): {e}", slug))?,
+                None => KanbanStore::open_default()
+                    .map_err(|e| format!("open_default: {e}"))?,
+            };
+
+            // Read current status — required for D-14 validation.
+            let current = store
+                .get_task(&task_id_owned)
+                .map_err(|e| format!("get_task('{}'): {e}", task_id_owned))?;
+            let current_status = KanbanStatus::from_wire_str(&current.status).ok_or_else(
+                || format!("unknown current status on task: {:?}", current.status),
+            )?;
+
+            // D-14 / Risk 8 branching:
+            match (new_status_owned, prompt_payload_owned) {
+                // Done branch — REQUIRES PromptPayload::Complete + non-empty summary.
+                (KanbanStatus::Done, Some(PromptPayload::Complete { summary, metadata })) => {
+                    if summary.is_empty() {
+                        return Err(
+                            "Risk 8: completing a task requires a non-empty summary"
+                                .to_string(),
+                        );
+                    }
+                    // The canonical kanban_complete contract: current_profile
+                    // attribution defaults to "ui" for dashboard writes. The
+                    // store's complete_task validates the run_id gate when
+                    // expected_run_id is Some; we pass None (dashboard writes
+                    // don't carry the LLM tool's run_id assertion).
+                    store
+                        .complete_task(
+                            &task_id_owned,
+                            Some(summary.as_str()),
+                            metadata.as_ref(),
+                            None,
+                            None,
+                            None,
+                            "ui",
+                        )
+                        .map_err(|e| format!("complete_task: {e}"))?;
+                }
+                // Blocked branch — REQUIRES PromptPayload::Block + non-empty reason.
+                (KanbanStatus::Blocked, Some(PromptPayload::Block { reason })) => {
+                    if reason.is_empty() {
+                        return Err(
+                            "Risk 8: blocking a task requires a non-empty reason"
+                                .to_string(),
+                        );
+                    }
+                    store
+                        .block_task(&task_id_owned, reason.as_str(), None)
+                        .map_err(|e| format!("block_task: {e}"))?;
+                }
+                // Wrong PromptPayload variant for the target status.
+                (KanbanStatus::Done, Some(PromptPayload::Block { .. })) => {
+                    return Err(
+                        "D-13: Done target requires PromptPayload::Complete, not Block"
+                            .to_string(),
+                    );
+                }
+                (KanbanStatus::Blocked, Some(PromptPayload::Complete { .. })) => {
+                    return Err(
+                        "D-13: Blocked target requires PromptPayload::Block, not Complete"
+                            .to_string(),
+                    );
+                }
+                // Done / Blocked with None — disallowed per Risk 8.
+                (KanbanStatus::Done, None) => {
+                    return Err(
+                        "Risk 8: Done transition requires PromptPayload::Complete with summary"
+                            .to_string(),
+                    );
+                }
+                (KanbanStatus::Blocked, None) => {
+                    return Err(
+                        "Risk 8: Blocked transition requires PromptPayload::Block with reason"
+                            .to_string(),
+                    );
+                }
+                // Allowed drag transitions with no payload — direct status update.
+                (target, None) => {
+                    // D-14: enforce the same allowed-table the client uses.
+                    if !is_drag_allowed(current_status, target) {
+                        return Err(format!(
+                            "D-14: transition not allowed: {:?} → {:?}",
+                            current_status, target,
+                        ));
+                    }
+                    // Special-cases that have dedicated store helpers:
+                    match (current_status, target) {
+                        // Blocked→Ready uses unblock_task (clears claim state).
+                        (KanbanStatus::Blocked, KanbanStatus::Ready) => {
+                            store
+                                .unblock_task(&task_id_owned)
+                                .map_err(|e| format!("unblock_task: {e}"))?;
+                        }
+                        // *→Archived uses archive_task (handles RUNNING reclamation).
+                        (_, KanbanStatus::Archived) => {
+                            store
+                                .archive_task(&task_id_owned)
+                                .map_err(|e| format!("archive_task: {e}"))?;
+                        }
+                        // Triage→Todo, Todo→Ready: direct UPDATE + Promoted event.
+                        // No `update_task_status` helper exists in
+                        // ironhermes-kanban (verified by grep). Use a
+                        // parameterized UPDATE with a `promoted` event append
+                        // — the same idiomatic shape used by store.rs's
+                        // block_task / archive_task. NEVER format!() the SQL.
+                        _ => {
+                            use rusqlite::params;
+                            let target_wire = target.as_wire_str();
+                            store
+                                .conn
+                                .execute(
+                                    "UPDATE tasks SET status = ?1 WHERE id = ?2",
+                                    params![target_wire, task_id_owned],
+                                )
+                                .map_err(|e| format!("update status: {e}"))?;
+                            // Append a `promoted` event so the dashboard tail
+                            // consumer (D-15) surfaces the change via WS.
+                            let payload = serde_json::json!({
+                                "from": current_status.as_wire_str(),
+                                "to": target_wire,
+                                "source": "ui",
+                            });
+                            store
+                                .append_event(
+                                    &task_id_owned,
+                                    None,
+                                    ironhermes_kanban::events::KanbanEventKind::Promoted,
+                                    Some(&payload),
+                                )
+                                .map_err(|e| format!("append promoted event: {e}"))?;
+                        }
+                    }
+                }
+                // Any other (target, Some(prompt)) is a misuse — only
+                // Done+Complete and Blocked+Block are accepted with payloads.
+                (other_target, Some(_)) => {
+                    return Err(format!(
+                        "D-13: PromptPayload is only valid for Done/Blocked targets, got {:?}",
+                        other_target,
+                    ));
+                }
+            }
+
+            // Re-fetch the updated task to return the canonical row.
+            let updated = store
+                .get_task(&task_id_owned)
+                .map_err(|e| format!("get_task after update: {e}"))?;
+            Ok(TaskRow {
+                id: updated.id,
+                title: updated.title,
+                body: updated.body,
+                assignee: updated.assignee,
+                status: updated.status,
+                priority: updated.priority,
+                tenant: updated.tenant,
+                workspace: updated.workspace,
+                created_at: updated.created_at,
+                started_at: updated.started_at,
+                ended_at: updated.ended_at,
+            })
+        })
+        .await
+        .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
+        .map_err(ServerFnError::new)?;
+        Ok(row)
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = (task_id, board, new_status, prompt_payload);
+        Err(ServerFnError::new(
+            "patch_task_status unavailable without `server` feature",
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// post_comment — D-13 / D-19
+// ---------------------------------------------------------------------------
+
+/// Phase 36.3.7.11 Plan 02 (D-13 / D-19): append a comment to a task.
+///
+/// Rejects empty body with `ServerFnError`. Author is recorded as `"ui"`
+/// (no existing convention in api.rs to source from; matches the dashboard
+/// surface naming).
+#[server]
+pub async fn post_comment(
+    task_id: String,
+    board: Option<String>,
+    body: String,
+) -> Result<CommentRow, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        if body.is_empty() {
+            return Err(ServerFnError::new("Comment body cannot be empty"));
+        }
+        let task_id_owned = task_id.clone();
+        let body_owned = body.clone();
+        let board_owned = board.clone();
+        let row = tokio::task::spawn_blocking(move || -> Result<CommentRow, String> {
+            let mut store = match board_owned {
+                Some(ref slug) => KanbanStore::open_for_board(slug)
+                    .map_err(|e| format!("open_for_board('{}'): {e}", slug))?,
+                None => KanbanStore::open_default()
+                    .map_err(|e| format!("open_default: {e}"))?,
+            };
+            let comment = store
+                .add_comment(&task_id_owned, "ui", &body_owned)
+                .map_err(|e| format!("add_comment: {e}"))?;
+            Ok(CommentRow {
+                author: comment.author,
+                body: comment.body,
+                created_at: comment.created_at,
+            })
+        })
+        .await
+        .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
+        .map_err(ServerFnError::new)?;
+        Ok(row)
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = (task_id, board, body);
+        Err(ServerFnError::new(
+            "post_comment unavailable without `server` feature",
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// create_task — D-13 / D-19
+// ---------------------------------------------------------------------------
+
+/// Phase 36.3.7.11 Plan 02 (D-13 / D-19): create a new task on the board.
+///
+/// Empty title returns `ServerFnError`. The `start_in_triage` flag on the
+/// payload maps to `CreateTaskOptions.triage` — the store's
+/// `create_task` then applies the D-06 initial-status rule (Triage if
+/// triage=true, Ready if parents empty, Todo otherwise).
+#[server]
+pub async fn create_task(
+    board: Option<String>,
+    payload: CreateTaskPayload,
+) -> Result<TaskRow, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        if payload.title.is_empty() {
+            return Err(ServerFnError::new("Task title is required"));
+        }
+        let payload_owned = payload.clone();
+        let board_owned = board.clone();
+        let row = tokio::task::spawn_blocking(move || -> Result<TaskRow, String> {
+            let mut store = match board_owned {
+                Some(ref slug) => KanbanStore::open_for_board(slug)
+                    .map_err(|e| format!("open_for_board('{}'): {e}", slug))?,
+                None => KanbanStore::open_default()
+                    .map_err(|e| format!("open_default: {e}"))?,
+            };
+            let assignee = payload_owned
+                .assignee
+                .clone()
+                .unwrap_or_else(|| "unassigned".to_string());
+            let opts = CreateTaskOptions {
+                body: payload_owned.body.clone(),
+                parents: payload_owned.parents.clone(),
+                tenant: payload_owned.tenant.clone(),
+                priority: Some(payload_owned.priority),
+                triage: payload_owned.start_in_triage,
+                created_by: Some("ui".to_string()),
+                ..Default::default()
+            };
+            let task = store
+                .create_task(&payload_owned.title, &assignee, opts)
+                .map_err(|e| format!("create_task: {e}"))?;
+            Ok(TaskRow {
+                id: task.id,
+                title: task.title,
+                body: task.body,
+                assignee: task.assignee,
+                status: task.status,
+                priority: task.priority,
+                tenant: task.tenant,
+                workspace: task.workspace,
+                created_at: task.created_at,
+                started_at: task.started_at,
+                ended_at: task.ended_at,
+            })
+        })
+        .await
+        .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
+        .map_err(ServerFnError::new)?;
+        Ok(row)
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = (board, payload);
+        Err(ServerFnError::new(
+            "create_task unavailable without `server` feature",
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// run_decompose_or_specify — D-13 / Q9 BRANCH
+// ---------------------------------------------------------------------------
+
+// Q9 BRANCH (b): AppState lacks the kernel's `DecomposeFn` aux client.
+//
+// Kernel signatures consulted (verified in this worktree):
+//   - crates/ironhermes-kanban/src/decomposer.rs:238
+//     pub async fn decompose_triage_task(
+//         store: Arc<TokioMutex<KanbanStore>>,
+//         task_id: &str,
+//         decompose_fn: &DecomposeFn,  // Arc<dyn Fn(DecomposeRequest)
+//                                       //   -> BoxFuture<Result<DecomposeOutput>>
+//                                       //   + Send + Sync>
+//         config: &KanbanConfig,
+//     ) -> Result<DecomposedIds>
+//   - crates/ironhermes-kanban/src/decomposer.rs:161
+//     pub async fn specify_triage_task(
+//         store: Arc<TokioMutex<KanbanStore>>,
+//         task_id: &str,
+//         decompose_fn: &DecomposeFn,
+//         config: &KanbanConfig,
+//     ) -> Result<DecomposedIds>
+//
+// AppState audit (crates/iron_hermes_ui/src/server/state.rs):
+//   - `resolver: Arc<ProviderResolver>` — yes, but `DecomposeFn` is a
+//     closure that calls an LLM and parses structured JSON output. Building
+//     it requires a request builder + provider client + JSON parser glue
+//     that does NOT live in iron_hermes_ui today.
+//   - `runtime: Arc<AgentRuntime>` — exposes a `.client()` provider client,
+//     but `AgentRuntime::run_turn` is an agent-loop entry, not a one-shot
+//     structured-output call.
+//   - No `decompose_fn: DecomposeFn` field — wiring it is the same
+//     unresolved gap the LLM `kanban_decompose` tool flags as `no_aux_client`.
+//
+// Branch (b) is therefore the correct v1 behavior: surface a `NotWired`
+// envelope pointing the operator at the CLI. The dashboard UI renders
+// this as a tooltip on the Decompose / Specify buttons. Branch (a)
+// (wiring the DecomposeFn from `runtime.client()`) is a future-phase
+// upgrade — explicitly out of scope per CONTEXT v1.
+
+/// Phase 36.3.7.11 Plan 02 (D-13 / Q9): invoke the decomposer / specifier
+/// kernel for a triage task.
+///
+/// Q9 BRANCH (b) — see comment above. The dashboard's `AppState` does not
+/// expose a kernel-compatible `DecomposeFn`, so this fn returns
+/// `DecomposeResult::NotWired` with the equivalent CLI command. The UI
+/// surfaces the message as a tooltip on the Decompose / Specify buttons.
+#[server]
+pub async fn run_decompose_or_specify(
+    task_id: String,
+    board: Option<String>,
+    action: DecomposeOrSpecify,
+) -> Result<DecomposeResult, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        // Q9 BRANCH (b): no DecomposeFn available on AppState; return
+        // NotWired with the CLI hint. The kernel signatures live at
+        // decomposer.rs:238 (`decompose_triage_task`) and decomposer.rs:161
+        // (`specify_triage_task`).
+        let slug = action.slug();
+        let message = format!("Use: hermes kanban {} {}", slug, task_id);
+        let _ = board; // unused in branch (b) — kept for D-19 signature
+        Ok(DecomposeResult::NotWired { message })
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = (task_id, board, action);
+        Err(ServerFnError::new(
+            "run_decompose_or_specify unavailable without `server` feature",
         ))
     }
 }

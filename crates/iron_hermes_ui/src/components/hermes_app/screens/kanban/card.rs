@@ -1,4 +1,4 @@
-//! Phase 36.3.7.11 Plan 01 (D-01) — Kanban card component.
+//! Phase 36.3.7.11 Plan 02 (D-01 / D-06) — Kanban card component.
 //!
 //! Visual contract = Models-page reference (CONTEXT canonical_refs):
 //! cyan-glow border, monospace heading, thin separator, footer row of meta
@@ -6,24 +6,31 @@
 //! (StatusChip / PriorityChip / AssigneeChip / AgeChip), action button
 //! glyph `▶` on the right.
 //!
-//! Drag-and-drop attributes are reserved stubs in Plan 01 — `draggable="true"`
-//! plus no-op `ondragstart`/`ondragend` handlers. Plan 02 wires them to the
-//! `dragged_task_id: Signal<Option<String>>` and the optimistic-update path.
+//! Plan 02 wires the drag-source: `draggable="true"` plus real
+//! `ondragstart`/`ondragend` handlers that update a shared
+//! `dragged_task_id: Signal<Option<String>>`. Plan 03 will consume the
+//! `kn-card-action-<id>` id for drawer-close focus restoration.
 
 use crate::protocol::TaskRow;
 use dioxus::prelude::*;
 
-/// Phase 36.3.7.11 Plan 01: a single kanban task card.
+/// Phase 36.3.7.11 Plan 02: a single kanban task card.
 ///
 /// Props:
 ///
 /// - `task`: read-only signal carrying the task row.
 /// - `on_open_drawer`: handler invoked when the user clicks the action
-///   button (or focuses + activates the card). Plan 03 wires the drawer.
+///   button. Plan 03 wires the drawer.
+/// - `dragged_task_id`: shared signal tracking the currently-dragged
+///   task. `ondragstart` writes `Some(task_id)`; `ondragend` clears it.
+/// - `is_pending`: true while an optimistic update is in flight for this
+///   card (UI-SPEC §4.2 `kn-pending-pulse` animation).
 #[component]
 pub fn KanbanCard(
     task: ReadSignal<TaskRow>,
     on_open_drawer: EventHandler<String>,
+    dragged_task_id: Signal<Option<String>>,
+    is_pending: bool,
 ) -> Element {
     let t = task.read().clone();
     // ARIA label per UI-SPEC §6.1.
@@ -32,7 +39,23 @@ pub fn KanbanCard(
         t.title, t.status, t.priority, t.assignee
     );
     let task_id_for_click = t.id.clone();
+    let task_id_for_start = t.id.clone();
     let task_title_for_aria = t.title.clone();
+
+    // Plan 03 dependency: stable id `kn-card-action-<task_id>` so the
+    // drawer-close focus restore can target the originating card. Same id
+    // is used by the drawer's `on_close` handler in Plan 03.
+    let action_id = format!("kn-card-action-{}", t.id);
+
+    // is_dragging is true when THIS card is the active drag source — driven
+    // by the shared dragged_task_id signal at board scope. Reading the
+    // signal here causes Dioxus to subscribe; the read is value-copy so no
+    // lock is held.
+    let is_dragging = dragged_task_id
+        .read()
+        .as_deref()
+        .map(|id| id == t.id)
+        .unwrap_or(false);
 
     rsx! {
         div {
@@ -40,10 +63,27 @@ pub fn KanbanCard(
             role: "listitem",
             tabindex: "0",
             "aria-label": "{aria}",
-            // Plan 02 wires drag — Plan 01 reserves the attribute so the
-            // browser knows the element is draggable for future plans.
+            // D-06: drag source flag — required for ondragstart/ondrop to
+            // fire in HTML5 native DnD.
             draggable: "true",
             "data-task-id": "{t.id}",
+            // UI-SPEC §4.2: visual state attribute toggles for the
+            // .kn-card[data-dragging] / .kn-card[data-pending] CSS rules.
+            "data-dragging": if is_dragging { "true" },
+            "data-pending": if is_pending { "true" },
+            // D-06: drag-start — write Some(task_id) into the shared signal
+            // so the drop target can read it. Signal `.write()` is a
+            // value-copy operation; no borrow held across `.await` (there
+            // is no await here — this is a synchronous handler).
+            ondragstart: move |_| {
+                *dragged_task_id.write() = Some(task_id_for_start.clone());
+            },
+            // D-06: drag-end (covers both successful drops and cancels) —
+            // clear the shared signal as a safety net even though
+            // KanbanColumn's ondrop also clears it.
+            ondragend: move |_| {
+                *dragged_task_id.write() = None;
+            },
             // Heading slot: monospace title.
             div { class: "kn-card-heading", "{t.title}" }
             // Thin internal separator (per UI-SPEC §3.7).
@@ -71,9 +111,12 @@ pub fn KanbanCard(
                     "data-kind": "age",
                     "{format_age_secs(t.created_at)}"
                 }
-                // Action button — Plan 03 opens the drawer.
+                // Action button — Plan 03 opens the drawer. The stable
+                // id `kn-card-action-<task_id>` enables drawer-close focus
+                // restoration per UI-SPEC §6.2.
                 button {
                     class: "kn-card-action",
+                    id: "{action_id}",
                     "aria-label": "Open {task_title_for_aria} detail",
                     onclick: move |_| {
                         on_open_drawer.call(task_id_for_click.clone());

@@ -163,6 +163,127 @@ pub struct CommentRow {
     pub created_at: f64,
 }
 
+// =============================================================================
+// Phase 36.3.7.11 Plan 02 — kanban write-side wire types
+// =============================================================================
+
+/// Phase 36.3.7.11 Plan 02 (D-09 wire): wire-copy of
+/// `ironhermes_kanban::types::KanbanStatus`. Plain Serde enum so the WASM
+/// client can match on a status without pulling `ironhermes-kanban` into the
+/// client build (Pattern A in PATTERNS.md). Variant set MUST match the
+/// canonical seven variants byte-for-byte by `as_str` casing — the
+/// `rename_all = "lowercase"` attribute combined with the special-case
+/// `InProgress → "running"` mapping (via `#[serde(rename)]`) matches
+/// `KanbanStatus::as_str` exactly (`triage`, `todo`, `ready`, `running`,
+/// `blocked`, `done`, `archived`).
+///
+/// The client-side `kanban::transitions` module uses this enum; the
+/// server-side `kanban_api::patch_task_status` parses the inbound value
+/// then forwards to `ironhermes_kanban::KanbanStatus` for the actual store
+/// call. The drift-risk surface is the variant set + the wire string for
+/// `InProgress`/Running; both are locked by inline tests below.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum KanbanStatus {
+    Triage,
+    Todo,
+    Ready,
+    /// Wire form is "running" (matches `ironhermes_kanban::KanbanStatus::Running`).
+    #[serde(rename = "running")]
+    InProgress,
+    Blocked,
+    Done,
+    Archived,
+}
+
+impl KanbanStatus {
+    /// Canonical lowercase wire string (matches
+    /// `ironhermes_kanban::KanbanStatus::as_str`).
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            KanbanStatus::Triage => "triage",
+            KanbanStatus::Todo => "todo",
+            KanbanStatus::Ready => "ready",
+            KanbanStatus::InProgress => "running",
+            KanbanStatus::Blocked => "blocked",
+            KanbanStatus::Done => "done",
+            KanbanStatus::Archived => "archived",
+        }
+    }
+
+    /// Parse from the canonical lowercase wire string. Returns `None` for
+    /// unknown values — callers should reject with a `ServerFnError`.
+    pub fn from_wire_str(s: &str) -> Option<Self> {
+        Some(match s {
+            "triage" => KanbanStatus::Triage,
+            "todo" => KanbanStatus::Todo,
+            "ready" => KanbanStatus::Ready,
+            "running" => KanbanStatus::InProgress,
+            "blocked" => KanbanStatus::Blocked,
+            "done" => KanbanStatus::Done,
+            "archived" => KanbanStatus::Archived,
+            _ => return None,
+        })
+    }
+}
+
+/// Phase 36.3.7.11 Plan 02 (D-13): payload for `create_task` `#[server]` fn.
+/// Carries the structured form input from the dashboard's Create Task modal
+/// to the server-side `KanbanStore::create_task` call.
+///
+/// Round-trips through serde — see inline tests below.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
+pub struct CreateTaskPayload {
+    pub title: String,
+    pub assignee: Option<String>,
+    pub parents: Vec<String>,
+    pub priority: i64,
+    pub tenant: Option<String>,
+    pub body: Option<String>,
+    /// When `true`, the new task starts in TRIAGE; when `false`, it starts
+    /// in TODO (or READY if parents.is_empty(), per the store's
+    /// `create_task` D-06 rule).
+    pub start_in_triage: bool,
+}
+
+/// Phase 36.3.7.11 Plan 02 (D-13): which decomposer kernel action to invoke.
+/// External-tag wire shape (default Rust enum Serde): bare strings
+/// `"Decompose"` / `"Specify"`.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecomposeOrSpecify {
+    Decompose,
+    Specify,
+}
+
+impl DecomposeOrSpecify {
+    /// Lowercase action slug for CLI hint copy ("decompose" / "specify").
+    pub fn slug(self) -> &'static str {
+        match self {
+            DecomposeOrSpecify::Decompose => "decompose",
+            DecomposeOrSpecify::Specify => "specify",
+        }
+    }
+}
+
+/// Phase 36.3.7.11 Plan 02 (D-13 / Q9): result of `run_decompose_or_specify`
+/// `#[server]` fn. Two branches:
+///
+/// - `Ok` — the kernel ran. Returns the number of children spawned (0 for
+///   the specify path) and a short human-readable summary.
+/// - `NotWired` — the dashboard's AppState does not satisfy the kernel's
+///   aux-client requirement. The UI surfaces the message as a tooltip and
+///   the user runs the CLI command directly.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub enum DecomposeResult {
+    Ok {
+        children_count: u32,
+        summary: String,
+    },
+    NotWired {
+        message: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,5 +416,130 @@ mod tests {
         let json = serde_json::to_string(&ev).expect("serialize Block");
         let parsed: PromptPayload = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, ev, "D-13: Block must round-trip");
+    }
+
+    // =========================================================================
+    // Phase 36.3.7.11 Plan 02 (D-09 wire / D-13) — kanban write-side types
+    // =========================================================================
+
+    /// D-09 wire: every `KanbanStatus` variant serializes to the canonical
+    /// lowercase string (matches `ironhermes_kanban::KanbanStatus::as_str`).
+    /// InProgress maps to "running".
+    #[test]
+    fn test_kanban_status_serializes_lowercase() {
+        let cases = [
+            (KanbanStatus::Triage, "\"triage\""),
+            (KanbanStatus::Todo, "\"todo\""),
+            (KanbanStatus::Ready, "\"ready\""),
+            (KanbanStatus::InProgress, "\"running\""),
+            (KanbanStatus::Blocked, "\"blocked\""),
+            (KanbanStatus::Done, "\"done\""),
+            (KanbanStatus::Archived, "\"archived\""),
+        ];
+        for (variant, expected) in cases {
+            let json = serde_json::to_string(&variant).expect("serialize KanbanStatus");
+            assert_eq!(
+                json, expected,
+                "D-09 wire: {:?} must serialize as {}",
+                variant, expected
+            );
+            let parsed: KanbanStatus = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed, variant, "D-09 wire: round-trip preserves variant");
+        }
+    }
+
+    /// D-09 wire: as_wire_str helper agrees with serde shape.
+    #[test]
+    fn test_kanban_status_as_wire_str_matches_serde() {
+        for v in [
+            KanbanStatus::Triage,
+            KanbanStatus::Todo,
+            KanbanStatus::Ready,
+            KanbanStatus::InProgress,
+            KanbanStatus::Blocked,
+            KanbanStatus::Done,
+            KanbanStatus::Archived,
+        ] {
+            let serde_str = serde_json::to_string(&v).unwrap();
+            assert_eq!(
+                serde_str,
+                format!("\"{}\"", v.as_wire_str()),
+                "as_wire_str must match serde for {:?}",
+                v
+            );
+        }
+    }
+
+    /// D-09 wire: from_wire_str inverse-of as_wire_str.
+    #[test]
+    fn test_kanban_status_from_wire_str_round_trip() {
+        for v in [
+            KanbanStatus::Triage,
+            KanbanStatus::Todo,
+            KanbanStatus::Ready,
+            KanbanStatus::InProgress,
+            KanbanStatus::Blocked,
+            KanbanStatus::Done,
+            KanbanStatus::Archived,
+        ] {
+            let parsed = KanbanStatus::from_wire_str(v.as_wire_str()).expect("parse");
+            assert_eq!(parsed, v);
+        }
+        assert!(KanbanStatus::from_wire_str("nonsense").is_none());
+    }
+
+    /// D-13: `CreateTaskPayload` round-trips through serde.
+    #[test]
+    fn test_create_task_payload_round_trip() {
+        let payload = CreateTaskPayload {
+            title: "wire up dashboard".to_string(),
+            assignee: Some("frontend-dev".to_string()),
+            parents: vec!["t_a".to_string(), "t_b".to_string()],
+            priority: 2,
+            tenant: Some("dashboard".to_string()),
+            body: Some("acceptance: drag works".to_string()),
+            start_in_triage: true,
+        };
+        let json = serde_json::to_string(&payload).expect("serialize");
+        let parsed: CreateTaskPayload = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed, payload, "D-13: CreateTaskPayload must round-trip");
+    }
+
+    /// D-13: `DecomposeOrSpecify` round-trips + slug helper.
+    #[test]
+    fn test_decompose_or_specify_round_trip() {
+        for v in [DecomposeOrSpecify::Decompose, DecomposeOrSpecify::Specify] {
+            let json = serde_json::to_string(&v).expect("serialize");
+            let parsed: DecomposeOrSpecify =
+                serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(parsed, v, "D-13: DecomposeOrSpecify must round-trip");
+        }
+        // External-tag bare-string shape.
+        assert_eq!(
+            serde_json::to_string(&DecomposeOrSpecify::Decompose).unwrap(),
+            r#""Decompose""#
+        );
+        assert_eq!(DecomposeOrSpecify::Decompose.slug(), "decompose");
+        assert_eq!(DecomposeOrSpecify::Specify.slug(), "specify");
+    }
+
+    /// D-13 / Q9: `DecomposeResult` round-trips for both branches.
+    #[test]
+    fn test_decompose_result_round_trip() {
+        let ok = DecomposeResult::Ok {
+            children_count: 3,
+            summary: "decomposed into 3 children".to_string(),
+        };
+        let json = serde_json::to_string(&ok).expect("serialize Ok");
+        let parsed: DecomposeResult = serde_json::from_str(&json).expect("deserialize Ok");
+        assert_eq!(parsed, ok, "D-13: DecomposeResult::Ok must round-trip");
+
+        let nw = DecomposeResult::NotWired {
+            message: "Use: hermes kanban decompose t_abc".to_string(),
+        };
+        let json = serde_json::to_string(&nw).expect("serialize NotWired");
+        let parsed: DecomposeResult =
+            serde_json::from_str(&json).expect("deserialize NotWired");
+        assert_eq!(parsed, nw, "D-13: DecomposeResult::NotWired must round-trip");
     }
 }
