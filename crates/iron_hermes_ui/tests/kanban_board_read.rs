@@ -100,3 +100,71 @@ fn fetch_board_read_path_excludes_archived() {
     );
     assert_eq!(tasks[0].id, _t1.id);
 }
+
+// Regression test for BUG-1 from 36.3.7.11 UAT — fetch_board never exposed the
+// include_archived parameter, so the ARCHIVED column was always empty regardless
+// of the SHOW ARCHIVED toggle state. This test locks BOTH directions of the
+// `ListFilters.archived` predicate at the store layer so future regressions
+// (either accidental drop of the predicate at the store layer OR re-introduction
+// of a hardcoded `archived: false` upstream) trip CI immediately.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn fetch_board_returns_archived_when_include_archived_true() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("test_kanban_archive_toggle.db");
+    let mut store = KanbanStore::open(&db_path).expect("open fresh KanbanStore");
+
+    // Seed two tasks; mark the second as archived using the exact same
+    // pattern the existing `fetch_board_read_path_excludes_archived` test uses.
+    let t1 = store
+        .create_task("Task A", "alice", CreateTaskOptions::default())
+        .expect("create A");
+    let t2 = store
+        .create_task("Task B", "alice", CreateTaskOptions::default())
+        .expect("create B");
+    store
+        .conn
+        .execute(
+            "UPDATE tasks SET status = 'archived' WHERE id = ?1",
+            rusqlite::params![t2.id],
+        )
+        .expect("archive update");
+
+    // Direction 1: archived=true MUST surface the archived row.
+    let filters_with_archived = ListFilters {
+        archived: true,
+        ..Default::default()
+    };
+    let tasks_with = store
+        .list_tasks(filters_with_archived)
+        .expect("list_tasks with archived=true");
+    let ids_with: Vec<&str> = tasks_with.iter().map(|t| t.id.as_str()).collect();
+    assert!(
+        ids_with.contains(&t2.id.as_str()),
+        "BUG-1 regression: ListFilters{{archived:true}} must include the archived task; \
+         got ids={:?}",
+        ids_with
+    );
+
+    // Direction 2: archived=false MUST exclude the archived row (regression
+    // against accidental flip of the predicate).
+    let filters_without_archived = ListFilters {
+        archived: false,
+        ..Default::default()
+    };
+    let tasks_without = store
+        .list_tasks(filters_without_archived)
+        .expect("list_tasks with archived=false");
+    let ids_without: Vec<&str> = tasks_without.iter().map(|t| t.id.as_str()).collect();
+    assert!(
+        !ids_without.contains(&t2.id.as_str()),
+        "BUG-1 regression: ListFilters{{archived:false}} must exclude the archived task; \
+         got ids={:?}",
+        ids_without
+    );
+    assert!(
+        ids_without.contains(&t1.id.as_str()),
+        "non-archived task t1 must remain visible when archived=false; got ids={:?}",
+        ids_without
+    );
+}
