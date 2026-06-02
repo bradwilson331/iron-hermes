@@ -1605,6 +1605,68 @@ impl KanbanStore {
     }
 
     // -----------------------------------------------------------------------
+    // Phase 36.3.7.12 — Goal-mode turn counter helpers (D-03 / D-04 / Pitfall 4)
+    // -----------------------------------------------------------------------
+
+    /// CAS-gated increment of `tasks.goal_turns_used` (Pitfall 4 mitigation).
+    ///
+    /// Wraps [`cas::worker_write_gated`] so a worker that has been reclaimed
+    /// mid-loop cannot bump the counter against a stale run. The closure
+    /// runs the UPDATE inside the same `BEGIN IMMEDIATE` transaction the
+    /// gate opens.
+    ///
+    /// Returns:
+    /// - `Ok(true)`  — claim_lock still matches, counter incremented by 1.
+    /// - `Ok(false)` — claim_lock is stale (reclaim happened); the helper
+    ///   emits the `claim_expired` advisory event via `worker_write_gated`
+    ///   and the counter is UNCHANGED. No panic, no Err.
+    /// - `Err(_)`    — DB-level failure (out of scope of the gate).
+    ///
+    /// The Plan 04 goal-loop wrapper at
+    /// `crates/ironhermes-cli/src/kanban/goal_loop.rs` is the sole intended
+    /// caller of this method.
+    pub fn bump_goal_turn_counter(
+        &mut self,
+        task_id: &str,
+        claim_lock: &str,
+    ) -> Result<bool> {
+        let task_id_owned = task_id.to_string();
+        crate::cas::worker_write_gated(
+            &mut self.conn,
+            task_id,
+            claim_lock,
+            move |tx| {
+                tx.execute(
+                    "UPDATE tasks SET goal_turns_used = goal_turns_used + 1 WHERE id=?1",
+                    params![task_id_owned],
+                )?;
+                Ok(())
+            },
+        )
+    }
+
+    /// Reset `tasks.goal_turns_used` to 0.
+    ///
+    /// Intended caller: the dispatcher's reclaim path (Plan 05 integration).
+    /// **NOT** CAS-gated — reclaim is the privileged writer that transitions
+    /// the claim state, so the run-id check is redundant here (and the new
+    /// claim doesn't exist yet at the moment of reset).
+    ///
+    /// T-36.3.7.12-02-E01 disposition: `accept`. The Plan 05 integration
+    /// test asserts no other call site lands.
+    ///
+    /// During the gap between Plan 02 and Plan 05 the safety net is
+    /// (a) DDL DEFAULT 0 on fresh rows, (b) `bump_goal_turn_counter`'s CAS
+    /// gate rejecting stale-lock bumps.
+    pub fn reset_goal_turn_counter(&self, task_id: &str) -> anyhow::Result<()> {
+        self.conn.execute(
+            "UPDATE tasks SET goal_turns_used = 0 WHERE id=?1",
+            params![task_id],
+        )?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // Subscriptions CRUD (Phase 36.3.7.5 BUG-36.3.7.5-02)
     // -----------------------------------------------------------------------
     //

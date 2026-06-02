@@ -58,7 +58,10 @@ pub use decomposer::{
     decompose_triage_task, specify_triage_task,
 };
 pub use judge::{JudgeFn, JudgeOutput, JudgeRequest, JudgeVerdict};
-pub use events::{KanbanEvent, KanbanEventKind, insert_event_sql};
+pub use events::{
+    GOAL_SUBKIND_BUDGET_EXHAUSTED, GOAL_SUBKIND_JUDGE_ERROR, GOAL_SUBKIND_JUDGE_VERDICT,
+    GOAL_SUBKIND_TURN_ADVANCED, KanbanEvent, KanbanEventKind, insert_event_sql,
+};
 pub use paths::{
     kanban_db_path, kanban_log_stderr, kanban_log_stdout, kanban_logs_dir, kanban_skills_dir,
     kanban_workspace_for, kanban_workspaces_root, validate_dir_workspace,
