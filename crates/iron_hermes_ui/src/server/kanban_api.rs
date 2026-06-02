@@ -33,15 +33,20 @@ use crate::kanban::transitions::is_drag_allowed;
 // fetch_board — D-09 read-side board fetch
 // ---------------------------------------------------------------------------
 
-/// Phase 36.3.7.11 (D-05 / D-09 / D-18 / D-19): fetch the board's non-archived
-/// tasks for the dashboard board view. `board=None` resolves to the default
-/// board (`~/.hermes/kanban.db`); `Some(slug)` opens the per-board DB.
+/// Phase 36.3.7.11 (D-05 / D-09 / D-18 / D-19): fetch the board's tasks for
+/// the dashboard board view. Returns all non-archived tasks, plus archived
+/// tasks when `include_archived = true` (BUG-1 fix from 36.3.7.11 UAT —
+/// `quick-260602-ds9`). `board=None` resolves to the default board
+/// (`~/.hermes/kanban.db`); `Some(slug)` opens the per-board DB.
 ///
 /// Returns a `Vec<TaskRow>` ordered by the underlying `list_tasks` query
 /// (created_at ASC). Plan 02 filters by status into per-column lists on the
 /// client side.
 #[server]
-pub async fn fetch_board(board: Option<String>) -> Result<Vec<TaskRow>, ServerFnError> {
+pub async fn fetch_board(
+    board: Option<String>,
+    include_archived: bool,
+) -> Result<Vec<TaskRow>, ServerFnError> {
     #[cfg(feature = "server")]
     {
         let board_owned = board;
@@ -53,7 +58,7 @@ pub async fn fetch_board(board: Option<String>) -> Result<Vec<TaskRow>, ServerFn
                     .map_err(|e| format!("open_default: {e}"))?,
             };
             let filters = ListFilters {
-                archived: false,
+                archived: include_archived,
                 ..Default::default()
             };
             let tasks = store
@@ -83,7 +88,7 @@ pub async fn fetch_board(board: Option<String>) -> Result<Vec<TaskRow>, ServerFn
     }
     #[cfg(not(feature = "server"))]
     {
-        let _ = board;
+        let _ = (board, include_archived);
         Err(ServerFnError::new(
             "fetch_board unavailable without `server` feature",
         ))

@@ -59,9 +59,19 @@ pub fn ScreenKanban(is_active: bool) -> Element {
     // ALL hooks register unconditionally on every render (Pattern E from
     // PATTERNS.md — agents.rs UAT-2 hotfix discipline).
 
-    // Board fetch resource.
-    let mut board_resource =
-        use_resource(move || async move { crate::server::kanban_api::fetch_board(None).await });
+    // Archive toggle — drives the 7th column visibility (D-09) AND the
+    // include_archived parameter on `fetch_board` (BUG-1 fix from
+    // 36.3.7.11 UAT). Declared BEFORE `board_resource` so the
+    // use_resource closure can capture it.
+    let mut archived_visible: Signal<bool> = use_signal(|| false);
+
+    // Board fetch resource. Re-runs whenever `archived_visible` flips
+    // (the toggle handler calls `board_resource.restart()` after `.set()`).
+    // The `.read()` is a Copy-out (bool) — no borrow held across the
+    // await, clippy-safe.
+    let mut board_resource = use_resource(move || async move {
+        crate::server::kanban_api::fetch_board(None, *archived_visible.read()).await
+    });
 
     // Local Signal<Vec<TaskRow>> — Plan 02 mutates this optimistically
     // on drop. The use_effect below syncs it from `board_resource`.
@@ -96,9 +106,6 @@ pub fn ScreenKanban(is_active: bool) -> Element {
 
     // Drawer open state — Plan 03 wires this end-to-end.
     let mut open_drawer_task_id: Signal<Option<String>> = use_signal(|| None);
-
-    // Archive toggle — drives the 7th column visibility (D-09).
-    let mut archived_visible: Signal<bool> = use_signal(|| false);
 
     // WS connection state indicator.
     let mut ws_state: Signal<WsState> = use_signal(|| WsState::Connecting);
@@ -386,6 +393,11 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                         onclick: move |_| {
                             let cur = *archived_visible.read();
                             archived_visible.set(!cur);
+                            // BUG-1 fix (quick-260602-ds9): re-fetch with
+                            // the new include_archived value so the
+                            // ARCHIVED column populates/empties. restart()
+                            // is sync — no signal-borrow span over await.
+                            board_resource.restart();
                         },
                         if *archived_visible.read() { "HIDE ARCHIVED" } else { "SHOW ARCHIVED" }
                     }

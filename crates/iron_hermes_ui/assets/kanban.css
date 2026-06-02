@@ -279,8 +279,13 @@
     width: 480px;
     min-width: 320px;
     max-width: min(480px, calc(100vw - 80px));
-    background: var(--w-bg-2);
-    border-left: 1px solid var(--w-border-hi);
+    /* BUG-2 fix (quick-260602-ds9): opaque tinted dark fill so the
+       `--w-bg-2` board behind no longer bleeds through. `--w-bg-3` is
+       opaque (it's a token resolving to a flat dark color) and
+       6%-cyan-tinting against it visibly separates the drawer from the
+       board cards while staying within the existing token surface. */
+    background: color-mix(in srgb, var(--accent-primary) 6%, var(--w-bg-3));
+    border-left: 1px solid var(--accent-primary);
     box-shadow: var(--w-shadow-float);
     z-index: 200;
     overflow-y: auto;
@@ -298,7 +303,9 @@
     padding: var(--sp-6);
     position: sticky;
     top: 0;
-    background: var(--w-bg-2);
+    /* BUG-2 fix: match the new drawer fill so the sticky header does
+       not show the old `--w-bg-2` underneath. */
+    background: color-mix(in srgb, var(--accent-primary) 6%, var(--w-bg-3));
     border-bottom: 1px solid var(--w-border);
     z-index: 1;
 }
@@ -563,8 +570,13 @@
     width: 480px;
     max-width: calc(100vw - 32px);
     max-height: calc(100vh - 64px);
-    background: var(--w-bg-2);
-    border: 1px solid var(--w-border-hi);
+    /* BUG-2 fix (quick-260602-ds9): cyan border + opaque tinted dark
+       fill so the drawer/modal reads as a distinct themed overlay
+       against the `--w-bg-2` board cards behind. Shared by Complete /
+       Block / ArchiveConfirm / CreateTask (all four modals use this
+       single class — no per-modal-type selectors). */
+    background: color-mix(in srgb, var(--accent-primary) 6%, var(--w-bg-3));
+    border: 1px solid var(--accent-primary);
     border-radius: var(--w-radius-block);
     box-shadow: var(--w-shadow-float);
     display: flex;
@@ -576,7 +588,9 @@
 
 .kn-modal-header {
     padding: var(--sp-4) var(--sp-6);
-    border-bottom: 1px solid var(--w-border);
+    /* BUG-2 fix: 30%-alpha cyan separator carries the accent without
+       being too loud against the new modal fill. */
+    border-bottom: 1px solid color-mix(in srgb, var(--accent-primary) 30%, transparent);
 }
 
 .kn-modal-title {
@@ -696,7 +710,8 @@
     gap: var(--sp-2);
     margin-top: var(--sp-4);
     padding-top: var(--sp-2);
-    border-top: 1px solid var(--w-border);
+    /* BUG-2 fix: 30%-alpha cyan separator matches the header treatment. */
+    border-top: 1px solid color-mix(in srgb, var(--accent-primary) 30%, transparent);
 }
 
 .kn-modal-btn {
