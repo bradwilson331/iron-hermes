@@ -98,6 +98,12 @@ pub struct KanbanConfig {
     /// Default `true` per reference.md §625.
     #[serde(default = "default_auto_promote_children")]
     pub auto_promote_children: bool,
+
+    /// Aux model id for the goal-mode judge LLM (Phase 36.3.7.12 D-05).
+    /// Empty = resolve through the `auxiliary.kanban_judge` role then fall
+    /// back to the main provider. Mirrors `decomposer_model` resolution.
+    #[serde(default)]
+    pub judge_model: String,
 }
 
 impl Default for KanbanConfig {
@@ -118,6 +124,7 @@ impl Default for KanbanConfig {
             default_assignee: String::new(),
             decomposer_model: String::new(),
             auto_promote_children: default_auto_promote_children(),
+            judge_model: String::new(),
         }
     }
 }
@@ -184,6 +191,9 @@ mod tests {
         assert!(cfg.default_assignee.is_empty());
         assert!(cfg.decomposer_model.is_empty());
         assert!(cfg.auto_promote_children);
+        // Phase 36.3.7.12 D-05: judge_model default is empty (resolves via
+        // auxiliary.kanban_judge then main provider).
+        assert!(cfg.judge_model.is_empty());
     }
 
     #[test]

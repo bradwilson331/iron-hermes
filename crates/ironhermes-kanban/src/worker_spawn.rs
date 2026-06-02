@@ -289,6 +289,10 @@ mod tests {
             created_at: 1_700_000_000.0,
             started_at: None,
             ended_at: None,
+            // Phase 36.3.7.12 — fake_task defaults: goal mode off, budget 20.
+            goal_mode: false,
+            goal_max_turns: 20,
+            goal_turns_used: 0,
         }
     }
 

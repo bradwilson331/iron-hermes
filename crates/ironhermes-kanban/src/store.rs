@@ -49,6 +49,18 @@ pub struct CreateTaskOptions {
     pub triage: bool,
     /// Profile slug that created the task (D-22 `created_cards` gate).
     pub created_by: Option<String>,
+    // -----------------------------------------------------------------------
+    // Phase 36.3.7.12 — Goal Mode (D-01).
+    // -----------------------------------------------------------------------
+    /// Opt into the in-session worker goal loop with an auxiliary judge LLM.
+    /// `#[derive(Default)]` (line 33) gives `false`; CLI `--goal` flag and
+    /// LLM `kanban_create` arg flip to `true`.
+    pub goal_mode: bool,
+    /// Per-card turn budget when `goal_mode = true` (D-03). `0` here means
+    /// "caller didn't override" and `create_task` coerces to the D-03 default
+    /// of 20 at the producer level before binding. The DDL DEFAULT 20 also
+    /// guarantees a sane value when this struct is not the write path.
+    pub goal_max_turns: u32,
 }
 
 /// Filters for [`KanbanStore::list_tasks`].
@@ -346,6 +358,12 @@ impl KanbanStore {
     }
 
     fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
+        // Phase 36.3.7.12: SELECT order must end with
+        // (..., goal_mode, goal_max_turns, goal_turns_used).
+        // SQLite stores goal_mode as INTEGER 0/1; map to bool via `!= 0`.
+        let goal_mode_int: i64 = row.get(23)?;
+        let goal_max_turns_i: i64 = row.get(24)?;
+        let goal_turns_used_i: i64 = row.get(25)?;
         Ok(Task {
             id: row.get(0)?,
             title: row.get(1)?,
@@ -370,6 +388,9 @@ impl KanbanStore {
             created_at: row.get(20)?,
             started_at: row.get(21)?,
             ended_at: row.get(22)?,
+            goal_mode: goal_mode_int != 0,
+            goal_max_turns: goal_max_turns_i.max(0) as u32,
+            goal_turns_used: goal_turns_used_i.max(0) as u32,
         })
     }
 
@@ -436,13 +457,24 @@ impl KanbanStore {
             .map(|v| serde_json::to_string(v))
             .transpose()?;
 
+        // Phase 36.3.7.12 D-03 producer-level coercion: `0` from a caller that
+        // didn't override goal_max_turns must land as 20 in the DB row, even
+        // though the column DDL DEFAULT 20 would handle the omission case.
+        // Binding 0 here would override the DDL default; coerce explicitly.
+        let goal_max_turns: u32 = if opts.goal_max_turns == 0 {
+            20
+        } else {
+            opts.goal_max_turns
+        };
+        let goal_mode_int: i64 = if opts.goal_mode { 1 } else { 0 };
+
         self.conn.execute(
             "INSERT INTO tasks \
              (id, title, body, assignee, status, priority, tenant, workspace, skills, \
               idempotency_key, consecutive_failures, max_retries, max_runtime_seconds, \
-              scheduled_at, created_by, created_at) \
+              scheduled_at, created_by, created_at, goal_mode, goal_max_turns) \
              VALUES \
-             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12, ?13, ?14, ?15)",
+             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
             params![
                 id,
                 title,
@@ -459,6 +491,8 @@ impl KanbanStore {
                 opts.scheduled_at,
                 opts.created_by,
                 now,
+                goal_mode_int,
+                goal_max_turns,
             ],
         )?;
 
@@ -486,7 +520,8 @@ impl KanbanStore {
                 "SELECT id, title, body, assignee, status, priority, tenant, workspace, skills, \
                  idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
                  max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
-                 current_step_key, created_by, created_at, started_at, ended_at \
+                 current_step_key, created_by, created_at, started_at, ended_at, \
+                 goal_mode, goal_max_turns, goal_turns_used \
                  FROM tasks WHERE id = ?1",
                 params![id],
                 Self::row_to_task,
@@ -503,7 +538,8 @@ impl KanbanStore {
             "SELECT id, title, body, assignee, status, priority, tenant, workspace, skills, \
              idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
              max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
-             current_step_key, created_by, created_at, started_at, ended_at \
+             current_step_key, created_by, created_at, started_at, ended_at, \
+             goal_mode, goal_max_turns, goal_turns_used \
              FROM tasks WHERE 1=1",
         );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -1770,7 +1806,8 @@ impl KanbanStore {
                 "SELECT id, title, body, assignee, status, priority, tenant, workspace, skills, \
                  idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
                  max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
-                 current_step_key, created_by, created_at, started_at, ended_at \
+                 current_step_key, created_by, created_at, started_at, ended_at, \
+                 goal_mode, goal_max_turns, goal_turns_used \
                  FROM tasks WHERE idempotency_key = ?1",
                 params![key],
                 Self::row_to_task,
@@ -1811,7 +1848,8 @@ impl KanbanStore {
                 "SELECT id, title, body, assignee, status, priority, tenant, workspace, skills, \
                  idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
                  max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
-                 current_step_key, created_by, created_at, started_at, ended_at \
+                 current_step_key, created_by, created_at, started_at, ended_at, \
+                 goal_mode, goal_max_turns, goal_turns_used \
                  FROM tasks WHERE id = ?1",
                 params![task_id],
                 Self::row_to_task,
@@ -1967,7 +2005,8 @@ impl KanbanStore {
                 "SELECT id, title, body, assignee, status, priority, tenant, workspace, skills, \
                  idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
                  max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
-                 current_step_key, created_by, created_at, started_at, ended_at \
+                 current_step_key, created_by, created_at, started_at, ended_at, \
+                 goal_mode, goal_max_turns, goal_turns_used \
                  FROM tasks WHERE id = ?1",
                 params![task_id],
                 Self::row_to_task,
