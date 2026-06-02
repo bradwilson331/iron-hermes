@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
 status: Phase closed — picking next phase from milestone-v3.0 backlog
-stopped_at: "Phase 36.3.7.11 CLOSED (approved with carve-outs); two follow-on quick tasks landed same session — quick-260602-ds9 closed BUG-1+BUG-2 (UAT U2/U6/U7/U8), quick-260602-nd7 closed U9 (drawer comments auto-refresh; producer-side fix in `KanbanStore::add_comment` emits a `task_events::Edited` row so the dashboard tail can broadcast). U6 also RESOLVED in-session — repro test `crates/ironhermes-kanban/tests/u6_complete_via_dashboard_args.rs` pins the store contract; tester's READY observation was a duplicate-title artifact. Remaining UAT carve-outs: U12 keyboard-DnD (already deferred since Plan 02), U13 reduced-motion, U14 localhost-bind threat-model — schedule into a follow-on a11y + security sweep phase. New deferred items: DEFER-1 (2 e2e tests in `ironhermes-kanban/tests/end_to_end.rs`) + DEFER-2 (Rust 1.94 clippy lint upgrade — 37+ errors workspace-wide)."
-last_updated: "2026-06-02T21:47:58.516Z"
+stopped_at: Phase 36.3.7.12 context gathered
+last_updated: "2026-06-02T22:02:33.461Z"
 last_activity: "2026-06-02 -- Completed quick task 260602-nd7: fix U9 drawer comments auto-refresh (producer-side fix in KanbanStore::add_comment; bilateral regression coverage)"
 progress:
   total_phases: 56
@@ -583,6 +583,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-06-02T21:30:00.000Z
-Stopped at: Phase 36.3.7.11 CLOSED (approved with carve-outs); two follow-on quick tasks landed same session — quick-260602-ds9 closed BUG-1+BUG-2 (UAT U2/U6/U7/U8), quick-260602-nd7 closed U9 (drawer comments auto-refresh; producer-side fix in `KanbanStore::add_comment` emits a `task_events::Edited` row so the dashboard tail can broadcast). U6 also RESOLVED in-session — repro test `crates/ironhermes-kanban/tests/u6_complete_via_dashboard_args.rs` pins the store contract; tester's READY observation was a duplicate-title artifact. Remaining UAT carve-outs: U12 keyboard-DnD (already deferred since Plan 02), U13 reduced-motion, U14 localhost-bind threat-model — schedule into a follow-on a11y + security sweep phase. New deferred items: DEFER-1 (2 e2e tests in `ironhermes-kanban/tests/end_to_end.rs`) + DEFER-2 (Rust 1.94 clippy lint upgrade — 37+ errors workspace-wide).
-Resume file: (none — phase closed; pick next from milestone-v3.0 backlog)
+Last session: 2026-06-02T22:02:33.454Z
+Stopped at: Phase 36.3.7.12 context gathered
+Resume file: .planning/phases/36.3.7.12-goal-mode-kanban-worker-loop-ralph-loop/36.3.7.12-CONTEXT.md
