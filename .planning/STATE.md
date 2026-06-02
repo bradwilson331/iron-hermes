@@ -577,9 +577,10 @@ Recent decisions affecting current work:
 | Date       | Slug                       | Outcome                                                                                                  |
 |------------|----------------------------|----------------------------------------------------------------------------------------------------------|
 | 2026-05-17 | transparent-logo-asset     | Restored true PNG alpha on `crates/iron_hermes_ui/assets/i_hermes_logo.png` (removed baked-in checkerboard via 18%-fuzz floodfill). |
+| 2026-06-02 | 260602-ds9                 | Closed BUG-1 (fetch_board `include_archived` parameter + ScreenKanban re-fetch on toggle + archived-fetch regression test) and BUG-2 (drawer + 4 modals cyan border + opaque tinted dark fill via existing tokens, zero new hex) from 36.3.7.11 UAT failures U2/U6/U7/U8. iron_hermes_ui test + clippy gates green. |
 
 ## Session Continuity
 
-Last session: 2026-06-01T04:15:55.919Z
-Stopped at: Phase 36.3.7.11 UI-SPEC approved
-Resume file: .planning/phases/36.3.7.11-dashboard-plugin-spa-rest-websocket-live-update/36.3.7.11-UI-SPEC.md
+Last session: 2026-06-02T17:30:00.000Z
+Stopped at: Phase 36.3.7.11 — quick-260602-ds9 landed; awaiting tester UAT re-run on U2/U6/U7/U8
+Resume file: .planning/phases/36.3.7.11-dashboard-plugin-spa-rest-websocket-live-update/.continue-here.md
