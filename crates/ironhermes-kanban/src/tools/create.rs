@@ -269,6 +269,20 @@ impl Tool for KanbanCreateTool {
                 .unwrap_or(false),
             // D-22: created_by tracks which profile created this task for created_cards gate.
             created_by: std::env::var("HERMES_PROFILE").ok(),
+            // Phase 36.3.7.12 D-01: goal_mode + goal_max_turns producer fields.
+            // Plan 02 will add full tool-schema entries + JSON parsing; for now
+            // accept the args opportunistically so this site stays forward-compat
+            // with the planned schema additions. Absent args → defaults (false/0
+            // → coerced to 20 by KanbanStore::create_task per D-03).
+            goal_mode: args
+                .get("goal_mode")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            goal_max_turns: args
+                .get("goal_max_turns")
+                .and_then(|v| v.as_u64())
+                .and_then(|n| u32::try_from(n).ok())
+                .unwrap_or(0),
         };
 
         // Open per-board store (D-08: create task in the resolved board's DB).

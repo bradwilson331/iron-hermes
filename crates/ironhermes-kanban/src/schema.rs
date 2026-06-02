@@ -10,7 +10,10 @@ use rusqlite::Connection;
 use crate::error::Result;
 
 /// Current schema version. Increment when `run_migrations()` gains a new step.
-pub const SCHEMA_VERSION: i64 = 1;
+///
+/// v2 — Phase 36.3.7.12: adds `goal_mode`, `goal_max_turns`, `goal_turns_used`
+/// columns to `tasks` for the in-session worker goal loop (D-01).
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// Full DDL executed on every open via `execute_batch`.
 /// Order: pragmas → schema_version → 5 tables → indexes.
@@ -27,7 +30,8 @@ CREATE TABLE IF NOT EXISTS schema_version (
 -- -----------------------------------------------------------------------
 -- tasks
 -- -----------------------------------------------------------------------
--- 22 columns matching types.rs Task struct (D-07).
+-- Phase 36.3.7.12 — v2 adds goal_mode, goal_max_turns, goal_turns_used (D-01).
+-- 25 columns matching types.rs Task struct (D-07).
 CREATE TABLE IF NOT EXISTS tasks (
     id                      TEXT PRIMARY KEY,
     title                   TEXT NOT NULL,
@@ -51,7 +55,13 @@ CREATE TABLE IF NOT EXISTS tasks (
     created_by              TEXT,                   -- profile slug (D-22 created_cards gate)
     created_at              REAL NOT NULL,
     started_at              REAL,
-    ended_at                REAL
+    ended_at                REAL,
+    -- Phase 36.3.7.12 Goal Mode (D-01). Fresh-DB path; existing DBs pick these
+    -- up via run_migrations() v1→v2 branch. goal_max_turns DEFAULT 20 mirrors
+    -- the D-03 budget default at the column level.
+    goal_mode               INTEGER NOT NULL DEFAULT 0,
+    goal_max_turns          INTEGER NOT NULL DEFAULT 20,
+    goal_turns_used         INTEGER NOT NULL DEFAULT 0
 );
 
 -- -----------------------------------------------------------------------
@@ -178,13 +188,28 @@ CREATE INDEX IF NOT EXISTS idx_subs_chat
 /// `KanbanStore::init_schema` satisfies this invariant via explicit
 /// `BEGIN`/`COMMIT`/`ROLLBACK` guards around the `v < SCHEMA_VERSION` arm.
 pub fn run_migrations(conn: &mut Connection, current: i64) -> Result<()> {
-    // v1 is the baseline — no ALTER statements needed.
-    // Example for v2 (add a column):
-    //   if current < 2 {
-    //       let _ = conn.execute("ALTER TABLE tasks ADD COLUMN new_col TEXT", []);
-    //       conn.execute("UPDATE schema_version SET version = 2", [])?;
-    //   }
-    let _ = current; // suppress unused-variable warning until first real migration
-    let _ = conn;
+    if current < 2 {
+        // Phase 36.3.7.12: add goal_mode, goal_max_turns, goal_turns_used to tasks (D-01).
+        //
+        // `let _ = conn.execute(ALTER ...)` deliberately swallows the
+        // rusqlite "duplicate column" error on a partial re-run (T-36.3.7.12-01-T02).
+        // The subsequent `UPDATE schema_version` propagates via `?` so a true
+        // ALTER failure (disk-full, permission) still surfaces — and the
+        // bilateral `goal_mode_migration::v1_db_upgrades_to_v2` test asserts
+        // PRAGMA table_info shows the new columns, catching silent failures.
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN goal_mode INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN goal_max_turns INTEGER NOT NULL DEFAULT 20",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN goal_turns_used INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+        conn.execute("UPDATE schema_version SET version = 2", [])?;
+    }
     Ok(())
 }

@@ -801,13 +801,18 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
             "SELECT id, title, body, assignee, status, priority, tenant, workspace, skills, \
              idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
              max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
-             current_step_key, created_by, created_at, started_at, ended_at \
+             current_step_key, created_by, created_at, started_at, ended_at, \
+             goal_mode, goal_max_turns, goal_turns_used \
              FROM tasks \
              WHERE status='ready' AND (scheduled_at IS NULL OR scheduled_at <= ?1) \
              ORDER BY priority DESC, created_at ASC \
              LIMIT ?2",
         )?;
         stmt.query_map(params![now, limit], |r| {
+            // Phase 36.3.7.12: SELECT now returns 26 columns; bind goal_* into Task.
+            let goal_mode_int: i64 = r.get(23)?;
+            let goal_max_turns_i: i64 = r.get(24)?;
+            let goal_turns_used_i: i64 = r.get(25)?;
             Ok(Task {
                 id: r.get(0)?,
                 title: r.get(1)?,
@@ -832,6 +837,9 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
                 created_at: r.get(20)?,
                 started_at: r.get(21)?,
                 ended_at: r.get(22)?,
+                goal_mode: goal_mode_int != 0,
+                goal_max_turns: goal_max_turns_i.max(0) as u32,
+                goal_turns_used: goal_turns_used_i.max(0) as u32,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?

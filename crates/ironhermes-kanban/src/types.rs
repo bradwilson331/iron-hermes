@@ -65,6 +65,26 @@ pub struct Task {
     pub created_at: f64,
     pub started_at: Option<f64>,
     pub ended_at: Option<f64>,
+    // -----------------------------------------------------------------------
+    // Phase 36.3.7.12 — Goal Mode (D-01).
+    // -----------------------------------------------------------------------
+    /// When `true`, the worker spawned for this card enters an in-session
+    /// goal loop with an auxiliary judge LLM evaluating output against
+    /// `title + body` between turns. CLI sets this via `--goal`; LLM tool
+    /// sets via `kanban_create` arg.
+    #[serde(default)]
+    pub goal_mode: bool,
+    /// Per-card turn budget for the goal loop (D-03). Budget exhaustion →
+    /// worker emits a synthetic `kanban_block` before exit. Column DEFAULT 20
+    /// and producer-level 0 → 20 coercion in `KanbanStore::create_task`
+    /// guarantee a sane budget even when callers don't override.
+    #[serde(default)]
+    pub goal_max_turns: u32,
+    /// Per-card turn counter, bumped by the worker harness via the
+    /// CAS-gated `worker_write_gated` path between iterations. Reset to 0
+    /// by reclaim+respawn (Pitfall 4).
+    #[serde(default)]
+    pub goal_turns_used: u32,
 }
 
 // ---------------------------------------------------------------------------
