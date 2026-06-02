@@ -387,3 +387,66 @@ fn screen_source_has_200ms_debounce_for_per_task_counter() {
          debounce on per-task-event-counter increments"
     );
 }
+
+// ===========================================================================
+// Quick task 260602-nd7 (U9 fix) — bilateral consumer-end regression.
+//
+// The coarse `drawer_source_reads_per_task_event_counter_for_d21` test at
+// line ~115 asserts the literal `per_task_event_counter` substring appears
+// SOMEWHERE in drawer.rs. With four use_resource calls (task / runs / events
+// / comments), three could read the counter and one — the comments
+// resource — could omit it, and the coarse test would still pass. That is
+// exactly the U9 failure mode if the producer fix were absent: a regressor
+// could remove `let _counter = per_task_event_counter();` from the comments
+// closure and ship without triggering any test. This fine-grained test
+// localizes the assertion to the comments resource's closure span so a
+// future regression on the consumer end is caught.
+//
+// Implementation: locate the byte offset of `"let comments = use_resource"`
+// and the offset of `"fetch_comments"` (which appears INSIDE that closure
+// per drawer.rs:111). Assert `per_task_event_counter()` appears in the
+// source slice between those offsets — i.e. inside the comments resource
+// closure body specifically, not just anywhere in the file.
+// ===========================================================================
+
+#[test]
+fn comments_resource_reads_per_task_event_counter_for_d21() {
+    let src = read("src/components/hermes_app/screens/kanban/drawer.rs");
+
+    let comments_decl_offset = src
+        .find("let comments = use_resource")
+        .expect(
+            "drawer.rs must declare a `let comments = use_resource(...)` \
+             resource — the COMMENTS section of the D-20 drawer depends on \
+             it; see .planning/quick/260602-nd7-fix-u9-drawer-comments-auto-refresh/",
+        );
+    let fetch_comments_offset = src
+        .find("fetch_comments")
+        .expect(
+            "drawer.rs must call `kanban_api::fetch_comments` inside the \
+             comments resource closure — see .planning/quick/260602-nd7-fix-u9-drawer-comments-auto-refresh/",
+        );
+
+    assert!(
+        fetch_comments_offset > comments_decl_offset,
+        "drawer.rs: `fetch_comments` call (offset={}) must appear AFTER the \
+         `let comments = use_resource` declaration (offset={}) — the \
+         comments resource closure body wraps the fetch call; see .planning/quick/260602-nd7-fix-u9-drawer-comments-auto-refresh/",
+        fetch_comments_offset,
+        comments_decl_offset,
+    );
+
+    let comments_closure_span = &src[comments_decl_offset..fetch_comments_offset];
+    assert!(
+        comments_closure_span.contains("per_task_event_counter()"),
+        "D-21 / U9 bilateral lock: the `comments` use_resource closure body \
+         (the slice from `let comments = use_resource` to the `fetch_comments` \
+         call site) MUST call `per_task_event_counter()` so Dioxus restarts \
+         the resource when the counter bumps. The coarse \
+         `drawer_source_reads_per_task_event_counter_for_d21` test at line \
+         ~115 only checks the substring appears somewhere in the file — it \
+         passes even if the comments resource specifically omits the read. \
+         This test catches that regression. \
+         See .planning/quick/260602-nd7-fix-u9-drawer-comments-auto-refresh/260602-nd7-PLAN.md."
+    );
+}
