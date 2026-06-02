@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
-stopped_at: Phase 36.3.7.11 UI-SPEC approved
-last_updated: "2026-06-01T07:59:24.913Z"
-last_activity: 2026-06-01 -- Phase 36.3.7.11 execution started
+stopped_at: Phase 36.3.7.11 closed (approved with carve-outs — U9 + U6 + U12-U14 file as follow-on)
+last_updated: "2026-06-02T18:00:00.000Z"
+last_activity: 2026-06-02 -- Phase 36.3.7.11 closed; UAT 9 PASS / 1 FAIL / 3 DEFERRED
 progress:
   total_phases: 55
-  completed_phases: 21
+  completed_phases: 22
   total_plans: 110
-  completed_plans: 102
-  percent: 38
+  completed_plans: 107
+  percent: 40
 ---
 
 # Project State
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 36.3.7.11 (dashboard-plugin-spa-rest-websocket-live-update) — EXECUTING
-Plan: 1 of 5
-Status: Executing Phase 36.3.7.11
-Last activity: 2026-06-01 -- Phase 36.3.7.11 execution started
+Phase: 36.3.7.11 (dashboard-plugin-spa-rest-websocket-live-update) — CLOSED 2026-06-02 (approved with carve-outs)
+Plan: 5 of 5 (all plans complete)
+Status: Phase closed — picking next phase from milestone-v3.0 backlog
+Last activity: 2026-06-02 -- UAT signed off 9 PASS / 1 FAIL / 3 DEFERRED; carve-outs filed for follow-on (U9 drawer refresh-on-event; U6 Complete→DONE ambiguity; U12/U13/U14 deferred to a11y + security sweeps)
 
 ## Recent close-out summary (2026-05-30 — Phase 36.3.7.6 closed PASS)
 
@@ -581,6 +581,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-06-02T17:30:00.000Z
-Stopped at: Phase 36.3.7.11 — quick-260602-ds9 landed; awaiting tester UAT re-run on U2/U6/U7/U8
-Resume file: .planning/phases/36.3.7.11-dashboard-plugin-spa-rest-websocket-live-update/.continue-here.md
+Last session: 2026-06-02T18:00:00.000Z
+Stopped at: Phase 36.3.7.11 CLOSED (approved with carve-outs). UAT re-ran 2026-06-02 after BUG-2 follow-up fix `4887e576` (un-gate DESIGN_TOKENS_CSS + WARP_IH_CSS const decls so non-legacy shells resolve --w-bg-*, --accent-primary tokens). Results: 9 PASS (U1-U5, U7, U8, U10, U11) / 1 FAIL (U9 drawer comment refresh-on-event broken) / 3 DEFERRED (U12 keyboard-DnD, U13 reduced-motion, U14 localhost-bind). U6 signed PASS with note that Complete transitions to READY not DONE — needs follow-on verification. ROADMAP updated.
+Resume file: (none — phase closed; pick next from milestone-v3.0 backlog)

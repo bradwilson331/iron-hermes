@@ -1,13 +1,14 @@
 {
   "version": "1.0",
-  "timestamp": "2026-06-02T01:09:14.105Z",
+  "timestamp": "2026-06-02T18:00:00.000Z",
   "phase": "36.3.7.11",
   "phase_name": "dashboard-plugin-spa-rest-websocket-live-update",
   "phase_dir": ".planning/phases/36.3.7.11-dashboard-plugin-spa-rest-websocket-live-update",
   "plan": 5,
-  "task": 2,
+  "task": 5,
   "total_tasks": 5,
-  "status": "paused-uat-failures",
+  "status": "phase-closed-with-carve-outs",
+  "closure_note": "Phase closed 2026-06-02 after re-run UAT (9 PASS / 1 FAIL / 3 DEFERRED) following BUG-2 follow-up fix 4887e576. Carve-outs filed as follow-on phase candidates in 36.3.7.11-05-SUMMARY.md: (1) U9 FAIL — drawer COMMENTS does not auto-refresh on cross-process comment write (D-21 broken); (2) U6 — Complete action transitions card to READY not DONE per tester observation; (3) U12/U13/U14 — keyboard-DnD, reduced-motion, localhost-bind threat-model all DEFERRED. Roadmap updated via gsd-sdk: phase status=Complete, 5/5 plans complete.",
   "completed_tasks": [
     {"id": "36.3.7.11-01", "name": "read-side #[server] fns + WS tail consumer + ScreenKanban board", "status": "done", "commit": "9d3e6e8d"},
     {"id": "36.3.7.11-02", "name": "drag-and-drop + 4 write #[server] fns + shared transition validator", "status": "done", "commit": "955c482a"},
