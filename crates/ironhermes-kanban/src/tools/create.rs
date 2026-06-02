@@ -158,6 +158,16 @@ impl Tool for KanbanCreateTool {
                         "description": "When true, task starts in 'triage' status (needs manual specification).",
                         "default": false
                     },
+                    "goal_mode": {
+                        "type": "boolean",
+                        "description": "Enable goal mode: worker enters in-session loop with judge LLM evaluating against title + body.",
+                        "default": false
+                    },
+                    "goal_max_turns": {
+                        "type": "integer",
+                        "description": "Per-task turn budget when goal_mode=true. Budget exhaustion → kanban_block. Default 20.",
+                        "default": 20
+                    },
                     "board": {
                         "type": "string",
                         "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
