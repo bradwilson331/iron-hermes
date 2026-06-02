@@ -544,6 +544,22 @@ impl KanbanStore {
     }
 
     /// Add a comment to a task. Returns the new `TaskComment`.
+    ///
+    /// Quick task 260602-nd7 (U9 fix): in addition to the existing
+    /// `task_comments` row, this method now appends one
+    /// `KanbanEventKind::Edited` row to `task_events` with payload
+    /// `{"subkind":"comment","comment_id":<id>,"author":<author>}` so the
+    /// dashboard tail consumer (D-15) can broadcast a `TaskEventBatch`
+    /// to all connected WS clients, which the drawer's per-task event
+    /// counter then picks up (D-21) and re-runs the `comments`
+    /// `use_resource`. The two writes share a single transaction so a
+    /// half-landed (comment without event) state is impossible — pattern
+    /// matches the `block_task` / `insert_link_checked` mutators in this
+    /// file. `events.rs` is frozen surface (Phase 36.3.7.6) so we reuse
+    /// the existing `Edited` variant with a `subkind` JSON tag instead of
+    /// adding a `Comment` variant. The comment body is intentionally
+    /// excluded from the event payload to keep `task_events` row sizes
+    /// bounded (T-quick-nd7-02 / threat register).
     pub fn add_comment(&mut self, task_id: &str, author: &str, body: &str) -> Result<TaskComment> {
         // Verify task exists.
         self.get_task(task_id)?;
@@ -551,11 +567,26 @@ impl KanbanStore {
         let id = Self::new_id("c");
         let now = Self::now();
 
-        self.conn.execute(
+        let tx = self.conn.transaction()?;
+        tx.execute(
             "INSERT INTO task_comments (id, task_id, author, body, created_at) \
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![id, task_id, author, body, now],
         )?;
+        let event_payload = serde_json::json!({
+            "subkind": "comment",
+            "comment_id": id,
+            "author": author,
+        });
+        Self::append_event_internal(
+            &tx,
+            task_id,
+            None,
+            KanbanEventKind::Edited,
+            Some(&event_payload),
+            now,
+        )?;
+        tx.commit()?;
 
         Ok(TaskComment {
             id,
