@@ -186,3 +186,69 @@ fn cli_create_with_goal_lands_in_db() {
         "fresh card should have goal_turns_used = 0"
     );
 }
+
+// ---------------------------------------------------------------------------
+// D-01 must-have — `kanban show` formatter prints goal_* lines for goal cards
+// and stays quiet for non-goal cards
+// ---------------------------------------------------------------------------
+
+#[test]
+fn show_formatter_prints_goal_lines_for_goal_card() {
+    use ironhermes_cli::kanban::format::format_task_detail;
+    use ironhermes_kanban::store::CreateTaskOptions;
+    use ironhermes_kanban::KanbanStore;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = KanbanStore::new(dir.path().join("kanban.db")).expect("open store");
+
+    let opts = CreateTaskOptions {
+        body: Some("Acceptance: docs translated".to_string()),
+        goal_mode: true,
+        goal_max_turns: 15,
+        ..CreateTaskOptions::default()
+    };
+    let task = store
+        .create_task("Translate docs", "alice", opts)
+        .expect("create_task");
+    let reloaded = store.get_task(&task.id).expect("get_task");
+
+    let rendered = format_task_detail(&reloaded, &[], &[], &[]);
+    assert!(
+        rendered.contains("goal_mode: true"),
+        "show output should include `goal_mode: true` line; got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("goal_max_turns: 15"),
+        "show output should include `goal_max_turns: 15` line; got:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("goal_turns_used: 0"),
+        "show output should include `goal_turns_used: 0` line; got:\n{rendered}"
+    );
+}
+
+#[test]
+fn show_formatter_omits_goal_lines_for_non_goal_card() {
+    use ironhermes_cli::kanban::format::format_task_detail;
+    use ironhermes_kanban::store::CreateTaskOptions;
+    use ironhermes_kanban::KanbanStore;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = KanbanStore::new(dir.path().join("kanban.db")).expect("open store");
+
+    // No --goal flag → goal_mode stays false (clap-shape default).
+    let opts = CreateTaskOptions {
+        body: Some("Plain card".to_string()),
+        ..CreateTaskOptions::default()
+    };
+    let task = store
+        .create_task("Plain task", "alice", opts)
+        .expect("create_task");
+    let reloaded = store.get_task(&task.id).expect("get_task");
+
+    let rendered = format_task_detail(&reloaded, &[], &[], &[]);
+    assert!(
+        !rendered.contains("goal_mode:"),
+        "non-goal card should NOT print goal_* lines; got:\n{rendered}"
+    );
+}

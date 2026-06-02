@@ -126,6 +126,8 @@ pub async fn cmd_create(
     skills: Vec<String>,
     priority: Option<i64>,
     triage: bool,
+    goal: bool,
+    goal_max_turns: u32,
     idempotency_key: Option<String>,
     max_runtime: Option<String>,
     max_retries: Option<i64>,
@@ -159,12 +161,12 @@ pub async fn cmd_create(
         max_retries,
         triage,
         created_by: Some(profile_from_env()),
-        // Phase 36.3.7.12 Plan 01: keep `cmd_create` forward-compatible with the
-        // new CreateTaskOptions fields. Plan 02 wires the `--goal` /
-        // `--goal-max-turns` CLI flags through to these fields; for now keep
-        // the defaults (goal_mode=false, goal_max_turns=0 → producer coerces to 20).
-        goal_mode: false,
-        goal_max_turns: 0,
+        // Phase 36.3.7.12 Plan 03 D-01: forward --goal / --goal-max-turns to
+        // the producer. The store coerces goal_max_turns = 0 → 20 (Plan 01
+        // D-03 producer-level coercion) so passing the raw clap value
+        // (default_value_t = 20) preserves D-03 even if a caller passes 0.
+        goal_mode: goal,
+        goal_max_turns,
     };
 
     let task = store.create_task(&title, &assignee, opts)
