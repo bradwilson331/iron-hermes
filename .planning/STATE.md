@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 Phase: 36.3.7.11 (dashboard-plugin-spa-rest-websocket-live-update) — CLOSED 2026-06-02 (approved with carve-outs)
 Plan: 5 of 5 (all plans complete)
 Status: Phase closed — picking next phase from milestone-v3.0 backlog
-Last activity: 2026-06-02 -- UAT signed off 9 PASS / 1 FAIL / 3 DEFERRED; carve-outs filed for follow-on (U9 drawer refresh-on-event; U6 Complete→DONE ambiguity; U12/U13/U14 deferred to a11y + security sweeps)
+Last activity: 2026-06-02 -- Completed quick task 260602-nd7: fix U9 drawer comments auto-refresh (producer-side fix in KanbanStore::add_comment; bilateral regression coverage)
 
 ## Recent close-out summary (2026-05-30 — Phase 36.3.7.6 closed PASS)
 
@@ -578,9 +578,10 @@ Recent decisions affecting current work:
 |------------|----------------------------|----------------------------------------------------------------------------------------------------------|
 | 2026-05-17 | transparent-logo-asset     | Restored true PNG alpha on `crates/iron_hermes_ui/assets/i_hermes_logo.png` (removed baked-in checkerboard via 18%-fuzz floodfill). |
 | 2026-06-02 | 260602-ds9                 | Closed BUG-1 (fetch_board `include_archived` parameter + ScreenKanban re-fetch on toggle + archived-fetch regression test) and BUG-2 (drawer + 4 modals cyan border + opaque tinted dark fill via existing tokens, zero new hex) from 36.3.7.11 UAT failures U2/U6/U7/U8. iron_hermes_ui test + clippy gates green. |
+| 2026-06-02 | 260602-nd7                 | Closed U9 FAIL from 36.3.7.11 UAT (drawer COMMENTS section did not auto-refresh on cross-process `kanban comment` write — D-21 contract broken). Root cause was producer-side, not UI: `KanbanStore::add_comment` wrote `task_comments` but never appended a `task_events` row, so the dashboard tail (D-15) had nothing to broadcast and the drawer's per-task event counter never bumped. Fix appends `KanbanEventKind::Edited` with payload `{subkind:"comment", comment_id, author}` (events.rs frozen surface preserved per Phase 36.3.7.6) inside one rusqlite transaction wrapping both INSERTs. Bilateral regression coverage: 3 producer-end tests (`crates/ironhermes-kanban/tests/comment_appends_event.rs`) + 1 consumer-end byte-offset-localized test (`crates/iron_hermes_ui/tests/kanban_drawer.rs`). 4 new tests, all green. Deferred (out-of-scope, pre-existing at base d2e51d52): DEFER-1 = 2 e2e tests in `ironhermes-kanban/tests/end_to_end.rs` (env-var race in dispatcher); DEFER-2 = Rust 1.94 clippy lint upgrade — 37+ errors in code blamed to commits 0db139084 + 9cc4114d8. |
 
 ## Session Continuity
 
-Last session: 2026-06-02T18:00:00.000Z
-Stopped at: Phase 36.3.7.11 CLOSED (approved with carve-outs). UAT re-ran 2026-06-02 after BUG-2 follow-up fix `4887e576` (un-gate DESIGN_TOKENS_CSS + WARP_IH_CSS const decls so non-legacy shells resolve --w-bg-*, --accent-primary tokens). Results: 9 PASS (U1-U5, U7, U8, U10, U11) / 1 FAIL (U9 drawer comment refresh-on-event broken) / 3 DEFERRED (U12 keyboard-DnD, U13 reduced-motion, U14 localhost-bind). U6 signed PASS with note that Complete transitions to READY not DONE — needs follow-on verification. ROADMAP updated.
+Last session: 2026-06-02T21:30:00.000Z
+Stopped at: Phase 36.3.7.11 CLOSED (approved with carve-outs); two follow-on quick tasks landed same session — quick-260602-ds9 closed BUG-1+BUG-2 (UAT U2/U6/U7/U8), quick-260602-nd7 closed U9 (drawer comments auto-refresh; producer-side fix in `KanbanStore::add_comment` emits a `task_events::Edited` row so the dashboard tail can broadcast). U6 also RESOLVED in-session — repro test `crates/ironhermes-kanban/tests/u6_complete_via_dashboard_args.rs` pins the store contract; tester's READY observation was a duplicate-title artifact. Remaining UAT carve-outs: U12 keyboard-DnD (already deferred since Plan 02), U13 reduced-motion, U14 localhost-bind threat-model — schedule into a follow-on a11y + security sweep phase. New deferred items: DEFER-1 (2 e2e tests in `ironhermes-kanban/tests/end_to_end.rs`) + DEFER-2 (Rust 1.94 clippy lint upgrade — 37+ errors workspace-wide).
 Resume file: (none — phase closed; pick next from milestone-v3.0 backlog)
