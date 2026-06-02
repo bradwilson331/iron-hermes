@@ -3,13 +3,13 @@ gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
 status: Phase closed — picking next phase from milestone-v3.0 backlog
-stopped_at: Phase 36.3.7.12 context gathered
-last_updated: "2026-06-02T22:02:33.461Z"
+stopped_at: Phase 36.3.7.12 planned (5 plans, 4 waves)
+last_updated: "2026-06-02T22:37:44.296Z"
 last_activity: "2026-06-02 -- Completed quick task 260602-nd7: fix U9 drawer comments auto-refresh (producer-side fix in KanbanStore::add_comment; bilateral regression coverage)"
 progress:
   total_phases: 56
   completed_phases: 22
-  total_plans: 110
+  total_plans: 115
   completed_plans: 107
   percent: 39
 ---
@@ -583,6 +583,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-06-02T22:02:33.454Z
-Stopped at: Phase 36.3.7.12 context gathered
-Resume file: .planning/phases/36.3.7.12-goal-mode-kanban-worker-loop-ralph-loop/36.3.7.12-CONTEXT.md
+Last session: 2026-06-02T22:37:44.285Z
+Stopped at: Phase 36.3.7.12 planned (5 plans, 4 waves)
+Resume file: .planning/phases/36.3.7.12-goal-mode-kanban-worker-loop-ralph-loop/36.3.7.12-01-PLAN.md
