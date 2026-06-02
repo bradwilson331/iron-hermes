@@ -40,6 +40,7 @@ pub mod store;
 // depends on ironhermes-gateway — reverse dep would be circular.
 pub mod store_writer_impl;
 pub mod decomposer;
+pub mod judge;
 pub mod mention;
 pub mod tools;
 pub mod types;
@@ -56,6 +57,7 @@ pub use decomposer::{
     ChildSpec, DecomposeFn, DecomposeOutput, DecomposeRequest, DecomposedIds,
     decompose_triage_task, specify_triage_task,
 };
+pub use judge::{JudgeFn, JudgeOutput, JudgeRequest, JudgeVerdict};
 pub use events::{KanbanEvent, KanbanEventKind, insert_event_sql};
 pub use paths::{
     kanban_db_path, kanban_log_stderr, kanban_log_stdout, kanban_logs_dir, kanban_skills_dir,
