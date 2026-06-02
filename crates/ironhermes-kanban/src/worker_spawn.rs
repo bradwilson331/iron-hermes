@@ -144,6 +144,32 @@ pub fn build_kanban_worker_env(task: &Task, run: &TaskRun, workspace: &str, boar
         }
     }
 
+    // Phase 36.3.7.12 (D-03 / D-06): goal-mode env pair.
+    //
+    // Emitted ONLY when the task opts into goal mode. When goal_mode=false
+    // (every existing card) this block is a no-op and the 8-var env contract
+    // (INV-36.3.7-07) is preserved bit-for-bit.
+    //
+    // The two new vars ride the per-task env list path downstream of
+    // env_clear() + SAFE_SYSTEM_VARS allowlist (T-36.3.7.12-02-I01: they
+    // carry only a feature flag and an integer budget — zero secret
+    // material — so no new exfil vector exists).
+    //
+    // Defensive 0 → 20 coercion: a struct-literal caller that forgets to
+    // set goal_max_turns lands `0`. We re-apply D-03's "20" default here so
+    // the worker harness never sees a 0-budget signal that could mask as
+    // "no budget enforcement." This mirrors the producer-level coercion
+    // already in KanbanStore::create_task (Plan 01).
+    if task.goal_mode {
+        env.push(("HERMES_KANBAN_GOAL_MODE".into(), "1".into()));
+        let budget = if task.goal_max_turns == 0 {
+            20
+        } else {
+            task.goal_max_turns
+        };
+        env.push(("HERMES_KANBAN_GOAL_MAX_TURNS".into(), budget.to_string()));
+    }
+
     env
 }
 
