@@ -723,6 +723,16 @@ Plans:
 - [x] 36.3.7.11-04-PLAN.md — WheelWedge::Kanban (atomic 6-method modulo-11 update — Risk 1) + wheel.rs geometry + Agents page KANBAN BOARD → button. No deps; can ship first. Covers D-02, D-03.
 - [x] 36.3.7.11-05-PLAN.md — UAT: full workspace gate (build/test/clippy) + kanban_ws_lifecycle.rs + kanban_full_suite.rs aggregating must_haves invariants + blocking manual UAT checkpoint with 14-row checklist. Depends on 01-04.
 
+### Phase 36.3.7.12: Goal mode - kanban worker loop (Ralph loop) (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.3.7.11
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.3.7.12 to break down)
+
 ### Phase 36.3.6: Smart home — Home Assistant ha_* suite (INSERTED)
 
 **Goal:** [Urgent work - to be planned]

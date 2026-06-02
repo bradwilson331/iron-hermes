@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: executing
-stopped_at: Phase 36.3.7.11 closed (approved with carve-outs — U9 + U6 + U12-U14 file as follow-on)
-last_updated: "2026-06-02T18:00:00.000Z"
-last_activity: 2026-06-02 -- Phase 36.3.7.11 closed; UAT 9 PASS / 1 FAIL / 3 DEFERRED
+status: Phase closed — picking next phase from milestone-v3.0 backlog
+stopped_at: "Phase 36.3.7.11 CLOSED (approved with carve-outs); two follow-on quick tasks landed same session — quick-260602-ds9 closed BUG-1+BUG-2 (UAT U2/U6/U7/U8), quick-260602-nd7 closed U9 (drawer comments auto-refresh; producer-side fix in `KanbanStore::add_comment` emits a `task_events::Edited` row so the dashboard tail can broadcast). U6 also RESOLVED in-session — repro test `crates/ironhermes-kanban/tests/u6_complete_via_dashboard_args.rs` pins the store contract; tester's READY observation was a duplicate-title artifact. Remaining UAT carve-outs: U12 keyboard-DnD (already deferred since Plan 02), U13 reduced-motion, U14 localhost-bind threat-model — schedule into a follow-on a11y + security sweep phase. New deferred items: DEFER-1 (2 e2e tests in `ironhermes-kanban/tests/end_to_end.rs`) + DEFER-2 (Rust 1.94 clippy lint upgrade — 37+ errors workspace-wide)."
+last_updated: "2026-06-02T21:47:58.516Z"
+last_activity: "2026-06-02 -- Completed quick task 260602-nd7: fix U9 drawer comments auto-refresh (producer-side fix in KanbanStore::add_comment; bilateral regression coverage)"
 progress:
-  total_phases: 55
+  total_phases: 56
   completed_phases: 22
   total_plans: 110
   completed_plans: 107
-  percent: 40
+  percent: 39
 ---
 
 # Project State
@@ -557,6 +557,7 @@ Recent decisions affecting current work:
 - Phase 36.17.2.1 inserted after Phase 36.17.2: fix /queue slash-command failing to wake parked worker (regression from 36.17.2 mpsc→Notify switch) (URGENT)
 - Phase 36.17.3 inserted after Phase 36.17: wire up TUI with gateway queue and slash queue commands (URGENT)
 - Phase 36.17.4 inserted after Phase 36.17: wire up iron_hermes_ui to the gateway queue + slash commands (URGENT)
+- Phase 36.3.7.12 inserted after Phase 36.3.7.11: Goal mode - kanban worker loop (Ralph loop) — autonomous worker primitives on the kanban surface: goal_mode card flag, /goal worker dispatcher loop, DecomposeFn + SpecifyFn runtime closures wired into AgentRuntime, threat model for auto-advance. Companion to Phase 36.3.7.11's manual-review dashboard. (URGENT)
 
 ### Pending Todos
 
