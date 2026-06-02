@@ -28,9 +28,10 @@ const COMPONENTS_CSS: Asset = asset!("/assets/components.css");
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 #[cfg(feature = "legacy-shell")]
 const MAIN_CSS: Asset = asset!("/assets/main.css");
-#[cfg(feature = "legacy-shell")]
+// Always-loaded — moved out of the legacy-shell gate so HermesApp can
+// resolve --w-bg-*, --accent-primary, --w-border, --w-radius-*, and
+// --w-shadow-* tokens (BUG-2 fix from 36.3.7.11 UAT).
 const DESIGN_TOKENS_CSS: Asset = asset!("/assets/design-tokens.css");
-#[cfg(feature = "legacy-shell")]
 const WARP_IH_CSS: Asset = asset!("/assets/warp-ih.css");
 #[cfg(feature = "legacy-shell")]
 const SCANNER_ANIM_CSS: Asset = asset!("/assets/scanner-anim.css");
