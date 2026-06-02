@@ -728,10 +728,10 @@ Plans:
 **Goal:** Extend kanban auto-decompose infrastructure with a per-card goal_mode opt-in that, when set, makes the spawned worker enter an in-session Ralph-style loop. Each turn the worker output is evaluated by an auxiliary judge LLM against the card's title + body (literal acceptance criteria). Loop terminates on judge-agrees, worker self-terminates (kanban_complete/kanban_block), or per-card turn budget exhaustion → synthetic kanban_block(reason="goal_max_turns exhausted; needs human review"). NO new dispatcher pool, NO new event variants (Edited+subkind frozen-surface pattern), NO DEFCON gating (deferred).
 **Requirements**: D-01..D-08 (locked in CONTEXT.md; no pre-assigned REQ-IDs — anchors are D-XX per phase 36.3.7.7 / 36.3.7.8 precedent)
 **Depends on:** Phase 36.3.7.11
-**Plans:** 5 plans
+**Plans:** 1/5 plans executed
 
 Plans:
-- [ ] 36.3.7.12-01-PLAN.md — Schema + types foundation (SCHEMA_VERSION 1→2, goal_mode/goal_max_turns/goal_turns_used columns, Task + CreateTaskOptions fields, KanbanConfig.judge_model, JudgeFn typedef in new judge.rs, kanban_judge reserved-role registration). Wave 1.
+- [x] 36.3.7.12-01-PLAN.md — Schema + types foundation (SCHEMA_VERSION 1→2, goal_mode/goal_max_turns/goal_turns_used columns, Task + CreateTaskOptions fields, KanbanConfig.judge_model, JudgeFn typedef in new judge.rs, kanban_judge reserved-role registration). Wave 1.
 - [ ] 36.3.7.12-02-PLAN.md — Producer surface (kanban_create JSON schema fields, worker_spawn HERMES_KANBAN_GOAL_* env injection, CAS-gated bump_goal_turn_counter, GOAL_SUBKIND_* CONSTs, frozen-surface event-variant guard). Wave 2, parallel with 03.
 - [ ] 36.3.7.12-03-PLAN.md — CLI surface (--goal/--goal-max-turns clap args, cmd_create signature + show formatter, build_runtime_judge_fn three-tier model cascade). Wave 2, parallel with 02.
 - [ ] 36.3.7.12-04-PLAN.md — Goal loop wrapper (new file goal_loop.rs with run_goal_loop_if_enabled, BudgetSentinel RAII drop guard, synthetic kanban_block helper, main.rs worker-mode dispatch wiring, 5 behavioral consumer tests). Wave 3.

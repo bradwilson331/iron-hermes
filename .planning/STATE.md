@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: Phase closed — picking next phase from milestone-v3.0 backlog
+status: executing
 stopped_at: Phase 36.3.7.12 planned (5 plans, 4 waves)
-last_updated: "2026-06-02T22:37:44.296Z"
-last_activity: "2026-06-02 -- Completed quick task 260602-nd7: fix U9 drawer comments auto-refresh (producer-side fix in KanbanStore::add_comment; bilateral regression coverage)"
+last_updated: "2026-06-02T23:06:31.391Z"
+last_activity: 2026-06-02 -- Phase 36.3.7.12 execution started
 progress:
   total_phases: 56
   completed_phases: 22
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.3.7.11 — dashboard-plugin-spa-rest-websocket-live-update
+**Current focus:** Phase 36.3.7.12 — goal-mode-kanban-worker-loop-ralph-loop
 
 ## Current Position
 
-Phase: 36.3.7.11 (dashboard-plugin-spa-rest-websocket-live-update) — CLOSED 2026-06-02 (approved with carve-outs)
-Plan: 5 of 5 (all plans complete)
-Status: Phase closed — picking next phase from milestone-v3.0 backlog
-Last activity: 2026-06-02 -- Completed quick task 260602-nd7: fix U9 drawer comments auto-refresh (producer-side fix in KanbanStore::add_comment; bilateral regression coverage)
+Phase: 36.3.7.12 (goal-mode-kanban-worker-loop-ralph-loop) — EXECUTING
+Plan: 1 of 5
+Status: Executing Phase 36.3.7.12
+Last activity: 2026-06-02 -- Phase 36.3.7.12 execution started
 
 ## Recent close-out summary (2026-05-30 — Phase 36.3.7.6 closed PASS)
 
