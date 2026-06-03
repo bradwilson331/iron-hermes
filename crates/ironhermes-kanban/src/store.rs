@@ -902,7 +902,8 @@ impl KanbanStore {
                     "SELECT id, title, body, assignee, status, priority, tenant, workspace, skills, \
                      idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
                      max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
-                     current_step_key, created_by, created_at, started_at, ended_at \
+                     current_step_key, created_by, created_at, started_at, ended_at, \
+                     goal_mode, goal_max_turns, goal_turns_used \
                      FROM tasks WHERE idempotency_key = ?1",
                     params![kr],
                     Self::row_to_task,
