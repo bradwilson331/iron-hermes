@@ -34,8 +34,24 @@ pub trait PlatformAdapter: Send + Sync {
     /// Edit an existing message (plain text — for streaming edits).
     async fn edit_message(&self, chat_id: &str, message_id: &str, content: &str) -> Result<()>;
 
-    /// Edit an existing message with Markdown formatting (final edit per D-03).
-    async fn edit_message_markdown(
+    /// Edit an existing message using Telegram's `parse_mode: MarkdownV2`
+    /// (Phase 36.17.2.2 D-01 — supersedes the legacy `Markdown` parse mode).
+    ///
+    /// **Caller contract:** `content` MUST be pre-escaped via
+    /// `crate::markdown_v2::escape_outside_code_blocks` before invocation.
+    /// The trait surface does NOT auto-escape — the only production call
+    /// site (`stream_consumer.rs::flush(final_edit=true)` per plan 05)
+    /// applies the escape. Implementors (notably `TelegramAdapter`) treat
+    /// `content` as already-escaped and pass it through `parse_mode:
+    /// MarkdownV2`.
+    ///
+    /// **D-02 fallback (`TelegramAdapter` only):** when the Bot API returns a
+    /// 400 whose description substring-matches a parse-mode failure, the
+    /// implementation logs `warn!`, re-issues the same call once with
+    /// `parse_mode` OMITTED, and returns the retry result. On second
+    /// failure logs `error!` and returns the retry `Err`. Non-Telegram
+    /// adapters need not implement the fallback.
+    async fn edit_message_markdown_v2(
         &self,
         chat_id: &str,
         message_id: &str,
@@ -79,6 +95,9 @@ pub use crate::media_tag::{MediaKind, MediaRef, MediaSource};
 /// NONE of the six methods carry a `caption` parameter. The text body has
 /// already been rendered into the placeholder message via
 /// `edit_message_markdown_v2` (D-01) BEFORE attachments are dispatched
+/// — see [`PlatformAdapter::edit_message_markdown_v2`].
+//
+// (doc-link no-op: pull `edit_message_markdown_v2` into rustdoc index)
 /// (D-07), so a per-attachment caption would be redundant — and a partial
 /// duplicate of the final-text body. This deviates from hermes-agent's
 /// behaviour, which attaches plain-text captions on `sendVoice`; the

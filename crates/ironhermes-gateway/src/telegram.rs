@@ -1,4 +1,4 @@
-use crate::adapter::PlatformAdapter;
+use crate::adapter::{MediaSender, MediaSource, PlatformAdapter};
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use ironhermes_core::{Attachment, MessageEvent, MessageResponse, Platform};
@@ -6,7 +6,8 @@ use ironhermes_core::{Attachment, MessageEvent, MessageResponse, Platform};
 pub use ironhermes_cron::TgSendApi;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use tracing::{error, warn};
 
 #[async_trait]
 impl TgSendApi for TelegramAdapter {
@@ -28,7 +29,15 @@ impl TgSendApi for TelegramAdapter {
         path: &Path,
         thread_id: Option<&str>,
     ) -> anyhow::Result<()> {
-        self.send_file_multipart("sendVoice", "voice", chat_id, path, thread_id).await
+        // Phase 36.17.2.2-04: `send_file_multipart` now returns
+        // `Result<MessageResponse>` per Pitfall 4 / D-18. `TgSendApi`
+        // contract is preserved by discarding the projected response
+        // with `.map(|_| ())` — `ironhermes-cron` callers continue to
+        // see `Result<()>` (RESEARCH FLAGGED RISK A8: zero external
+        // callers of the gateway-side helper).
+        self.send_file_multipart("sendVoice", "voice", chat_id, path, thread_id)
+            .await
+            .map(|_| ())
     }
 
     async fn send_image_file(
@@ -37,7 +46,11 @@ impl TgSendApi for TelegramAdapter {
         path: &Path,
         thread_id: Option<&str>,
     ) -> anyhow::Result<()> {
-        self.send_file_multipart("sendPhoto", "photo", chat_id, path, thread_id).await
+        // Phase 36.17.2.2-04: discard the new `MessageResponse` projection to
+        // preserve the `TgSendApi::Result<()>` contract (Pitfall 4 option ii).
+        self.send_file_multipart("sendPhoto", "photo", chat_id, path, thread_id)
+            .await
+            .map(|_| ())
     }
 
     async fn send_video(
@@ -46,7 +59,10 @@ impl TgSendApi for TelegramAdapter {
         path: &Path,
         thread_id: Option<&str>,
     ) -> anyhow::Result<()> {
-        self.send_file_multipart("sendVideo", "video", chat_id, path, thread_id).await
+        // Phase 36.17.2.2-04: discard MessageResponse — preserve TgSendApi contract.
+        self.send_file_multipart("sendVideo", "video", chat_id, path, thread_id)
+            .await
+            .map(|_| ())
     }
 
     async fn send_document(
@@ -55,7 +71,10 @@ impl TgSendApi for TelegramAdapter {
         path: &Path,
         thread_id: Option<&str>,
     ) -> anyhow::Result<()> {
-        self.send_file_multipart("sendDocument", "document", chat_id, path, thread_id).await
+        // Phase 36.17.2.2-04: discard MessageResponse — preserve TgSendApi contract.
+        self.send_file_multipart("sendDocument", "document", chat_id, path, thread_id)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -154,6 +173,15 @@ impl TelegramAdapter {
     ///
     /// `method`     — Telegram Bot API method name (e.g. "sendPhoto")
     /// `field_name` — multipart field name for the file (e.g. "photo")
+    ///
+    /// Phase 36.17.2.2-04 (Pitfall 4 / D-18): return type was widened from
+    /// `Result<()>` to `Result<MessageResponse>` so `MediaSender::send_*`
+    /// implementations can project a real `MessageResponse` (mirrors the
+    /// `TgMessage` → `MessageResponse` projection used by `send_message` at
+    /// the bottom of `impl PlatformAdapter for TelegramAdapter`). The four
+    /// existing `TgSendApi` callers (`send_voice`, `send_image_file`,
+    /// `send_video`, `send_document`) discard the new value via
+    /// `.map(|_| ())` to preserve their `Result<()>` contract.
     async fn send_file_multipart(
         &self,
         method: &str,
@@ -161,7 +189,7 @@ impl TelegramAdapter {
         chat_id: &str,
         path: &Path,
         thread_id: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<MessageResponse> {
         let file_bytes = tokio::fs::read(path)
             .await
             .with_context(|| format!("Failed to read media file: {}", path.display()))?;
@@ -191,7 +219,7 @@ impl TelegramAdapter {
             .with_context(|| format!("Telegram {} request failed", method))?;
 
         let status = response.status();
-        let body: TelegramResponse<serde_json::Value> = response
+        let body: TelegramResponse<TgMessage> = response
             .json()
             .await
             .with_context(|| format!("Failed to parse Telegram {} response", method))?;
@@ -205,7 +233,35 @@ impl TelegramAdapter {
             );
         }
 
-        Ok(())
+        let result = body
+            .result
+            .with_context(|| format!("Telegram {} returned no result", method))?;
+        Ok(MessageResponse {
+            message_id: result.message_id.to_string(),
+            chat_id: chat_id.to_string(),
+            platform: Platform::Telegram,
+        })
+    }
+
+    /// Phase 36.17.2.2-04 D-13: send a music-player audio attachment
+    /// (`.mp3`, `.m4a`, `.flac`, `.wav`) via Telegram Bot API `sendAudio`.
+    ///
+    /// Sibling of the existing `TgSendApi::send_voice` / `send_image_file`
+    /// / `send_video` / `send_document` helpers — mechanically symmetric,
+    /// mirrors the `send_file_multipart` call shape per RESEARCH §Telegram
+    /// Bot API Confirmations Assumption A2 (pattern symmetry).
+    ///
+    /// Added as an inherent method (NOT on `TgSendApi`) because the cron
+    /// crate has no audio caller today; adding it to the cross-crate trait
+    /// would expand the public surface area for a single in-crate
+    /// consumer (`impl MediaSender for TelegramAdapter`, task 4 below).
+    pub async fn send_audio(
+        &self,
+        chat_id: &str,
+        path: &Path,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse> {
+        self.send_file_multipart("sendAudio", "audio", chat_id, path, thread_id).await
     }
 }
 
@@ -247,21 +303,77 @@ impl PlatformAdapter for TelegramAdapter {
         Ok(())
     }
 
-    async fn edit_message_markdown(
+    async fn edit_message_markdown_v2(
         &self,
         chat_id: &str,
         message_id: &str,
         content: &str,
     ) -> Result<()> {
+        // Phase 36.17.2.2-04 D-01: switch parse_mode from legacy "Markdown"
+        // to "MarkdownV2" and apply the D-02 single-retry-as-plain-text
+        // fallback. `content` is assumed to have been pre-escaped by the
+        // caller via `crate::markdown_v2::escape_outside_code_blocks`
+        // (call site wired in plan 05; the trait-level doc-comment on
+        // `PlatformAdapter::edit_message_markdown_v2` records the contract).
         let params = serde_json::json!({
             "chat_id": chat_id,
             "message_id": message_id.parse::<i64>().unwrap_or(0),
             "text": content,
-            "parse_mode": "Markdown",
+            "parse_mode": "MarkdownV2",
         });
 
-        let _: serde_json::Value = self.api_call("editMessageText", &params).await?;
-        Ok(())
+        let result: Result<serde_json::Value> =
+            self.api_call("editMessageText", &params).await;
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // D-02 fallback: detect parse-mode failures via substring match
+                // on the error description. Telegram's exact wording for parse
+                // errors has shifted across Bot API versions, so we match a
+                // small substring set rather than a fixed string. Keywords
+                // sourced from RESEARCH §Telegram Bot API Confirmations row 8
+                // ("can't parse", "parse entities", "parse_mode").
+                let desc = format!("{e}");
+                let is_parse_failure = desc.contains("can't parse")
+                    || desc.contains("parse entities")
+                    || desc.contains("parse_mode");
+                if !is_parse_failure {
+                    // Not a parse-mode failure — propagate unchanged.
+                    return Err(e);
+                }
+
+                warn!(
+                    chat_id = chat_id,
+                    message_id = message_id,
+                    error = %desc,
+                    "MarkdownV2 parse failed; retrying as plain text (D-02 fallback)"
+                );
+
+                let plain_params = serde_json::json!({
+                    "chat_id": chat_id,
+                    "message_id": message_id.parse::<i64>().unwrap_or(0),
+                    "text": content,
+                });
+
+                match self
+                    .api_call::<serde_json::Value>("editMessageText", &plain_params)
+                    .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(retry_err) => {
+                        error!(
+                            chat_id = chat_id,
+                            message_id = message_id,
+                            original_error = %desc,
+                            retry_error = %retry_err,
+                            "D-02 plain-text retry also failed"
+                        );
+                        Err(retry_err)
+                    }
+                }
+            }
+        }
     }
 
     async fn delete_message(&self, chat_id: &str, message_id: &str) -> Result<()> {
@@ -295,6 +407,256 @@ impl PlatformAdapter for TelegramAdapter {
         // Lifecycle is managed by GatewayRunner; adapter itself has no running state
         false
     }
+}
+
+// =============================================================================
+// MediaSender — Phase 36.17.2.2-04 D-12/D-13/D-14/D-15/D-17/D-18
+// =============================================================================
+
+// Per-method size caps (D-15). All five Bot API methods reject local
+// multipart uploads above their respective caps; pre-checking against the
+// metadata length avoids a wasted multipart attempt and gives the D-19
+// dispatch loop in plan 06 a typed Err to detect for the reinsert path.
+const SIZE_CAP_20_MB: u64 = 20 * 1024 * 1024;
+const SIZE_CAP_50_MB: u64 = 50 * 1024 * 1024;
+
+/// Implements outbound media-attachment delivery on Telegram per the
+/// `MediaSender` trait surface (D-18).
+///
+/// Per-method handling:
+/// - **`MediaSource::Path(p)`** — runs the D-15 size pre-check
+///   (`tokio::fs::metadata`), then the T-INPUT-MEDIA-PATH canonicalization
+///   security gate (canonicalize + allow-list against `HERMES_HOME` and
+///   `/tmp`), then forwards to `send_file_multipart` for multipart upload.
+///   Rejected paths log the FILENAME ONLY via `tracing::warn!` per the
+///   phase threat model's T-LOG-LEAK row (no parent directories leaked).
+/// - **`MediaSource::Url(u)`** — D-12 passthrough: pass the URL string
+///   straight to Telegram as the per-method field (`photo`/`voice`/etc.)
+///   so Telegram's servers fetch it. Pre-validates the URL scheme: only
+///   `http://` and `https://` are accepted (T-INPUT-MEDIA-URL gate).
+///
+/// **D-17 — no captions.** None of the five methods set a `caption`
+/// parameter. The surrounding text body has already been rendered into
+/// the placeholder message via `edit_message_markdown_v2` (D-01) before
+/// attachments are dispatched (D-07), so a caption would duplicate the
+/// final body.
+///
+/// **FLAGGED RISK D-05 — name sibling, not rename.** `send_photo` here is
+/// INTENTIONALLY a sibling of the existing `TgSendApi::send_image_file`
+/// method on this same struct (telegram.rs:34). `send_image_file` has
+/// `ironhermes-cron` callers and renaming it is OUT OF SCOPE for this
+/// plan. The two paths share `send_file_multipart` so behavior is
+/// identical for the Path arm; the new method exists so the
+/// `MediaSender` trait surface can be naturally named.
+#[async_trait]
+impl MediaSender for TelegramAdapter {
+    async fn send_photo(
+        &self,
+        chat_id: &str,
+        source: &MediaSource,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse> {
+        match source {
+            MediaSource::Path(p) => {
+                check_size_cap(p, SIZE_CAP_20_MB).await?;
+                let validated = canonicalize_under_allowed_roots(p)?;
+                self.send_file_multipart("sendPhoto", "photo", chat_id, &validated, thread_id)
+                    .await
+            }
+            MediaSource::Url(u) => {
+                validate_url_scheme(u)?;
+                send_url_form(self, "sendPhoto", "photo", chat_id, u, thread_id).await
+            }
+        }
+    }
+
+    async fn send_voice(
+        &self,
+        chat_id: &str,
+        source: &MediaSource,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse> {
+        match source {
+            MediaSource::Path(p) => {
+                check_size_cap(p, SIZE_CAP_20_MB).await?;
+                let validated = canonicalize_under_allowed_roots(p)?;
+                self.send_file_multipart("sendVoice", "voice", chat_id, &validated, thread_id)
+                    .await
+            }
+            MediaSource::Url(u) => {
+                validate_url_scheme(u)?;
+                send_url_form(self, "sendVoice", "voice", chat_id, u, thread_id).await
+            }
+        }
+    }
+
+    async fn send_audio(
+        &self,
+        chat_id: &str,
+        source: &MediaSource,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse> {
+        match source {
+            MediaSource::Path(p) => {
+                check_size_cap(p, SIZE_CAP_20_MB).await?;
+                let validated = canonicalize_under_allowed_roots(p)?;
+                self.send_file_multipart("sendAudio", "audio", chat_id, &validated, thread_id)
+                    .await
+            }
+            MediaSource::Url(u) => {
+                validate_url_scheme(u)?;
+                send_url_form(self, "sendAudio", "audio", chat_id, u, thread_id).await
+            }
+        }
+    }
+
+    async fn send_video(
+        &self,
+        chat_id: &str,
+        source: &MediaSource,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse> {
+        match source {
+            MediaSource::Path(p) => {
+                check_size_cap(p, SIZE_CAP_20_MB).await?;
+                let validated = canonicalize_under_allowed_roots(p)?;
+                self.send_file_multipart("sendVideo", "video", chat_id, &validated, thread_id)
+                    .await
+            }
+            MediaSource::Url(u) => {
+                validate_url_scheme(u)?;
+                send_url_form(self, "sendVideo", "video", chat_id, u, thread_id).await
+            }
+        }
+    }
+
+    async fn send_document(
+        &self,
+        chat_id: &str,
+        source: &MediaSource,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse> {
+        match source {
+            MediaSource::Path(p) => {
+                // D-15: documents have a higher cap (50 MiB vs 20 MiB).
+                check_size_cap(p, SIZE_CAP_50_MB).await?;
+                let validated = canonicalize_under_allowed_roots(p)?;
+                self.send_file_multipart(
+                    "sendDocument",
+                    "document",
+                    chat_id,
+                    &validated,
+                    thread_id,
+                )
+                .await
+            }
+            MediaSource::Url(u) => {
+                validate_url_scheme(u)?;
+                send_url_form(self, "sendDocument", "document", chat_id, u, thread_id).await
+            }
+        }
+    }
+}
+
+/// D-15 size pre-check helper. Reads `tokio::fs::metadata` on `path` and
+/// returns `Err` if the file exceeds `cap` bytes. The Err message is
+/// typed so the D-19 dispatch loop (plan 06) can substring-match the
+/// "media exceeds size cap" prefix for the reinsert path.
+async fn check_size_cap(path: &Path, cap: u64) -> Result<()> {
+    let meta = tokio::fs::metadata(path)
+        .await
+        .with_context(|| format!("Failed to stat media file: {}", path.display()))?;
+    let len = meta.len();
+    if len > cap {
+        anyhow::bail!(
+            "media exceeds size cap: {} bytes > {} bytes cap (path {})",
+            len,
+            cap,
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+/// T-INPUT-MEDIA-PATH security gate (HIGH, phase threat model).
+///
+/// Canonicalize `path` (resolves symlinks and `..` components), then assert
+/// the resolved absolute path is contained under one of the allowed roots:
+/// - `$HERMES_HOME` if the env var is set, AND
+/// - `/tmp` (literal).
+///
+/// On rejection, log a `warn!` with the FILENAME ONLY (no parent dirs) per
+/// the T-LOG-LEAK mitigation row, then return a typed `Err` that the D-19
+/// reinsert path in plan 06 can detect via substring match.
+fn canonicalize_under_allowed_roots(path: &Path) -> Result<PathBuf> {
+    let canonical = path
+        .canonicalize()
+        .with_context(|| format!("Failed to canonicalize media path: {}", path.display()))?;
+
+    let mut allowed_roots: Vec<PathBuf> = Vec::new();
+    if let Ok(home) = std::env::var("HERMES_HOME") {
+        if let Ok(canon_home) = PathBuf::from(&home).canonicalize() {
+            allowed_roots.push(canon_home);
+        }
+    }
+    if let Ok(canon_tmp) = PathBuf::from("/tmp").canonicalize() {
+        allowed_roots.push(canon_tmp);
+    }
+
+    let allowed = allowed_roots
+        .iter()
+        .any(|root| canonical.starts_with(root));
+
+    if !allowed {
+        let filename = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("?");
+        warn!(
+            filename = %filename,
+            "rejected media path outside allowed roots (T-INPUT-MEDIA-PATH)"
+        );
+        anyhow::bail!("media path outside allowed roots: {}", path.display());
+    }
+
+    Ok(canonical)
+}
+
+/// T-INPUT-MEDIA-URL security gate. Accept only `http://` and `https://`
+/// schemes — reject `file://`, `gopher://`, `ftp://`, etc.
+fn validate_url_scheme(u: &str) -> Result<()> {
+    if !(u.starts_with("http://") || u.starts_with("https://")) {
+        anyhow::bail!("media URL scheme not allowed: {}", u);
+    }
+    Ok(())
+}
+
+/// D-12 URL-form sender. Builds the JSON payload that Telegram's
+/// `sendPhoto`/`sendVoice`/... methods accept when the file is referenced
+/// by URL rather than uploaded as multipart, calls `api_call`, and
+/// projects the resulting `TgMessage` to `MessageResponse` (mirrors
+/// `impl PlatformAdapter for TelegramAdapter::send_message`).
+async fn send_url_form(
+    adapter: &TelegramAdapter,
+    method: &str,
+    field_name: &str,
+    chat_id: &str,
+    url: &str,
+    thread_id: Option<&str>,
+) -> Result<MessageResponse> {
+    let mut params = serde_json::json!({
+        "chat_id": chat_id,
+        field_name: url,
+    });
+    if let Some(tid) = thread_id {
+        params["message_thread_id"] = serde_json::Value::String(tid.to_string());
+    }
+    let result: TgMessage = adapter.api_call(method, &params).await?;
+    Ok(MessageResponse {
+        message_id: result.message_id.to_string(),
+        chat_id: chat_id.to_string(),
+        platform: Platform::Telegram,
+    })
 }
 
 // =============================================================================

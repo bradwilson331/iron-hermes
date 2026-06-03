@@ -95,9 +95,24 @@ impl StreamConsumer {
             let mut first_chunk = true;
             loop {
                 if remaining.len() <= MAX_MESSAGE_LEN {
-                    // Last (or only) chunk: edit the current placeholder with Markdown
+                    // Last (or only) chunk: edit the current placeholder with
+                    // Telegram MarkdownV2 (Phase 36.17.2.2-04 D-01 rename).
+                    //
+                    // INTERIM CONTRACT (plan 04 task 3): `&remaining` is passed
+                    // through verbatim — `escape_outside_code_blocks` is NOT
+                    // applied here. Plan 05's task 1 wires the proper escape
+                    // call. The D-02 single-retry-as-plain-text fallback
+                    // inside `TelegramAdapter::edit_message_markdown_v2` will
+                    // catch any parse-mode 400s in the interim and silently
+                    // degrade to plain text — so user-visible behavior is
+                    // "loses markdown rendering on bodies containing reserved
+                    // chars until plan 05 ships", not "messages drop".
                     self.adapter
-                        .edit_message_markdown(&self.chat_id, &self.current_message_id, &remaining)
+                        .edit_message_markdown_v2(
+                            &self.chat_id,
+                            &self.current_message_id,
+                            &remaining,
+                        )
                         .await?;
                     break;
                 }
@@ -247,7 +262,7 @@ mod tests {
             message_id: String,
             content: String,
         },
-        EditMessageMarkdown {
+        EditMessageMarkdownV2 {
             chat_id: String,
             message_id: String,
             content: String,
@@ -308,7 +323,7 @@ mod tests {
             Ok(())
         }
 
-        async fn edit_message_markdown(
+        async fn edit_message_markdown_v2(
             &self,
             chat_id: &str,
             message_id: &str,
@@ -317,7 +332,7 @@ mod tests {
             self.calls
                 .lock()
                 .unwrap()
-                .push(AdapterCall::EditMessageMarkdown {
+                .push(AdapterCall::EditMessageMarkdownV2 {
                     chat_id: chat_id.to_string(),
                     message_id: message_id.to_string(),
                     content: content.to_string(),
@@ -365,14 +380,14 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         match &calls[0] {
-            AdapterCall::EditMessageMarkdown { content, .. } => {
+            AdapterCall::EditMessageMarkdownV2 { content, .. } => {
                 assert!(
                     !content.contains('\u{2588}'),
                     "Final edit should not have cursor"
                 );
                 assert_eq!(content, "hello");
             }
-            other => panic!("Expected EditMessageMarkdown, got {:?}", other),
+            other => panic!("Expected EditMessageMarkdownV2, got {:?}", other),
         }
     }
 
@@ -476,10 +491,10 @@ mod tests {
             .iter()
             .filter(|c| matches!(c, AdapterCall::SendMessage { .. }))
             .count();
-        // Final chunk: edit_message_markdown on the last message id
+        // Final chunk: edit_message_markdown_v2 on the last message id
         let edit_md_count = calls
             .iter()
-            .filter(|c| matches!(c, AdapterCall::EditMessageMarkdown { .. }))
+            .filter(|c| matches!(c, AdapterCall::EditMessageMarkdownV2 { .. }))
             .count();
 
         assert!(
@@ -542,7 +557,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_final_edit_uses_edit_message_markdown() {
+    async fn test_final_edit_uses_edit_message_markdown_v2() {
         let (adapter, calls) = MockAdapter::new();
         let mut sc = StreamConsumer::new(adapter, "chat1", "msg-1");
         sc.push("**bold** text");
@@ -551,8 +566,8 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert!(
-            matches!(&calls[0], AdapterCall::EditMessageMarkdown { .. }),
-            "Final edit should use edit_message_markdown, got {:?}",
+            matches!(&calls[0], AdapterCall::EditMessageMarkdownV2 { .. }),
+            "Final edit should use edit_message_markdown_v2, got {:?}",
             calls[0]
         );
     }
