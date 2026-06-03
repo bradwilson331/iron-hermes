@@ -90,7 +90,7 @@ pub use types::{
     KanbanStatus, KanbanWorkerSpec, Subscription, SwarmGraphIds, SwarmGraphSpec, Task,
     TaskComment, TaskLink, TaskRun,
 };
-pub use worker_spawn::{SAFE_SYSTEM_VARS, build_kanban_worker_env, spawn_worker, spawn_worker_for_board};
+pub use worker_spawn::{SAFE_SYSTEM_VARS, build_kanban_worker_env, resolve_worker_bin, spawn_worker, spawn_worker_for_board};
 pub use tools::{register_kanban_tools, KanbanSwarmTool};
 
 /// Canonical KANBAN_GUIDANCE system-prompt block injected into worker
