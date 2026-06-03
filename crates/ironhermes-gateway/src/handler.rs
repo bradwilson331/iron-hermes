@@ -1362,9 +1362,20 @@ impl GatewayMessageHandler {
             ironhermes_agent::streaming_scrubber::StreamingContextScrubber::new(),
         ));
         let scrubber_gw_cb = std::sync::Arc::clone(&scrubber_gw);
+        // Phase 36.17.2.2 D-08 / Open Q5 / Assumption A10: extract `<MEDIA: ...>`
+        // tags from streaming deltas alongside the scrubber. Chain order is
+        // scrubber FIRST, extractor SECOND so MEDIA tags inside scrubbed
+        // `<memory-context>` spans are dropped consistently (the scrubber
+        // discards memory-context content; without the chain the extractor
+        // would attach files referenced from invisible memory body).
+        let extractor_gw = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::media_tag::MediaTagExtractor::new(),
+        ));
+        let extractor_cb = std::sync::Arc::clone(&extractor_gw);
         let stream_tx_clone = stream_tx.clone();
         let stream_callback: StreamCallback = Box::new(move |delta: &str| {
-            let visible = scrubber_gw_cb.lock().unwrap().feed(delta);
+            let scrubbed = scrubber_gw_cb.lock().unwrap().feed(delta);
+            let visible = extractor_cb.lock().unwrap().feed(&scrubbed);
             if !visible.is_empty() {
                 let _ = stream_tx_clone.try_send(visible);
             }
@@ -1454,8 +1465,20 @@ impl GatewayMessageHandler {
             Err(anyhow::anyhow!("AgentRuntime not configured in gateway handler"))
         };
 
-        // Phase 34a MEM-READ-05: flush scrubber tail after stream ends.
-        let tail = scrubber_gw.lock().unwrap().flush();
+        // Phase 34a MEM-READ-05 + Phase 36.17.2.2 D-08: flush scrubber tail
+        // then feed it through the extractor before emitting the extractor's
+        // own tail. This preserves the scrubber→extractor chain order at
+        // end-of-stream so an unterminated `<MEDIA:...` straddling a
+        // memory-context fence boundary degrades consistently with the
+        // streaming path (Open Q5 / Assumption A10).
+        let scrubber_tail = scrubber_gw.lock().unwrap().flush();
+        let extractor_pre = if !scrubber_tail.is_empty() {
+            extractor_gw.lock().unwrap().feed(&scrubber_tail)
+        } else {
+            String::new()
+        };
+        let extractor_tail = extractor_gw.lock().unwrap().flush_tail();
+        let tail = format!("{extractor_pre}{extractor_tail}");
         if !tail.is_empty() {
             let _ = stream_tx.try_send(tail);
         }
