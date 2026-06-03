@@ -58,3 +58,108 @@ pub trait PlatformAdapter: Send + Sync {
     /// Check if the adapter is currently running.
     fn is_running(&self) -> bool;
 }
+
+// Phase 36.17.2.2 D-18: re-export the media-tag types so consumers can write
+// `use ironhermes_gateway::adapter::{MediaSender, MediaRef, MediaSource, MediaKind};`
+// with a single import statement. The canonical definitions still live in
+// `crate::media_tag` (plan 02) — both paths resolve to the same types.
+pub use crate::media_tag::{MediaKind, MediaRef, MediaSource};
+
+/// Outbound media-attachment sender. Sibling of [`PlatformAdapter`] —
+/// declared in this module so the natural import surface for callers is
+/// `use ironhermes_gateway::adapter::{PlatformAdapter, MediaSender, ...};`.
+///
+/// Implementors (today): `TelegramAdapter` (plan 04). Discord, Slack, and
+/// the web adapter intentionally do NOT implement `MediaSender`; on those
+/// platforms `GatewayMessageHandler` holds `Option<Arc<dyn MediaSender>>`
+/// set to `None`, and the plan 06 D-19 dispatch loop logs a `warn!` and
+/// drops any extracted `<MEDIA: ...>` refs (CONTEXT.md D-18).
+///
+/// **D-17 — uniform-no-caption divergence from hermes-agent §Audio Captions.**
+/// NONE of the six methods carry a `caption` parameter. The text body has
+/// already been rendered into the placeholder message via
+/// `edit_message_markdown_v2` (D-01) BEFORE attachments are dispatched
+/// (D-07), so a per-attachment caption would be redundant — and a partial
+/// duplicate of the final-text body. This deviates from hermes-agent's
+/// behaviour, which attaches plain-text captions on `sendVoice`; the
+/// rationale and follow-up are tracked in CONTEXT.md D-17.
+///
+/// **Construction pattern (RESEARCH §`#[async_trait]` Verification Open Q4 /
+/// Assumption A7).** Trait upcasting between `Arc<dyn PlatformAdapter>` and
+/// `Arc<dyn MediaSender>` is unstable on stable Rust at the time this trait
+/// was added. Callers MUST construct the concrete adapter once
+/// (`Arc<TelegramAdapter>`) and then `clone()`-cast separately into each
+/// trait object — never `Arc<dyn PlatformAdapter>` -> `Arc<dyn MediaSender>`
+/// via upcast. Example wiring (runner.rs in plan 06):
+///
+/// ```ignore
+/// let telegram: Arc<TelegramAdapter> = Arc::new(TelegramAdapter::new(token));
+/// let adapter_for_platform: Arc<dyn PlatformAdapter> = telegram.clone();
+/// let adapter_for_media:    Arc<dyn MediaSender>     = telegram.clone();
+/// ```
+#[async_trait]
+pub trait MediaSender: Send + Sync {
+    /// Send a still image (`.png`, `.jpg`, `.jpeg`, `.webp`, `.gif`).
+    /// Path variants are uploaded multipart; URL variants are passed
+    /// through for Telegram's servers to fetch (D-12).
+    async fn send_photo(
+        &self,
+        chat_id: &str,
+        source: &MediaSource,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse>;
+
+    /// Send an inline voice bubble (`.ogg` / `.opus`) — D-14.
+    async fn send_voice(
+        &self,
+        chat_id: &str,
+        source: &MediaSource,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse>;
+
+    /// Send a music-player audio attachment (`.mp3`, `.m4a`, `.flac`,
+    /// `.wav`) — D-14.
+    async fn send_audio(
+        &self,
+        chat_id: &str,
+        source: &MediaSource,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse>;
+
+    /// Send a playable video (`.mp4`, `.mov`, `.webm`).
+    async fn send_video(
+        &self,
+        chat_id: &str,
+        source: &MediaSource,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse>;
+
+    /// Send an arbitrary file as a downloadable document (everything that
+    /// doesn't match the four media kinds above).
+    async fn send_document(
+        &self,
+        chat_id: &str,
+        source: &MediaSource,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse>;
+
+    /// Dispatch on [`MediaKind`] and forward to the corresponding per-type
+    /// method. Default impl provided so concrete adapters need only
+    /// implement the five per-type methods (D-18).
+    async fn send_media(
+        &self,
+        chat_id: &str,
+        media_ref: &MediaRef,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse> {
+        match media_ref.kind {
+            MediaKind::Photo => self.send_photo(chat_id, &media_ref.source, thread_id).await,
+            MediaKind::Voice => self.send_voice(chat_id, &media_ref.source, thread_id).await,
+            MediaKind::Audio => self.send_audio(chat_id, &media_ref.source, thread_id).await,
+            MediaKind::Video => self.send_video(chat_id, &media_ref.source, thread_id).await,
+            MediaKind::Document => {
+                self.send_document(chat_id, &media_ref.source, thread_id).await
+            }
+        }
+    }
+}
