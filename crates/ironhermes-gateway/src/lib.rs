@@ -3,6 +3,7 @@ pub mod backoff;
 pub mod discord; // Phase 34 — D-10
 pub mod handler;
 pub mod markdown_v2; // Phase 36.17.2.2 — D-04 Telegram MarkdownV2 escape
+pub mod media_tag; // Phase 36.17.2.2 — D-05/D-06/D-08/D-09 streaming MediaTagExtractor
 pub mod multimodal;
 // Phase 36.3.7.5 BUG-36.3.7.5-04: pure-function notifier-spawn gate. `pub` is for
 // receiver-end integration tests only (see `tests/notifier_spawn_gating.rs`).
