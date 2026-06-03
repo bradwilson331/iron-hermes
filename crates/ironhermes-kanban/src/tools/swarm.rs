@@ -373,7 +373,8 @@ impl Tool for KanbanSwarmTool {
         };
 
         // 10. open per-board store + create_swarm (D-08)
-        let mut store = KanbanStore::open_for_board(&board_ctx.slug)
+        // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+        let mut store = KanbanStore::open_from_env_or_board(Some(&board_ctx.slug))
             .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
         let ids = match store.create_swarm(spec) {
             Ok(v) => v,

@@ -296,7 +296,8 @@ impl Tool for KanbanCreateTool {
         };
 
         // Open per-board store (D-08: create task in the resolved board's DB).
-        let mut store = KanbanStore::open_for_board(&board_ctx.slug)
+        // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+        let mut store = KanbanStore::open_from_env_or_board(Some(&board_ctx.slug))
             .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
         let task = store.create_task(&title, &assignee, opts)?;
 
