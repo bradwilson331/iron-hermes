@@ -95,9 +95,24 @@ impl StreamConsumer {
             let mut first_chunk = true;
             loop {
                 if remaining.len() <= MAX_MESSAGE_LEN {
-                    // Last (or only) chunk: edit the current placeholder with Markdown
+                    // Last (or only) chunk: edit the current placeholder with
+                    // Telegram MarkdownV2 (Phase 36.17.2.2-04 D-01 rename).
+                    //
+                    // INTERIM CONTRACT (plan 04 task 3): `&remaining` is passed
+                    // through verbatim — `escape_outside_code_blocks` is NOT
+                    // applied here. Plan 05's task 1 wires the proper escape
+                    // call. The D-02 single-retry-as-plain-text fallback
+                    // inside `TelegramAdapter::edit_message_markdown_v2` will
+                    // catch any parse-mode 400s in the interim and silently
+                    // degrade to plain text — so user-visible behavior is
+                    // "loses markdown rendering on bodies containing reserved
+                    // chars until plan 05 ships", not "messages drop".
                     self.adapter
-                        .edit_message_markdown(&self.chat_id, &self.current_message_id, &remaining)
+                        .edit_message_markdown_v2(
+                            &self.chat_id,
+                            &self.current_message_id,
+                            &remaining,
+                        )
                         .await?;
                     break;
                 }
