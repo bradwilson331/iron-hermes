@@ -728,14 +728,24 @@ Plans:
 **Goal:** Extend kanban auto-decompose infrastructure with a per-card goal_mode opt-in that, when set, makes the spawned worker enter an in-session Ralph-style loop. Each turn the worker output is evaluated by an auxiliary judge LLM against the card's title + body (literal acceptance criteria). Loop terminates on judge-agrees, worker self-terminates (kanban_complete/kanban_block), or per-card turn budget exhaustion → synthetic kanban_block(reason="goal_max_turns exhausted; needs human review"). NO new dispatcher pool, NO new event variants (Edited+subkind frozen-surface pattern), NO DEFCON gating (deferred).
 **Requirements**: D-01..D-08 (locked in CONTEXT.md; no pre-assigned REQ-IDs — anchors are D-XX per phase 36.3.7.7 / 36.3.7.8 precedent)
 **Depends on:** Phase 36.3.7.11
-**Plans:** 4/5 plans executed
+**Plans:** 5/5 plans complete
 
 Plans:
 - [x] 36.3.7.12-01-PLAN.md — Schema + types foundation (SCHEMA_VERSION 1→2, goal_mode/goal_max_turns/goal_turns_used columns, Task + CreateTaskOptions fields, KanbanConfig.judge_model, JudgeFn typedef in new judge.rs, kanban_judge reserved-role registration). Wave 1.
 - [x] 36.3.7.12-02-PLAN.md — Producer surface (kanban_create JSON schema fields, worker_spawn HERMES_KANBAN_GOAL_* env injection, CAS-gated bump_goal_turn_counter, GOAL_SUBKIND_* CONSTs, frozen-surface event-variant guard). Wave 2, parallel with 03.
 - [x] 36.3.7.12-03-PLAN.md — CLI surface (--goal/--goal-max-turns clap args, cmd_create signature + show formatter, build_runtime_judge_fn three-tier model cascade). Wave 2, parallel with 02.
 - [x] 36.3.7.12-04-PLAN.md — Goal loop wrapper (new file goal_loop.rs with run_goal_loop_if_enabled, BudgetSentinel RAII drop guard, synthetic kanban_block helper, main.rs worker-mode dispatch wiring, 5 behavioral consumer tests). Wave 3.
-- [ ] 36.3.7.12-05-PLAN.md — Integration tests + docs + UAT (dispatcher passthrough test, reclaim-resets-counter wiring, kanban-worker skill amendment, docs/kanban/reference.md Goal mode section, workspace gate, 4-row manual UAT checkpoint). Wave 4. Has blocking human-verify checkpoint.
+- [x] 36.3.7.12-05-PLAN.md — Integration tests + docs + UAT (dispatcher passthrough test, reclaim-resets-counter wiring, kanban-worker skill amendment, docs/kanban/reference.md Goal mode section, workspace gate, 4-row manual UAT checkpoint). Wave 4. Has blocking human-verify checkpoint.
+
+### Phase 36.3.7.13: Kanban worker cross-profile ergonomics + goal-mode UAT polish (INSERTED)
+
+**Goal:** Close the operational gaps surfaced during Phase 36.3.7.12 goal-mode UAT. (1) Add `KanbanStore::open_from_env()` consuming `HERMES_KANBAN_DB` so dispatcher + worker can run under different profiles without losing the card (F-01 — operator hit silent cross-profile DB mismatch during live UAT). (2) Add `IRONHERMES_WORKER_BIN` env override on `worker_spawn.rs:254` so `cargo run` from a worktree can pin worker subprocesses to the same code base (F-02 — operator's `~/.local/bin/ironhermes` symlink ran May-31 binary silently). (3) Default goal-mode workers to a RESTRICTED toolset (no terminal, no delegate_task, no web) and clamp inner agent-loop `max_iterations` ≤10 when `HERMES_KANBAN_GOAL_MODE=1` (F-03 — eliminated 10-15 min/turn thrashing). (4) Ship six documentation surfaces (F-04, F-05): `docs/configuration/profiles.md` (NEW), `docs/kanban/cli-reference.md` (NEW), `docs/kanban/profile-discipline.md` (NEW), `docs/kanban/goal-mode-uat-prompts.md` (NEW), `skills/kanban-worker/SKILL.md` (UPDATE), `docs/kanban/reference.md` (UPDATE). Schema bump v2→v3 for new `goal_toolset TEXT NULL` column. No new dispatcher pool, no new gateway-side edits, crate-isolation fence holds.
+**Requirements**: D-01..D-08 (to be locked in CONTEXT.md via /gsd-discuss-phase). Seed scope at .planning/phases/36.3.7.13-kanban-worker-cross-profile-ergonomics/36.3.7.13-SCOPE.md.
+**Depends on:** Phase 36.3.7.12
+**Plans:** TBD (run /gsd-plan-phase 36.3.7.13 to break down — preliminary slicing: 4 plans across 4 waves)
+
+Plans:
+- [ ] TBD (run /gsd-discuss-phase 36.3.7.13 then /gsd-plan-phase 36.3.7.13)
 
 ### Phase 36.3.6: Smart home — Home Assistant ha_* suite (INSERTED)
 
