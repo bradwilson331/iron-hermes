@@ -551,6 +551,17 @@ async fn reclaim_stale_claims(ctx: &DispatcherContext, now: f64) -> Result<()> {
             let _ = release_claim(&mut store.conn, &task.id, &claim_lock, "ttl_expired");
         }
 
+        // Phase 36.3.7.12 D-04: when a goal_mode card is reclaimed, reset its
+        // per-card turn counter so the next worker starts at goal_turns_used=0
+        // with a fresh budget. The CAS gate from Plan 02 (bump_goal_turn_counter)
+        // already prevents the OLD run from corrupting state; this reset is the
+        // handoff side of the contract so the NEW run sees a clean budget.
+        // Plan 05 Task 1 wiring (the one-line addition the planner anticipated).
+        if task.goal_mode {
+            let store = ctx.store.lock().await;
+            let _ = store.reset_goal_turn_counter(&task.id);
+        }
+
         // Increment consecutive_failures.
         {
             let store = ctx.store.lock().await;

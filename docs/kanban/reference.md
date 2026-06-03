@@ -449,7 +449,152 @@ And the two auxiliary LLM slots:
 | Key | Purpose |
 |---|---|
 | `auxiliary.kanban_decomposer` | Model that produces the task graph (called by Decompose). Set `provider`/`model` to override the main chat model. |
+| `auxiliary.kanban_judge` | Model that evaluates each goal-mode turn's output against the card's `title + body` (acceptance criteria). Three-tier cascade: `kanban.judge_model` (non-empty) → `auxiliary.kanban_judge` → main provider default. Same shape as `auxiliary.kanban_decomposer`. |
 | `auxiliary.profile_describer` | Model that auto-generates profile descriptions (called by `hermes profile describe --auto`). |
+
+### Goal mode
+
+> **Shipped in Phase 36.3.7.12:** per-card opt-in autonomous worker loop with
+> auxiliary-judge evaluation and budget-exhaustion-as-BLOCKED semantics.
+> Companion to Phase 36.3.7.11's manual-review dashboard — `goal_mode` is the
+> OPT-IN inverse of the manual flow, not its replacement. `auto_decompose`
+> (above) remains unchanged and continues to drive TRIAGE→TODO LLM rewrites
+> independently of the goal loop.
+
+A card created with `goal_mode=true` opts into an in-session worker loop with
+automatic judge LLM evaluation. After the dispatcher claims the card and
+spawns the worker the normal way, the worker shell detects goal mode via env
+vars set by the spawner and wraps its `AgentLoop::run` in a budget-bounded
+loop:
+
+1. Each turn the worker runs one agent iteration in the same session.
+2. The per-card turn counter (`goal_turns_used`) is bumped under a CAS gate
+   so a reclaimed worker cannot mutate state against a stale run.
+3. The auxiliary judge LLM evaluates the worker's output against the card's
+   `title + body` (literal acceptance criteria; body content is load-bearing).
+4. Judge-met → loop exits, worker calls `kanban_complete`.
+5. Judge-not-met → synthetic user message with the judge's reason is appended
+   to the chat and the next turn begins.
+6. Budget exhausted → worker shell emits synthetic
+   `kanban_block(reason="goal_max_turns exhausted; needs human review")` so
+   the card lands in BLOCKED for human review, never silently dropped.
+7. Two consecutive judge errors → synthetic
+   `kanban_block(reason="judge unavailable")`.
+
+#### Schema (v2 migration)
+
+The `tasks` table carries three new columns (added via the v1→v2 migration
+ladder in `KanbanStore::new`):
+
+| Column | Type | Default | Purpose |
+|---|---|---|---|
+| `goal_mode` | INTEGER | `0` (false) | Per-card opt-in to the goal loop. |
+| `goal_max_turns` | INTEGER | `20` | Per-card turn budget. `0` coerces to `20` at the producer (`KanbanStore::create_task`) and again at `build_kanban_worker_env`. |
+| `goal_turns_used` | INTEGER | `0` | Per-card running counter, bumped under CAS gate per turn. Reset to 0 when the card is reclaimed (dispatcher Step 3). |
+
+#### CLI surface
+
+```bash
+# Canonical usage (from the pasted-spec design)
+ironhermes kanban create "Translate the docs site to French" \
+  --body "Acceptance: every page translated, no English left, links intact." \
+  --assignee linguist \
+  --goal \
+  --goal-max-turns 15
+```
+
+The `--goal` flag enables goal mode; `--goal-max-turns N` overrides the
+default budget of 20. `kanban show <id>` prints `goal_mode`,
+`goal_max_turns`, and `goal_turns_used` lines for goal cards (non-goal cards
+see byte-identical pre-Phase-36.3.7.12 output).
+
+#### LLM tool surface
+
+The existing `kanban_create` tool accepts two new optional args:
+
+```json
+{
+  "title": "...",
+  "body": "Acceptance: ...",
+  "assignee": "linguist",
+  "goal_mode": true,
+  "goal_max_turns": 15
+}
+```
+
+Both fields carry defaults (`goal_mode: false`, `goal_max_turns: 20`) and
+are NOT in the `required[]` list. The frozen tool count remains 13 — no new
+verbs were added (per the Phase 36.3.7.6 frozen-surface contract).
+
+#### Worker-shell env contract
+
+When the dispatcher spawns a worker for a goal_mode card, `build_kanban_worker_env`
+appends two env-var pairs downstream of the `SAFE_SYSTEM_VARS` scrub:
+
+| Env var | Value | Meaning |
+|---|---|---|
+| `HERMES_KANBAN_GOAL_MODE` | `"1"` | Tells the worker shell to wrap `AgentLoop::run` in a budget-bounded loop. Absent → byte-identical pre-Phase-36.3.7.12 worker dispatch. |
+| `HERMES_KANBAN_GOAL_MAX_TURNS` | `"<N>"` | Per-card turn budget. Defensive coercion: `0` → `20` at the env-build site. |
+
+#### Judge model config — three-tier cascade
+
+| Key | Purpose |
+|---|---|
+| `kanban.judge_model` | Optional non-empty model id. When set, the judge uses the main provider with this model. Empty → fall through. |
+| `auxiliary.kanban_judge` | Standard auxiliary model slot (`provider`/`model`). Used when `kanban.judge_model` is empty. Empty → fall through. |
+| (main provider default) | Final fallback. Used when neither of the above is set. |
+
+Resolution lives in `build_runtime_judge_fn` (`crates/ironhermes-cli/src/kanban/commands.rs`).
+A missing API key at every tier surfaces an actionable error naming both
+`kanban.judge_model` and `auxiliary.kanban_judge`.
+
+#### Goal-loop events (frozen surface)
+
+All four ride on `KanbanEventKind::Edited` with a JSON `subkind` payload tag
+(mirrors the Phase 36.3.7.6 nd7 quick-task precedent for comment events). No
+new variants land in the enum.
+
+| Subkind tag | Payload shape | When |
+|---|---|---|
+| `judge_verdict` | `{"subkind":"judge_verdict","verdict":"met"\|"not_met","reason":"<short>"}` | After each turn's judge call. |
+| `judge_error` | `{"subkind":"judge_error","error":"<200-char snippet>"}` | When the judge call fails (network, parse, missing field). Two consecutive → kanban_block(reason="judge unavailable"). |
+| `goal_turn_advanced` | `{"subkind":"goal_turn_advanced","turn":<N>}` | After `bump_goal_turn_counter` returns Ok(true). |
+| `goal_budget_exhausted` | `{"subkind":"goal_budget_exhausted","max_turns":<N>}` | Emitted by the worker shell's RAII `BudgetSentinel` on budget exhaustion, immediately before the synthetic `kanban_block`. |
+
+The pinned `pub const &str` tag symbols
+(`GOAL_SUBKIND_JUDGE_VERDICT`, `GOAL_SUBKIND_JUDGE_ERROR`,
+`GOAL_SUBKIND_TURN_ADVANCED`, `GOAL_SUBKIND_BUDGET_EXHAUSTED`) live in
+`crates/ironhermes-kanban/src/events.rs` and are re-exported from
+`lib.rs`. Plan 04's wrapper imports them by symbol — never duplicate the
+string literals.
+
+#### Reclaim contract (in-place handoff)
+
+If a goal_mode worker dies mid-loop (heartbeat timeout, crash, SIGKILL), the
+dispatcher's Step 3 (`reclaim_stale_claims`) resets `goal_turns_used` to 0
+so the next spawn starts with a fresh budget. The card body (acceptance
+criteria) is byte-stable across reclaim, and prior runs' `judge_verdict`
+events are NOT deleted — the new worker can `kanban_show` to read what the
+previous worker tried and why the judge rejected it. The existing
+`failure_limit` circuit breaker still applies: a goal_mode card that keeps
+killing its worker mid-loop will trip the breaker at
+`consecutive_failures = failure_limit` and transition to `blocked` with a
+`gave_up` event, never infinite re-spawn.
+
+#### Budget-exhaustion-as-BLOCKED contract (D-03)
+
+The worker shell guarantees that a card whose budget is exhausted lands in
+BLOCKED, never silently exits with a `protocol_violation` event. The RAII
+`BudgetSentinel` in `crates/ironhermes-cli/src/kanban/goal_loop.rs` emits
+the synthetic `kanban_block` call before the worker process unwinds — so
+even a panic in the goal loop's tail keeps the contract.
+
+#### Scope boundary
+
+DEFCON-tiered budget caps (e.g., DEFCON 5 ceiling 50, DEFCON 1 ceiling 5)
+are deferred to a future DEFCON-tiered phase. The v1 surface ships at all
+DEFCON tiers with no policy-level ceiling beyond the per-card
+`--goal-max-turns N`.
 
 ### Architecture
 

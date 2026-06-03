@@ -189,3 +189,62 @@ Every tool has a CLI equivalent for human operators and scripts:
 - etc.
 
 Use the tools from inside an agent; the CLI exists for the human at the terminal.
+
+## Goal mode
+
+Cards created with `goal_mode=true` (CLI flag `--goal`, LLM-tool arg
+`kanban_create(..., goal_mode=true)`, default `goal_max_turns=20`) opt into an
+in-session worker loop with automatic judge LLM evaluation. The dispatcher
+claims goal-mode cards the normal way and spawns the worker the normal way.
+The worker shell detects goal mode via two env vars set by the spawner:
+
+- `HERMES_KANBAN_GOAL_MODE=1` — flag indicating the worker should wrap
+  `AgentLoop::run` in a budget-bounded loop.
+- `HERMES_KANBAN_GOAL_MAX_TURNS=<N>` — per-card turn budget. Default 20 (a
+  caller passing `0` is coerced to 20 at two layers: producer-side in
+  `KanbanStore::create_task` and again at `build_kanban_worker_env`).
+
+On each turn the worker:
+
+1. Runs one `AgentLoop::run` iteration in the same session.
+2. Bumps the per-card turn counter under a CAS gate — a reclaimed worker
+   cannot bump against a stale run.
+3. Invokes an auxiliary judge LLM that evaluates the worker's output against
+   the card's `title + body` (literal acceptance criteria; the `body` is
+   load-bearing, not advisory).
+4. On judge-met → loop exits cleanly; the worker LLM is expected to call
+   `kanban_complete` next.
+5. On judge-not-met → a synthetic user message carrying the judge's reason
+   is appended to the chat and the next turn begins.
+6. On budget exhaustion → the worker shell emits a synthetic
+   `kanban_block(reason="goal_max_turns exhausted; needs human review")` so
+   the card lands in BLOCKED for human review, never silently dropped.
+
+Two consecutive judge errors → synthetic
+`kanban_block(reason="judge unavailable")`. The 2-strike block is independent
+of the budget path.
+
+Goal-loop events ride on `KanbanEventKind::Edited` with JSON `subkind` tags:
+`judge_verdict`, `judge_error`, `goal_turn_advanced`, `goal_budget_exhausted`.
+No new event variants are introduced (frozen surface preserved per Phase
+36.3.7.6).
+
+### Reclaim contract (in-place handoff)
+
+If your worker dies mid-loop (heartbeat timeout, crash, SIGKILL), the
+dispatcher's reclaim path resets `goal_turns_used` to 0 so the next spawn
+starts with a fresh budget. The card body (acceptance criteria) is
+byte-stable across reclaim, and prior runs' `judge_verdict` events are NOT
+deleted — you can `kanban_show` to read what the previous worker tried and
+why the judge rejected it. The existing `failure_limit` circuit breaker
+still applies: a goal_mode card that keeps killing its worker mid-loop will
+trip the breaker at `consecutive_failures = failure_limit` and transition
+to `blocked` with a `gave_up` event, never infinite re-spawn.
+
+### Budget-exhaustion-as-BLOCKED contract
+
+The worker shell guarantees that a card whose budget is exhausted lands in
+BLOCKED, never silently exits with a `protocol_violation` event. The
+RAII `BudgetSentinel` in the worker process emits the synthetic
+`kanban_block` call before the worker process unwinds — so even a panic
+in the goal loop's tail keeps the contract.
