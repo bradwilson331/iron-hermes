@@ -68,7 +68,23 @@ pub const SAFE_SYSTEM_VARS: &[&str] = &[
     "TERM",
     "RUST_LOG",
     "IRONHERMES_HOME",
+    "IRONHERMES_WORKER_BIN",  // Phase 36.3.7.13 D-02: forward-compat for recursive worker spawn
 ];
+
+/// Phase 36.3.7.13 D-02: resolve the ironhermes worker binary.
+///
+/// Reads `IRONHERMES_WORKER_BIN` first (lets `cargo run` in a worktree pin
+/// workers to the same binary without the `~/.local/bin/ironhermes` symlink
+/// dance from Phase 36.3.7.12 UAT). Falls back to `"ironhermes"` (PATH
+/// lookup — pre-36.3.7.13 behavior preserved bit-for-bit).
+///
+/// Callers: [`spawn_worker`] at the `Command::new` site (line 254 area).
+/// The env var also rides the `SAFE_SYSTEM_VARS` allowlist above so that
+/// recursive worker spawn (dispatcher → worker → sub-worker) carries the
+/// override forward without additional wiring.
+pub fn resolve_worker_bin() -> String {
+    std::env::var("IRONHERMES_WORKER_BIN").unwrap_or_else(|_| "ironhermes".to_string())
+}
 
 // ---------------------------------------------------------------------------
 // build_kanban_worker_env
@@ -251,7 +267,9 @@ pub async fn spawn_worker_for_board(task: &Task, run: &TaskRun, workspace: &str,
     //
     // CRITICAL: .env_clear() BEFORE .envs(...) ensures no inherited shell
     // secrets reach the worker process (D-18 / INV-36.3.7-05).
-    let child = Command::new("ironhermes")
+    // Phase 36.3.7.13 D-02: use resolve_worker_bin() so IRONHERMES_WORKER_BIN
+    // can pin the subprocess to a specific binary (worktree cargo-run scenario).
+    let child = Command::new(resolve_worker_bin())
         .arg("--profile")
         .arg(&task.assignee)
         .arg("chat")
