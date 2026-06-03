@@ -28,7 +28,15 @@ impl TgSendApi for TelegramAdapter {
         path: &Path,
         thread_id: Option<&str>,
     ) -> anyhow::Result<()> {
-        self.send_file_multipart("sendVoice", "voice", chat_id, path, thread_id).await
+        // Phase 36.17.2.2-04: `send_file_multipart` now returns
+        // `Result<MessageResponse>` per Pitfall 4 / D-18. `TgSendApi`
+        // contract is preserved by discarding the projected response
+        // with `.map(|_| ())` — `ironhermes-cron` callers continue to
+        // see `Result<()>` (RESEARCH FLAGGED RISK A8: zero external
+        // callers of the gateway-side helper).
+        self.send_file_multipart("sendVoice", "voice", chat_id, path, thread_id)
+            .await
+            .map(|_| ())
     }
 
     async fn send_image_file(
@@ -37,7 +45,11 @@ impl TgSendApi for TelegramAdapter {
         path: &Path,
         thread_id: Option<&str>,
     ) -> anyhow::Result<()> {
-        self.send_file_multipart("sendPhoto", "photo", chat_id, path, thread_id).await
+        // Phase 36.17.2.2-04: discard the new `MessageResponse` projection to
+        // preserve the `TgSendApi::Result<()>` contract (Pitfall 4 option ii).
+        self.send_file_multipart("sendPhoto", "photo", chat_id, path, thread_id)
+            .await
+            .map(|_| ())
     }
 
     async fn send_video(
@@ -46,7 +58,10 @@ impl TgSendApi for TelegramAdapter {
         path: &Path,
         thread_id: Option<&str>,
     ) -> anyhow::Result<()> {
-        self.send_file_multipart("sendVideo", "video", chat_id, path, thread_id).await
+        // Phase 36.17.2.2-04: discard MessageResponse — preserve TgSendApi contract.
+        self.send_file_multipart("sendVideo", "video", chat_id, path, thread_id)
+            .await
+            .map(|_| ())
     }
 
     async fn send_document(
@@ -55,7 +70,10 @@ impl TgSendApi for TelegramAdapter {
         path: &Path,
         thread_id: Option<&str>,
     ) -> anyhow::Result<()> {
-        self.send_file_multipart("sendDocument", "document", chat_id, path, thread_id).await
+        // Phase 36.17.2.2-04: discard MessageResponse — preserve TgSendApi contract.
+        self.send_file_multipart("sendDocument", "document", chat_id, path, thread_id)
+            .await
+            .map(|_| ())
     }
 }
 
@@ -154,6 +172,15 @@ impl TelegramAdapter {
     ///
     /// `method`     — Telegram Bot API method name (e.g. "sendPhoto")
     /// `field_name` — multipart field name for the file (e.g. "photo")
+    ///
+    /// Phase 36.17.2.2-04 (Pitfall 4 / D-18): return type was widened from
+    /// `Result<()>` to `Result<MessageResponse>` so `MediaSender::send_*`
+    /// implementations can project a real `MessageResponse` (mirrors the
+    /// `TgMessage` → `MessageResponse` projection used by `send_message` at
+    /// the bottom of `impl PlatformAdapter for TelegramAdapter`). The four
+    /// existing `TgSendApi` callers (`send_voice`, `send_image_file`,
+    /// `send_video`, `send_document`) discard the new value via
+    /// `.map(|_| ())` to preserve their `Result<()>` contract.
     async fn send_file_multipart(
         &self,
         method: &str,
@@ -161,7 +188,7 @@ impl TelegramAdapter {
         chat_id: &str,
         path: &Path,
         thread_id: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<MessageResponse> {
         let file_bytes = tokio::fs::read(path)
             .await
             .with_context(|| format!("Failed to read media file: {}", path.display()))?;
@@ -191,7 +218,7 @@ impl TelegramAdapter {
             .with_context(|| format!("Telegram {} request failed", method))?;
 
         let status = response.status();
-        let body: TelegramResponse<serde_json::Value> = response
+        let body: TelegramResponse<TgMessage> = response
             .json()
             .await
             .with_context(|| format!("Failed to parse Telegram {} response", method))?;
@@ -205,7 +232,35 @@ impl TelegramAdapter {
             );
         }
 
-        Ok(())
+        let result = body
+            .result
+            .with_context(|| format!("Telegram {} returned no result", method))?;
+        Ok(MessageResponse {
+            message_id: result.message_id.to_string(),
+            chat_id: chat_id.to_string(),
+            platform: Platform::Telegram,
+        })
+    }
+
+    /// Phase 36.17.2.2-04 D-13: send a music-player audio attachment
+    /// (`.mp3`, `.m4a`, `.flac`, `.wav`) via Telegram Bot API `sendAudio`.
+    ///
+    /// Sibling of the existing `TgSendApi::send_voice` / `send_image_file`
+    /// / `send_video` / `send_document` helpers — mechanically symmetric,
+    /// mirrors the `send_file_multipart` call shape per RESEARCH §Telegram
+    /// Bot API Confirmations Assumption A2 (pattern symmetry).
+    ///
+    /// Added as an inherent method (NOT on `TgSendApi`) because the cron
+    /// crate has no audio caller today; adding it to the cross-crate trait
+    /// would expand the public surface area for a single in-crate
+    /// consumer (`impl MediaSender for TelegramAdapter`, task 4 below).
+    pub async fn send_audio(
+        &self,
+        chat_id: &str,
+        path: &Path,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse> {
+        self.send_file_multipart("sendAudio", "audio", chat_id, path, thread_id).await
     }
 }
 
