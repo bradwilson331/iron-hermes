@@ -70,6 +70,14 @@ pub enum KanbanCommands {
         /// Put task in triage status instead of ready
         #[arg(long)]
         triage: bool,
+        /// Phase 36.3.7.12 D-01: enable goal mode — worker enters in-session
+        /// loop with an auxiliary judge LLM evaluating against title + body.
+        #[arg(long)]
+        goal: bool,
+        /// Phase 36.3.7.12 D-03: per-card turn budget when --goal is set.
+        /// Budget exhaustion → kanban_block. Default 20 per the canonical spec.
+        #[arg(long, default_value_t = 20)]
+        goal_max_turns: u32,
         /// Idempotency key — short-circuits to existing task if key already exists
         #[arg(long)]
         idempotency_key: Option<String>,
@@ -583,6 +591,8 @@ pub async fn handle_kanban_command(cmd: KanbanCommands, board: Option<String>) -
             skills,
             priority,
             triage,
+            goal,
+            goal_max_turns,
             idempotency_key,
             max_runtime,
             max_retries,
@@ -592,8 +602,9 @@ pub async fn handle_kanban_command(cmd: KanbanCommands, board: Option<String>) -
         } => {
             commands::cmd_create(
                 title, assignee, body, parents, tenant, workspace, skills,
-                priority, triage, idempotency_key, max_runtime, max_retries,
-                scheduled_at, branch, json, board.as_deref(),
+                priority, triage, goal, goal_max_turns, idempotency_key,
+                max_runtime, max_retries, scheduled_at, branch, json,
+                board.as_deref(),
             )
             .await
         }

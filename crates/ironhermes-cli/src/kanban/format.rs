@@ -163,6 +163,14 @@ pub fn format_task_detail(
     if task.consecutive_failures > 0 {
         out.push_str(&format!("FAILURES: {}\n", task.consecutive_failures));
     }
+    // Phase 36.3.7.12 Plan 03 D-01: goal-mode visibility in `kanban show`.
+    // Print the three goal_* lines only when the card opted into goal mode
+    // OR is already partway through a goal run — keep non-goal cards quiet.
+    if task.goal_mode || task.goal_turns_used > 0 {
+        out.push_str(&format!("goal_mode: {}\n", task.goal_mode));
+        out.push_str(&format!("goal_max_turns: {}\n", task.goal_max_turns));
+        out.push_str(&format!("goal_turns_used: {}\n", task.goal_turns_used));
+    }
     if let Some(ref body) = task.body {
         out.push_str("\n--- BODY ---\n");
         out.push_str(body);

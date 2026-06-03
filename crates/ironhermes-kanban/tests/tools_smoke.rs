@@ -2232,6 +2232,74 @@ async fn mention_unique_collision_rolls_back_first_child() {
     );
 }
 
+// ─── Phase 36.3.7.12 Plan 02 Task 1: kanban_create goal_mode arg + schema ────
+
+/// D-01 / D-03: `kanban_create` accepts `goal_mode=true` + `goal_max_turns=5`
+/// JSON args, threads them through `CreateTaskOptions`, and the resulting row
+/// shows the matching column values.
+#[tokio::test]
+async fn create_goal_mode_sets_columns() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = make_store();
+    let tool = KanbanCreateTool::new(store.clone(), true);
+
+    let result = tool
+        .execute(json!({
+            "title": "Translate docs",
+            "assignee": "alice",
+            "body": "Acceptance: every page translated, no English left.",
+            "goal_mode": true,
+            "goal_max_turns": 5,
+        }))
+        .await
+        .unwrap();
+
+    let v: Value = serde_json::from_str(&result).unwrap();
+    let task_id = v["task_id"].as_str().expect("task_id present").to_string();
+
+    let s = store.lock().await;
+    let task = s.get_task(&task_id).expect("get_task");
+    assert!(task.goal_mode, "goal_mode must be true on the row");
+    assert_eq!(
+        task.goal_max_turns, 5,
+        "goal_max_turns must equal the value passed (5)"
+    );
+    assert_eq!(
+        task.goal_turns_used, 0,
+        "goal_turns_used must start at 0 on a fresh card"
+    );
+}
+
+/// D-01: `kanban_create` JSON schema advertises `goal_mode` (default false)
+/// and `goal_max_turns` (default 20) under `properties`.
+#[test]
+fn schema_contains_goal_properties() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let store = {
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("IRONHERMES_HOME", dir.path()) };
+        std::mem::forget(dir);
+        Arc::new(TokioMutex::new(KanbanStore::open_default().unwrap()))
+    };
+    let tool = KanbanCreateTool::new(store, true);
+
+    let schema_str = serde_json::to_string(&tool.schema()).unwrap();
+    assert!(
+        schema_str.contains("\"goal_mode\""),
+        "schema missing goal_mode property: {schema_str}"
+    );
+    assert!(
+        schema_str.contains("\"goal_max_turns\""),
+        "schema missing goal_max_turns property: {schema_str}"
+    );
+    // Default value 20 for goal_max_turns must be advertised so the LLM
+    // caller knows the budget when it omits the arg.
+    assert!(
+        schema_str.contains("\"default\":20"),
+        "schema missing default:20 for goal_max_turns: {schema_str}"
+    );
+}
+
 // ─── Test 17 (bonus): kanban_mention registered as 11th tool (REQ-06) ────────
 
 #[tokio::test]

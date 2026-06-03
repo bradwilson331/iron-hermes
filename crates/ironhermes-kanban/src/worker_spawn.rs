@@ -144,6 +144,32 @@ pub fn build_kanban_worker_env(task: &Task, run: &TaskRun, workspace: &str, boar
         }
     }
 
+    // Phase 36.3.7.12 (D-03 / D-06): goal-mode env pair.
+    //
+    // Emitted ONLY when the task opts into goal mode. When goal_mode=false
+    // (every existing card) this block is a no-op and the 8-var env contract
+    // (INV-36.3.7-07) is preserved bit-for-bit.
+    //
+    // The two new vars ride the per-task env list path downstream of
+    // env_clear() + SAFE_SYSTEM_VARS allowlist (T-36.3.7.12-02-I01: they
+    // carry only a feature flag and an integer budget — zero secret
+    // material — so no new exfil vector exists).
+    //
+    // Defensive 0 → 20 coercion: a struct-literal caller that forgets to
+    // set goal_max_turns lands `0`. We re-apply D-03's "20" default here so
+    // the worker harness never sees a 0-budget signal that could mask as
+    // "no budget enforcement." This mirrors the producer-level coercion
+    // already in KanbanStore::create_task (Plan 01).
+    if task.goal_mode {
+        env.push(("HERMES_KANBAN_GOAL_MODE".into(), "1".into()));
+        let budget = if task.goal_max_turns == 0 {
+            20
+        } else {
+            task.goal_max_turns
+        };
+        env.push(("HERMES_KANBAN_GOAL_MAX_TURNS".into(), budget.to_string()));
+    }
+
     env
 }
 
@@ -422,6 +448,101 @@ mod tests {
             .find(|(k, _)| k == "HERMES_KANBAN_BOARD")
             .map(|(_, v)| v.as_str());
         assert_eq!(board, Some("default"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 36.3.7.12 Plan 02 Task 2 — goal-mode env append
+    // -----------------------------------------------------------------------
+
+    /// D-06 / INV-36.3.7-07: when `task.goal_mode == false` the existing
+    /// 8-var env contract is preserved — NO `HERMES_KANBAN_GOAL_*` keys
+    /// appear in the returned env list.
+    #[test]
+    fn goal_mode_off_env_unchanged() {
+        let task = fake_task("t_goal_off", "alice");
+        // fake_task defaults: goal_mode: false, goal_max_turns: 20.
+        let run = fake_run("r_goal_off", "t_goal_off", "host:1:goal_off");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_goal_off", "default");
+
+        let goal_keys: Vec<&str> = env
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .filter(|k| k.starts_with("HERMES_KANBAN_GOAL_"))
+            .collect();
+
+        assert!(
+            goal_keys.is_empty(),
+            "goal_mode=false must NOT emit any HERMES_KANBAN_GOAL_* keys; got {goal_keys:?}"
+        );
+    }
+
+    /// D-03 / D-06: `task.goal_mode == true` with a non-default budget
+    /// emits exactly two new env entries: `HERMES_KANBAN_GOAL_MODE=1` and
+    /// `HERMES_KANBAN_GOAL_MAX_TURNS=<budget>`.
+    #[test]
+    fn goal_mode_on_env_has_budget() {
+        let mut task = fake_task("t_goal_on", "bob");
+        task.goal_mode = true;
+        task.goal_max_turns = 7;
+        let run = fake_run("r_goal_on", "t_goal_on", "host:2:goal_on");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_goal_on", "default");
+
+        let mode = env
+            .iter()
+            .find(|(k, _)| k == "HERMES_KANBAN_GOAL_MODE")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            mode,
+            Some("1"),
+            "HERMES_KANBAN_GOAL_MODE must equal \"1\" when goal_mode=true"
+        );
+
+        let budget = env
+            .iter()
+            .find(|(k, _)| k == "HERMES_KANBAN_GOAL_MAX_TURNS")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            budget,
+            Some("7"),
+            "HERMES_KANBAN_GOAL_MAX_TURNS must equal goal_max_turns.to_string()"
+        );
+
+        // Exactly one of each — guards against accidental double-push.
+        let mode_count = env
+            .iter()
+            .filter(|(k, _)| k == "HERMES_KANBAN_GOAL_MODE")
+            .count();
+        let budget_count = env
+            .iter()
+            .filter(|(k, _)| k == "HERMES_KANBAN_GOAL_MAX_TURNS")
+            .count();
+        assert_eq!(mode_count, 1, "HERMES_KANBAN_GOAL_MODE must appear exactly once");
+        assert_eq!(
+            budget_count, 1,
+            "HERMES_KANBAN_GOAL_MAX_TURNS must appear exactly once"
+        );
+    }
+
+    /// D-03 defensive coercion: `goal_mode == true` paired with a 0 budget
+    /// (struct-literal default) must NOT emit "0" — the env value falls
+    /// back to "20" (the D-03 documented default).
+    #[test]
+    fn goal_mode_on_with_zero_budget_falls_back_to_twenty() {
+        let mut task = fake_task("t_goal_zero", "carol");
+        task.goal_mode = true;
+        task.goal_max_turns = 0; // defensive: caller forgot the budget
+        let run = fake_run("r_goal_zero", "t_goal_zero", "host:3:goal_zero");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_goal_zero", "default");
+
+        let budget = env
+            .iter()
+            .find(|(k, _)| k == "HERMES_KANBAN_GOAL_MAX_TURNS")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            budget,
+            Some("20"),
+            "0 budget must defensively coerce to \"20\" in the emitted env"
+        );
     }
 
     /// HERMES_KANBAN_BOARD and HERMES_KANBAN_DB must reflect the named slug
