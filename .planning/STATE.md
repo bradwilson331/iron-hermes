@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: paused
+status: executing
 stopped_at: Phase 36.17.2.2 context gathered
-last_updated: "2026-06-03T19:13:46.728Z"
-last_activity: 2026-06-03 -- Plans 01/02/03 merged to develop (Schema-v3 migration shipped); plan 04 deferred
+last_updated: "2026-06-03T21:32:42.120Z"
+last_activity: 2026-06-03 -- Phase 36.17.2.2 execution started
 progress:
   total_phases: 58
   completed_phases: 23
-  total_plans: 119
+  total_plans: 126
   completed_plans: 115
   percent: 40
 ---
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.3.7.13 — kanban-worker-cross-profile-ergonomics
+**Current focus:** Phase 36.17.2.2 — ironhermes-telegram-client-delivers-streaming-final-media-me
 
 ## Current Position
 
-Phase: 36.3.7.13 (kanban-worker-cross-profile-ergonomics) — PAUSED (3/4 plans done; plan 04 deferred)
-Plan: 4 of 3 (next — docs + LIVE UAT, autonomous:false, deferred per user)
-Status: Phase 36.3.7.13 paused after Wave 2 — F-01/F-02/F-03 closed; D-D1 docs + D-C1 UAT deferred to a follow-up run
-Last activity: 2026-06-03 -- Plans 01/02/03 merged to develop (Schema-v3 migration shipped); plan 04 deferred
+Phase: 36.17.2.2 (ironhermes-telegram-client-delivers-streaming-final-media-me) — EXECUTING
+Plan: 1 of 7
+Status: Executing Phase 36.17.2.2
+Last activity: 2026-06-03 -- Phase 36.17.2.2 execution started
 
 ## Recent close-out summary (2026-05-30 — Phase 36.3.7.6 closed PASS)
 
