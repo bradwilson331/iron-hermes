@@ -1303,6 +1303,16 @@ impl GatewayMessageHandler {
         let (stream_tx, mut stream_rx) = mpsc::channel::<String>(256);
         let (tool_tx, mut tool_rx) = mpsc::channel::<String>(64);
 
+        // Phase 36.17.2.2 D-10: oneshot channel for the consumer task to hand
+        // the post-final-flush body to the parent task. The D-19 dispatch loop
+        // needs this string to construct the reinsert body when an attachment
+        // fails (`format!("{final_body}\n\n{failed_tags}")`). Sending happens
+        // exactly once, just before the consumer task breaks. The parent task
+        // awaits the receiver after `consumer_handle.await.ok()` so the value
+        // is guaranteed-present whenever the consumer ran to completion.
+        let (body_tx, body_rx) = tokio::sync::oneshot::channel::<String>();
+        let mut body_tx = Some(body_tx);
+
         // 6. Spawn StreamConsumer task
         let mut consumer = StreamConsumer::new(adapter.clone(), &event.chat_id, &placeholder_id);
         let consumer_handle = tokio::spawn(async move {
@@ -1333,6 +1343,12 @@ impl GatewayMessageHandler {
                                 None => {
                                     // stream_rx closed — do final flush
                                     let _ = consumer.flush(true).await;
+                                    // Phase 36.17.2.2 D-10: hand the final body
+                                    // back to the parent task for the D-19
+                                    // reinsert-on-failure path.
+                                    if let Some(tx) = body_tx.take() {
+                                        let _ = tx.send(consumer.final_body().to_string());
+                                    }
                                     break;
                                 }
                             }
@@ -1348,6 +1364,11 @@ impl GatewayMessageHandler {
                         }
                         None => {
                             let _ = consumer.flush(true).await;
+                            // Phase 36.17.2.2 D-10: hand the final body back
+                            // to the parent task (alt break branch).
+                            if let Some(tx) = body_tx.take() {
+                                let _ = tx.send(consumer.final_body().to_string());
+                            }
                             break;
                         }
                     }
@@ -1492,6 +1513,79 @@ impl GatewayMessageHandler {
         // 10. Cancel typing indicator
         cancel.cancel();
         typing_handle.await.ok();
+
+        // Phase 36.17.2.2 D-19: dispatch extracted `<MEDIA: ...>` attachments.
+        //
+        // ANCHOR (per RESEARCH FLAGGED RISK / Pitfall 6 / Assumption A9): this
+        // block lives AFTER `consumer_handle.await.ok()` AND `typing_handle.await.ok()`,
+        // BEFORE `match agent_result`. CONTEXT.md D-19 cited an anchor
+        // (`after stream_consumer.flush(true).await?`) that does NOT exist
+        // inline — `flush(true)` lives inside the consumer task spawned at
+        // handler.rs:~1313 area. The CORRECT synchronization point is the
+        // `consumer_handle.await.ok()` barrier; placing the dispatch here
+        // guarantees: (a) the final markdown edit has rendered before
+        // attachments arrive, (b) the typing indicator has cleared, and
+        // (c) attachments dispatch regardless of `agent_result` branch (the
+        // user's text + media are independent of whether the turn completed
+        // cleanly — attachments extracted before an agent error should
+        // still be sent).
+        let media_refs = extractor_gw.lock().unwrap().take_attachments();
+        if !media_refs.is_empty() {
+            if let Some(media_sender) = self.media_sender.as_ref() {
+                let mut failed_tags: Vec<String> = Vec::new();
+                for media_ref in media_refs {
+                    match media_sender.send_media(&event.chat_id, &media_ref, None).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                chat_id = %event.chat_id,
+                                kind = ?media_ref.kind,
+                                error = %e,
+                                "attachment failed, reinserting tag literal (D-10)"
+                            );
+                            failed_tags.push(media_ref.original_tag_text.clone());
+                        }
+                    }
+                }
+                if !failed_tags.is_empty() {
+                    // D-10: ONE combined re-edit of the placeholder appending
+                    // each failed tag literal on its own line (not one edit
+                    // per failure). The final body from `StreamConsumer::flush(true)`
+                    // arrived via the `body_rx` oneshot above; concat the
+                    // appended failed-tag literals, run through
+                    // `escape_outside_code_blocks` so the entire reinsert body
+                    // satisfies MarkdownV2 (the appended literals contain
+                    // paths with `.` / `/` / etc. — reserved chars that the
+                    // escape preserves correctly inside link grammar and
+                    // escapes outside).
+                    let final_body = body_rx.await.unwrap_or_default();
+                    let appended = failed_tags.join("\n");
+                    let reinsert_body = if final_body.is_empty() {
+                        appended
+                    } else {
+                        format!("{final_body}\n\n{appended}")
+                    };
+                    let escaped = crate::markdown_v2::escape_outside_code_blocks(&reinsert_body);
+                    if let Err(e) = adapter
+                        .edit_message_markdown_v2(&event.chat_id, &placeholder_id, &escaped)
+                        .await
+                    {
+                        tracing::error!(
+                            chat_id = %event.chat_id,
+                            message_id = %placeholder_id,
+                            error = %e,
+                            "D-10 reinsert edit failed; placeholder retains its post-flush body without tag literals"
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    chat_id = %event.chat_id,
+                    ref_count = media_refs.len(),
+                    "media tags emitted on platform without MediaSender — dropping refs (D-18)"
+                );
+            }
+        }
 
         match agent_result {
             Ok(result) => {

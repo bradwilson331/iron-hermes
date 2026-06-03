@@ -56,6 +56,19 @@ impl StreamConsumer {
         self.dirty = true;
     }
 
+    /// Phase 36.17.2.2 D-10: expose the post-flush final body as a borrowed
+    /// slice. Used by the D-19 dispatch loop in
+    /// `GatewayMessageHandler::run_agent` to construct the reinsert body
+    /// (`format!("{final_body}\n\n{failed_tags}")`) when one or more
+    /// attachments fail or trip the D-15 size pre-check. The body is the
+    /// canonical text that was edited into the placeholder by `flush(true)`
+    /// at the call site above — accessible AFTER the final flush has run.
+    /// Owned by the consumer task and handed to the parent task via a
+    /// `tokio::sync::oneshot::channel<String>` (see handler.rs:1308 area).
+    pub fn final_body(&self) -> &str {
+        &self.buffer
+    }
+
     /// Set a tool status line shown during tool execution (D-02).
     /// Format: "\n\n⚙️ Running: {tool_name}..."
     pub fn tool_status(&mut self, tool_name: &str) {
