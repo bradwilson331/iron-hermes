@@ -1729,3 +1729,602 @@ async fn auto_decompose_step_respects_per_tick_cap() {
         "exactly 2 tasks must be promoted to todo (cap=2)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 36.3.7.12 — Plan 05 goal-mode integration tests
+// ---------------------------------------------------------------------------
+//
+// D-06 dispatcher passthrough: the dispatcher tick MUST be byte-equivalent
+// regardless of `task.goal_mode`. Only the spawn-env content differs (covered
+// separately in worker_spawn.rs Plan 02 tests).
+//
+// D-04 reclaim-resets-counter: when a goal_mode card is reclaimed via
+// `reclaim_stale_claims`, `goal_turns_used` MUST be reset to 0 so the next
+// run starts with a fresh budget. The CAS gate from Plan 02
+// (`bump_goal_turn_counter`) prevents the OLD run from corrupting state; the
+// reset is the handoff side of the contract.
+//
+// Handoff coverage: locks two contracts the user pasted-spec design demands —
+// prior-run judge_verdict events survive in-place reclaim (so the new worker
+// can read what was tried), and the card body (acceptance criteria) is
+// byte-stable across reclaim (so the new judge evaluates against the same
+// rubric).
+//
+// Consecutive-failures cap: locks that goal_mode does NOT bypass the existing
+// `failure_limit` circuit breaker. Without `reset_goal_turn_counter` each
+// respawn would have a fresh budget; the cap is the only thing preventing
+// infinite re-spawn of a goal_mode card that keeps killing its worker
+// mid-loop. Mirrors `circuit_breaker_trips_on_reclaim_path` shape.
+
+/// D-06: drive `run_dispatch_tick_for_board` against a board with two ready
+/// cards — card A (goal_mode=false) and card B (goal_mode=true). The dispatcher
+/// MUST claim both via the same code path: both end up in `running`, both have
+/// `claimed` + `spawned` events, the mock spawn_fn is invoked exactly twice
+/// (once per card), and the per-task event sequence is identical except for
+/// task ids. The dispatcher does NOT inspect `goal_mode` to decide what to do.
+#[tokio::test]
+async fn goal_mode_no_dispatcher_change() {
+    let dir = TempDir::new().unwrap();
+    let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
+
+    // Create card A (goal_mode=false) and card B (goal_mode=true), same
+    // priority + same assignee so ordering is purely by created_at ASC.
+    let (task_a_id, task_b_id) = {
+        let mut store = store_arc.lock().await;
+        let a = store
+            .create_task("card A (no goal)", "alice", CreateTaskOptions::default())
+            .unwrap();
+        let b = store
+            .create_task(
+                "card B (goal mode)",
+                "alice",
+                CreateTaskOptions {
+                    goal_mode: true,
+                    goal_max_turns: 7,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        (a.id, b.id)
+    };
+
+    // Mock spawn_fn that records each Task it was called with, so we can
+    // assert both cards were dispatched.
+    let invocations: Arc<std::sync::Mutex<Vec<(String, bool)>>> =
+        Arc::new(std::sync::Mutex::new(Vec::new()));
+    let invocations_inner = Arc::clone(&invocations);
+    let spawn_fn = Arc::new(
+        move |task: ironhermes_kanban::types::Task,
+              _run: ironhermes_kanban::types::TaskRun,
+              _ws: String,
+              _board_slug: String|
+              -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>>
+                    + Send,
+            >,
+        > {
+            let invocations_for_call = Arc::clone(&invocations_inner);
+            Box::pin(async move {
+                invocations_for_call
+                    .lock()
+                    .unwrap()
+                    .push((task.id.clone(), task.goal_mode));
+                Ok(42u32)
+            })
+        },
+    );
+    let ctx = Arc::new(ironhermes_kanban::dispatcher::DispatcherContext::with_spawn_fn(
+        store_arc.clone(),
+        KanbanConfig::default(),
+        spawn_fn,
+    ));
+
+    run_dispatch_tick(&ctx).await.expect("tick failed");
+
+    // Assert exactly two spawn invocations, one per card, capturing the
+    // goal_mode flag the dispatcher passed in.
+    let calls = invocations.lock().unwrap().clone();
+    assert_eq!(
+        calls.len(),
+        2,
+        "dispatcher must call spawn_fn once per ready card (regardless of goal_mode)"
+    );
+    let ids_seen: Vec<String> = calls.iter().map(|(id, _)| id.clone()).collect();
+    assert!(
+        ids_seen.contains(&task_a_id),
+        "spawn_fn must have been invoked for card A"
+    );
+    assert!(
+        ids_seen.contains(&task_b_id),
+        "spawn_fn must have been invoked for card B"
+    );
+    // Card A goes through with goal_mode=false; card B with goal_mode=true.
+    let a_call = calls.iter().find(|(id, _)| id == &task_a_id).unwrap();
+    let b_call = calls.iter().find(|(id, _)| id == &task_b_id).unwrap();
+    assert!(
+        !a_call.1,
+        "card A must reach spawn_fn with goal_mode=false"
+    );
+    assert!(
+        b_call.1,
+        "card B must reach spawn_fn with goal_mode=true (dispatcher does NOT strip the flag)"
+    );
+
+    // Both cards must be in `running` after the tick.
+    let store = store_arc.lock().await;
+    let a = store.get_task(&task_a_id).unwrap();
+    let b = store.get_task(&task_b_id).unwrap();
+    assert_eq!(a.status, "running", "card A must be running");
+    assert_eq!(b.status, "running", "card B must be running");
+
+    // Both cards must have the same event-kind sequence (modulo task id):
+    // a `claimed` and a `spawned` event for each. NO goal-specific events at
+    // the dispatcher layer — goal-loop events only emit later, from the
+    // worker process (Plan 04 wrapper).
+    let a_events = store.get_events(&task_a_id).unwrap();
+    let b_events = store.get_events(&task_b_id).unwrap();
+    let a_kinds: Vec<String> = a_events.iter().map(|e| e.kind.clone()).collect();
+    let b_kinds: Vec<String> = b_events.iter().map(|e| e.kind.clone()).collect();
+    assert!(
+        a_kinds.iter().any(|k| k == "spawned"),
+        "card A must have a spawned event"
+    );
+    assert!(
+        b_kinds.iter().any(|k| k == "spawned"),
+        "card B must have a spawned event"
+    );
+    // The kinds *list* must match (same ordering, same counts).
+    assert_eq!(
+        a_kinds, b_kinds,
+        "dispatcher event sequence must be byte-identical for goal_mode=false vs goal_mode=true"
+    );
+
+    // No goal-loop subkind events at the dispatcher layer (those only land
+    // from inside the worker process via Plan 04's wrapper).
+    for events in &[a_events, b_events] {
+        for evt in events {
+            let payload = evt.payload.as_deref().unwrap_or("{}");
+            assert!(
+                !payload.contains("goal_turn_advanced"),
+                "dispatcher tick must NOT emit goal_turn_advanced"
+            );
+            assert!(
+                !payload.contains("goal_budget_exhausted"),
+                "dispatcher tick must NOT emit goal_budget_exhausted"
+            );
+            assert!(
+                !payload.contains("judge_verdict"),
+                "dispatcher tick must NOT emit judge_verdict"
+            );
+        }
+    }
+}
+
+/// D-04: when a goal_mode card is reclaimed via `reclaim_stale_claims`, its
+/// `goal_turns_used` counter MUST reset to 0 — the next worker spawn starts
+/// with a fresh budget. Without this reset, a card whose worker dies mid-loop
+/// would resume at the prior `goal_turns_used`, effectively shrinking the
+/// budget on each respawn until budget exhaustion hits prematurely.
+///
+/// Seed shape mirrors `circuit_breaker_does_not_trip_below_limit_on_reclaim_path`:
+/// goal_mode=true card, claimed with an expired claim, claim_pid NULLed so
+/// Step 1 (detect_crashed_workers) skips it and only Step 3
+/// (reclaim_stale_claims) fires. `scheduled_at = now + 3600.0` prevents Step
+/// 6 from re-claiming on the same tick.
+#[tokio::test]
+async fn reclaim_resets_goal_counter() {
+    let dir = TempDir::new().unwrap();
+    let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
+
+    let task_id = {
+        let mut store = store_arc.lock().await;
+        let task = store
+            .create_task(
+                "goal-mode card needing reclaim reset",
+                "alice",
+                CreateTaskOptions {
+                    goal_mode: true,
+                    goal_max_turns: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let now = now_secs();
+        let rid = format!("r_{}", uuid::Uuid::new_v4().simple());
+        let claim_lock = format!("host:999:uuid_reclaim_goal_reset");
+
+        // Seed as running with an EXPIRED claim.
+        seed_running(
+            &mut store,
+            &task.id,
+            &claim_lock,
+            999_999_995i64,
+            now - 1.0,
+            &rid,
+            now,
+        );
+
+        // NULL claim_pid so Step 1 skips this task — only Step 3 fires.
+        store
+            .conn
+            .execute(
+                "UPDATE task_runs SET claim_pid = NULL WHERE id = ?1",
+                params![rid],
+            )
+            .unwrap();
+
+        // Bump goal_turns_used to 3 via direct UPDATE — simulates a worker
+        // that ran 3 turns before its claim went stale. `bump_goal_turn_counter`
+        // requires a live claim_lock match; seeding the value directly is
+        // equivalent and lets the test focus on the reclaim-reset contract.
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET goal_turns_used = 3 WHERE id = ?1",
+                params![task.id],
+            )
+            .unwrap();
+
+        // Prevent step-6 re-claim on the same tick (so the assertion measures
+        // ONLY the reclaim path's effect, not a subsequent fresh claim).
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET scheduled_at = ?1 WHERE id = ?2",
+                params![now_secs() + 3600.0, task.id],
+            )
+            .unwrap();
+
+        task.id
+    };
+
+    // Sanity: goal_turns_used == 3 before the tick.
+    {
+        let store = store_arc.lock().await;
+        let task = store.get_task(&task_id).unwrap();
+        assert_eq!(
+            task.goal_turns_used, 3,
+            "precondition: goal_turns_used must be 3 before reclaim"
+        );
+        assert!(task.goal_mode, "precondition: task must be goal_mode=true");
+    }
+
+    let ctx = make_ctx_failing_spawn(store_arc.clone(), KanbanConfig::default());
+    run_dispatch_tick(&ctx).await.expect("tick failed");
+
+    // After the reclaim tick: task is back to `ready`, goal_turns_used is 0.
+    let store = store_arc.lock().await;
+    let task = store.get_task(&task_id).unwrap();
+    assert_eq!(
+        task.status, "ready",
+        "reclaim path must release the claim and reset status to ready"
+    );
+    assert_eq!(
+        task.goal_turns_used, 0,
+        "reclaim_stale_claims must reset goal_turns_used to 0 for goal_mode cards (D-04 / Plan 05 Task 1)"
+    );
+    assert!(
+        task.goal_mode,
+        "goal_mode flag must persist across reclaim (only goal_turns_used resets)"
+    );
+}
+
+/// Handoff coverage: the in-place reclaim does NOT delete prior-run
+/// `task_events`. The new worker reads the previous run's `judge_verdict`
+/// events via `kanban_show` to understand what was tried and why it failed.
+/// The card body (acceptance criteria) is byte-stable across reclaim so the
+/// new judge evaluates against the same rubric.
+///
+/// Mirrors the user's pasted-spec contract: "when a worker is spawned (or
+/// re-spawned), it reads the full comment thread as part of its context."
+#[tokio::test]
+async fn goal_mode_card_reclaim_preserves_judge_history() {
+    use ironhermes_kanban::events::KanbanEventKind;
+
+    let dir = TempDir::new().unwrap();
+    let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
+
+    let body_text = "Acceptance: produce a haiku with exactly 5/7/5 syllables.";
+    let task_id = {
+        let mut store = store_arc.lock().await;
+        let task = store
+            .create_task(
+                "goal-mode card with judge history",
+                "alice",
+                CreateTaskOptions {
+                    body: Some(body_text.to_string()),
+                    goal_mode: true,
+                    goal_max_turns: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        task.id
+    };
+
+    // Snapshot the body BEFORE reclaim — must be byte-stable after.
+    let body_before = {
+        let store = store_arc.lock().await;
+        store.get_task(&task_id).unwrap().body
+    };
+    assert_eq!(
+        body_before.as_deref(),
+        Some(body_text),
+        "precondition: body persists from create"
+    );
+
+    // Seed running with an expired claim under run_id_A; emit two
+    // judge_verdict events under run_id_A.
+    let run_id_a = format!("r_{}", uuid::Uuid::new_v4().simple());
+    let claim_lock_a = "host:888:uuid_judge_history_A".to_string();
+    {
+        let mut store = store_arc.lock().await;
+        let now = now_secs();
+        seed_running(
+            &mut store,
+            &task_id,
+            &claim_lock_a,
+            999_999_994i64,
+            now - 1.0,
+            &run_id_a,
+            now,
+        );
+
+        // NULL claim_pid so Step 1 skips (reclaim path is the only producer).
+        store
+            .conn
+            .execute(
+                "UPDATE task_runs SET claim_pid = NULL WHERE id = ?1",
+                params![run_id_a],
+            )
+            .unwrap();
+
+        // Two judge_verdict events tied to run_id_A. Use Edited + JSON
+        // subkind payload (frozen-surface contract from Phase 36.3.7.6).
+        let payload1 = serde_json::json!({
+            "subkind": "judge_verdict",
+            "verdict": "not_met",
+            "reason": "missing line 2",
+        });
+        store
+            .append_event(
+                &task_id,
+                Some(&run_id_a),
+                KanbanEventKind::Edited,
+                Some(&payload1),
+            )
+            .unwrap();
+        let payload2 = serde_json::json!({
+            "subkind": "judge_verdict",
+            "verdict": "not_met",
+            "reason": "missing line 3",
+        });
+        store
+            .append_event(
+                &task_id,
+                Some(&run_id_a),
+                KanbanEventKind::Edited,
+                Some(&payload2),
+            )
+            .unwrap();
+
+        // Bump goal_turns_used to 2.
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET goal_turns_used = 2 WHERE id = ?1",
+                params![task_id],
+            )
+            .unwrap();
+
+        // Prevent step-6 re-claim on the same tick.
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET scheduled_at = ?1 WHERE id = ?2",
+                params![now_secs() + 3600.0, task_id],
+            )
+            .unwrap();
+    }
+
+    // Snapshot judge events BEFORE reclaim.
+    let judge_events_before: Vec<String> = {
+        let store = store_arc.lock().await;
+        store
+            .get_events(&task_id)
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                let payload = e.payload.as_deref().unwrap_or("{}");
+                payload.contains("\"subkind\":\"judge_verdict\"")
+            })
+            .filter_map(|e| e.payload.clone())
+            .collect()
+    };
+    assert_eq!(
+        judge_events_before.len(),
+        2,
+        "precondition: 2 judge_verdict events from run_id_A must exist"
+    );
+
+    // Run reclaim tick.
+    let ctx = make_ctx_failing_spawn(store_arc.clone(), KanbanConfig::default());
+    run_dispatch_tick(&ctx).await.expect("tick failed");
+
+    // Re-enable claiming and run another tick to acquire a fresh claim →
+    // simulating the "next worker spawn" without exec'ing ironhermes.
+    let now2 = now_secs();
+    {
+        let store = store_arc.lock().await;
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET scheduled_at = ?1 WHERE id = ?2",
+                params![now2 - 1.0, task_id],
+            )
+            .unwrap();
+    }
+
+    let ctx2 = make_ctx_ok_spawn(store_arc.clone(), KanbanConfig::default(), 54321);
+    run_dispatch_tick(&ctx2).await.expect("second tick failed");
+
+    // After re-claim: assert run_id_B != run_id_A and claim_lock_B != claim_lock_A.
+    let (run_id_b, claim_lock_b, body_after) = {
+        let store = store_arc.lock().await;
+        let task = store.get_task(&task_id).unwrap();
+        (
+            task.current_run_id.clone(),
+            task.claim_lock.clone(),
+            task.body.clone(),
+        )
+    };
+    assert!(
+        run_id_b.is_some(),
+        "second claim must populate current_run_id"
+    );
+    assert_ne!(
+        run_id_b.as_deref(),
+        Some(run_id_a.as_str()),
+        "run_id_B must differ from run_id_A"
+    );
+    assert!(
+        claim_lock_b.is_some(),
+        "second claim must populate claim_lock"
+    );
+    assert_ne!(
+        claim_lock_b.as_deref(),
+        Some(claim_lock_a.as_str()),
+        "claim_lock_B must differ from claim_lock_A"
+    );
+
+    // Body is byte-stable (acceptance criteria the new judge will evaluate
+    // against MUST not drift across reclaim).
+    assert_eq!(
+        body_after, body_before,
+        "card body must be byte-stable across reclaim (handoff contract)"
+    );
+
+    // The two judge_verdict events from run_id_A must STILL appear in
+    // get_events on the second claim. The in-place reclaim does NOT delete
+    // prior task_events.
+    let judge_events_after: Vec<String> = {
+        let store = store_arc.lock().await;
+        store
+            .get_events(&task_id)
+            .unwrap()
+            .iter()
+            .filter(|e| {
+                let payload = e.payload.as_deref().unwrap_or("{}");
+                payload.contains("\"subkind\":\"judge_verdict\"")
+            })
+            .filter_map(|e| e.payload.clone())
+            .collect()
+    };
+    assert_eq!(
+        judge_events_after.len(),
+        2,
+        "the two judge_verdict events from run_id_A must survive reclaim (handoff contract)"
+    );
+    assert_eq!(
+        judge_events_after, judge_events_before,
+        "judge_verdict event payloads must be byte-identical before/after reclaim"
+    );
+}
+
+/// Consecutive-failures cap: the existing `failure_limit` circuit breaker
+/// applies to goal_mode cards exactly as it does to non-goal cards. Without
+/// the reset, each respawn would have a fresh turn budget — the cap is the
+/// only thing preventing infinite re-spawn of a goal_mode card that keeps
+/// killing its worker mid-loop. Mirrors
+/// `circuit_breaker_trips_on_reclaim_path`'s shape with goal_mode=true.
+#[tokio::test]
+async fn goal_mode_card_consecutive_failures_caps_reclaim() {
+    let dir = TempDir::new().unwrap();
+    let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
+
+    let task_id = {
+        let mut store = store_arc.lock().await;
+        let task = store
+            .create_task(
+                "goal-mode card that keeps killing its worker",
+                "alice",
+                CreateTaskOptions {
+                    goal_mode: true,
+                    goal_max_turns: 10,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let now = now_secs();
+        let rid = format!("r_{}", uuid::Uuid::new_v4().simple());
+        let claim_lock = format!("host:777:uuid_goal_consec_fail");
+
+        seed_running(
+            &mut store,
+            &task.id,
+            &claim_lock,
+            999_999_993i64,
+            now - 1.0,
+            &rid,
+            now,
+        );
+
+        // NULL claim_pid so Step 1 skips this task — Step 3 is the only path
+        // that bumps consecutive_failures here.
+        store
+            .conn
+            .execute(
+                "UPDATE task_runs SET claim_pid = NULL WHERE id = ?1",
+                params![rid],
+            )
+            .unwrap();
+
+        // Pre-seed consecutive_failures = failure_limit - 1 = 1. Step 3 will
+        // bump it to 2, tripping the breaker on this same tick.
+        store
+            .conn
+            .execute(
+                "UPDATE tasks SET consecutive_failures = 1 WHERE id = ?1",
+                params![task.id],
+            )
+            .unwrap();
+
+        task.id
+    };
+
+    let config = KanbanConfig {
+        failure_limit: 2,
+        ..Default::default()
+    };
+    // ok_spawn so a side-effect of the breaker is not masked by spawn failure
+    // (mirrors `circuit_breaker_trips_on_reclaim_path`).
+    let ctx = make_ctx_ok_spawn(store_arc.clone(), config, 33333);
+    run_dispatch_tick(&ctx).await.expect("tick failed");
+
+    let store = store_arc.lock().await;
+    let task = store.get_task(&task_id).unwrap();
+
+    // The cap must fire — goal_mode does NOT bypass the breaker.
+    assert_eq!(
+        task.status, "blocked",
+        "goal_mode card must transition to blocked at failure_limit (goal_mode does NOT bypass the breaker)"
+    );
+    assert_eq!(
+        task.consecutive_failures, 2,
+        "consecutive_failures must be 2 after bump at failure_limit"
+    );
+    assert!(
+        task.goal_mode,
+        "goal_mode flag persists across breaker trip (only status changes)"
+    );
+
+    let events = store.get_events(&task_id).unwrap();
+    let gave_up = events.iter().find(|e| e.kind == "gave_up");
+    assert!(
+        gave_up.is_some(),
+        "gave_up event must be appended when goal_mode card trips the failure_limit breaker"
+    );
+}
