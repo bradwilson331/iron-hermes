@@ -169,7 +169,7 @@ fn error_message_names_both_config_keys() {
 }
 
 // ---------------------------------------------------------------------------
-// Compile anchor — build_runtime_judge_fn is reachable as pub(crate)
+// Compile anchor — build_runtime_judge_fn is reachable as pub
 // (Plan 04's loop wrapper will import it from the same crate.) We can't call
 // it without a runtime provider, but referencing the fn name in a no-op
 // closure ensures the symbol exists at the expected path.
@@ -186,4 +186,238 @@ fn build_runtime_judge_fn_symbol_exists() {
     ) -> anyhow::Result<ironhermes_kanban::JudgeFn> {
         ironhermes_cli::kanban::commands::build_runtime_judge_fn(_kanban, _main)
     }
+}
+
+// ===========================================================================
+// Closure-execution tests — wiremock the LLM endpoint to verify the JudgeFn
+// closure's JSON-parse + verdict-match semantics (T-36.3.7.12-03-T01 / T02 /
+// I01 mitigation rails). These tests build a real JudgeFn against a fake
+// provider, invoke it once with a synthetic JudgeRequest, and assert the
+// closure's behavior on the three load-bearing response shapes:
+//   - valid {"verdict":"met","reason":"..."} → Ok(Met, reason)
+//   - verdict="MAYBE" (case-sensitive miss) → Err
+//   - non-JSON body → Err with raw snippet
+// ===========================================================================
+
+use ironhermes_core::config::ProviderConfig as Provider2; // alias to keep tier_* using config::ProviderConfig naming
+use ironhermes_kanban::{JudgeRequest, JudgeVerdict};
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// Build a Config where the main provider points at a wiremock server's
+/// `/chat/completions` endpoint. Returns the (Config, server_uri) pair.
+fn config_pointing_at_wiremock(server: &MockServer) -> Config {
+    let mut config = Config::default();
+    config.model.provider = "wiremock".to_string();
+    config.model.default = "stub-model".to_string();
+    let mut providers: HashMap<String, Provider2> = HashMap::new();
+    providers.insert(
+        "wiremock".to_string(),
+        Provider2 {
+            base_url: Some(server.uri()),
+            api_key: Some("test-api-key".to_string()),
+            ..Default::default()
+        },
+    );
+    config.providers = providers;
+    config
+}
+
+fn synthetic_judge_request() -> JudgeRequest {
+    JudgeRequest {
+        task_id: "t_abc1234".to_string(),
+        title: "Translate docs".to_string(),
+        body: "Acceptance: every page translated".to_string(),
+        worker_turn_output: "I translated 3 of 12 pages so far.".to_string(),
+        turn: 1,
+    }
+}
+
+/// LLM returns `{"verdict":"met","reason":"all criteria satisfied"}` →
+/// closure returns Ok(Met, "all criteria satisfied").
+#[tokio::test]
+async fn closure_parses_met_verdict() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "stub-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "{\"verdict\":\"met\",\"reason\":\"all criteria satisfied\"}"
+                },
+                "finish_reason": "stop"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let config = config_pointing_at_wiremock(&server);
+    let kanban = KanbanConfig::default();
+    let judge = ironhermes_cli::kanban::commands::build_runtime_judge_fn(&kanban, &config)
+        .expect("build_runtime_judge_fn");
+    let out = judge(synthetic_judge_request()).await.expect("Ok JudgeOutput");
+    assert_eq!(out.verdict, JudgeVerdict::Met);
+    assert_eq!(out.reason, "all criteria satisfied");
+}
+
+/// LLM returns `{"verdict":"not_met","reason":"missing criterion 3"}` →
+/// closure returns Ok(NotMet, "missing criterion 3").
+#[tokio::test]
+async fn closure_parses_not_met_verdict() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "stub-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "{\"verdict\":\"not_met\",\"reason\":\"missing criterion 3\"}"
+                },
+                "finish_reason": "stop"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let config = config_pointing_at_wiremock(&server);
+    let kanban = KanbanConfig::default();
+    let judge = ironhermes_cli::kanban::commands::build_runtime_judge_fn(&kanban, &config)
+        .expect("build_runtime_judge_fn");
+    let out = judge(synthetic_judge_request()).await.expect("Ok JudgeOutput");
+    assert_eq!(out.verdict, JudgeVerdict::NotMet);
+    assert_eq!(out.reason, "missing criterion 3");
+}
+
+/// T-36.3.7.12-03-T02 — verdict="MAYBE" (or any string outside the locked
+/// {"met","not_met"} pair) MUST return Err. Case-sensitive match: even
+/// "MET" or "yes" fail.
+#[tokio::test]
+async fn unknown_verdict_returns_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "stub-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "{\"verdict\":\"MAYBE\",\"reason\":\"unclear\"}"
+                },
+                "finish_reason": "stop"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let config = config_pointing_at_wiremock(&server);
+    let kanban = KanbanConfig::default();
+    let judge = ironhermes_cli::kanban::commands::build_runtime_judge_fn(&kanban, &config)
+        .expect("build_runtime_judge_fn");
+    let err = judge(synthetic_judge_request())
+        .await
+        .expect_err("verdict='MAYBE' must Err");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("not in {met,not_met}"),
+        "error msg must name the locked verdict pair; got: {msg}"
+    );
+    assert!(
+        msg.contains("MAYBE"),
+        "error msg must include the offending verdict; got: {msg}"
+    );
+}
+
+/// T-36.3.7.12-03-T01 — non-JSON LLM body MUST return Err. Raw snippet
+/// truncated to 200 chars (T-36.3.7.12-03-I01 V8 mitigation).
+#[tokio::test]
+async fn non_json_body_returns_error_with_snippet() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "stub-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "this is not JSON at all"
+                },
+                "finish_reason": "stop"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let config = config_pointing_at_wiremock(&server);
+    let kanban = KanbanConfig::default();
+    let judge = ironhermes_cli::kanban::commands::build_runtime_judge_fn(&kanban, &config)
+        .expect("build_runtime_judge_fn");
+    let err = judge(synthetic_judge_request())
+        .await
+        .expect_err("non-JSON body must Err");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("not JSON"),
+        "error msg must indicate parse failure; got: {msg}"
+    );
+    assert!(
+        msg.contains("this is not JSON at all"),
+        "error msg must include the raw snippet for operator triage; got: {msg}"
+    );
+}
+
+/// T-36.3.7.12-03-T01 — well-formed JSON missing the `verdict` field
+/// MUST return Err.
+#[tokio::test]
+async fn missing_verdict_field_returns_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "stub-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "{\"reason\":\"no verdict here\"}"
+                },
+                "finish_reason": "stop"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let config = config_pointing_at_wiremock(&server);
+    let kanban = KanbanConfig::default();
+    let judge = ironhermes_cli::kanban::commands::build_runtime_judge_fn(&kanban, &config)
+        .expect("build_runtime_judge_fn");
+    let err = judge(synthetic_judge_request())
+        .await
+        .expect_err("missing verdict field must Err");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("missing 'verdict'"),
+        "error msg must name the missing field; got: {msg}"
+    );
 }
