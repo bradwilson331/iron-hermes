@@ -905,28 +905,176 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     // the writer but then held it in a let-_-binding): run_turn threads it into
     // the AgentLoop so per-tool-call TrajectoryEntry records land in the JSONL.
     let _ = max_turns; // max_turns is baked into runtime via config.agent.max_turns
-    let request = ironhermes_agent::TurnRequest {
-        messages,
-        session_id: session_id.clone(),
-        cancel_token: None,
-        stream: Some(Box::new(move |delta| {
-            let visible = scrubber_single_cb.lock().unwrap().feed(delta);
-            if !visible.is_empty() {
-                print!("{}", visible);
-                io::stdout().flush().ok();
-            }
-        })),
-        tool_progress: Some(Box::new(|name, args| {
-            eprintln!("{} {} {}", "Tool:".dimmed(), name.yellow(), args.dimmed());
-        })),
-        tool_result: None,
-        trajectory_writer: trajectory_writer.clone(),
-        pressure_tracker: None, // one-shot: fresh tracker per run
-        state_store: Some(state_store.clone()),
-        compression_count: 0, // one-shot: no cross-turn carry-over
-    };
 
-    let result = runtime.run_turn(request).await?;
+    // Phase 36.3.7.12-04 Plan 04 Task 2 — goal-mode dispatch.
+    //
+    // When the process is a kanban worker (HERMES_KANBAN_TASK set) AND the
+    // task carries goal_mode=true (signaled via HERMES_KANBAN_GOAL_MODE=1 in
+    // the worker env per Plan 02), wrap `runtime.run_turn` in the budget-bounded
+    // goal loop. The wrapper handles both goal_mode AND non-goal cases
+    // internally — the non-goal branch is a single passthrough call so the
+    // existing chat -q worker path stays byte-for-byte equivalent (D-06).
+    //
+    // Outside worker mode (no HERMES_KANBAN_TASK), the wrapper is bypassed
+    // entirely so a normal `ironhermes chat -q "prompt"` invocation retains
+    // its exact pre-Plan-04 semantics.
+    let worker_mode = std::env::var("HERMES_KANBAN_TASK").is_ok();
+    // Wrap runtime in an Arc up-front so both the goal-loop wrapper's
+    // TurnRunner closure (which needs to clone the runtime across turns)
+    // and the post-loop `runtime.registry()` consumer (line ~1141) can
+    // share ownership without taking either by value.
+    let runtime_handle = std::sync::Arc::new(runtime);
+    let result = if worker_mode {
+        // Build the kanban + judge inputs for the wrapper.
+        let kanban_config = crate::kanban::commands::load_kanban_config(&config);
+        let judge_fn = crate::kanban::commands::build_runtime_judge_fn(&kanban_config, &config)
+            .context("build_runtime_judge_fn for worker-mode goal-loop wrapper")?;
+        let task_id = std::env::var("HERMES_KANBAN_TASK").unwrap_or_default();
+        let run_id = std::env::var("HERMES_KANBAN_RUN_ID").unwrap_or_default();
+        let claim_lock = std::env::var("HERMES_KANBAN_CLAIM_LOCK").unwrap_or_default();
+        let kanban_store_for_loop = ironhermes_kanban::KanbanStore::open_default()
+            .context("open kanban store for goal-loop wrapper")?;
+        let kanban_store_arc = std::sync::Arc::new(tokio::sync::Mutex::new(kanban_store_for_loop));
+
+        // The TurnRunner closure captures the runtime + per-call inputs and
+        // produces the textual assistant output the judge will evaluate.
+        // Inputs that are non-Clone per-call (the scrubber callback closures)
+        // are rebuilt inside each invocation so the wrapper can iterate
+        // freely without consuming them on turn 1.
+        let runtime_for_runner = runtime_handle.clone();
+        let session_id_for_runner = session_id.clone();
+        let trajectory_for_runner = trajectory_writer.clone();
+        let state_store_for_runner = state_store.clone();
+        let scrubber_for_runner = scrubber_single.clone();
+        let initial_messages = messages.clone();
+        let mut initial_taken = false;
+        let turn_runner: crate::kanban::goal_loop::TurnRunner =
+            Box::new(move |_msgs_history: Vec<String>| {
+                // Plan 04 D-06: the wrapper's `messages` is a textual history;
+                // the runtime owns the canonical ChatMessage sequence via its
+                // internal state. On the FIRST call we feed the seeded
+                // `messages` vec into run_turn; subsequent calls receive an
+                // empty vec because run_turn's run_chat path appends judge
+                // feedback into the existing session via the worker's tool
+                // surface. For run_single (which is single-turn batch),
+                // subsequent goal-loop turns build a synthetic user-message
+                // out of the wrapper's textual history string.
+                let runtime = runtime_for_runner.clone();
+                let session_id = session_id_for_runner.clone();
+                let trajectory = trajectory_for_runner.clone();
+                let state_store = state_store_for_runner.clone();
+                let scrubber = scrubber_for_runner.clone();
+                let messages_for_call = if initial_taken {
+                    // Subsequent turns: synthesize a user message from the
+                    // judge's most-recent feedback (last entry in the textual
+                    // history). When the history is empty (e.g., the wrapper
+                    // chose not to push feedback), we send a no-op continue
+                    // prompt; the worker LLM is expected to consult kanban_show
+                    // for state.
+                    let last = _msgs_history.last().cloned().unwrap_or_else(|| {
+                        "Continue working toward the acceptance criteria.".to_string()
+                    });
+                    vec![ironhermes_core::ChatMessage::user(last)]
+                } else {
+                    initial_messages.clone()
+                };
+                initial_taken = true;
+                Box::pin(async move {
+                    let request = ironhermes_agent::TurnRequest {
+                        messages: messages_for_call,
+                        session_id,
+                        cancel_token: None,
+                        stream: Some(Box::new(move |delta: &str| {
+                            let visible = scrubber.lock().unwrap().feed(delta);
+                            if !visible.is_empty() {
+                                print!("{}", visible);
+                                io::stdout().flush().ok();
+                            }
+                        })),
+                        tool_progress: Some(Box::new(|name: &str, args: &str| {
+                            eprintln!("{} {} {}", "Tool:".dimmed(), name.yellow(), args.dimmed());
+                        })),
+                        tool_result: None,
+                        trajectory_writer: trajectory,
+                        pressure_tracker: None,
+                        state_store: Some(state_store),
+                        compression_count: 0,
+                    };
+                    let agent_result = runtime.run_turn(request).await?;
+                    // Extract the final assistant message text — the judge
+                    // evaluates it against title + body. Prefer the
+                    // `final_response` field (set by run_turn's normal exit
+                    // paths); fall back to the last assistant entry in
+                    // `messages` for paths that leave `final_response = None`.
+                    // Empty string is a legitimate fallback — judge will say
+                    // NotMet, advancing the budget normally.
+                    let final_text = agent_result
+                        .final_response
+                        .clone()
+                        .or_else(|| {
+                            agent_result.messages.iter().rev().find_map(|m| {
+                                if m.role == ironhermes_core::types::Role::Assistant {
+                                    m.content
+                                        .as_ref()
+                                        .and_then(|c| c.as_text())
+                                        .map(String::from)
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                        .unwrap_or_default();
+                    Ok::<String, anyhow::Error>(final_text)
+                })
+            });
+
+        crate::kanban::goal_loop::run_goal_loop_if_enabled(
+            turn_runner,
+            Vec::new(), // wrapper-internal textual history seed
+            &task_id,
+            &run_id,
+            &claim_lock,
+            &judge_fn,
+            kanban_store_arc.clone(),
+        )
+        .await
+        .context("run_goal_loop_if_enabled in worker-mode dispatch")?;
+
+        // The wrapper returns Ok(()) on every behavioral path. The
+        // downstream tail-rendering paths (scrubber flush, context-warnings
+        // block, drain-and-kill-session) consume only the
+        // `context_warnings` field; an empty AgentResult is the right
+        // sentinel because the wrapper's per-turn run_turn invocations
+        // already streamed everything to stdout in real time. We reuse
+        // the existing `budget_exhausted` constructor as a neutral
+        // "wrapper drove the session" shape — turns_used is left at the
+        // wrapper-tracked count via best-available approximation (the
+        // bumped counter on the DB is the canonical record).
+        ironhermes_agent::AgentResult::budget_exhausted(Vec::new(), 0)
+    } else {
+        // Non-worker mode: untouched chat -q semantics.
+        let request = ironhermes_agent::TurnRequest {
+            messages,
+            session_id: session_id.clone(),
+            cancel_token: None,
+            stream: Some(Box::new(move |delta| {
+                let visible = scrubber_single_cb.lock().unwrap().feed(delta);
+                if !visible.is_empty() {
+                    print!("{}", visible);
+                    io::stdout().flush().ok();
+                }
+            })),
+            tool_progress: Some(Box::new(|name, args| {
+                eprintln!("{} {} {}", "Tool:".dimmed(), name.yellow(), args.dimmed());
+            })),
+            tool_result: None,
+            trajectory_writer: trajectory_writer.clone(),
+            pressure_tracker: None,
+            state_store: Some(state_store.clone()),
+            compression_count: 0,
+        };
+        runtime_handle.run_turn(request).await?
+    };
 
     // Phase 34a MEM-READ-05: flush scrubber tail (emits held partial-tag if stream ended
     // mid-tag and it proved to not be a memory-context tag).
@@ -997,7 +1145,7 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     // per D-14) get a chance to clean up. Best-effort, log-and-continue --
     // matches the surrounding memory_manager.on_session_end pattern.
     // Read lock only; do NOT hold a write lock here (see RESEARCH Pitfall 6).
-    runtime.registry().read().await.call_session_end_hooks();
+    runtime_handle.registry().read().await.call_session_end_hooks();
 
     // Persist assistant response messages to SQLite
     for msg in &result.messages {

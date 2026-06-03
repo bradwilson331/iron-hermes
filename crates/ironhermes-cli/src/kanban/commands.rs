@@ -1391,7 +1391,11 @@ pub async fn cmd_notify_list(task_id: Option<String>, json: bool, board: Option<
 /// Fails gracefully: if `config.yaml` is missing or the `kanban:` block is absent,
 /// returns `KanbanConfig::default()` (all defaults). This mirrors the gateway runner's
 /// behavior.
-fn load_kanban_config(main_config: &Config) -> KanbanConfig {
+///
+/// `pub` (was `pub(crate)`) so the worker-mode dispatcher in `main.rs` can call
+/// it alongside `build_runtime_judge_fn` when constructing the goal-loop wrapper
+/// inputs (Phase 36.3.7.12-04 Plan 04 Task 2).
+pub fn load_kanban_config(main_config: &Config) -> KanbanConfig {
     serde_yaml::from_value(main_config.kanban.clone()).unwrap_or_default()
 }
 
