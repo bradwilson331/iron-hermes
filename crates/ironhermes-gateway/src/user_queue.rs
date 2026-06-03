@@ -255,7 +255,7 @@ mod tests {
             Ok(())
         }
 
-        async fn edit_message_markdown(
+        async fn edit_message_markdown_v2(
             &self,
             _chat_id: &str,
             _message_id: &str,

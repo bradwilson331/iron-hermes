@@ -112,7 +112,7 @@ impl PlatformAdapter for RecordingFailingAdapter {
         Ok(())
     }
 
-    async fn edit_message_markdown(
+    async fn edit_message_markdown_v2(
         &self,
         chat_id: &str,
         message_id: &str,

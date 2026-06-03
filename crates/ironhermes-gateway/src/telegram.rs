@@ -7,6 +7,7 @@ pub use ironhermes_cron::TgSendApi;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use tracing::{error, warn};
 
 #[async_trait]
 impl TgSendApi for TelegramAdapter {
@@ -302,21 +303,77 @@ impl PlatformAdapter for TelegramAdapter {
         Ok(())
     }
 
-    async fn edit_message_markdown(
+    async fn edit_message_markdown_v2(
         &self,
         chat_id: &str,
         message_id: &str,
         content: &str,
     ) -> Result<()> {
+        // Phase 36.17.2.2-04 D-01: switch parse_mode from legacy "Markdown"
+        // to "MarkdownV2" and apply the D-02 single-retry-as-plain-text
+        // fallback. `content` is assumed to have been pre-escaped by the
+        // caller via `crate::markdown_v2::escape_outside_code_blocks`
+        // (call site wired in plan 05; the trait-level doc-comment on
+        // `PlatformAdapter::edit_message_markdown_v2` records the contract).
         let params = serde_json::json!({
             "chat_id": chat_id,
             "message_id": message_id.parse::<i64>().unwrap_or(0),
             "text": content,
-            "parse_mode": "Markdown",
+            "parse_mode": "MarkdownV2",
         });
 
-        let _: serde_json::Value = self.api_call("editMessageText", &params).await?;
-        Ok(())
+        let result: Result<serde_json::Value> =
+            self.api_call("editMessageText", &params).await;
+
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                // D-02 fallback: detect parse-mode failures via substring match
+                // on the error description. Telegram's exact wording for parse
+                // errors has shifted across Bot API versions, so we match a
+                // small substring set rather than a fixed string. Keywords
+                // sourced from RESEARCH §Telegram Bot API Confirmations row 8
+                // ("can't parse", "parse entities", "parse_mode").
+                let desc = format!("{e}");
+                let is_parse_failure = desc.contains("can't parse")
+                    || desc.contains("parse entities")
+                    || desc.contains("parse_mode");
+                if !is_parse_failure {
+                    // Not a parse-mode failure — propagate unchanged.
+                    return Err(e);
+                }
+
+                warn!(
+                    chat_id = chat_id,
+                    message_id = message_id,
+                    error = %desc,
+                    "MarkdownV2 parse failed; retrying as plain text (D-02 fallback)"
+                );
+
+                let plain_params = serde_json::json!({
+                    "chat_id": chat_id,
+                    "message_id": message_id.parse::<i64>().unwrap_or(0),
+                    "text": content,
+                });
+
+                match self
+                    .api_call::<serde_json::Value>("editMessageText", &plain_params)
+                    .await
+                {
+                    Ok(_) => Ok(()),
+                    Err(retry_err) => {
+                        error!(
+                            chat_id = chat_id,
+                            message_id = message_id,
+                            original_error = %desc,
+                            retry_error = %retry_err,
+                            "D-02 plain-text retry also failed"
+                        );
+                        Err(retry_err)
+                    }
+                }
+            }
+        }
     }
 
     async fn delete_message(&self, chat_id: &str, message_id: &str) -> Result<()> {
