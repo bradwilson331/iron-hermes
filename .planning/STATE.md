@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: executing
-stopped_at: Phase 36.3.7.12 planned (5 plans, 4 waves)
-last_updated: "2026-06-02T23:06:31.391Z"
+status: ready_to_plan
+stopped_at: Phase 36.3.7.12 complete (5/5) — ready to discuss Phase 36.3.7.13
+last_updated: 2026-06-03T04:27:54.833Z
 last_activity: 2026-06-02 -- Phase 36.3.7.12 execution started
 progress:
   total_phases: 56
   completed_phases: 22
   total_plans: 115
-  completed_plans: 107
+  completed_plans: 112
   percent: 39
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.3.7.12 — goal-mode-kanban-worker-loop-ralph-loop
+**Current focus:** Phase 36.3.7.13 — kanban worker cross profile ergonomics
 
 ## Current Position
 
-Phase: 36.3.7.12 (goal-mode-kanban-worker-loop-ralph-loop) — EXECUTING
-Plan: 1 of 5
-Status: Executing Phase 36.3.7.12
-Last activity: 2026-06-02 -- Phase 36.3.7.12 execution started
+Phase: 36.3.7.13
+Plan: Not started
+Status: Ready to plan
+Last activity: 2026-06-03
 
 ## Recent close-out summary (2026-05-30 — Phase 36.3.7.6 closed PASS)
 
@@ -100,7 +100,7 @@ Last activity: 2026-06-02 -- Phase 36.3.7.12 execution started
 
 **Velocity:**
 
-- Total plans completed: 145
+- Total plans completed: 150
 - Average duration: — min
 - Total execution time: 0 hours
 
@@ -143,6 +143,7 @@ Last activity: 2026-06-02 -- Phase 36.3.7.12 execution started
 | 34b | 4 | - | - |
 | 36.3.7.9 | 9 | - | - |
 | 36.3.7.10 | 6 | - | - |
+| 36.3.7.12 | 5 | - | - |
 
 **Recent Trend:**
 
