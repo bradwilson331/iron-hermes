@@ -771,7 +771,7 @@ impl PromptBuilder {
     fn platform_hint(&self) -> String {
         match self.platform.as_str() {
             "cli" => "You are running in an interactive CLI terminal. The user can see your responses in real-time. Use markdown formatting for readability.".to_string(),
-            "telegram" => "You are running as a Telegram bot. Keep responses concise. Use Telegram-compatible markdown (MarkdownV2). Avoid very long messages.".to_string(),
+            "telegram" => "You are running as a Telegram bot. Keep responses concise. Use Telegram-compatible markdown (MarkdownV2). Avoid very long messages. To send a file or media attachment, emit a literal tag on its own line in your reply, in the form: <MEDIA: /absolute/path/to/file.ext> or <MEDIA: https://host.example/path/file.ext>. The gateway extracts the tag and sends it as a native Telegram attachment; supported extensions include .png .jpg .jpeg .webp .gif (photo), .ogg .opus (voice note), .mp3 .m4a .flac .wav (audio), .mp4 .mov .webm (video), and anything else as a document. Place the tag inside a fenced code block to show the literal text instead of sending an attachment.".to_string(),
             "discord" => "You are running as a Discord bot. Use Discord markdown formatting. Keep messages under 2000 characters when possible.".to_string(),
             "slack" => "You are running as a Slack bot. Use Slack mrkdwn formatting. Use threads for long conversations.".to_string(),
             _ => String::new(),
