@@ -184,6 +184,15 @@ pub fn build_kanban_worker_env(task: &Task, run: &TaskRun, workspace: &str, boar
             task.goal_max_turns
         };
         env.push(("HERMES_KANBAN_GOAL_MAX_TURNS".into(), budget.to_string()));
+
+        // Phase 36.3.7.13 F-03 / D-E2: emit HERMES_KANBAN_GOAL_TOOLSET when
+        // task.goal_toolset is Some. The worker reads this verbatim (D-E2 single
+        // source of truth — no silent "restricted" default on dispatcher side).
+        // When None (legacy cards created before v3 schema): env var is absent;
+        // the worker warns LOUD via tracing::warn! and skips toolset filtering.
+        if let Some(ref toolset) = task.goal_toolset {
+            env.push(("HERMES_KANBAN_GOAL_TOOLSET".into(), toolset.clone()));
+        }
     }
 
     env

@@ -168,6 +168,11 @@ impl Tool for KanbanCreateTool {
                         "description": "Per-task turn budget when goal_mode=true. Budget exhaustion → kanban_block. Default 20.",
                         "default": 20
                     },
+                    "goal_toolset": {
+                        "type": "string",
+                        "description": "Tool filter preset for goal-mode workers: 'restricted' (15 safe tools, default), 'extended' (18 tools + terminal), or 'full' (no filter). Only used when goal_mode=true.",
+                        "enum": ["restricted", "extended", "full"]
+                    },
                     "board": {
                         "type": "string",
                         "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
