@@ -103,6 +103,27 @@ pub mod helpers {
             Ok(())
         }
 
+        async fn send_message_markdown_v2(
+            &self,
+            chat_id: &str,
+            content: &str,
+            _thread_id: Option<&str>,
+        ) -> Result<MessageResponse> {
+            // Phase 36.17.2.2-05: record into the same `log` as plain
+            // send_message so the GW-05 guard tests' assertions on sent
+            // messages still hold if a future overflow-chunk path lands
+            // on this adapter.
+            self.log
+                .lock()
+                .await
+                .push((chat_id.to_string(), content.to_string()));
+            Ok(MessageResponse {
+                message_id: "stub-msg-id".to_string(),
+                chat_id: chat_id.to_string(),
+                platform: Platform::Telegram,
+            })
+        }
+
         async fn delete_message(&self, _chat_id: &str, _message_id: &str) -> Result<()> {
             Ok(())
         }

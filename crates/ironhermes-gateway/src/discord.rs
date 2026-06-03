@@ -90,6 +90,18 @@ impl PlatformAdapter for DiscordAdapter {
         self.edit_message(chat_id, message_id, content).await
     }
 
+    async fn send_message_markdown_v2(
+        &self,
+        chat_id: &str,
+        content: &str,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse> {
+        // Phase 36.17.2.2-05: Discord has no MarkdownV2 distinction —
+        // delegate to plain `send_message`. The already-escaped body
+        // renders adequately as CommonMark (Discord's native dialect).
+        self.send_message(chat_id, content, thread_id).await
+    }
+
     async fn delete_message(&self, chat_id: &str, message_id: &str) -> Result<()> {
         let channel_id = serenity::model::id::ChannelId::new(
             chat_id

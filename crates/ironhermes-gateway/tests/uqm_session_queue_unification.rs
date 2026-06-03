@@ -125,6 +125,24 @@ impl PlatformAdapter for RecordingFailingAdapter {
         Ok(())
     }
 
+    async fn send_message_markdown_v2(
+        &self,
+        chat_id: &str,
+        content: &str,
+        _thread_id: Option<&str>,
+    ) -> anyhow::Result<MessageResponse> {
+        // Phase 36.17.2.2-05: intentionally fails like send_message (records
+        // before returning Err) so the fixture's fast-exit semantics carry
+        // over to any future overflow-chunk path that lands on this adapter.
+        self.send_log
+            .lock()
+            .unwrap()
+            .push((chat_id.to_string(), content.to_string()));
+        Err(anyhow::anyhow!(
+            "RecordingFailingAdapter::send_message_markdown_v2 — intentional test failure to fast-exit run_agent"
+        ))
+    }
+
     async fn delete_message(&self, _chat_id: &str, _message_id: &str) -> anyhow::Result<()> {
         Ok(())
     }

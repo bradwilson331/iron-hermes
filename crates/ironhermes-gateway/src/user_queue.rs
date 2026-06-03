@@ -264,6 +264,20 @@ mod tests {
             Ok(())
         }
 
+        async fn send_message_markdown_v2(
+            &self,
+            chat_id: &str,
+            content: &str,
+            thread_id: Option<&str>,
+        ) -> anyhow::Result<MessageResponse> {
+            // Phase 36.17.2.2-05: this fixture exercises the cap-hit reply
+            // path which uses plain `send_message`; the MarkdownV2 sibling
+            // is not on any tested path here. Delegate to send_message so
+            // any future test that does exercise it sees identical
+            // behavior.
+            self.send_message(chat_id, content, thread_id).await
+        }
+
         async fn delete_message(&self, _chat_id: &str, _message_id: &str) -> anyhow::Result<()> {
             Ok(())
         }

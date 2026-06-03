@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::adapter::PlatformAdapter;
+use crate::markdown_v2::escape_outside_code_blocks;
 
 const EDIT_INTERVAL: Duration = Duration::from_millis(300);
 const MAX_MESSAGE_LEN: usize = 4096;
@@ -96,22 +97,24 @@ impl StreamConsumer {
             loop {
                 if remaining.len() <= MAX_MESSAGE_LEN {
                     // Last (or only) chunk: edit the current placeholder with
-                    // Telegram MarkdownV2 (Phase 36.17.2.2-04 D-01 rename).
+                    // Telegram MarkdownV2 (Phase 36.17.2.2-04 D-01 rename;
+                    // Phase 36.17.2.2-05 D-01 + D-04 escape applied).
                     //
-                    // INTERIM CONTRACT (plan 04 task 3): `&remaining` is passed
-                    // through verbatim — `escape_outside_code_blocks` is NOT
-                    // applied here. Plan 05's task 1 wires the proper escape
-                    // call. The D-02 single-retry-as-plain-text fallback
-                    // inside `TelegramAdapter::edit_message_markdown_v2` will
-                    // catch any parse-mode 400s in the interim and silently
-                    // degrade to plain text — so user-visible behavior is
-                    // "loses markdown rendering on bodies containing reserved
-                    // chars until plan 05 ships", not "messages drop".
+                    // `escape_outside_code_blocks` walks the body to escape
+                    // the 18 MarkdownV2 reserved chars OUTSIDE of fenced code
+                    // blocks, inline-code spans, and `[label](url)` link
+                    // URLs — preserving real model-authored markdown syntax
+                    // (`*bold*`, ` ```fence``` `, links) while ensuring
+                    // literal reserved chars in prose render correctly.
+                    // The D-02 single-retry-as-plain-text fallback inside
+                    // `TelegramAdapter::edit_message_markdown_v2` is now the
+                    // safety net for the rare model-emitted-malformed-markdown
+                    // case, not the common-path crutch.
                     self.adapter
                         .edit_message_markdown_v2(
                             &self.chat_id,
                             &self.current_message_id,
-                            &remaining,
+                            &escape_outside_code_blocks(&remaining),
                         )
                         .await?;
                     break;
@@ -132,20 +135,34 @@ impl StreamConsumer {
                         .push(self.current_message_id.clone());
                     first_chunk = false;
                 } else {
-                    // Send additional overflow chunks as new plain-text messages
+                    // Phase 36.17.2.2-05 D-Discretion: send overflow chunks
+                    // as MarkdownV2 with pre-escaped body so the entire
+                    // final response renders consistently (per CONTEXT.md
+                    // "every overflow chunk uses send_message_markdown_v2").
                     let new_msg = self
                         .adapter
-                        .send_message(&self.chat_id, &chunk, None)
+                        .send_message_markdown_v2(
+                            &self.chat_id,
+                            &escape_outside_code_blocks(&chunk),
+                            None,
+                        )
                         .await?;
                     self.overflow_message_ids
                         .push(self.current_message_id.clone());
                     self.current_message_id = new_msg.message_id;
                 }
 
-                // Send the rest as a new message and continue the loop
+                // Phase 36.17.2.2-05: send the rest as a new MarkdownV2
+                // message and continue the loop (the rest may either fit
+                // on the next iteration and become the final MarkdownV2
+                // edit, or split again into more overflow chunks).
                 let new_msg = self
                     .adapter
-                    .send_message(&self.chat_id, &rest, None)
+                    .send_message_markdown_v2(
+                        &self.chat_id,
+                        &escape_outside_code_blocks(&rest),
+                        None,
+                    )
                     .await?;
                 self.current_message_id = new_msg.message_id;
                 remaining = rest;
@@ -271,6 +288,10 @@ mod tests {
             chat_id: String,
             content: String,
         },
+        SendMessageMarkdownV2 {
+            chat_id: String,
+            content: String,
+        },
     }
 
     struct MockAdapter {
@@ -338,6 +359,32 @@ mod tests {
                     content: content.to_string(),
                 });
             Ok(())
+        }
+
+        async fn send_message_markdown_v2(
+            &self,
+            chat_id: &str,
+            content: &str,
+            _thread_id: Option<&str>,
+        ) -> Result<MessageResponse> {
+            // Phase 36.17.2.2-05: record overflow-chunk MarkdownV2 sends
+            // as a distinct call so tests can distinguish plain `SendMessage`
+            // (used by the intermediate-edit / non-final cursor-strip
+            // overflow path per D-03) from MarkdownV2 sends (the final-edit
+            // overflow path).
+            let id = self.next_message_id.lock().unwrap().clone();
+            self.calls
+                .lock()
+                .unwrap()
+                .push(AdapterCall::SendMessageMarkdownV2 {
+                    chat_id: chat_id.to_string(),
+                    content: content.to_string(),
+                });
+            Ok(MessageResponse {
+                message_id: id,
+                chat_id: chat_id.to_string(),
+                platform: Platform::Telegram,
+            })
         }
 
         async fn delete_message(&self, _chat_id: &str, _message_id: &str) -> Result<()> {
@@ -486,8 +533,16 @@ mod tests {
             .iter()
             .filter(|c| matches!(c, AdapterCall::EditMessage { .. }))
             .count();
-        // Continuation chunk(s): send_message
-        let send_count = calls
+        // Phase 36.17.2.2-05: continuation chunk(s) now route through
+        // send_message_markdown_v2 (D-Discretion: "every overflow chunk
+        // uses send_message_markdown_v2 so the entire response renders
+        // consistently"). Plain SendMessage from the final branch is now
+        // never expected.
+        let send_md_count = calls
+            .iter()
+            .filter(|c| matches!(c, AdapterCall::SendMessageMarkdownV2 { .. }))
+            .count();
+        let send_plain_count = calls
             .iter()
             .filter(|c| matches!(c, AdapterCall::SendMessage { .. }))
             .count();
@@ -502,8 +557,12 @@ mod tests {
             "Should have at least one plain edit for the first chunk"
         );
         assert!(
-            send_count >= 1,
-            "Should send at least one new message for overflow content"
+            send_md_count >= 1,
+            "Should send at least one new MarkdownV2 message for overflow content (D-Discretion)"
+        );
+        assert_eq!(
+            send_plain_count, 0,
+            "Final-edit overflow path must NOT use plain SendMessage (D-Discretion: every overflow chunk is MarkdownV2)"
         );
         assert_eq!(
             edit_md_count, 1,

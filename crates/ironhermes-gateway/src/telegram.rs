@@ -291,6 +291,82 @@ impl PlatformAdapter for TelegramAdapter {
         })
     }
 
+    async fn send_message_markdown_v2(
+        &self,
+        chat_id: &str,
+        content: &str,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse> {
+        // Phase 36.17.2.2-05 D-01 + D-Discretion: route the overflow-chunk
+        // path through MarkdownV2 so the entire final response renders
+        // consistently. `content` is assumed to have been pre-escaped by
+        // the caller via `crate::markdown_v2::escape_outside_code_blocks`.
+        // D-02 single-retry-as-plain-text fallback mirrors the shape used
+        // by `edit_message_markdown_v2` above.
+        let mut params = serde_json::json!({
+            "chat_id": chat_id,
+            "text": content,
+            "parse_mode": "MarkdownV2",
+        });
+        if let Some(tid) = thread_id {
+            params["message_thread_id"] = serde_json::Value::String(tid.to_string());
+        }
+
+        let result: Result<TgMessage> = self.api_call("sendMessage", &params).await;
+
+        match result {
+            Ok(msg) => Ok(MessageResponse {
+                message_id: msg.message_id.to_string(),
+                chat_id: chat_id.to_string(),
+                platform: Platform::Telegram,
+            }),
+            Err(e) => {
+                // D-02 fallback: detect parse-mode failures via substring match
+                // on the error description (same keyword set as
+                // `edit_message_markdown_v2`).
+                let desc = format!("{e}");
+                let is_parse_failure = desc.contains("can't parse")
+                    || desc.contains("parse entities")
+                    || desc.contains("parse_mode");
+                if !is_parse_failure {
+                    return Err(e);
+                }
+
+                warn!(
+                    chat_id = chat_id,
+                    error = %desc,
+                    "MarkdownV2 parse failed on send_message_markdown_v2; retrying as plain text (D-02 fallback)"
+                );
+
+                let mut plain_params = serde_json::json!({
+                    "chat_id": chat_id,
+                    "text": content,
+                });
+                if let Some(tid) = thread_id {
+                    plain_params["message_thread_id"] =
+                        serde_json::Value::String(tid.to_string());
+                }
+
+                match self.api_call::<TgMessage>("sendMessage", &plain_params).await {
+                    Ok(msg) => Ok(MessageResponse {
+                        message_id: msg.message_id.to_string(),
+                        chat_id: chat_id.to_string(),
+                        platform: Platform::Telegram,
+                    }),
+                    Err(retry_err) => {
+                        error!(
+                            chat_id = chat_id,
+                            original_error = %desc,
+                            retry_error = %retry_err,
+                            "D-02 plain-text retry also failed on send_message_markdown_v2"
+                        );
+                        Err(retry_err)
+                    }
+                }
+            }
+        }
+    }
+
     async fn edit_message(&self, chat_id: &str, message_id: &str, content: &str) -> Result<()> {
         // Plain text during streaming edits per D-03 (no parse_mode)
         let params = serde_json::json!({
