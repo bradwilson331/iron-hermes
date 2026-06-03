@@ -9,6 +9,7 @@
 pub mod boards;
 pub mod commands;
 pub mod format;
+pub mod goal_loop;
 pub mod store_reader_impl;
 
 pub use store_reader_impl::KanbanStoreReaderImpl;
