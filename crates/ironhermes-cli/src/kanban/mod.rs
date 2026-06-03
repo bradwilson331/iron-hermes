@@ -79,6 +79,11 @@ pub enum KanbanCommands {
         /// Budget exhaustion → kanban_block. Default 20 per the canonical spec.
         #[arg(long, default_value_t = 20)]
         goal_max_turns: u32,
+        /// Phase 36.3.7.13 F-03: tool filter preset for goal-mode workers.
+        /// One of: restricted (15 safe tools, default), extended (18 tools + terminal), full (no filter).
+        /// Only meaningful when --goal is set. Stored in DB; emitted as HERMES_KANBAN_GOAL_TOOLSET.
+        #[arg(long, requires = "goal")]
+        goal_toolset: Option<String>,
         /// Idempotency key — short-circuits to existing task if key already exists
         #[arg(long)]
         idempotency_key: Option<String>,
@@ -594,6 +599,7 @@ pub async fn handle_kanban_command(cmd: KanbanCommands, board: Option<String>) -
             triage,
             goal,
             goal_max_turns,
+            goal_toolset,
             idempotency_key,
             max_runtime,
             max_retries,
@@ -603,9 +609,9 @@ pub async fn handle_kanban_command(cmd: KanbanCommands, board: Option<String>) -
         } => {
             commands::cmd_create(
                 title, assignee, body, parents, tenant, workspace, skills,
-                priority, triage, goal, goal_max_turns, idempotency_key,
-                max_runtime, max_retries, scheduled_at, branch, json,
-                board.as_deref(),
+                priority, triage, goal, goal_max_turns, goal_toolset,
+                idempotency_key, max_runtime, max_retries, scheduled_at,
+                branch, json, board.as_deref(),
             )
             .await
         }

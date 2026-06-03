@@ -13,7 +13,10 @@ use crate::error::Result;
 ///
 /// v2 — Phase 36.3.7.12: adds `goal_mode`, `goal_max_turns`, `goal_turns_used`
 /// columns to `tasks` for the in-session worker goal loop (D-01).
-pub const SCHEMA_VERSION: i64 = 2;
+///
+/// v3 — Phase 36.3.7.13: adds `goal_toolset TEXT NULL` to `tasks`
+/// for the restricted/extended/full toolset preset (D-B1).
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// Full DDL executed on every open via `execute_batch`.
 /// Order: pragmas → schema_version → 5 tables → indexes.
@@ -61,7 +64,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     -- the D-03 budget default at the column level.
     goal_mode               INTEGER NOT NULL DEFAULT 0,
     goal_max_turns          INTEGER NOT NULL DEFAULT 20,
-    goal_turns_used         INTEGER NOT NULL DEFAULT 0
+    goal_turns_used         INTEGER NOT NULL DEFAULT 0,
+    -- Phase 36.3.7.13 — v3 adds goal_toolset (D-B1).
+    goal_toolset            TEXT
 );
 
 -- -----------------------------------------------------------------------
@@ -210,6 +215,17 @@ pub fn run_migrations(conn: &mut Connection, current: i64) -> Result<()> {
             [],
         );
         conn.execute("UPDATE schema_version SET version = 2", [])?;
+    }
+    if current < 3 {
+        // Phase 36.3.7.13: add goal_toolset TEXT NULL to tasks (D-B1).
+        //
+        // NULL on existing goal_mode cards resolves to "restricted" at
+        // worker spawn (D-E1). Same `let _ =` idempotency pattern as v1→v2.
+        let _ = conn.execute(
+            "ALTER TABLE tasks ADD COLUMN goal_toolset TEXT",
+            [],
+        );
+        conn.execute("UPDATE schema_version SET version = 3", [])?;
     }
     Ok(())
 }

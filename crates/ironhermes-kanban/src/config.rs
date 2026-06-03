@@ -104,6 +104,19 @@ pub struct KanbanConfig {
     /// back to the main provider. Mirrors `decomposer_model` resolution.
     #[serde(default)]
     pub judge_model: String,
+
+    /// Inner-loop iteration cap for goal-mode workers (Phase 36.3.7.13 F-03).
+    ///
+    /// The worker's `config.agent.max_iterations` is clamped to
+    /// `min(original, goal_inner_max_iterations)` before the in-session
+    /// loop starts. Prevents run-away inner loops when the per-turn LLM
+    /// calls are themselves expensive.
+    ///
+    /// Default 10 — conservative cap that is well below the typical
+    /// `max_iterations` default (50) while still allowing meaningful
+    /// per-turn work. Operators can raise it per-board in config.yaml.
+    #[serde(default = "default_goal_inner_max_iterations")]
+    pub goal_inner_max_iterations: u32,
 }
 
 impl Default for KanbanConfig {
@@ -125,6 +138,7 @@ impl Default for KanbanConfig {
             decomposer_model: String::new(),
             auto_promote_children: default_auto_promote_children(),
             judge_model: String::new(),
+            goal_inner_max_iterations: default_goal_inner_max_iterations(),
         }
     }
 }
@@ -169,6 +183,10 @@ fn default_auto_promote_children() -> bool {
     true
 }
 
+fn default_goal_inner_max_iterations() -> u32 {
+    10
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,6 +212,8 @@ mod tests {
         // Phase 36.3.7.12 D-05: judge_model default is empty (resolves via
         // auxiliary.kanban_judge then main provider).
         assert!(cfg.judge_model.is_empty());
+        // Phase 36.3.7.13 F-03: inner-loop cap defaults to 10.
+        assert_eq!(cfg.goal_inner_max_iterations, 10);
     }
 
     #[test]

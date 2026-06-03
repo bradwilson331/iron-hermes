@@ -168,6 +168,11 @@ impl Tool for KanbanCreateTool {
                         "description": "Per-task turn budget when goal_mode=true. Budget exhaustion → kanban_block. Default 20.",
                         "default": 20
                     },
+                    "goal_toolset": {
+                        "type": "string",
+                        "description": "Tool filter preset for goal-mode workers: 'restricted' (15 safe tools, default), 'extended' (18 tools + terminal), or 'full' (no filter). Only used when goal_mode=true.",
+                        "enum": ["restricted", "extended", "full"]
+                    },
                     "board": {
                         "type": "string",
                         "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
@@ -293,6 +298,12 @@ impl Tool for KanbanCreateTool {
                 .and_then(|v| v.as_u64())
                 .and_then(|n| u32::try_from(n).ok())
                 .unwrap_or(0),
+            // Phase 36.3.7.13 D-G1: goal_toolset from tool args → store.
+            // None → NULL in DB → resolves to "restricted" at spawn (D-E1).
+            goal_toolset: args
+                .get("goal_toolset")
+                .and_then(|v| v.as_str())
+                .map(String::from),
         };
 
         // Open per-board store (D-08: create task in the resolved board's DB).

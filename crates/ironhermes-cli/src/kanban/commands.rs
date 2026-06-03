@@ -128,6 +128,7 @@ pub async fn cmd_create(
     triage: bool,
     goal: bool,
     goal_max_turns: u32,
+    goal_toolset: Option<String>,
     idempotency_key: Option<String>,
     max_runtime: Option<String>,
     max_retries: Option<i64>,
@@ -167,6 +168,10 @@ pub async fn cmd_create(
         // (default_value_t = 20) preserves D-03 even if a caller passes 0.
         goal_mode: goal,
         goal_max_turns,
+        // Phase 36.3.7.13 F-03 / D-G1: --goal-toolset forwarded verbatim to
+        // the store (None → NULL in DB → worker warns + skips filter per D-E2).
+        // clap requires = "goal" enforces --goal-toolset only when --goal is set.
+        goal_toolset,
     };
 
     let task = store.create_task(&title, &assignee, opts)
