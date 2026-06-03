@@ -116,6 +116,26 @@ impl PlatformAdapter for RecordingPlatformAdapter {
         Ok(())
     }
 
+    async fn send_message_markdown_v2(
+        &self,
+        chat_id: &str,
+        content: &str,
+        _thread_id: Option<&str>,
+    ) -> Result<MessageResponse> {
+        // Phase 36.17.2.2-05: record into the same `sent` log as plain
+        // send_message so existing assertions on send-count still hold
+        // if a future overflow-chunk path lands on this adapter.
+        self.sent
+            .lock()
+            .await
+            .push((chat_id.to_string(), content.to_string()));
+        Ok(MessageResponse {
+            message_id: "stub-msg-id".to_string(),
+            chat_id: chat_id.to_string(),
+            platform: Platform::Telegram,
+        })
+    }
+
     async fn delete_message(&self, _chat_id: &str, _message_id: &str) -> Result<()> {
         Ok(())
     }
@@ -205,6 +225,25 @@ impl PlatformAdapter for FailingPlatformAdapter {
         _content: &str,
     ) -> Result<()> {
         Ok(())
+    }
+
+    async fn send_message_markdown_v2(
+        &self,
+        chat_id: &str,
+        content: &str,
+        _thread_id: Option<&str>,
+    ) -> Result<MessageResponse> {
+        // Phase 36.17.2.2-05: intentionally fails like send_message so
+        // the fixture's fast-exit semantics carry over to any future
+        // overflow-chunk path that lands on this adapter (records before
+        // returning Err).
+        self.sent
+            .lock()
+            .await
+            .push((chat_id.to_string(), content.to_string()));
+        Err(anyhow::anyhow!(
+            "FailingPlatformAdapter::send_message_markdown_v2 — intentional test failure to fast-exit run_agent"
+        ))
     }
 
     async fn delete_message(&self, _chat_id: &str, _message_id: &str) -> Result<()> {

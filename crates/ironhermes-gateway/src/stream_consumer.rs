@@ -271,6 +271,10 @@ mod tests {
             chat_id: String,
             content: String,
         },
+        SendMessageMarkdownV2 {
+            chat_id: String,
+            content: String,
+        },
     }
 
     struct MockAdapter {
@@ -338,6 +342,32 @@ mod tests {
                     content: content.to_string(),
                 });
             Ok(())
+        }
+
+        async fn send_message_markdown_v2(
+            &self,
+            chat_id: &str,
+            content: &str,
+            _thread_id: Option<&str>,
+        ) -> Result<MessageResponse> {
+            // Phase 36.17.2.2-05: record overflow-chunk MarkdownV2 sends
+            // as a distinct call so tests can distinguish plain `SendMessage`
+            // (used by the intermediate-edit / non-final cursor-strip
+            // overflow path per D-03) from MarkdownV2 sends (the final-edit
+            // overflow path).
+            let id = self.next_message_id.lock().unwrap().clone();
+            self.calls
+                .lock()
+                .unwrap()
+                .push(AdapterCall::SendMessageMarkdownV2 {
+                    chat_id: chat_id.to_string(),
+                    content: content.to_string(),
+                });
+            Ok(MessageResponse {
+                message_id: id,
+                chat_id: chat_id.to_string(),
+                platform: Platform::Telegram,
+            })
         }
 
         async fn delete_message(&self, _chat_id: &str, _message_id: &str) -> Result<()> {

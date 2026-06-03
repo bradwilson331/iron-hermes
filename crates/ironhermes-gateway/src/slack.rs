@@ -103,6 +103,17 @@ impl PlatformAdapter for SlackAdapter {
         self.edit_message(chat_id, message_id, content).await
     }
 
+    async fn send_message_markdown_v2(
+        &self,
+        chat_id: &str,
+        content: &str,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse> {
+        // Phase 36.17.2.2-05: Slack uses its own `mrkdwn` dialect — no
+        // MarkdownV2 concept. Delegate to plain `send_message`.
+        self.send_message(chat_id, content, thread_id).await
+    }
+
     async fn delete_message(&self, chat_id: &str, message_id: &str) -> Result<()> {
         let session = self.client.open_session(&self.bot_token);
         let req = SlackApiChatDeleteRequest::new(chat_id.into(), message_id.into());

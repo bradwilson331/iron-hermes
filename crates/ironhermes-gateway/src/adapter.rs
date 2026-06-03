@@ -31,6 +31,34 @@ pub trait PlatformAdapter: Send + Sync {
         thread_id: Option<&str>,
     ) -> Result<MessageResponse>;
 
+    /// Send a text message using Telegram's `parse_mode: MarkdownV2`
+    /// (Phase 36.17.2.2 D-01 — sibling of [`Self::send_message`] for the
+    /// `stream_consumer.rs` overflow-chunk path per CONTEXT.md D-Discretion
+    /// recommendation: "every overflow chunk uses `send_message_markdown_v2`
+    /// so the entire response renders consistently").
+    ///
+    /// **Caller contract:** `content` MUST be pre-escaped via
+    /// `crate::markdown_v2::escape_outside_code_blocks` before invocation.
+    /// The trait surface does NOT auto-escape — the production call sites
+    /// in `stream_consumer.rs::flush(final_edit=true)`'s overflow branch
+    /// apply the escape themselves. Implementors that do not distinguish
+    /// MarkdownV2 from plain text (Discord, Slack, test fixtures) MAY
+    /// delegate to [`Self::send_message`]; only `TelegramAdapter` actually
+    /// sets `parse_mode: MarkdownV2` and applies the D-02 fallback.
+    ///
+    /// **D-02 fallback (`TelegramAdapter` only):** when the Bot API returns a
+    /// 400 whose description substring-matches a parse-mode failure, the
+    /// implementation logs `warn!`, re-issues the same call once with
+    /// `parse_mode` OMITTED, and returns the retry result. On second
+    /// failure logs `error!` and returns the retry `Err`. Non-Telegram
+    /// adapters need not implement the fallback.
+    async fn send_message_markdown_v2(
+        &self,
+        chat_id: &str,
+        content: &str,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse>;
+
     /// Edit an existing message (plain text — for streaming edits).
     async fn edit_message(&self, chat_id: &str, message_id: &str, content: &str) -> Result<()>;
 
