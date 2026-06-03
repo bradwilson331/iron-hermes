@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
 status: paused
-stopped_at: Phase 36.3.7.13 context gathered
-last_updated: "2026-06-03T17:33:52.369Z"
+stopped_at: Phase 36.17.2.2 context gathered
+last_updated: "2026-06-03T19:13:46.728Z"
 last_activity: 2026-06-03 -- Plans 01/02/03 merged to develop (Schema-v3 migration shipped); plan 04 deferred
 progress:
   total_phases: 58
@@ -585,6 +585,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-06-03T05:16:54.593Z
-Stopped at: Phase 36.3.7.13 context gathered
-Resume file: .planning/phases/36.3.7.13-kanban-worker-cross-profile-ergonomics/36.3.7.13-CONTEXT.md
+Last session: 2026-06-03T19:13:46.721Z
+Stopped at: Phase 36.17.2.2 context gathered
+Resume file: .planning/phases/36.17.2.2-ironhermes-telegram-client-delivers-streaming-final-media-me/36.17.2.2-CONTEXT.md
