@@ -233,6 +233,52 @@ impl KanbanStore {
         Self::open_labeled(path, slug)
     }
 
+    /// Phase 36.3.7.13 D-A1: read `HERMES_KANBAN_DB` first, fall back to
+    /// `kanban_db_path()`. Single source of truth for env-bridged opens.
+    ///
+    /// Dispatcher → worker bridge: workers ALWAYS call this; `HERMES_KANBAN_DB`
+    /// is set by `build_kanban_worker_env` (`worker_spawn.rs:112-115`).
+    ///
+    /// Emits a `tracing::info!` on every env-override open (D-H1). Operators
+    /// can silence via `RUST_LOG=kanban.db=warn`.
+    pub fn open_from_env() -> Result<Self> {
+        if let Ok(path) = std::env::var("HERMES_KANBAN_DB") {
+            tracing::info!(
+                target: "kanban.db",
+                path = %path,
+                "kanban store: using HERMES_KANBAN_DB override"
+            );
+            Self::open(std::path::PathBuf::from(path))
+        } else {
+            Self::open(crate::paths::kanban_db_path())
+        }
+    }
+
+    /// Phase 36.3.7.13 D-A2: env wins; slug is a fallback hint.
+    ///
+    /// Collapses the `Some(slug) => open_for_board(slug) / None => open_default()`
+    /// pattern present at all 8 dashboard handlers into a single call.
+    ///
+    /// Priority: `HERMES_KANBAN_DB` env > slug > `kanban_db_path()` default.
+    ///
+    /// Emits a `tracing::info!` on every env-override open (D-H1). Operators
+    /// can silence via `RUST_LOG=kanban.db=warn`.
+    pub fn open_from_env_or_board(slug: Option<&str>) -> Result<Self> {
+        if let Ok(path) = std::env::var("HERMES_KANBAN_DB") {
+            tracing::info!(
+                target: "kanban.db",
+                path = %path,
+                slug = ?slug,
+                "kanban store: using HERMES_KANBAN_DB override; slug ignored"
+            );
+            Self::open(std::path::PathBuf::from(path))
+        } else if let Some(s) = slug {
+            Self::open_for_board(s)
+        } else {
+            Self::open(crate::paths::kanban_db_path())
+        }
+    }
+
     /// Back-compat alias for [`KanbanStore::open`].
     ///
     /// Existing callers (`KanbanStore::new(path)`) continue to work unchanged.

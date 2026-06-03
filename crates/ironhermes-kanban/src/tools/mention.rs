@@ -196,7 +196,8 @@ impl Tool for KanbanMentionTool {
         // T-03: store opened ONCE per call; parse_mentions runs in Step 6 after we
         // have the body. Brief extra time holding the connection is acceptable and
         // simpler than a two-open dance.
-        let mut store = KanbanStore::open_for_board(&board_ctx.slug)
+        // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+        let mut store = KanbanStore::open_from_env_or_board(Some(&board_ctx.slug))
             .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
 
         let parent = match store.get_task(&task_id) {

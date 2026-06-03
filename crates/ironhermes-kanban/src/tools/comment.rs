@@ -146,7 +146,8 @@ impl Tool for KanbanCommentTool {
         if let Some(claim_lock) = claim_lock_env {
             // Worker mode — gate the write on claim validity (D-41).
             // Open per-board store.
-            let mut store = KanbanStore::open_for_board(&board_ctx.slug)
+            // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+            let mut store = KanbanStore::open_from_env_or_board(Some(&board_ctx.slug))
                 .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
 
             let comment_id = new_id("c");
@@ -184,7 +185,8 @@ impl Tool for KanbanCommentTool {
             }
         } else {
             // Orchestrator mode or unclaimed worker — direct insert.
-            let mut store = KanbanStore::open_for_board(&board_ctx.slug)
+            // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+            let mut store = KanbanStore::open_from_env_or_board(Some(&board_ctx.slug))
                 .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
             let comment = store.add_comment(&task_id, &author, &body)?;
             crate::tools::common::ok_with_board(json!({

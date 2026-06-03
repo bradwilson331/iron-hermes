@@ -51,12 +51,9 @@ pub async fn fetch_board(
     {
         let board_owned = board;
         let tasks = tokio::task::spawn_blocking(move || -> Result<Vec<TaskRow>, String> {
-            let store = match board_owned {
-                Some(ref slug) => KanbanStore::open_for_board(slug)
-                    .map_err(|e| format!("open_for_board('{}'): {e}", slug))?,
-                None => KanbanStore::open_default()
-                    .map_err(|e| format!("open_default: {e}"))?,
-            };
+            // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+            let store = KanbanStore::open_from_env_or_board(board_owned.as_deref())
+                .map_err(|e| format!("open_from_env_or_board({:?}): {e}", board_owned))?;
             let filters = ListFilters {
                 archived: include_archived,
                 ..Default::default()
@@ -115,12 +112,9 @@ pub async fn fetch_task(
         let env = tokio::task::spawn_blocking(
             move || -> Result<WorkerContextEnvelope, String> {
                 use rusqlite::params;
-                let store = match board_owned {
-                    Some(ref slug) => KanbanStore::open_for_board(slug)
-                        .map_err(|e| format!("open_for_board('{}'): {e}", slug))?,
-                    None => KanbanStore::open_default()
-                        .map_err(|e| format!("open_default: {e}"))?,
-                };
+                // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+                let store = KanbanStore::open_from_env_or_board(board_owned.as_deref())
+                    .map_err(|e| format!("open_from_env_or_board({:?}): {e}", board_owned))?;
                 let task = store
                     .get_task(&task_id_owned)
                     .map_err(|e| format!("get_task('{}'): {e}", task_id_owned))?;
@@ -278,12 +272,9 @@ pub async fn fetch_task_events(
         let effective_limit: u32 = if limit == 0 { 20 } else { limit };
         let events = tokio::task::spawn_blocking(
             move || -> Result<Vec<KanbanEventRow>, String> {
-                let store = match board_owned {
-                    Some(ref slug) => KanbanStore::open_for_board(slug)
-                        .map_err(|e| format!("open_for_board('{}'): {e}", slug))?,
-                    None => KanbanStore::open_default()
-                        .map_err(|e| format!("open_default: {e}"))?,
-                };
+                // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+                let store = KanbanStore::open_from_env_or_board(board_owned.as_deref())
+                    .map_err(|e| format!("open_from_env_or_board({:?}): {e}", board_owned))?;
                 let mut events = store
                     .get_events(&task_id_owned)
                     .map_err(|e| format!("get_events: {e}"))?;
@@ -335,12 +326,9 @@ pub async fn fetch_task_runs(
         let board_owned = board;
         let runs = tokio::task::spawn_blocking(
             move || -> Result<Vec<TaskRunRow>, String> {
-                let store = match board_owned {
-                    Some(ref slug) => KanbanStore::open_for_board(slug)
-                        .map_err(|e| format!("open_for_board('{}'): {e}", slug))?,
-                    None => KanbanStore::open_default()
-                        .map_err(|e| format!("open_default: {e}"))?,
-                };
+                // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+                let store = KanbanStore::open_from_env_or_board(board_owned.as_deref())
+                    .map_err(|e| format!("open_from_env_or_board({:?}): {e}", board_owned))?;
                 let rows = store
                     .get_runs(&task_id_owned)
                     .map_err(|e| format!("get_runs: {e}"))?;
@@ -396,12 +384,9 @@ pub async fn fetch_comments(
         let rows = tokio::task::spawn_blocking(
             move || -> Result<Vec<CommentRow>, String> {
                 use rusqlite::params;
-                let store = match board_owned {
-                    Some(ref slug) => KanbanStore::open_for_board(slug)
-                        .map_err(|e| format!("open_for_board('{}'): {e}", slug))?,
-                    None => KanbanStore::open_default()
-                        .map_err(|e| format!("open_default: {e}"))?,
-                };
+                // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+                let store = KanbanStore::open_from_env_or_board(board_owned.as_deref())
+                    .map_err(|e| format!("open_from_env_or_board({:?}): {e}", board_owned))?;
                 let mut stmt = store
                     .conn
                     .prepare(
@@ -498,12 +483,9 @@ pub async fn patch_task_status(
 
         let row = tokio::task::spawn_blocking(move || -> Result<TaskRow, String> {
             // Open store (D-18: None → default).
-            let mut store = match board_owned {
-                Some(ref slug) => KanbanStore::open_for_board(slug)
-                    .map_err(|e| format!("open_for_board('{}'): {e}", slug))?,
-                None => KanbanStore::open_default()
-                    .map_err(|e| format!("open_default: {e}"))?,
-            };
+            // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+            let mut store = KanbanStore::open_from_env_or_board(board_owned.as_deref())
+                .map_err(|e| format!("open_from_env_or_board({:?}): {e}", board_owned))?;
 
             // Read current status — required for D-14 validation.
             let current = store
@@ -701,12 +683,9 @@ pub async fn post_comment(
         let body_owned = body.clone();
         let board_owned = board.clone();
         let row = tokio::task::spawn_blocking(move || -> Result<CommentRow, String> {
-            let mut store = match board_owned {
-                Some(ref slug) => KanbanStore::open_for_board(slug)
-                    .map_err(|e| format!("open_for_board('{}'): {e}", slug))?,
-                None => KanbanStore::open_default()
-                    .map_err(|e| format!("open_default: {e}"))?,
-            };
+            // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+            let mut store = KanbanStore::open_from_env_or_board(board_owned.as_deref())
+                .map_err(|e| format!("open_from_env_or_board({:?}): {e}", board_owned))?;
             let comment = store
                 .add_comment(&task_id_owned, "ui", &body_owned)
                 .map_err(|e| format!("add_comment: {e}"))?;
@@ -753,12 +732,9 @@ pub async fn create_task(
         let payload_owned = payload.clone();
         let board_owned = board.clone();
         let row = tokio::task::spawn_blocking(move || -> Result<TaskRow, String> {
-            let mut store = match board_owned {
-                Some(ref slug) => KanbanStore::open_for_board(slug)
-                    .map_err(|e| format!("open_for_board('{}'): {e}", slug))?,
-                None => KanbanStore::open_default()
-                    .map_err(|e| format!("open_default: {e}"))?,
-            };
+            // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+            let mut store = KanbanStore::open_from_env_or_board(board_owned.as_deref())
+                .map_err(|e| format!("open_from_env_or_board({:?}): {e}", board_owned))?;
             let assignee = payload_owned
                 .assignee
                 .clone()

@@ -134,7 +134,8 @@ impl Tool for KanbanBlockTool {
         }
 
         // Open per-board store (D-08).
-        let mut store = KanbanStore::open_for_board(&board_ctx.slug)
+        // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+        let mut store = KanbanStore::open_from_env_or_board(Some(&board_ctx.slug))
             .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
 
         match store.block_task(&task_id, &reason, expected_run_id.as_deref()) {

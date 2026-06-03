@@ -304,7 +304,10 @@ async fn register_kanban_tools_if_applicable(
     let orchestrator_mode = toolsets.contains("kanban");
 
     if worker_mode || orchestrator_mode {
-        let store = match KanbanStore::open_default() {
+        // Phase 36.3.7.13 D-A1: env-bridged open so the store-Arc passed to
+        // register_kanban_tools (which flows to ALL 13 tools, including
+        // decompose/specify via constructor injection) honors HERMES_KANBAN_DB.
+        let store = match KanbanStore::open_from_env() {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to open kanban.db — kanban tools unavailable");
@@ -932,7 +935,9 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         let task_id = std::env::var("HERMES_KANBAN_TASK").unwrap_or_default();
         let run_id = std::env::var("HERMES_KANBAN_RUN_ID").unwrap_or_default();
         let claim_lock = std::env::var("HERMES_KANBAN_CLAIM_LOCK").unwrap_or_default();
-        let kanban_store_for_loop = ironhermes_kanban::KanbanStore::open_default()
+        // Phase 36.3.7.13 D-A1: env-bridged open closes F-01 (cross-profile
+        // DB mismatch) on the CLI one-shot dispatcher → worker bridge.
+        let kanban_store_for_loop = ironhermes_kanban::KanbanStore::open_from_env()
             .context("open kanban store for goal-loop wrapper")?;
         let kanban_store_arc = std::sync::Arc::new(tokio::sync::Mutex::new(kanban_store_for_loop));
 

@@ -115,7 +115,8 @@ impl Tool for KanbanShowTool {
         };
 
         // Open the per-board store (D-08: always use the resolved board's DB).
-        let store = KanbanStore::open_for_board(&board_ctx.slug)
+        // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+        let store = KanbanStore::open_from_env_or_board(Some(&board_ctx.slug))
             .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
 
         // Load the task — map TaskNotFound to a structured rejection (D-08 T-5).

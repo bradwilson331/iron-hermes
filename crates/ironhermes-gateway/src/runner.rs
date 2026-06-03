@@ -1278,7 +1278,10 @@ impl GatewayRunner {
         // site of the Arc moves. The dispatcher's `dispatch_in_gateway` gate +
         // env-flag gate + interval-seconds log line are preserved verbatim.
         // -----------------------------------------------------------------------
-        match ironhermes_kanban::KanbanStore::open_default() {
+        // Phase 36.3.7.13 D-A1: env-bridged open closes F-01 on the gateway
+        // background dispatcher loop. Workers spawned from here read
+        // HERMES_KANBAN_DB to resolve the same DB path.
+        match ironhermes_kanban::KanbanStore::open_from_env() {
             Ok(store) => {
                 let kanban_store_arc =
                     std::sync::Arc::new(tokio::sync::Mutex::new(store));
