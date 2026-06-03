@@ -85,6 +85,36 @@ pub enum KanbanEventKind {
     DecomposeFailed,
 }
 
+// ---------------------------------------------------------------------------
+// Phase 36.3.7.12 — Goal-loop event subkind tags.
+// ---------------------------------------------------------------------------
+//
+// `KanbanEventKind` is FROZEN (Phase 36.3.7.6). Goal-loop events ride on
+// `KanbanEventKind::Edited` with a JSON `subkind` payload tag, mirroring
+// the nd7 quick-task precedent for comment events. No new enum variants.
+//
+// These `pub const &str` symbols are the **type-level contract** between
+// the producer (the goal-loop wrapper at
+// `crates/ironhermes-cli/src/kanban/goal_loop.rs`, landing in Plan 04) and
+// any consumer that filters task_events by subkind (dashboard renderers,
+// tests, future trajectory readers). Importing the symbol instead of
+// duplicating the string literal at every emit site prevents the
+// dashboard/test/emitter drift class of bug.
+//
+// The `frozen_surface_no_new_variants` test in
+// `tests/goal_judge_event_subkind.rs` is the compile-time guard that the
+// enum stays frozen.
+
+/// Judge LLM emitted a met/not_met verdict for the last worker turn.
+pub const GOAL_SUBKIND_JUDGE_VERDICT: &str = "judge_verdict";
+/// Judge LLM call failed (network, rate-limit, malformed response).
+pub const GOAL_SUBKIND_JUDGE_ERROR: &str = "judge_error";
+/// The goal-loop wrapper bumped `tasks.goal_turns_used` via the CAS gate.
+pub const GOAL_SUBKIND_TURN_ADVANCED: &str = "goal_turn_advanced";
+/// The synthetic `kanban_block` reason emitted when the per-card turn
+/// budget is exhausted without judge-met (D-03).
+pub const GOAL_SUBKIND_BUDGET_EXHAUSTED: &str = "goal_budget_exhausted";
+
 impl KanbanEventKind {
     /// snake_case kind name — the canonical wire / DB form.
     pub fn as_str(&self) -> &'static str {
