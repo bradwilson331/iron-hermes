@@ -236,7 +236,9 @@ pub async fn run_kanban_tail_loop(
     // Open the dashboard's own KanbanStore connection (D-16: cross-process
     // WAL boundary — gateway notifier holds its own connection to the same
     // file). Q8: persistent per-loop connection avoids per-tick open cost.
-    let store = match KanbanStore::open_default() {
+    // Phase 36.3.7.13 D-A1: env-bridged open so the dashboard WS tailer
+    // honors HERMES_KANBAN_DB when run under a non-default profile.
+    let store = match KanbanStore::open_from_env() {
         Ok(s) => Arc::new(TokioMutex::new(s)),
         Err(e) => {
             warn!(error = %e, "kanban tail: failed to open default board; tail disabled");

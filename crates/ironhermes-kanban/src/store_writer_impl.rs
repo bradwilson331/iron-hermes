@@ -4,9 +4,13 @@
 //! to construct it at CommandContext build-time and ironhermes-cli already
 //! depends on ironhermes-gateway (the reverse direction would be circular).
 //!
-//! Each method opens a fresh `KanbanStore::open_default()` and discards it
+//! Each method opens a fresh `KanbanStore::open_from_env()` and discards it
 //! after the call. Stateless; safe to clone the trait-object Arc into multiple
 //! contexts; no shared mutable state at the impl layer.
+//!
+//! Phase 36.3.7.13 D-A1: opens are env-bridged via `HERMES_KANBAN_DB` so
+//! dashboard write paths share the same DB as the dispatcher when run under
+//! a non-default profile.
 
 use ironhermes_core::commands::context::{KanbanStoreWriter, SubscriptionView};
 
@@ -30,7 +34,10 @@ impl Default for KanbanStoreWriterImpl {
 }
 
 fn open_store() -> Result<KanbanStore, String> {
-    KanbanStore::open_default().map_err(|e| format!("open kanban.db: {}", e))
+    // Phase 36.3.7.13 D-A1: env-bridged open so the dashboard write paths
+    // (which run in the same dispatcher-bridged context as the SPA reads)
+    // honor HERMES_KANBAN_DB. Tracked in RESEARCH.md Risk 2.
+    KanbanStore::open_from_env().map_err(|e| format!("open kanban.db: {}", e))
 }
 
 fn to_view(s: Subscription) -> SubscriptionView {
