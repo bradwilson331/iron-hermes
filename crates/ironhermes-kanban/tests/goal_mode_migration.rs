@@ -53,7 +53,7 @@ fn open_store(dir: &TempDir) -> KanbanStore {
 }
 
 /// Fresh DB path: DDL block at schema.rs must include the three goal-mode columns,
-/// schema_version row lands at 2.
+/// schema_version row lands at 3 (current SCHEMA_VERSION after Phase 36.3.7.13 v3 bump).
 #[test]
 fn fresh_db_has_v2_columns() {
     let dir = tempfile::tempdir().unwrap();
@@ -103,12 +103,13 @@ fn fresh_db_has_v2_columns() {
             r.get(0)
         })
         .expect("read schema_version");
-    assert_eq!(version, 2, "fresh DB must land at schema_version 2");
+    // Phase 36.3.7.13: schema is now at v3; fresh DBs land at 3.
+    assert_eq!(version, 3, "fresh DB must land at schema_version 3 (current SCHEMA_VERSION)");
 }
 
 /// Migration-ladder path: a hand-crafted v1 DB (no goal-mode columns,
 /// schema_version row = 1) re-opened via `KanbanStore::new` must emerge with
-/// all three columns present and schema_version = 2.
+/// all three columns present and schema_version = 3 (both v1→v2 and v2→v3 ladders run).
 #[test]
 fn v1_db_upgrades_to_v2() {
     let dir = tempfile::tempdir().unwrap();
@@ -175,6 +176,12 @@ fn v1_db_upgrades_to_v2() {
         "v1 → v2 migration must add goal_turns_used column; actual columns: {:?}",
         names
     );
+    // Phase 36.3.7.13: v2→v3 ladder also runs, adding goal_toolset.
+    assert!(
+        names.contains(&"goal_toolset"),
+        "v1 → v3 full migration must add goal_toolset column; actual columns: {:?}",
+        names
+    );
 
     let version: i64 = store
         .conn
@@ -182,22 +189,24 @@ fn v1_db_upgrades_to_v2() {
             r.get(0)
         })
         .expect("read schema_version after migration");
+    // Phase 36.3.7.13: both v1→v2 and v2→v3 ladders run; final version is 3.
     assert_eq!(
-        version, 2,
-        "schema_version row must be bumped to 2 after migration"
+        version, 3,
+        "schema_version row must be bumped to 3 after full migration (v1→v2→v3)"
     );
 }
 
-/// Re-opening a v2 DB must be a no-op. No `PartialReExec`, no duplicate
+/// Re-opening a v3 DB must be a no-op. No `PartialReExec`, no duplicate
 /// column error, no version regression. RESEARCH Finding 5 idempotency
 /// contract — `let _ = conn.execute("ALTER TABLE ... ADD COLUMN ...")` must
 /// swallow the duplicate-column error.
+/// Phase 36.3.7.13: updated to assert version 3 (was 2 before v3 bump).
 #[test]
 fn migration_is_idempotent() {
     let dir = tempfile::tempdir().unwrap();
     let path: PathBuf = dir.path().join("kanban.db");
 
-    // First open creates the v2 schema.
+    // First open creates the v3 schema.
     {
         let _store = KanbanStore::new(&path).expect("first open");
     }
@@ -211,12 +220,13 @@ fn migration_is_idempotent() {
             r.get(0)
         })
         .expect("read schema_version on second open");
-    assert_eq!(version, 2, "schema_version must remain 2 on re-open");
+    // Phase 36.3.7.13: schema is now at v3.
+    assert_eq!(version, 3, "schema_version must remain 3 on re-open");
 
-    // All three goal-mode columns are still present after the second open.
+    // All goal-mode columns (v2) and goal_toolset (v3) are still present after the second open.
     let cols = read_tasks_columns(&store.conn);
     let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
-    for col in &["goal_mode", "goal_max_turns", "goal_turns_used"] {
+    for col in &["goal_mode", "goal_max_turns", "goal_turns_used", "goal_toolset"] {
         assert!(
             names.contains(col),
             "column '{}' must persist after idempotent re-open; actual: {:?}",

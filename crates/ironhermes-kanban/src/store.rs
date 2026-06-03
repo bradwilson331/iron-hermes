@@ -61,6 +61,10 @@ pub struct CreateTaskOptions {
     /// of 20 at the producer level before binding. The DDL DEFAULT 20 also
     /// guarantees a sane value when this struct is not the write path.
     pub goal_max_turns: u32,
+    /// Phase 36.3.7.13 D-B1: toolset preset for goal-mode workers.
+    /// `None` = NULL in DB = resolves to `"restricted"` at spawn (D-E1).
+    /// Non-goal cards: always `None`, ignored by dispatcher.
+    pub goal_toolset: Option<String>,
 }
 
 /// Filters for [`KanbanStore::list_tasks`].
@@ -406,10 +410,12 @@ impl KanbanStore {
     fn row_to_task(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         // Phase 36.3.7.12: SELECT order must end with
         // (..., goal_mode, goal_max_turns, goal_turns_used).
+        // Phase 36.3.7.13: column index 26 = goal_toolset TEXT NULL.
         // SQLite stores goal_mode as INTEGER 0/1; map to bool via `!= 0`.
         let goal_mode_int: i64 = row.get(23)?;
         let goal_max_turns_i: i64 = row.get(24)?;
         let goal_turns_used_i: i64 = row.get(25)?;
+        let goal_toolset: Option<String> = row.get(26)?;
         Ok(Task {
             id: row.get(0)?,
             title: row.get(1)?,
@@ -437,6 +443,7 @@ impl KanbanStore {
             goal_mode: goal_mode_int != 0,
             goal_max_turns: goal_max_turns_i.max(0) as u32,
             goal_turns_used: goal_turns_used_i.max(0) as u32,
+            goal_toolset,
         })
     }
 
@@ -518,9 +525,9 @@ impl KanbanStore {
             "INSERT INTO tasks \
              (id, title, body, assignee, status, priority, tenant, workspace, skills, \
               idempotency_key, consecutive_failures, max_retries, max_runtime_seconds, \
-              scheduled_at, created_by, created_at, goal_mode, goal_max_turns) \
+              scheduled_at, created_by, created_at, goal_mode, goal_max_turns, goal_toolset) \
              VALUES \
-             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+             (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 0, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
             params![
                 id,
                 title,
@@ -539,6 +546,7 @@ impl KanbanStore {
                 now,
                 goal_mode_int,
                 goal_max_turns,
+                opts.goal_toolset,
             ],
         )?;
 
@@ -567,7 +575,7 @@ impl KanbanStore {
                  idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
                  max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
                  current_step_key, created_by, created_at, started_at, ended_at, \
-                 goal_mode, goal_max_turns, goal_turns_used \
+                 goal_mode, goal_max_turns, goal_turns_used, goal_toolset \
                  FROM tasks WHERE id = ?1",
                 params![id],
                 Self::row_to_task,
@@ -585,7 +593,7 @@ impl KanbanStore {
              idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
              max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
              current_step_key, created_by, created_at, started_at, ended_at, \
-             goal_mode, goal_max_turns, goal_turns_used \
+             goal_mode, goal_max_turns, goal_turns_used, goal_toolset \
              FROM tasks WHERE 1=1",
         );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -949,7 +957,7 @@ impl KanbanStore {
                      idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
                      max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
                      current_step_key, created_by, created_at, started_at, ended_at, \
-                     goal_mode, goal_max_turns, goal_turns_used \
+                     goal_mode, goal_max_turns, goal_turns_used, goal_toolset \
                      FROM tasks WHERE idempotency_key = ?1",
                     params![kr],
                     Self::row_to_task,
@@ -1916,7 +1924,7 @@ impl KanbanStore {
                  idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
                  max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
                  current_step_key, created_by, created_at, started_at, ended_at, \
-                 goal_mode, goal_max_turns, goal_turns_used \
+                 goal_mode, goal_max_turns, goal_turns_used, goal_toolset \
                  FROM tasks WHERE idempotency_key = ?1",
                 params![key],
                 Self::row_to_task,
@@ -1958,7 +1966,7 @@ impl KanbanStore {
                  idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
                  max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
                  current_step_key, created_by, created_at, started_at, ended_at, \
-                 goal_mode, goal_max_turns, goal_turns_used \
+                 goal_mode, goal_max_turns, goal_turns_used, goal_toolset \
                  FROM tasks WHERE id = ?1",
                 params![task_id],
                 Self::row_to_task,
@@ -2115,7 +2123,7 @@ impl KanbanStore {
                  idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
                  max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
                  current_step_key, created_by, created_at, started_at, ended_at, \
-                 goal_mode, goal_max_turns, goal_turns_used \
+                 goal_mode, goal_max_turns, goal_turns_used, goal_toolset \
                  FROM tasks WHERE id = ?1",
                 params![task_id],
                 Self::row_to_task,

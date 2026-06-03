@@ -44,6 +44,8 @@ fn fake_task(id: &str, assignee: &str) -> Task {
         goal_mode: false,
         goal_max_turns: 20,
         goal_turns_used: 0,
+        // Phase 36.3.7.13 D-B1: no toolset preset by default.
+        goal_toolset: None,
     }
 }
 

@@ -813,7 +813,7 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
              idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
              max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
              current_step_key, created_by, created_at, started_at, ended_at, \
-             goal_mode, goal_max_turns, goal_turns_used \
+             goal_mode, goal_max_turns, goal_turns_used, goal_toolset \
              FROM tasks \
              WHERE status='ready' AND (scheduled_at IS NULL OR scheduled_at <= ?1) \
              ORDER BY priority DESC, created_at ASC \
@@ -821,9 +821,11 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
         )?;
         stmt.query_map(params![now, limit], |r| {
             // Phase 36.3.7.12: SELECT now returns 26 columns; bind goal_* into Task.
+            // Phase 36.3.7.13: column 26 = goal_toolset TEXT NULL.
             let goal_mode_int: i64 = r.get(23)?;
             let goal_max_turns_i: i64 = r.get(24)?;
             let goal_turns_used_i: i64 = r.get(25)?;
+            let goal_toolset: Option<String> = r.get(26)?;
             Ok(Task {
                 id: r.get(0)?,
                 title: r.get(1)?,
@@ -851,6 +853,7 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
                 goal_mode: goal_mode_int != 0,
                 goal_max_turns: goal_max_turns_i.max(0) as u32,
                 goal_turns_used: goal_turns_used_i.max(0) as u32,
+                goal_toolset,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?

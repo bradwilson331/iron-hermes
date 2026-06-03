@@ -293,6 +293,12 @@ impl Tool for KanbanCreateTool {
                 .and_then(|v| v.as_u64())
                 .and_then(|n| u32::try_from(n).ok())
                 .unwrap_or(0),
+            // Phase 36.3.7.13 D-G1: goal_toolset from tool args → store.
+            // None → NULL in DB → resolves to "restricted" at spawn (D-E1).
+            goal_toolset: args
+                .get("goal_toolset")
+                .and_then(|v| v.as_str())
+                .map(String::from),
         };
 
         // Open per-board store (D-08: create task in the resolved board's DB).

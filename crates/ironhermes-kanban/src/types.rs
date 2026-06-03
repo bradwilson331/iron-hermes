@@ -85,6 +85,12 @@ pub struct Task {
     /// by reclaim+respawn (Pitfall 4).
     #[serde(default)]
     pub goal_turns_used: u32,
+    // Phase 36.3.7.13 — D-B1: toolset preset for goal-mode workers.
+    /// Named toolset preset. One of `"restricted"` (default), `"extended"`,
+    /// or `"full"`. NULL in DB resolves to `"restricted"` at worker spawn
+    /// (D-E1). Non-goal cards: field is always `None`, ignored by dispatcher.
+    #[serde(default)]
+    pub goal_toolset: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
