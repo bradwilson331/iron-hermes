@@ -208,6 +208,16 @@ Plans:
 - [x] 36.17.2-04-PLAN.md — Telegram live UAT runbook update + blocking-human checkpoint: rewrite session_queue_telegram_uat.md Scenario 1 (👁 at pop time, not dispatch); add Scenario 5 (T-36.17.2-01 worker-exit/dispatch race); add Scenario 6 (T-36.17.2-04 multimodal sidecar lockstep); D-12 deferred footnote; preserve cap-hit + /new + drain-mode scenarios verbatim; phase sign-off gated on user typing "approved" (D-22, T-36.17.2-01..04)
 - [x] 36.17.2-05-PLAN.md — Slash-command fast-path (closes second UAT failure): runner.rs dispatch loop branches on event.content.starts_with("/") BEFORE UQM.dispatch and tokio::spawns handler.handle_with_multimodal directly so commands bypass the per-chat worker; sem_dispatch permit acquired in spawn (T-36.17.2-06 storm-bypass mitigation); integration test test_slash_command_bypasses_per_chat_worker + live UAT Scenario 7 (D-23..D-27, T-36.17.2-05/06)
 
+### Phase 36.17.2.2: IronHermes Telegram client delivers streaming final media messages (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.17.2
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.17.2.2 to break down)
+
 ### Phase 36.17.2.1: fix /queue slash-command failing to wake parked worker — regression from Phase 36.17.2's mpsc→Notify worker rewrite; /queue pushes to SessionQueue but does not call notify_one(), so 128/129 messages never reach the LLM (UAT 2026-05-28T15:36-15:38 UTC) (INSERTED)
 
 **Goal:** Restore the /queue slash-command's depth-128 buffering by routing the handler's CoreCommandResult::Queued arm through UQM::dispatch (Option B from RESEARCH.md) so push + notify_one() are atomic. Adds a regression integration test that exercises the EXACT production fast-path invocation (handler.handle_with_multimodal against a real parked worker) so this regression cannot recur silently in CI.

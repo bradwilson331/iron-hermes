@@ -2,12 +2,12 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: executing
-stopped_at: Phase 36.3.7.13 paused — plans 01/02/03 complete, plan 04 (docs + UAT) deferred
-last_updated: "2026-06-03T14:30:00.000Z"
-last_activity: 2026-06-03 -- Phase 36.3.7.13 waves 1+2 complete (plans 01/02/03 merged to develop); plan 04 deferred per user
+status: paused
+stopped_at: Phase 36.3.7.13 context gathered
+last_updated: "2026-06-03T17:33:52.369Z"
+last_activity: 2026-06-03 -- Plans 01/02/03 merged to develop (Schema-v3 migration shipped); plan 04 deferred
 progress:
-  total_phases: 57
+  total_phases: 58
   completed_phases: 23
   total_plans: 119
   completed_plans: 115
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 36.3.7.13 (kanban-worker-cross-profile-ergonomics) — PAUSED (3/4 plans done; plan 04 deferred)
-Plan: 4 of 4 (next — docs + LIVE UAT, autonomous:false, deferred per user)
+Plan: 4 of 3 (next — docs + LIVE UAT, autonomous:false, deferred per user)
 Status: Phase 36.3.7.13 paused after Wave 2 — F-01/F-02/F-03 closed; D-D1 docs + D-C1 UAT deferred to a follow-up run
 Last activity: 2026-06-03 -- Plans 01/02/03 merged to develop (Schema-v3 migration shipped); plan 04 deferred
 
@@ -559,6 +559,7 @@ Recent decisions affecting current work:
 - Phase 36.17.3 inserted after Phase 36.17: wire up TUI with gateway queue and slash queue commands (URGENT)
 - Phase 36.17.4 inserted after Phase 36.17: wire up iron_hermes_ui to the gateway queue + slash commands (URGENT)
 - Phase 36.3.7.12 inserted after Phase 36.3.7.11: Goal mode - kanban worker loop (Ralph loop) — autonomous worker primitives on the kanban surface: goal_mode card flag, /goal worker dispatcher loop, DecomposeFn + SpecifyFn runtime closures wired into AgentRuntime, threat model for auto-advance. Companion to Phase 36.3.7.11's manual-review dashboard. (URGENT)
+- Phase 36.17.2.2 inserted after Phase 36.17.2: IronHermes Telegram client delivers streaming final media messages (URGENT)
 
 ### Pending Todos
 
