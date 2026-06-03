@@ -26,7 +26,7 @@ use ironhermes_core::{
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_tools::ToolRegistry;
 
-use crate::adapter::{MessageHandler, PlatformAdapter};
+use crate::adapter::{MediaSender, MessageHandler, PlatformAdapter};
 use crate::multimodal::ProcessedAttachments;
 use crate::rate_limiter::{PerUserRateLimiter, with_rate_limit_retry};
 use crate::session::{SessionKey, SessionStore};
@@ -167,6 +167,13 @@ pub struct GatewayMessageHandler {
     /// arm falls back to the original direct-try_push code path (degraded —
     /// no wake, but tests that hand-spawn workers do not depend on Notify).
     user_queue_manager: Option<Arc<UserQueueManager>>,
+    /// Phase 36.17.2.2 D-18: optional `MediaSender` impl wired by
+    /// `GatewayRunner` on the Telegram start path via `set_media_sender`.
+    /// Discord/Slack/web start paths leave this `None`; the D-19 dispatch
+    /// loop in `run_agent` warns and drops extracted `<MEDIA: ...>` refs
+    /// on those platforms (Pitfall 3 silent-drop mitigation — every
+    /// dropped-tag turn emits a `warn!` with the chat_id + ref count).
+    media_sender: Option<Arc<dyn MediaSender>>,
 }
 
 impl GatewayMessageHandler {
@@ -221,6 +228,12 @@ impl GatewayMessageHandler {
             // Handlers built via direct ::new() see None here and fall through
             // to the legacy direct-try_push path in the Queued arm.
             user_queue_manager: None,
+            // Phase 36.17.2.2 D-18: no MediaSender wired until
+            // `GatewayRunner` calls `set_media_sender` on the Telegram start
+            // path. Discord/Slack/web handlers leave this `None`; the D-19
+            // dispatch loop in `run_agent` warns and drops extracted tags
+            // when `media_sender.is_none()`.
+            media_sender: None,
         }
     }
 
@@ -355,6 +368,21 @@ impl GatewayMessageHandler {
     /// `session_queue.try_push` path for backward-compat (D-20 from parent phase).
     pub fn set_user_queue_manager(&mut self, uqm: Arc<UserQueueManager>) {
         self.user_queue_manager = Some(uqm);
+    }
+
+    /// Phase 36.17.2.2 D-18: install the `MediaSender` impl. In production
+    /// `GatewayRunner` clone-casts the same `Arc<TelegramAdapter>` it uses
+    /// for `Arc<dyn PlatformAdapter>` into `Arc<dyn MediaSender>` and threads
+    /// it here (clone-cast twice, NEVER upcast — see RESEARCH Open Q4 /
+    /// Assumption A7). Discord/Slack/web start paths do NOT call this; on
+    /// those platforms `media_sender` stays `None` and the D-19 dispatch
+    /// loop in `run_agent` warns + drops any extracted `<MEDIA: ...>` refs
+    /// (Pitfall 3 silent-drop mitigation — `warn!` emits chat_id + ref count
+    /// so operators can see the misconfiguration). Setter pattern (rather
+    /// than constructor param) keeps the 5 existing `GatewayMessageHandler::new`
+    /// call sites stable across production + 4 test fixtures.
+    pub fn set_media_sender(&mut self, sender: Arc<dyn MediaSender>) {
+        self.media_sender = Some(sender);
     }
 
     /// Set the hook registry for event emission.
