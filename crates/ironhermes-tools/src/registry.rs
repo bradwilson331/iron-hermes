@@ -276,6 +276,28 @@ impl ToolRegistry {
         before - self.tools.len()
     }
 
+    /// Phase 36.3.7.13 D-B2: retain only tools whose name is in `allowed`.
+    ///
+    /// Called by `filter_for_goal_mode_if_applicable` (main.rs) after
+    /// `register_kanban_tools_if_applicable` to enforce the goal-mode toolset
+    /// preset (D-B1). Tools NOT in `allowed` are permanently removed from the
+    /// registry for this worker session — the LLM never sees their schemas
+    /// (D-B2 security contract).
+    ///
+    /// Returns the number of tools removed (mirrors `unregister_by_prefix`
+    /// return contract for symmetric API).
+    ///
+    /// # Safety
+    ///
+    /// This is a destructive operation on `self.tools`. It MUST NOT be called
+    /// in interactive session paths (REPL / TUI) — only in kanban worker-mode
+    /// entry where the toolset is fixed for the entire session lifetime.
+    pub fn retain_by_name(&mut self, allowed: &[&str]) -> usize {
+        let before = self.tools.len();
+        self.tools.retain(|name, _| allowed.contains(&name.as_str()));
+        before - self.tools.len()
+    }
+
     /// Add a guardrail hook that will be checked before every tool dispatch.
     /// Guardrails are checked in registration order.
     /// Per D-05: register BlocklistGuardrail first, custom trait hooks second.
@@ -1529,6 +1551,47 @@ mod tests {
             count, 0,
             "unregister_by_prefix with no matching prefix must return 0"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 36.3.7.13 D-B2 — retain_by_name tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_retain_by_name_removes_non_allowed() {
+        let mut registry = ToolRegistry::new();
+        registry.register_dynamic(Box::new(MockTool { tool_name: "a" }));
+        registry.register_dynamic(Box::new(MockTool { tool_name: "b" }));
+        registry.register_dynamic(Box::new(MockTool { tool_name: "c" }));
+
+        let removed = registry.retain_by_name(&["a", "b"]);
+
+        assert_eq!(removed, 1, "retain_by_name must return the count of removed tools");
+        let names = registry.list_tools();
+        assert!(names.contains(&"a"), "\"a\" must remain after retain_by_name");
+        assert!(names.contains(&"b"), "\"b\" must remain after retain_by_name");
+        assert!(
+            !names.contains(&"c"),
+            "\"c\" must be removed by retain_by_name (not in allowlist)"
+        );
+    }
+
+    #[test]
+    fn test_retain_by_name_returns_removed_count() {
+        let mut registry = ToolRegistry::new();
+        for name in &["x", "y", "z", "w"] {
+            registry.register_dynamic(Box::new(MockTool { tool_name: name }));
+        }
+
+        // Allow only "x" → removes 3.
+        let removed = registry.retain_by_name(&["x"]);
+        assert_eq!(
+            removed, 3,
+            "retain_by_name must return number of removed tools (4 total − 1 allowed = 3 removed)"
+        );
+        let names = registry.list_tools();
+        assert_eq!(names.len(), 1, "only one tool must remain");
+        assert_eq!(names[0], "x");
     }
 
     // ---------------------------------------------------------------------------

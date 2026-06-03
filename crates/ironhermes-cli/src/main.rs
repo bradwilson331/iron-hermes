@@ -326,6 +326,161 @@ async fn register_kanban_tools_if_applicable(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Phase 36.3.7.13 F-03 — goal-mode toolset filter + inner-loop clamp helpers
+// ---------------------------------------------------------------------------
+
+/// Canonical tool allowlists for goal-mode workers (Phase 36.3.7.13 D-B1).
+///
+/// RESTRICTED (15 tools): 13 kanban_* tools + 2 file I/O tools.
+/// EXTENDED  (18 tools): RESTRICTED + memory + skill management.
+///
+/// Tool names are verified against the registry's `fn name()` return values
+/// (RESEARCH Risk 3): file tools register as "read_file"/"write_file" (NOT
+/// "file_read"/"file_write"); memory as "memory" (NOT "memory_tool");
+/// skills as "skills" + "skill_manage" (NOT "skills_tool"/"memory_manager_handle").
+const GOAL_TOOLSET_RESTRICTED: &[&str] = &[
+    "kanban_show",
+    "kanban_list",
+    "kanban_comment",
+    "kanban_complete",
+    "kanban_block",
+    "kanban_create",
+    "kanban_heartbeat",
+    "kanban_link",
+    "kanban_unblock",
+    "kanban_swarm",
+    "kanban_mention",
+    "kanban_decompose",
+    "kanban_specify",  // 13 kanban_*
+    "read_file",
+    "write_file",      // +2 file I/O
+];
+
+const GOAL_TOOLSET_EXTENDED: &[&str] = &[
+    "kanban_show",
+    "kanban_list",
+    "kanban_comment",
+    "kanban_complete",
+    "kanban_block",
+    "kanban_create",
+    "kanban_heartbeat",
+    "kanban_link",
+    "kanban_unblock",
+    "kanban_swarm",
+    "kanban_mention",
+    "kanban_decompose",
+    "kanban_specify",  // 13 kanban_*
+    "read_file",
+    "write_file",      // +2 file I/O
+    "memory",
+    "skills",
+    "skill_manage",    // +3 memory / skill tools
+];
+
+/// Apply goal-mode toolset filtering to the tool registry.
+///
+/// Called at BOTH worker-mode entry points (run_single + run_chat), immediately
+/// after `register_kanban_tools_if_applicable`, per D-B2 requirement.
+///
+/// No-ops when:
+/// - `HERMES_KANBAN_TASK` is unset (not a kanban worker process)
+/// - `HERMES_KANBAN_GOAL_MODE` is not exactly "1" (non-goal task)
+///
+/// When `HERMES_KANBAN_GOAL_TOOLSET` is unset under goal_mode=1, this function
+/// emits a LOUD `tracing::warn!` and early-returns WITHOUT applying any filter.
+/// This surfaces dispatcher misconfiguration (D-E2 single-source-of-truth:
+/// the dispatcher is the only place that resolves NULL→"restricted"; the worker
+/// must NOT silently apply a second default — BLOCKER 3 from plan-checker).
+///
+/// For the "full" preset: no-op (all registered tools remain visible).
+/// For "extended": retain_by_name(GOAL_TOOLSET_EXTENDED).
+/// For "restricted" (or any unrecognized value): retain_by_name(GOAL_TOOLSET_RESTRICTED).
+async fn filter_for_goal_mode_if_applicable(
+    registry: &Arc<RwLock<ToolRegistry>>,
+) -> anyhow::Result<()> {
+    // Gate 1: must be a kanban worker process.
+    let worker_mode = std::env::var("HERMES_KANBAN_TASK").is_ok();
+    if !worker_mode {
+        return Ok(());
+    }
+
+    // Gate 2: goal mode must be active for this task.
+    let goal_mode = std::env::var("HERMES_KANBAN_GOAL_MODE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if !goal_mode {
+        return Ok(());
+    }
+
+    // D-E2: HERMES_KANBAN_GOAL_TOOLSET must have been set by the dispatcher.
+    // If absent under goal_mode=1, this is a dispatcher misconfiguration — warn
+    // LOUD and early-return rather than applying a silent "restricted" default
+    // (BLOCKER 3 fix: worker must not be a second resolver).
+    let preset = match std::env::var("HERMES_KANBAN_GOAL_TOOLSET") {
+        Ok(v) => v,
+        Err(_) => {
+            tracing::warn!(
+                target: "kanban.goal_toolset",
+                "HERMES_KANBAN_GOAL_TOOLSET is unset under HERMES_KANBAN_GOAL_MODE=1 — \
+                 dispatcher should have resolved NULL→\"restricted\" and emitted this var. \
+                 Skipping toolset filter to avoid silent misconfiguration masking (D-E2)."
+            );
+            return Ok(());
+        }
+    };
+
+    let removed = match preset.as_str() {
+        "full" => {
+            tracing::info!(
+                target: "kanban.goal_mode",
+                preset = "full",
+                "goal-mode: full preset — no toolset filter applied"
+            );
+            return Ok(());
+        }
+        "extended" => {
+            let n = registry.write().await.retain_by_name(GOAL_TOOLSET_EXTENDED);
+            tracing::info!(
+                target: "kanban.goal_mode",
+                preset = "extended",
+                removed = n,
+                "goal-mode: extended toolset filter applied"
+            );
+            n
+        }
+        other => {
+            if other != "restricted" {
+                tracing::warn!(
+                    target: "kanban.goal_toolset",
+                    preset = other,
+                    "goal-mode: unrecognized toolset preset — falling back to \"restricted\""
+                );
+            }
+            let n = registry.write().await.retain_by_name(GOAL_TOOLSET_RESTRICTED);
+            tracing::info!(
+                target: "kanban.goal_mode",
+                preset = "restricted",
+                removed = n,
+                "goal-mode: restricted toolset filter applied"
+            );
+            n
+        }
+    };
+    let _ = removed; // logged above; suppress unused-variable lint
+    Ok(())
+}
+
+/// Phase 36.3.7.13 D-F1: clamp the agent inner-loop iteration cap.
+///
+/// Returns `min(config_iter, kanban_iter as usize)` so the worker's
+/// per-turn LLM call count is bounded by the board-level config knob.
+///
+/// Extracted as a pure fn for unit-testability (goal_toolset_filter.rs Test 6).
+pub fn clamp_goal_inner_iterations(config_iter: usize, kanban_iter: u32) -> usize {
+    std::cmp::min(config_iter, kanban_iter as usize)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Phase 24 (Pitfall 1 canonical order):
@@ -716,7 +871,27 @@ fn ensure_home_dirs() -> Result<()> {
 
 /// Run a single prompt and exit.
 async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()> {
-    let (client, config, resolver) = build_client(cli)?;
+    let (client, mut config, resolver) = build_client(cli)?;
+
+    // Phase 36.3.7.13 D-F1: clamp inner-loop iteration cap for goal-mode workers.
+    // Applied HERE (before AgentRuntime::from_config captures the config) so the
+    // clamped value is baked into the runtime's budget handle from the start.
+    if std::env::var("HERMES_KANBAN_GOAL_MODE").map(|v| v == "1").unwrap_or(false) {
+        let kanban_cfg = crate::kanban::commands::load_kanban_config(&config);
+        let clamped = clamp_goal_inner_iterations(
+            config.agent.max_iterations,
+            kanban_cfg.goal_inner_max_iterations,
+        );
+        if clamped != config.agent.max_iterations {
+            tracing::info!(
+                target: "kanban.goal_mode",
+                original = config.agent.max_iterations,
+                clamped_to = clamped,
+                "goal-mode: inner agent loop clamped (D-F1)"
+            );
+            config.agent.max_iterations = clamped;
+        }
+    }
     // Phase 21.7 Plan 08 (D-11 / D-12 / D-14): resolve yolo from CLI + config,
     // print the banner ONCE per session. `run_single` is batch mode — a single
     // `-e "prompt"` invocation — so "per session" means "per process".
@@ -878,6 +1053,10 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         &runtime.merged_tools().enabled_toolset_names(),
     )
     .await?;
+    // Phase 36.3.7.13 F-03 / D-B2: apply goal-mode toolset filter after kanban tools
+    // are registered. No-ops when not in goal-mode worker. BOTH main.rs call sites
+    // (run_single:this + run_chat:~1700) must call this (D-B2 requirement).
+    filter_for_goal_mode_if_applicable(runtime.registry()).await?;
     let system_msg = prompt_builder.build_system_message();
 
     let user_msg = ChatMessage::user(prompt);
@@ -1316,7 +1495,28 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     io::stdout().flush().ok();
     io::stderr().flush().ok();
 
-    let (client, config, resolver) = build_client(cli)?;
+    let (client, mut config, resolver) = build_client(cli)?;
+
+    // Phase 36.3.7.13 D-F1: clamp inner-loop iteration cap for goal-mode workers.
+    // Applied HERE (before AgentRuntime::from_config captures the config) so the
+    // clamped value is baked into the runtime's budget handle from the start.
+    if std::env::var("HERMES_KANBAN_GOAL_MODE").map(|v| v == "1").unwrap_or(false) {
+        let kanban_cfg = crate::kanban::commands::load_kanban_config(&config);
+        let clamped = clamp_goal_inner_iterations(
+            config.agent.max_iterations,
+            kanban_cfg.goal_inner_max_iterations,
+        );
+        if clamped != config.agent.max_iterations {
+            tracing::info!(
+                target: "kanban.goal_mode",
+                original = config.agent.max_iterations,
+                clamped_to = clamped,
+                "goal-mode: inner agent loop clamped (D-F1)"
+            );
+            config.agent.max_iterations = clamped;
+        }
+    }
+
     // Phase 21.7 Plan 08 (D-11 / D-12 / D-14): resolve yolo + emit the
     // bold-red stderr banner ONCE per REPL session before we enter the
     // main loop. CLI flag wins over config; gateway reads config only
@@ -1636,6 +1836,9 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
         &runtime.merged_tools().enabled_toolset_names(),
     )
     .await?;
+    // Phase 36.3.7.13 F-03 / D-B2: apply goal-mode toolset filter (second call site).
+    // Mirrors the run_single site above — both must call this per D-B2 requirement.
+    filter_for_goal_mode_if_applicable(&registry).await?;
     let system_msg = prompt_builder.build_system_message();
 
     let mut messages = vec![system_msg];

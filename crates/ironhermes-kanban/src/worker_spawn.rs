@@ -185,14 +185,14 @@ pub fn build_kanban_worker_env(task: &Task, run: &TaskRun, workspace: &str, boar
         };
         env.push(("HERMES_KANBAN_GOAL_MAX_TURNS".into(), budget.to_string()));
 
-        // Phase 36.3.7.13 F-03 / D-E2: emit HERMES_KANBAN_GOAL_TOOLSET when
-        // task.goal_toolset is Some. The worker reads this verbatim (D-E2 single
-        // source of truth — no silent "restricted" default on dispatcher side).
-        // When None (legacy cards created before v3 schema): env var is absent;
-        // the worker warns LOUD via tracing::warn! and skips toolset filtering.
-        if let Some(ref toolset) = task.goal_toolset {
-            env.push(("HERMES_KANBAN_GOAL_TOOLSET".into(), toolset.clone()));
-        }
+        // Phase 36.3.7.13 F-03 / D-E1: emit HERMES_KANBAN_GOAL_TOOLSET always
+        // when goal_mode=true. NULL in the DB (legacy v2 cards) coerces to
+        // "restricted" HERE (the dispatcher is the single resolver per D-E2).
+        // The worker side reads this env var verbatim and does NOT apply a second
+        // default — absent env var under goal_mode=1 triggers a LOUD tracing::warn!
+        // in filter_for_goal_mode_if_applicable (Task 3) to surface misconfig.
+        let toolset_preset = task.goal_toolset.as_deref().unwrap_or("restricted");
+        env.push(("HERMES_KANBAN_GOAL_TOOLSET".into(), toolset_preset.to_string()));
     }
 
     env
@@ -571,6 +571,68 @@ mod tests {
             budget,
             Some("20"),
             "0 budget must defensively coerce to \"20\" in the emitted env"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 36.3.7.13 Plan 03 Task 2 — HERMES_KANBAN_GOAL_TOOLSET emission
+    // -----------------------------------------------------------------------
+
+    /// D-E1: goal_mode=true + goal_toolset=None (NULL in DB) must emit
+    /// HERMES_KANBAN_GOAL_TOOLSET="restricted" (dispatcher-side NULL coercion).
+    #[test]
+    fn goal_toolset_null_coerces_to_restricted() {
+        let mut task = fake_task("t_toolset_null", "alice");
+        task.goal_mode = true;
+        task.goal_toolset = None; // NULL in DB
+        let run = fake_run("r_ts_null", "t_toolset_null", "host:1:ts_null");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_ts_null", "default");
+
+        let found = env
+            .iter()
+            .find(|(k, _)| k == "HERMES_KANBAN_GOAL_TOOLSET")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            found,
+            Some("restricted"),
+            "goal_toolset=None must coerce to \"restricted\" in emitted env (D-E1 dispatcher-side coercion)"
+        );
+    }
+
+    /// D-E1: goal_mode=true + goal_toolset=Some("extended") must emit
+    /// HERMES_KANBAN_GOAL_TOOLSET="extended" verbatim (no override).
+    #[test]
+    fn goal_toolset_some_passthrough() {
+        let mut task = fake_task("t_toolset_ext", "bob");
+        task.goal_mode = true;
+        task.goal_toolset = Some("extended".to_string());
+        let run = fake_run("r_ts_ext", "t_toolset_ext", "host:2:ts_ext");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_ts_ext", "default");
+
+        let found = env
+            .iter()
+            .find(|(k, _)| k == "HERMES_KANBAN_GOAL_TOOLSET")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            found,
+            Some("extended"),
+            "goal_toolset=Some(\"extended\") must be emitted verbatim (D-E2 single-source-of-truth)"
+        );
+    }
+
+    /// D-E1 / D-06: goal_mode=false must NOT emit HERMES_KANBAN_GOAL_TOOLSET
+    /// regardless of goal_toolset value (env var belongs to goal-mode path only).
+    #[test]
+    fn goal_toolset_not_emitted_when_goal_mode_off() {
+        let task = fake_task("t_toolset_off", "carol");
+        // fake_task defaults: goal_mode: false, goal_toolset: None.
+        let run = fake_run("r_ts_off", "t_toolset_off", "host:3:ts_off");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_ts_off", "default");
+
+        let found = env.iter().find(|(k, _)| k == "HERMES_KANBAN_GOAL_TOOLSET");
+        assert!(
+            found.is_none(),
+            "HERMES_KANBAN_GOAL_TOOLSET must NOT appear in env when goal_mode=false; got: {found:?}"
         );
     }
 
