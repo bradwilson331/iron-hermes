@@ -2,14 +2,14 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: "Phase 36.17.2.2 closed PASS 2026-06-03 (live UAT 9/9 approved). New phase 36.17.5 (integrate TTS functions) inserted after parent phase 36.17 — URGENT. Run `/gsd:plan-phase 36.17.5` to plan; consider `/gsd:discuss-phase 36.17.5` first if scope/decisions need clarifying."
+status: executing
 stopped_at: Phase 36.17.5 context gathered
-last_updated: "2026-06-04T03:49:05.129Z"
-last_activity: 2026-06-03 -- Phase 36.17.2.2 closed PASS; phase 36.17.5 (TTS integration) inserted
+last_updated: "2026-06-04T09:46:59.022Z"
+last_activity: 2026-06-04 -- Phase 36.17.5 execution started
 progress:
   total_phases: 59
   completed_phases: 24
-  total_plans: 126
+  total_plans: 130
   completed_plans: 122
   percent: 41
 ---
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.17.5 — integrate TTS functions (next; not planned yet)
+**Current focus:** Phase 36.17.5 — integrate-tts-functions
 
 ## Current Position
 
-Phase: 36.17.5 (integrate TTS functions) — INSERTED, NOT PLANNED YET
-Plan: 0 of N (planning pending)
-Status: Phase 36.17.2.2 closed PASS 2026-06-03 (live UAT 9/9 approved). New phase 36.17.5 (integrate TTS functions) inserted after parent phase 36.17 — URGENT. Run `/gsd:plan-phase 36.17.5` to plan; consider `/gsd:discuss-phase 36.17.5` first if scope/decisions need clarifying.
-Last activity: 2026-06-03 -- Phase 36.17.2.2 closed PASS; phase 36.17.5 (TTS integration) inserted
+Phase: 36.17.5 (integrate-tts-functions) — EXECUTING
+Plan: 1 of 4
+Status: Executing Phase 36.17.5
+Last activity: 2026-06-04 -- Phase 36.17.5 execution started
 
 ## Recent close-out summary (2026-06-03 — Phase 36.17.2.2 plans 01-06 + 07 Task 1 merged, awaiting UAT)
 
