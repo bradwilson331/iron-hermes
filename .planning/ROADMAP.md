@@ -123,6 +123,16 @@ Plans:
 - [x] 36.17-03-PLAN.md — Replace `tracing_subscriber::fmt().init()` in `main.rs` with `install_web_logger_subscriber()`; mount `TraceLayer::new_for_http().on_request(DefaultOnRequest::new().level(Level::INFO)).on_response(DefaultOnResponse::new().level(Level::INFO))` on the Axum router (D-01, D-07..D-12 + Q2 INFO-level fix)
 - [x] 36.17-04-PLAN.md — Create `scripts/uat/phase-36.17-web-logging.sh` UAT script (mktemp IRONHERMES_HOME, start server, curl, assert both files exist + non-empty + ANSI-free + `tower_http::trace` target present in access log); blocking-human verify (D-01..D-05, D-09, D-10, D-15, D-16)
 
+### Phase 36.17.6: Toolset CLI TTS wiring (INSERTED)
+
+**Goal:** [Urgent work - to be planned]
+**Requirements**: TBD
+**Depends on:** Phase 36.17
+**Plans:** 0 plans
+
+Plans:
+- [ ] TBD (run /gsd-plan-phase 36.17.6 to break down)
+
 ### Phase 36.17.5: integrate TTS functions (INSERTED)
 
 **Goal:** Port hermes-agent text-to-speech into IronHermes as a faithful concept-level port of Python TTSProvider ABC + _BUILTIN_NAMES invariant. Ships a TtsProvider trait + TtsRegistry in ironhermes-core; two built-in provider impls in ironhermes-tools (Edge TTS — free default, no API key; ElevenLabs — premium ELEVENLABS_API_KEY); single LLM-callable text_to_speech tool that synthesizes to a file and returns the path; companion send_audio tool that dispatches the produced file via the current SessionKey platform (Local → rodio playback; Telegram → send_voice/send_audio with optional ffmpeg MP3→Opus conversion). Telegram delivery wired this phase; Discord and iron_hermes_ui web deferred. STT, push-to-talk, streaming TTS, and auto-speak (Path A) all out of scope.
