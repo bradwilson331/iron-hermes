@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
-stopped_at: Phase 36.17.5 context gathered
-last_updated: "2026-06-04T09:46:59.022Z"
+stopped_at: Phase 36.17.6 context gathered
+last_updated: "2026-06-04T13:32:38.104Z"
 last_activity: 2026-06-04 -- Phase 36.17.5 execution started
 progress:
-  total_phases: 58
-  completed_phases: 24
+  total_phases: 60
+  completed_phases: 25
   total_plans: 130
-  completed_plans: 122
-  percent: 41
+  completed_plans: 126
+  percent: 42
 ---
 
 # Project State
@@ -613,6 +613,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-06-04T03:49:05.121Z
-Stopped at: Phase 36.17.5 context gathered
-Resume file: .planning/phases/36.17.5-integrate-tts-functions/36.17.5-CONTEXT.md
+Last session: 2026-06-04T13:32:38.097Z
+Stopped at: Phase 36.17.6 context gathered
+Resume file: .planning/phases/36.17.6-toolset-cli-tts-wiring/36.17.6-CONTEXT.md
