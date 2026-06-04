@@ -256,11 +256,81 @@ fn test_elevenlabs_provider_name_is_elevenlabs() {
     assert_eq!(provider.name(), "elevenlabs");
 }
 
-// TTS-10 (still ignored — live network; opt-in via cargo test -- --ignored)
+// TTS-10 (un-ignored by PLAN 04): EdgeProvider::synthesize writes a real MP3 via live network.
+// Runs ONLY with `cargo test -- --ignored` (live Edge TTS network call).
+// Asserts: returned PathBuf == tmp_path; file exists; file size > 0; MP3/ID3 magic bytes present.
 #[tokio::test]
-#[ignore = "TTS-10 — live network; opt-in via cargo test -- --ignored"]
+#[ignore = "TTS-10 — live network; runs with cargo test -- --ignored"]
 async fn test_edge_synth_writes_file() {
-    unimplemented!("PLAN 04 will un-ignore once live UAT path is wired")
+    use ironhermes_core::config::EdgeTtsConfig;
+    use ironhermes_core::tts::TtsProvider;
+    use ironhermes_tools::tts::EdgeProvider;
+    use tempfile::TempDir;
+
+    // msedge-tts tokio-runtime uses rustls 0.23 with aws-lc-rs backend.
+    // The process-level CryptoProvider must be installed before any TLS connection.
+    // `.ok()` is intentional: if another test already installed a provider, ignore the error.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let _lock = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let tmpdir = TempDir::new().expect("create tempdir");
+
+    // SAFETY: env_lock() serializes IRONHERMES_HOME mutations across tests.
+    unsafe { std::env::set_var("IRONHERMES_HOME", tmpdir.path()) };
+
+    let provider = EdgeProvider::new(EdgeTtsConfig::default());
+    assert!(
+        provider.is_available(),
+        "EdgeProvider must be available (D-03)"
+    );
+
+    let tmp_path = tmpdir.path().join(format!("{}.mp3", uuid::Uuid::new_v4()));
+    let result = provider
+        .synthesize("Hello from IronHermes Phase 36.17.5 TTS test.", &tmp_path)
+        .await;
+
+    unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+    let written = result.expect("EdgeProvider::synthesize must succeed against live Edge TTS (D-03)");
+
+    // Assert returned PathBuf matches the requested path.
+    assert_eq!(
+        written, tmp_path,
+        "synthesize must return the output path"
+    );
+
+    // Assert file exists on disk.
+    assert!(
+        tmp_path.exists(),
+        "synthesized file must exist at {:?} (D-16)",
+        tmp_path
+    );
+
+    // Assert file is non-empty (real audio bytes, not a stub).
+    let metadata = std::fs::metadata(&tmp_path).expect("stat synthesized file");
+    assert!(
+        metadata.len() > 0,
+        "synthesized file must be non-empty (D-04 / D-05); got {} bytes",
+        metadata.len()
+    );
+
+    // Assert MP3 frame sync or ID3 tag in first 3 bytes.
+    // MP3: 0xFF 0xFB / 0xFF 0xF3 / 0xFF 0xF2 | ID3: 0x49 0x44 0x33 ("ID3")
+    let bytes = std::fs::read(&tmp_path).expect("read synthesized file");
+    assert!(
+        bytes.len() >= 3,
+        "synthesized file must have at least 3 bytes; got {}",
+        bytes.len()
+    );
+    let magic_ok = matches!(
+        (bytes[0], bytes[1]),
+        (0xFF, 0xFB) | (0xFF, 0xF3) | (0xFF, 0xF2)
+    ) || (bytes[0] == 0x49 && bytes[1] == 0x44 && bytes[2] == 0x33); // "ID3"
+    assert!(
+        magic_ok,
+        "synthesized file must start with MP3 frame sync (0xFF 0xFB/F3/F2) or ID3 tag (0x49 0x44 0x33); got: {:02x} {:02x} {:02x}",
+        bytes[0], bytes[1], bytes[2]
+    );
 }
 
 // ============================================================================

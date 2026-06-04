@@ -868,6 +868,11 @@ async fn cmd_tts_test(
     use ironhermes_core::BUILTIN_TTS_NAMES;
     use ironhermes_tools::tts::build_tts_registry;
 
+    // msedge-tts uses rustls 0.23 + aws-lc-rs for its WebSocket TLS connection.
+    // The process-level CryptoProvider must be installed before the first TLS call.
+    // `.ok()` is intentional: ignore Err if a provider was already installed.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     // 1. Load config (mirrors pattern used by other simple subcommands in main.rs).
     let config = ironhermes_core::Config::load().unwrap_or_default();
 
