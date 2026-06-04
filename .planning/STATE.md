@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: awaiting_uat
-stopped_at: Phase 36.17.2.2 plans 01-06 merged + plan 07 Task 1 (UAT runbook) authored; Task 2 (operator-approved live Telegram UAT) pending
-last_updated: "2026-06-04T00:10:00.000Z"
-last_activity: 2026-06-03 -- Phase 36.17.2.2 plans 01-06 merged to develop; plan 07 runbook authored; awaiting operator UAT
+status: complete
+stopped_at: Phase 36.17.2.2 closed PASS — operator approved live Telegram UAT
+last_updated: "2026-06-04T02:35:00.000Z"
+last_activity: 2026-06-03 -- Phase 36.17.2.2 closed PASS; operator UAT approved
 progress:
   total_phases: 58
-  completed_phases: 23
+  completed_phases: 24
   total_plans: 126
-  completed_plans: 121
-  percent: 42
+  completed_plans: 122
+  percent: 43
 ---
 
 # Project State
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 36.17.2.2 (ironhermes-telegram-client-delivers-streaming-final-media-me) — AWAITING UAT (6/7 plans merged; plan 07 Task 1 done, Task 2 pending operator)
-Plan: 7 of 7 (Task 1 ✓ runbook authored; Task 2 ⏸ live Telegram UAT + operator `approved` reply)
-Status: Phase 36.17.2.2 halted at live-UAT gate — runbook at `crates/ironhermes-gateway/tests/telegram_media_uat.md`; operator runs 9 scenarios + replies `approved`
-Last activity: 2026-06-03 -- Plans 01-06 merged (Wave 0-5 complete); plan 07 Task 1 runbook authored; UAT deferred
+Phase: 36.17.2.2 (ironhermes-telegram-client-delivers-streaming-final-media-me) — COMPLETE (7/7 plans + operator UAT approved 2026-06-03)
+Plan: 7 of 7 (all closed; live UAT passed)
+Status: Phase 36.17.2.2 closed PASS. Live UAT discovered the runbook's "pre-create test files" prereq was silent on commands — operator hit "Failed to stat" on scenario 2; root cause was missing /tmp/uat-* fixtures, not a code defect. Mitigated by adding `crates/ironhermes-gateway/tests/uat-setup-36.17.2.2.sh` setup script. After fixtures landed, all 9 scenarios passed.
+Last activity: 2026-06-03 -- Phase 36.17.2.2 closed PASS; operator UAT approved; ready for next phase pick
 
 ## Recent close-out summary (2026-06-03 — Phase 36.17.2.2 plans 01-06 + 07 Task 1 merged, awaiting UAT)
 
