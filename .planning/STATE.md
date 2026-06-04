@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: complete
-stopped_at: Phase 36.17.2.2 closed PASS — operator approved live Telegram UAT
-last_updated: "2026-06-04T02:35:00.000Z"
-last_activity: 2026-06-03 -- Phase 36.17.2.2 closed PASS; operator UAT approved
+status: ready
+stopped_at: Phase 36.17.2.2 closed PASS; Phase 36.17.5 inserted (URGENT) — integrate TTS functions, not planned yet
+last_updated: "2026-06-04T02:59:39.585Z"
+last_activity: 2026-06-03 -- Phase 36.17.5 (integrate TTS functions) inserted after Phase 36.17 — URGENT
 progress:
-  total_phases: 58
+  total_phases: 59
   completed_phases: 24
   total_plans: 126
   completed_plans: 122
-  percent: 43
+  percent: 41
 ---
 
 # Project State
@@ -21,20 +21,21 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.17.2.2 — ironhermes-telegram-client-delivers-streaming-final-media-me
+**Current focus:** Phase 36.17.5 — integrate TTS functions (next; not planned yet)
 
 ## Current Position
 
-Phase: 36.17.2.2 (ironhermes-telegram-client-delivers-streaming-final-media-me) — COMPLETE (7/7 plans + operator UAT approved 2026-06-03)
-Plan: 7 of 7 (all closed; live UAT passed)
-Status: Phase 36.17.2.2 closed PASS. Live UAT discovered the runbook's "pre-create test files" prereq was silent on commands — operator hit "Failed to stat" on scenario 2; root cause was missing /tmp/uat-* fixtures, not a code defect. Mitigated by adding `crates/ironhermes-gateway/tests/uat-setup-36.17.2.2.sh` setup script. After fixtures landed, all 9 scenarios passed.
-Last activity: 2026-06-03 -- Phase 36.17.2.2 closed PASS; operator UAT approved; ready for next phase pick
+Phase: 36.17.5 (integrate TTS functions) — INSERTED, NOT PLANNED YET
+Plan: 0 of N (planning pending)
+Status: Phase 36.17.2.2 closed PASS 2026-06-03 (live UAT 9/9 approved). New phase 36.17.5 (integrate TTS functions) inserted after parent phase 36.17 — URGENT. Run `/gsd:plan-phase 36.17.5` to plan; consider `/gsd:discuss-phase 36.17.5` first if scope/decisions need clarifying.
+Last activity: 2026-06-03 -- Phase 36.17.2.2 closed PASS; phase 36.17.5 (TTS integration) inserted
 
 ## Recent close-out summary (2026-06-03 — Phase 36.17.2.2 plans 01-06 + 07 Task 1 merged, awaiting UAT)
 
 **Phase 36.17.2.2 (`<MEDIA: ...>` media delivery + MarkdownV2 final-text rendering):** 6 production plans merged to `develop` sequentially in DAG order; plan 07 Task 1 (live UAT runbook) merged; plan 07 Task 2 (operator runs 9 scenarios on a live Telegram bot + replies `approved`) deferred to a follow-up session.
 
 **Wave-by-wave commit roll-up (final HEAD `2dbcb041`):**
+
 - **Plan 01 (TDD — MarkdownV2 escape, D-04):** 3 commits → `321d7b33` RED golden test table, `c81316de` GREEN `escape_markdown_v2` + `escape_outside_code_blocks` (fence/inline-code/link-URL state machine, backslash respect), `b7f767d0` SUMMARY. Tests: 16/16 markdown_v2. Em-dash + emphasis-marker corrections applied per plan's catch-all branch (documented as Rule 1 deviations).
 - **Plan 02 (TDD — MediaTagExtractor, D-05/D-06/D-08/D-09):** 3 commits → `82cb360a` RED tests, `9d09881e` GREEN `MediaTagExtractor` + `MediaSource`/`MediaKind`/`MediaRef` + lib.rs wire, `fe32db13` SUMMARY. Tests: 21/21 media_tag. Diverges from `StreamingContextScrubber` only on `flush_tail` policy (emits buffered tag-text as VISIBLE per user-trust contract; scrubber discards).
 - **Plan 03 (MediaSender trait + Telegram prompt, D-17/D-18):** 3 commits → `e4e31bb2` `MediaSender` trait declaration with one-import re-export, `bfea82ec` prompt_builder.rs teaches `<MEDIA: path|url>` convention, `daf735a9` SUMMARY. Tests: 408/408 ironhermes-agent lib regression clean.
@@ -46,6 +47,7 @@ Last activity: 2026-06-03 -- Phase 36.17.2.2 closed PASS; operator UAT approved;
 **Pre-work YAML fix (`2da0ded3`):** plans 03 and 05 had `depends_on` entries with trailing YAML comments (`- 36.17.2.2-02   # MediaRef...`) which the gsd-sdk plan-index parser treated as part of the dependency ID, breaking DAG resolution and forcing plan 03/05 into wave 0. Moved comments to dedicated comment lines, restoring correct wave ordering — future plans benefit.
 
 **Phase-level must_haves status:**
+
 - Items 1-4 (build/test/grep): GREEN (markdown_v2 16/16, media_tag 21/21, gateway full crate 209/0/1, telegram_media_delivery 7/7).
 - Items 5-8 (source assertions): GREEN — `grep -c 'fn set_media_sender' handler.rs` = 1, `grep -c 'take_attachments' handler.rs` = 1, `grep -c 'MediaTagExtractor::new' handler.rs` = 1, `grep -c '\.canonicalize()' telegram.rs` = 3, `impl MediaSender for TelegramAdapter` = 1, `escape_outside_code_blocks` at stream_consumer = 3, `rg fn edit_message_markdown crates/ironhermes-gateway | grep -v _v2 | wc -l` = 0, `rg '\.edit_message_markdown\(' crates/ironhermes-gateway | wc -l` = 0.
 - Item 9 (UAT runbook exists): GREEN — 221 lines, 9 scenarios.
@@ -585,6 +587,7 @@ Recent decisions affecting current work:
 - Phase 36.17.4 inserted after Phase 36.17: wire up iron_hermes_ui to the gateway queue + slash commands (URGENT)
 - Phase 36.3.7.12 inserted after Phase 36.3.7.11: Goal mode - kanban worker loop (Ralph loop) — autonomous worker primitives on the kanban surface: goal_mode card flag, /goal worker dispatcher loop, DecomposeFn + SpecifyFn runtime closures wired into AgentRuntime, threat model for auto-advance. Companion to Phase 36.3.7.11's manual-review dashboard. (URGENT)
 - Phase 36.17.2.2 inserted after Phase 36.17.2: IronHermes Telegram client delivers streaming final media messages (URGENT)
+- Phase 36.17.5 inserted after Phase 36.17: integrate TTS functions (URGENT)
 
 ### Pending Todos
 
