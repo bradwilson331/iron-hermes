@@ -128,14 +128,14 @@ Plans:
 **Goal:** Close phase 36.17.5 Plan 04's blocked UAT Gates 4+5 by wiring the `voice` toolset into the CLI inspection path. Adds `"voice"` to `KNOWN_TOOLSETS` + `toolset_members_map` and a `register_tts_for_inspection` helper called from both `cmd_toolset_list` and `cmd_toolset_show` (D-01/D-02). Re-runs the full 5-gate UAT (D-04) and secures operator approval for Gates 4+5 (D-05). Finally flips `36.17.5-VALIDATION.md` (`nyquist_compliant: true`, `wave_0_complete: true`, `status: complete`) and ROADMAP Plan 04 line to `[x]`, closing 36.17.5 formally.
 **Requirements**: A1..A8 + REGR-1 from 36.17.6-CONTEXT.md `<acceptance>` block (CONTEXT-locked acceptance items act as REQ-IDs per the 36.17.x precedent). D-01..D-05 locked decisions.
 **Depends on:** Phase 36.17.5 (Plan 04 PARTIAL)
-**Plans:** 3 plans
+**Plans:** 2/3 plans executed
 
 Plans:
 **Wave 1**
-- [ ] 36.17.6-01-PLAN.md — Add `"voice"` to `KNOWN_TOOLSETS` + `toolset_members_map`, add `register_tts_for_inspection` helper, call from both `cmd_toolset_list` and `cmd_toolset_show`, add `toolset_members_map_voice_entry` test, update `browser_in_known_set` length 8→9. Single-file change to `crates/ironhermes-cli/src/toolset_cmd.rs`. 3 tasks. D-01/D-02/D-03. A1/A2/REGR-1.
+- [x] 36.17.6-01-PLAN.md — Add `"voice"` to `KNOWN_TOOLSETS` + `toolset_members_map`, add `register_tts_for_inspection` helper, call from both `cmd_toolset_list` and `cmd_toolset_show`, add `toolset_members_map_voice_entry` test, update `browser_in_known_set` length 8→9. Single-file change to `crates/ironhermes-cli/src/toolset_cmd.rs`. 3 tasks. D-01/D-02/D-03. A1/A2/REGR-1.
 
 **Wave 2** *(depends on Wave 1)*
-- [ ] 36.17.6-02-PLAN.md — Release-build the binary, pre-flight `voice` row visibility, re-run `bash scripts/uat/phase-36.17.5-tts.sh` (Gates 1-3 automated regression check; Gates 4-5 operator-approved via blocking-human checkpoints). 3 tasks (1 auto + 2 BLOCKING human-verify). D-04/D-05. A3/A4/A5.
+- [x] 36.17.6-02-PLAN.md — Release-build the binary, pre-flight `voice` row visibility, re-run `bash scripts/uat/phase-36.17.5-tts.sh` (Gates 1-3 automated regression check; Gates 4-5 operator-approved via blocking-human checkpoints). 3 tasks (1 auto + 2 BLOCKING human-verify). D-04/D-05. A3/A4/A5.
 
 **Wave 3** *(depends on Wave 2)*
 - [ ] 36.17.6-03-PLAN.md — Flip `36.17.5-VALIDATION.md` frontmatter (`status: complete`, `nyquist_compliant: true`, `wave_0_complete: true`), flip ROADMAP Plan 04 line `[ ]` → `[x]`, run `gsd-verifier` over combined 36.17.5 + 36.17.6 surface. 3 tasks. D-05. A6/A7/A8.
@@ -158,7 +158,7 @@ Plans:
 - [x] 36.17.5-03-PLAN.md — TextToSpeechTool + SendAudioTool + AudioDispatcher trait + register_tts_tools + AppRuntimeFactoryInput extension + per-session wiring + TelegramAdapter::impl AudioDispatcher. 4 tasks. D-05/D-06/D-07/D-13/D-14/D-15/D-16. TTS-05/06. **T-output-path BLOCKING mitigation owned here.**
 
 **Wave 4** *(depends on Wave 3)*
-- [ ] 36.17.5-04-PLAN.md — `hermes tts test/play` CLI subcommands + 5-gate UAT script + un-ignore TTS-10 live-network test + operator UAT (2 BLOCKING human-verify gates: tool registry exposure + Platform::Local audible playback). 5 tasks. D-01/D-02. TTS-10.
+- [x] 36.17.5-04-PLAN.md — `hermes tts test/play` CLI subcommands + 5-gate UAT script + un-ignore TTS-10 live-network test + operator UAT (2 BLOCKING human-verify gates: tool registry exposure + Platform::Local audible playback). 5 tasks. D-01/D-02. TTS-10.
 
 ### Phase 36.17.4: wire up iron_hermes_ui to the gateway queue + slash commands (INSERTED)
 
