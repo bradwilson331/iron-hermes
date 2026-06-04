@@ -20,6 +20,7 @@ pub mod hexapod_video; // Phase 27.1.4 — stateless single-frame JPEG capture v
 pub mod memory_manager_handle;
 pub mod memory_tool;
 pub mod registry;
+pub mod send_audio_tool; // Phase 36.17.5 D-14/D-15 — SendAudioTool + AudioDispatcher
 pub mod skill_manage; // Phase 33 — learning toolset (LEARN-04, LEARN-05)
 pub mod skills_tool;
 pub mod terminal;
@@ -34,6 +35,7 @@ pub use memory_manager_handle::MemoryManagerHandle;
 pub use registry::{
     InterceptHandler, Prerequisite, Tool, ToolRegistry, todo_read_schema, todo_write_schema,
 };
+pub use send_audio_tool::{AudioDispatcher, SendAudioTool};
 pub use toolset_session::RegistryToolsetSession;
 pub use web_extract::WebExtractTool;
 

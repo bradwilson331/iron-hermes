@@ -210,6 +210,10 @@ impl AgentRuntime {
             }),
             hooks_config,
             emit_mcp_startup_logs,
+            // Phase 36.17.5 D-15: per-turn threading deferred to a follow-up phase.
+            // v1 ships the infrastructure; TTS tools activate when session_key is Some.
+            session_key: None,
+            telegram_adapter: None,
         })
         .await?;
 

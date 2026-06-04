@@ -41,6 +41,13 @@ pub struct AppRuntimeFactoryInput {
     pub delegate_task: Option<DelegateTaskWiring>,
     pub hooks_config: HooksConfig,
     pub emit_mcp_startup_logs: bool,
+    /// Phase 36.17.5 D-15: per-session SessionKey for SendAudioTool dispatch.
+    /// None at startup / global construction; Some when build_app_runtime_bundle is
+    /// called per-session (gateway handler, CLI run_chat init).
+    pub session_key: Option<ironhermes_core::SessionKey>,
+    /// Phase 36.17.5 D-13 / D-15: gateway-supplied audio dispatcher for the Telegram arm.
+    /// None for CLI/Local-only paths.
+    pub telegram_adapter: Option<Arc<dyn ironhermes_tools::AudioDispatcher>>,
 }
 
 pub struct AppRuntimeBundle {
@@ -325,6 +332,8 @@ mod tests {
             delegate_task: None,
             hooks_config: HooksConfig::default(),
             emit_mcp_startup_logs: false,
+            session_key: None,
+            telegram_adapter: None,
         }
     }
 
@@ -521,6 +530,8 @@ mod tests {
             delegate_task: None,
             hooks_config: HooksConfig::default(),
             emit_mcp_startup_logs: false,
+            session_key: None,
+            telegram_adapter: None,
         };
 
         let bundle = build_app_runtime_bundle(input)
@@ -581,6 +592,8 @@ mod tests {
             delegate_task: None,
             hooks_config: HooksConfig::default(),
             emit_mcp_startup_logs: false,
+            session_key: None,
+            telegram_adapter: None,
         };
 
         let bundle = build_app_runtime_bundle(input)
@@ -632,6 +645,8 @@ mod tests {
             delegate_task: None,
             hooks_config: HooksConfig::default(),
             emit_mcp_startup_logs: false,
+            session_key: None,
+            telegram_adapter: None,
         };
 
         let bundle = build_app_runtime_bundle(input)
