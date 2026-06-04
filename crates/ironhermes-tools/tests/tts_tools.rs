@@ -86,6 +86,17 @@ fn test_edge_provider_name_is_edge() {
     assert_eq!(provider.name(), "edge");
 }
 
+// New test (PLAN 02 Task 3): ElevenLabsProvider::name() matches BUILTIN_TTS_NAMES[1].
+#[test]
+fn test_elevenlabs_provider_name_is_elevenlabs() {
+    use ironhermes_core::config::ElevenLabsConfig;
+    use ironhermes_tools::tts::ElevenLabsProvider;
+    use ironhermes_core::tts::TtsProvider;
+
+    let provider = ElevenLabsProvider::new(ElevenLabsConfig::default());
+    assert_eq!(provider.name(), "elevenlabs");
+}
+
 // TTS-10 (still ignored — live network; opt-in via cargo test -- --ignored)
 #[tokio::test]
 #[ignore = "TTS-10 — live network; opt-in via cargo test -- --ignored"]
