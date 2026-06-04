@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
-stopped_at: Phase 36.17.6 context gathered
-last_updated: "2026-06-04T14:02:57.618Z"
-last_activity: 2026-06-04 -- Phase 36.17.6 execution started
+stopped_at: Phase 36.17.7 context gathered
+last_updated: "2026-06-04T19:27:05.327Z"
+last_activity: 2026-06-04
 progress:
-  total_phases: 60
-  completed_phases: 25
+  total_phases: 61
+  completed_phases: 26
   total_plans: 133
-  completed_plans: 126
-  percent: 42
+  completed_plans: 129
+  percent: 43
 ---
 
 # Project State
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 36.17.6 (toolset-cli-tts-wiring) — EXECUTING
-Plan: 1 of 3
+Phase: 36.17.6
+Plan: Not started
 Status: Executing Phase 36.17.6
-Last activity: 2026-06-04 -- Phase 36.17.6 execution started
+Last activity: 2026-06-04
 
 ## Recent close-out summary (2026-06-03 — Phase 36.17.2.2 plans 01-06 + 07 Task 1 merged, awaiting UAT)
 
@@ -127,7 +127,7 @@ Last activity: 2026-06-04 -- Phase 36.17.6 execution started
 
 **Velocity:**
 
-- Total plans completed: 150
+- Total plans completed: 153
 - Average duration: — min
 - Total execution time: 0 hours
 
@@ -171,6 +171,7 @@ Last activity: 2026-06-04 -- Phase 36.17.6 execution started
 | 36.3.7.9 | 9 | - | - |
 | 36.3.7.10 | 6 | - | - |
 | 36.3.7.12 | 5 | - | - |
+| 36.17.6 | 3 | - | - |
 
 **Recent Trend:**
 
@@ -613,6 +614,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-06-04T13:32:38.097Z
-Stopped at: Phase 36.17.6 context gathered
-Resume file: .planning/phases/36.17.6-toolset-cli-tts-wiring/36.17.6-CONTEXT.md
+Last session: 2026-06-04T19:27:05.319Z
+Stopped at: Phase 36.17.7 context gathered
+Resume file: .planning/phases/36.17.7-gateway-web-tts-runtime-wiring/36.17.7-CONTEXT.md
