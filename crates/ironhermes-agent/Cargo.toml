@@ -55,3 +55,5 @@ tracing-test = { workspace = true }
 insta = { workspace = true }
 # Phase 25.1 GAP-7 — pre-send invariant integration tests
 wiremock = { workspace = true }
+# Phase 36.17.7 Plan 01 — async behavioral tests for tts_per_turn_wiring
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
