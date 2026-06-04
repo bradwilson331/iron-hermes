@@ -128,7 +128,7 @@ Plans:
 **Goal:** Close phase 36.17.5 Plan 04's blocked UAT Gates 4+5 by wiring the `voice` toolset into the CLI inspection path. Adds `"voice"` to `KNOWN_TOOLSETS` + `toolset_members_map` and a `register_tts_for_inspection` helper called from both `cmd_toolset_list` and `cmd_toolset_show` (D-01/D-02). Re-runs the full 5-gate UAT (D-04) and secures operator approval for Gates 4+5 (D-05). Finally flips `36.17.5-VALIDATION.md` (`nyquist_compliant: true`, `wave_0_complete: true`, `status: complete`) and ROADMAP Plan 04 line to `[x]`, closing 36.17.5 formally.
 **Requirements**: A1..A8 + REGR-1 from 36.17.6-CONTEXT.md `<acceptance>` block (CONTEXT-locked acceptance items act as REQ-IDs per the 36.17.x precedent). D-01..D-05 locked decisions.
 **Depends on:** Phase 36.17.5 (Plan 04 PARTIAL)
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 
 Plans:
 **Wave 1**
@@ -138,7 +138,7 @@ Plans:
 - [x] 36.17.6-02-PLAN.md — Release-build the binary, pre-flight `voice` row visibility, re-run `bash scripts/uat/phase-36.17.5-tts.sh` (Gates 1-3 automated regression check; Gates 4-5 operator-approved via blocking-human checkpoints). 3 tasks (1 auto + 2 BLOCKING human-verify). D-04/D-05. A3/A4/A5.
 
 **Wave 3** *(depends on Wave 2)*
-- [ ] 36.17.6-03-PLAN.md — Flip `36.17.5-VALIDATION.md` frontmatter (`status: complete`, `nyquist_compliant: true`, `wave_0_complete: true`), flip ROADMAP Plan 04 line `[ ]` → `[x]`, run `gsd-verifier` over combined 36.17.5 + 36.17.6 surface. 3 tasks. D-05. A6/A7/A8.
+- [x] 36.17.6-03-PLAN.md — Flip `36.17.5-VALIDATION.md` frontmatter (`status: complete`, `nyquist_compliant: true`, `wave_0_complete: true`), flip ROADMAP Plan 04 line `[ ]` → `[x]`, run `gsd-verifier` over combined 36.17.5 + 36.17.6 surface. 3 tasks. D-05. A6/A7/A8.
 
 ### Phase 36.17.5: integrate TTS functions (INSERTED)
 
