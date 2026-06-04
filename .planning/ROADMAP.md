@@ -87,6 +87,7 @@ Plans:
 **Source of truth:** `/Users/twilson/Documents/iron-hermes-planning.md` (parity comparison, 2026-05-24)
 **Phases:** 14 parents + 20 sub-phases = 34 total. Phase 36 + 36.1 carry over from v2.1 (36.1 SHIPPED 2026-05-25). Phases 36.2 through 36.13 inserted during the parity walk on 2026-05-25.
 **Strategic narrowings (referenced from memory):**
+
 - `project_multiplatform_gateway_scope` — 17 messaging platforms deferred under Phase 36.7
 - `project_plugin_loader_rejected` — Phase 36.13 ships AgentRuntime primitives instead of a loader
 
@@ -118,10 +119,38 @@ Plans:
 **Plans:** 4/4 plans complete · UAT 5/5 green (2026-05-27) · post-execute fixes: `2df0ae60` (UAT public-dir precondition) · `2ab57e72` (production graceful-shutdown + startup INFO marker)
 
 Plans:
+
 - [x] 36.17-01-PLAN.md — Add `tower-http = { version = "0.6", features = ["trace"] }` to workspace deps; add `tracing-appender` + `tower-http` to `iron_hermes_ui` non-wasm32 deps (D-13/D-14)
 - [x] 36.17-02-PLAN.md — Create `crates/iron_hermes_ui/src/server/logging.rs` with `install_web_logger_subscriber()` (3-layer registry, both appenders, ANSI-stripped file layers, per-layer filters, `try_init`); declare module in `server/mod.rs` (D-02..D-05, D-15..D-18)
 - [x] 36.17-03-PLAN.md — Replace `tracing_subscriber::fmt().init()` in `main.rs` with `install_web_logger_subscriber()`; mount `TraceLayer::new_for_http().on_request(DefaultOnRequest::new().level(Level::INFO)).on_response(DefaultOnResponse::new().level(Level::INFO))` on the Axum router (D-01, D-07..D-12 + Q2 INFO-level fix)
 - [x] 36.17-04-PLAN.md — Create `scripts/uat/phase-36.17-web-logging.sh` UAT script (mktemp IRONHERMES_HOME, start server, curl, assert both files exist + non-empty + ANSI-free + `tower_http::trace` target present in access log); blocking-human verify (D-01..D-05, D-09, D-10, D-15, D-16)
+
+### Phase 36.17.7: Gateway + web runtime TTS wiring — activate `text_to_speech` / `send_audio` for live sessions (INSERTED, NEW)
+
+**Goal:** Close the runtime-side gap that 36.17.5 deferred and 36.17.6 documented: `register_tts_tools` is guarded by `if let Some(ref session_key) = input.session_key` in `crates/ironhermes-agent/src/app_runtime_factory.rs:97-103`, and `AgentRuntime::from_config` (called by `run_gateway` and by the iron_hermes_ui web server) currently hard-codes `session_key: None, telegram_adapter: None` at `crates/ironhermes-agent/src/agent_runtime.rs:215-217` ("Phase 36.17.5 D-15: per-turn threading deferred to a follow-up phase"). As a result, live agent sessions on Telegram, Discord, Slack, and the iron_hermes_ui web surface have `text_to_speech` + `send_audio` REGISTERED in `ironhermes-tools` but NEVER exposed to the LLM tool-schema list, so the agent silently falls back to skills like `hyperframes-media` or `say`. This phase threads a real `SessionKey` (and the right `AudioDispatcher` adapter per platform) into the per-session bundle so the two TTS tools actually appear in the agent's tool surface on every supported platform.
+
+**Surfaces in scope:** (a) **gateway** path `run_gateway` → `AgentRuntime::from_config` (covers Telegram via existing `impl AudioDispatcher for TelegramAdapter`, Discord + Slack deferred-or-decision below); (b) **iron_hermes_ui web** path `crates/iron_hermes_ui/src/server/...` → whatever runtime constructor it uses (likely `AgentRuntime::from_config` too, or its own ws-handler-scoped factory) — needs a new `WebAudioDispatcher` impl that pipes the produced MP3 file to the browser (WS binary frame / blob URL via existing chat-event channel, NOT a server-side `rodio` playback).
+
+**Out of scope:** new TTS providers, streaming/chunked synthesis, push-to-talk / STT, voice-mode (auto-speak Path A). All four were deferred from 36.17.5 and stay deferred.
+
+**Sketch of locked decisions to confirm in `/gsd:discuss-phase`:**
+- **D-01 — where to thread session_key:** gateway handler builds a per-turn `AppRuntimeFactoryInput` with `session_key: Some(SessionKey { platform: Telegram, chat_id, user_id })` and calls `build_app_runtime_bundle` per-session, OR keeps the singleton `AgentRuntime` and adds a registry-mutator path. Default: per-turn bundle (matches 36.17.5 D-15 "tools are tied to the agent loop, not the runtime").
+- **D-02 — WebAudioDispatcher transport:** browser audio is delivered as a binary WS frame on the existing `ChatStreamEvent` channel (new typed variant `ChatStreamEvent::AudioOut { mime, bytes }`), with the wasm UI calling `HTMLAudioElement.play()` from a `Blob` URL. Reject the alternatives of (a) writing to `~/.ironhermes/audio_cache` and serving via a new `/audio/:id` HTTP route (cross-origin + cleanup pain), (b) base64-encoding inside the existing JSON event stream (3× bandwidth, blocks streaming). Confirm during discuss.
+- **D-03 — Discord/Slack adapters:** Discord supports voice via gateway voice channels (large surface — DEFER); Slack supports `files.upload` audio (small surface — could ship). Default: ship Telegram + Web in this phase; queue Discord + Slack for a separate phase. (Mirrors the 36.17.5 deferral pattern.)
+- **D-04 — Per-session SessionKey lifetime:** built fresh at the start of every `run_turn` (gateway handler arm + ws handler arm), threaded through `AppRuntimeFactoryInput` for that turn only; old bundle is dropped when the turn completes. Rationale: keeps the audio dispatcher Arc-clone count bounded, matches the existing `RegistryToolsetSession` per-session lifetime in `run_gateway`.
+- **D-05 — Invariant test:** add `crates/ironhermes-agent/tests/invariants_36_17_7.rs` that asserts `from_config` (or its replacement constructor) passes `session_key: Some(...)` on the production code path — flipping the negation of the 36.17.5 deferral guard.
+
+**Requirements (acceptance items, locked at discuss-phase):**
+- **A1** — On a live Telegram session, `text_to_speech` + `send_audio` appear in the LLM's tool-schema list for every turn (verifiable by tracing the system message or by an integration test that captures the request payload).
+- **A2** — On a live iron_hermes_ui web session, the same two tools appear in the LLM tool-schema list for every turn.
+- **A3** — On Telegram, the agent invoking `text_to_speech` + `send_audio` produces an audible voice message in the chat (operator UAT, mirrors 36.17.5 Gate 5).
+- **A4** — On the web UI, the agent invoking `text_to_speech` + `send_audio` produces playback in the browser (operator UAT — clicking the audio control plays the synthesized audio).
+- **A5** — `cargo test -p ironhermes-agent` includes a new invariant locking the `session_key: Some(...)` wiring (D-05).
+- **A6** — No regression in 36.17.5 CLI path (`hermes tts test/play`) or 36.17.6 CLI inspection path (`hermes toolset list/show voice` still shows `2/2 ✓`).
+- **A7** — `voice` row in `toolset list` flips from `disabled` to `enabled` for sessions where the agent runtime registered the tools (or document why the slug-level enablement is decoupled from the per-session registration and add a status banner to inspection output).
+
+**Depends on:** Phase 36.17.5 (D-15 deferral), Phase 36.17.6 (CLI inspection scaffolding to verify against), Phase 36.17.4 (web ws ChatStreamEvent variant pattern for D-02).
+**Plans:** TBD (sketch — to be detailed by `/gsd:discuss-phase 36.17.7` then `/gsd:plan-phase 36.17.7`).
 
 ### Phase 36.17.6: Toolset CLI TTS wiring (INSERTED)
 
@@ -132,12 +161,15 @@ Plans:
 
 Plans:
 **Wave 1**
+
 - [x] 36.17.6-01-PLAN.md — Add `"voice"` to `KNOWN_TOOLSETS` + `toolset_members_map`, add `register_tts_for_inspection` helper, call from both `cmd_toolset_list` and `cmd_toolset_show`, add `toolset_members_map_voice_entry` test, update `browser_in_known_set` length 8→9. Single-file change to `crates/ironhermes-cli/src/toolset_cmd.rs`. 3 tasks. D-01/D-02/D-03. A1/A2/REGR-1.
 
 **Wave 2** *(depends on Wave 1)*
+
 - [x] 36.17.6-02-PLAN.md — Release-build the binary, pre-flight `voice` row visibility, re-run `bash scripts/uat/phase-36.17.5-tts.sh` (Gates 1-3 automated regression check; Gates 4-5 operator-approved via blocking-human checkpoints). 3 tasks (1 auto + 2 BLOCKING human-verify). D-04/D-05. A3/A4/A5.
 
 **Wave 3** *(depends on Wave 2)*
+
 - [x] 36.17.6-03-PLAN.md — Flip `36.17.5-VALIDATION.md` frontmatter (`status: complete`, `nyquist_compliant: true`, `wave_0_complete: true`), flip ROADMAP Plan 04 line `[ ]` → `[x]`, run `gsd-verifier` over combined 36.17.5 + 36.17.6 surface. 3 tasks. D-05. A6/A7/A8.
 
 ### Phase 36.17.5: integrate TTS functions (INSERTED)
@@ -149,15 +181,19 @@ Plans:
 
 Plans:
 **Wave 1**
+
 - [x] 36.17.5-01-PLAN.md — Core trait + registry + config + constants + workspace deps (msedge-tts + rodio) + Wave-0 test scaffolds. 7 tasks (2 BLOCKING package-legitimacy human-verify gates + 5 auto). D-08/D-09/D-10/D-11/D-12. TTS-01/02/07/08.
 
 **Wave 2** *(depends on Wave 1)*
+
 - [x] 36.17.5-02-PLAN.md — Provider impls (EdgeProvider via msedge-tts, ElevenLabsProvider via reqwest) + ffmpeg OnceLock probe + build_tts_registry factory. 3 tasks. D-03/D-04. TTS-03/04/09. T-text-length + T-api-key-leak.
 
 **Wave 3** *(depends on Wave 2)*
+
 - [x] 36.17.5-03-PLAN.md — TextToSpeechTool + SendAudioTool + AudioDispatcher trait + register_tts_tools + AppRuntimeFactoryInput extension + per-session wiring + TelegramAdapter::impl AudioDispatcher. 4 tasks. D-05/D-06/D-07/D-13/D-14/D-15/D-16. TTS-05/06. **T-output-path BLOCKING mitigation owned here.**
 
 **Wave 4** *(depends on Wave 3)*
+
 - [x] 36.17.5-04-PLAN.md — `hermes tts test/play` CLI subcommands + 5-gate UAT script + un-ignore TTS-10 live-network test + operator UAT (2 BLOCKING human-verify gates: tool registry exposure + Platform::Local audible playback). 5 tasks. D-01/D-02. TTS-10.
 
 ### Phase 36.17.4: wire up iron_hermes_ui to the gateway queue + slash commands (INSERTED)
@@ -239,6 +275,7 @@ Plans:
 **Plans:** 5/5 plans complete
 
 Plans:
+
 - [x] 36.17.2-01-PLAN.md — UserQueueManager internal rewrite: replace mpsc::Sender map with SessionKey-keyed worker-presence + Notify map; dispatch returns Result<DispatchOutcome, QueueError>; cap-hit UX (❌+chat reply) migrates into dispatch; rekey by full SessionKey triple; multimodal sidecar (pending_multimodal); with_rate_limit_retry relocated to rate_limiter.rs (D-01..D-03, D-10, D-11, D-13, D-14, D-18, D-19)
 - [x] 36.17.2-02-PLAN.md — Per-chat worker rewrite in runner.rs: chat_rx.recv pattern → SessionQueue::pop + Notify::notified select loop; 👁 transport reaction moves into the worker at pop-time (D-08); post-turn drain_pending call REMOVED (D-07); dispatch loop matches on DispatchOutcome (D-04..D-09, D-15, D-16)
 - [x] 36.17.2-03-PLAN.md — Integration test tests/uqm_session_queue_unification.rs: 5 same-chat messages → 5 👁 at pop in FIFO order through real handle_with_multimodal; multimodal round-trip test; worker-exit/dispatch race coverage; verify 9 existing tests in session_queue_integration.rs still pass unchanged (D-20, D-21)
@@ -253,6 +290,7 @@ Plans:
 **Plans:** 7/7 plans complete
 
 Plans:
+
 - [x] 36.17.2.2-01-PLAN.md — markdown_v2.rs TDD: pub fn escape_markdown_v2 + pub fn escape_outside_code_blocks (D-04 smart escape with fence/inline-code/link-URL state machine; Pitfall 1 + Pitfall 5 mitigations); 13+ golden tests written RED first; pub mod wired into lib.rs.
 - [x] 36.17.2.2-02-PLAN.md — media_tag.rs TDD: pub struct MediaTagExtractor mirroring StreamingContextScrubber partial-prefix buffering (D-05/D-08) + 3 extra state booleans for D-09 fence/inline-code skip + Pitfall 5 escaped-backtick respect; MediaSource/MediaKind/MediaRef types; 19+ tests covering D-05/D-06/D-08/D-09; pub mod wired into lib.rs.
 - [x] 36.17.2.2-03-PLAN.md — MediaSender trait declaration in adapter.rs per D-18 (6 async methods: 5 per-type + send_media dispatcher with default body) with D-17 no-caption divergence doc-comment + Arc dyn-dispatch upcast warning; teach the <MEDIA: ...> convention to the model in prompt_builder.rs Telegram branch (RESEARCH Open Q1 / Assumption A11 mitigation — without this the phase ships dead code).
@@ -269,6 +307,7 @@ Plans:
 **Plans:** 2/2 plans complete
 
 Plans:
+
 - [x] 36.17.2.1-01-PLAN.md — Add Option<Arc<UserQueueManager>> field + set_user_queue_manager setter on GatewayMessageHandler; rewrite the CoreCommandResult::Queued arm to delegate to uqm.dispatch(queued_event, None, None).await so push + notify_one() are atomic (Option B from RESEARCH.md); preserve depth-aware reply via session_queue.len() AFTER dispatch; cap-hit UX deduplicated (UQM already fires ❌ + "Queue is full"); legacy direct-try_push fallback preserved when uqm field is None (D-20 contract); reorder runner.rs::run_gateway to construct UQM BEFORE handler Arc-wrap so setter can run on the mutable handler.
 - [x] 36.17.2.1-02-PLAN.md — Append regression test test_queue_command_wakes_parked_worker to tests/uqm_session_queue_unification.rs that reuses RecordingFailingAdapter + spawn_test_worker + make_event_full; dispatches 1 free-text via uqm.dispatch to register the worker, polls until the worker drains it and parks at notify.notified(), then dispatches 5 /queue events via handler.handle_with_multimodal directly (the exact production fast-path invocation that exposed the bug); polls the 👀-reaction count on synthesized message_ids q_1..q_5 with a 5-second timeout; asserts 5 reactions in FIFO order + queue drained + send_log grew by baseline+5. Test times out under unfixed code; passes under Plan 01's fix.
 
@@ -280,6 +319,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.16 to break down)
 
 ### Phase 36.15: Small Model Mode (SMM) — per-provider extra_request_options TOML knob wired through AgentRuntime to ChatRequest.extra so Ollama num_ctx / vLLM top_k / OpenRouter provider.order can be tuned without code changes; closes Ollama exceed_context_size_error fallback path (INSERTED)
@@ -308,7 +348,6 @@ Plans:
 - [x] 36.15-05-PLAN.md — Append four invariant tests to tests/extra_request_options.rs: D-09 caller-wins per-key, D-09 stream_options.include_usage floor preserved (client.rs:236), reserved-key collision (named-field-wins, T-36.15-09 mitigation), D-10 mid-session model-switch via resolve_extras with different model_name
 - [x] 36.15-06-PLAN.md — Create tests/invariants_36_15.rs with 5 static-grep gates: no literal `None` for extra in agent_loop.rs, `resolved_extras.clone()` count ≥ 2, D-06 `build_openrouter_chat_request_full` still present in any_client.rs, `_extra: Option<HashMap` still present in anthropic_client.rs, client.rs floor markers preserved; full-workspace release build + cargo test gate
 
-
 ### Phase 36.14: SSE stream error fallback gap — detect provider error envelopes inside HTTP 200 SSE bodies and route them through the existing PROV-07 fallback/retry chain (INSERTED)
 
 **Goal:** Close the third major fallback gap class: streaming LLM providers (e.g., OpenRouter) that return HTTP 200 but deliver an error payload as an in-stream SSE `data:` line. Currently `LlmClient::chat_completion_stream` only inspects the HTTP status, so SSE-body errors deserialize-fail silently as `debug!` parse warnings, `call_llm_streaming` returns `Ok` with empty content, and `should_fallback` never fires. Fix adds `StreamEvent::ProviderError(String)` and detection in the stream consumer (when `ChatStreamChunk` deserialization fails AND the data parses as a JSON object with a top-level `error` key), synthesizes a `(NNN Reason)`-formatted error string so `extract_http_status` / `classify_400_subcases` route through the existing classifier, and locks the shape with static-grep invariants in `tests/invariants_36_14.rs`. AnthropicClient streaming path and the `agent_loop.rs` fallback/retry block are NOT modified. Extends Phase 27.1.4.1 (gateway fallback wiring) and 27.1.4.1.1 (transport-error fallback).
@@ -318,6 +357,7 @@ Plans:
 **Status:** COMPLETE (2026-05-26) — 18 new tests green (7 unit + 7 wiremock integration + 4 static-grep invariants); cargo build --workspace + cargo test -p ironhermes-agent green; atomicity verified (variant + match arm in same commit); see `.planning/phases/36.14-sse-stream-error-fallback-gap/36.14-VERIFICATION.md`.
 
 Plans:
+
 - [x] 36.14-01-PLAN.md — Detect SSE error envelopes in stream consumer, add `StreamEvent::ProviderError` variant, propagate as `Err` in `call_llm_streaming`, add invariants_36_14.rs static-grep regression gates
 
 ### Phase 36.13: Plugins & extensions — DECISION: REJECT plugin loader port (lean on skills+MCP+crates per "ironhermes is its own thing" strategic posture). Ship: (1) OpenTelemetry exporter subsuming hermes-agent's observability plugin (Datadog/New Relic via OTLP); (2) ctx.llm + tool_override as direct AgentRuntime primitives (no plugin system); (3) ADR documenting the decision in PROJECT.md / ARCHITECTURE.md; (4) confirm overlap mapping — memory/model/platforms/image-gen/video-gen/kanban/browser already covered by other phases (INSERTED)
@@ -328,6 +368,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.13 to break down)
 
 ### Phase 36.12: Packaging & distribution parity — Homebrew tap (macOS native install), Nix flake (reproducible builds, NixOS), Termux/Android support, crates.io publication verification, Windows native install (quick_setup_script.ps1 currently exists — verify status); reach feature parity with hermes-agent's distribution matrix (PyPI/Homebrew/Docker/Nix/Termux/Windows beta) (INSERTED)
@@ -338,6 +379,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.12 to break down)
 
 ### Phase 36.11: Configuration & secrets parity — credential source plugins beyond env/config: macOS Keychain, AWS Secrets Manager, Bitwarden CLI (parity targets from hermes-agent); optional extensions: Linux Secret Service / gnome-keyring, Windows Credential Manager, 1Password CLI. Reduces reliance on plaintext .env files; OS-native credential storage (INSERTED)
@@ -348,6 +390,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.11 to break down)
 
 ### Phase 36.10: Memory & state parity — expose session_search tool over existing ironhermes-state FTS5 schema (infrastructure shipped, just no tool wrapper); optionally evaluate adding managed-memory providers (honcho, mem0, supermemory) alongside current sqlite/grafeo/duckdb backends (INSERTED)
@@ -358,6 +401,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.10 to break down)
 
 ### Phase 36.9: MCP server — expose ironhermes as MCP server for Claude Code / Cursor / external clients. Port hermes-agent's 9-tool surface: conversations_list, conversation_get, messages_read (FTS-backed), attachments_fetch, events_poll/wait, messages_send, permissions_list_open, permissions_respond, channels_list. ironhermes-state FTS5 + HookRegistry already provide the needed substrate. (INSERTED)
@@ -368,6 +412,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.9 to break down)
 
 ### Phase 36.8: ACP adapter — Agent Client Protocol server for Zed / VS Code / JetBrains integration (stdio transport, tool listing + dispatch + streaming, approval-event surface, registry-driven uvx-style install). Single biggest 'cannot switch from hermes-agent' blocker for editor-driven users (INSERTED)
@@ -378,6 +423,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.8 to break down)
 
 ### Phase 36.7: Multi-platform gateway parity — port 19 missing platforms from hermes-agent: WhatsApp, Signal, SMS, Email (IMAP/SMTP), Matrix, Mattermost, MS Teams, iMessage (Bluebubbles), LINE, SimpleX, DingTalk, Feishu, Wecom, WeChat (Weixin), QQ, Yuanbao, generic webhook, HTTP REST API server, Home Assistant trigger (INSERTED)
@@ -388,6 +434,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.7 to break down)
 
 ### Phase 36.7.1: Foundation — generic webhook adapter + HTTP REST API server (unblocks any custom integration via webhook; provides a programmatic surface for headless ironhermes use). Other 17 hermes-agent platforms (WhatsApp/Signal/SMS/Email/Matrix/Mattermost/Teams/iMessage/LINE/SimpleX/DingTalk/Feishu/Wecom/Weixin/QQ/Yuanbao/HomeAssistant) DEFERRED (INSERTED)
@@ -398,6 +445,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.7.1 to break down)
 
 ### Phase 36.6: TUI parity & visibility fix — BUG: AI responses still not rendering visibly in ratatui TUI; plus Ink-UX feature port (overlays, pickers, skins, thinking panel, command palette, mode picker, model switcher, OSC8 hyperlinks) (INSERTED)
@@ -408,6 +456,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.6 to break down)
 
 ### Phase 36.6.4: TUI polish — OSC8 clickable hyperlinks, skin engine (dark/light/custom themes), terminal compatibility (iTerm2/Kitty/Ghostty/Windows Terminal) (INSERTED)
@@ -418,6 +467,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.6.4 to break down)
 
 ### Phase 36.6.3: Ink-UX port — input UX (command palette / slash menu, model/provider switcher with live handoff, picker components) (INSERTED)
@@ -428,6 +478,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.6.3 to break down)
 
 ### Phase 36.6.2: Ink-UX port — thinking panel + overlays (skill hub overlay polish, mode picker overlay, generic overlay framework matching Ink modal pattern) (INSERTED)
@@ -438,6 +489,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.6.2 to break down)
 
 ### Phase 36.6.1: BUG FIX: AI response visibility — investigate why streamed/final AI responses don't render visibly in ratatui TUI; verify whether feedback_scroll_width_inner formulas (area.width-2 inner, prefix+body+width-1/width, viewport_content_length) ever landed; ship a regression test (SHIPPED 2026-05-26)
@@ -450,6 +502,7 @@ Plans:
 **Closeout (2026-05-26):** Verifier passed 7/7 automated must-haves: D-02 module `word_wrap_tests` 5/5 pass, D-03 `auto_scroll_lands_at_true_bottom_after_stream_finished` passes, `unicode-width = "0.2"` direct dep landed, `pub(crate) fn compute_transcript_area` confirmed, both `i==0` and `i>0` call sites in `transcript_line_count` route through `word_wrapped_line_count`, old `fn wrapped_line_count` deleted. Plan 02 auto-fix patched a subtle `flush_word` double-count bug in Plan 01's simulator (caught by the broader D-03 test — exactly the integration coverage's intent) and re-baselined 5 insta snapshots to reflect the now-correct scrollbar appearance. Manual UAT (live TUI reproducing screenshot 1 "Hi!" + screenshot 2 `/usage`) confirmed by user.
 
 Plans:
+
 - [x] 36.6.1-01-PLAN.md — Wave 0: Add `unicode-width` direct dep, replace `wrapped_line_count` with `word_wrapped_line_count` (word-wrap simulator), fix both call sites in `transcript_line_count`, add D-02 unit tests in `app.rs`
 - [x] 36.6.1-02-PLAN.md — Wave 1: Promote `compute_transcript_area` to `pub(crate)` in `event_loop.rs`, add D-03 end-to-end auto-scroll integration test in `ui.rs`
 
@@ -461,6 +514,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.5 to break down)
 
 ### Phase 36.4: Skills library — bundle hermes-agent's 27 built-in + 18 optional skills; install via GitHub, migrate from hermes-agent, or openclaw local install (INSERTED)
@@ -471,6 +525,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.4 to break down)
 
 ### Phase 36.4.3: Openclaw catalog bridge — consume Claude Code openclaw-shaped skill ecosystem via ironhermes-mcp; expose openclaw skills as first-class tools without re-porting (INSERTED)
@@ -481,6 +536,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.4.3 to break down)
 
 ### Phase 36.4.2: Hermes-agent skill port — Tier 1 only (github, productivity, devops, software-development, research, email, data-science, mcp); translate Python-handler skills to ironhermes YAML+Markdown bundles or MCP-bridge wrappers (INSERTED)
@@ -491,6 +547,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.4.2 to break down)
 
 ### Phase 36.4.1: GitHub tap setup + lock-file seed — point ironhermes-hub at huggingface/skills (or new ironhermes/skills repo); seed Tier-1 skills via SKILL.lock without any code port (INSERTED)
@@ -501,6 +558,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.4.1 to break down)
 
 ### Phase 36.3: Tools parity — vision/image/video gen, TTS/STT, computer_use, smart-home, kanban, planning tools (todo/clarify/session_search), first-class send_message, multi-environment exec, browser CDP/dialog (INSERTED)
@@ -511,6 +569,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.3 to break down)
 
 ### Phase 36.3.12: Multi-environment exec — Docker, SSH, Modal, Daytona, Singularity backends (INSERTED)
@@ -521,6 +580,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.3.12 to break down)
 
 ### Phase 36.3.11: Web search expansion — Brave, DDG, SearXNG; pluggable web_search_registry (INSERTED)
@@ -531,6 +591,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.3.11 to break down)
 
 ### Phase 36.3.10: Browser polish — CDP tool, dialog tool, Camofox-style privacy backend (INSERTED)
@@ -541,6 +602,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.3.10 to break down)
 
 ### Phase 36.3.9: Planning tools — todo, session_search (INSERTED)
@@ -551,6 +613,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.3.9 to break down)
 
 ### Phase 36.3.8: Messaging & clarification tools — first-class send_message tool, clarify with native buttons (INSERTED)
@@ -561,6 +624,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.3.8 to break down)
 
 ### Phase 36.3.7: Kanban / multi-agent board — kanban_* tools (INSERTED)
@@ -571,6 +635,7 @@ Plans:
 **Plans:** 9/9 plans complete
 
 Plans:
+
 - [x] 36.3.7-01-PLAN.md — Crate skeleton + types/paths/events/config + `chat -q` flag + invariants test scaffold + sysinfo checkpoint (Wave 0)
 - [x] 36.3.7-02-PLAN.md — Schema (5 tables + WAL + migrations) + KanbanStore CRUD + atomic CAS claim (BEGIN IMMEDIATE) + claim_lock/expected_run_id gates + concurrency test (Wave 1)
 - [x] 36.3.7-03-PLAN.md — PID liveness + worker env scrub (build_kanban_worker_env) + spawn_worker + 8-step dispatcher tick (detect-crashed → live-PID extension → reclaim → max-runtime → ready-promotion → atomic-claim → respawn-guard → spawn) + failure circuit-breaker (Wave 2)
@@ -589,6 +654,7 @@ Plans:
 **Plans:** 5/5 plans complete
 
 Plans:
+
 - [x] 36.3.7.0-01-PLAN.md — Drop `--skills` argv from worker_spawn.rs; add HERMES_KANBAN_TASK_SKILLS env carrier; receiver-end test (Wave 1)
 - [x] 36.3.7.0-02-PLAN.md — Add cmd_kanban handler + dispatch arm + KanbanStoreReader trait + KanbanStoreReaderImpl + build_cmd_ctx wiring + receiver dispatch-chain test (Wave 1)
 - [x] 36.3.7.0-03-PLAN.md — D-12 determination commit + hook apply_circuit_breaker into detect_crashed_workers path + 2 receiver-end tests on the crashed path (Wave 1)
@@ -603,6 +669,7 @@ Plans:
 **Plans:** 2 plans
 
 Plans:
+
 - [ ] 36.3.7.1-01-PLAN.md — Wire apply_circuit_breaker into reclaim_stale_claims path + 2 receiver-end tests (Wave 1)
 - [ ] 36.3.7.1-02-PLAN.md — Wire apply_circuit_breaker into enforce_max_runtime path + 2 receiver-end tests (Wave 1)
 
@@ -614,6 +681,7 @@ Plans:
 **Plans:** 2/2 plans complete
 
 Plans:
+
 - [x] 36.3.7.2-01-PLAN.md — Drop top-level oneOf from delegate_task input_schema, rewrite mutex prose, invert existing test, audit ironhermes-tools/src/ for other hits (BUG-COMPAT-01 + 02)
 - [x] 36.3.7.2-02-PLAN.md — System-level receiver-end test asserting no tool's input_schema has a top-level boolean combinator (BUG-COMPAT-03)
 
@@ -625,6 +693,7 @@ Plans:
 **Plans:** 1/1 plans complete
 
 Plans:
+
 - [x] 36.3.7.3-PLAN.md — Restore CFG-03 marker line + harden test to anchor on async fn main scope (BUG-01 + BUG-02)
 
 ### Phase 36.3.7.4: Dispatcher events parity — emit Reclaimed event in reclaim_stale_claims (INSERTED)
@@ -635,6 +704,7 @@ Plans:
 **Plans:** 0 plans (orchestrator-inline at execution)
 
 Plans:
+
 - [x] 36.3.7.4-PLAN.md — Single-plan inline execution; Task 1 verification revealed `cas::release_claim` already emits the `reclaimed` event row via direct SQL INSERT (cas.rs:136-140), so BUG-36.3.7.4-01 was a NO-OP per CONTEXT's conditional gate. BUG-36.3.7.4-02 receiver test shipped as the regression lock. All 7 gates PASS. Commit `1161fc7d`. See SUMMARY.md + VERIFY.md.
 
 ### Phase 36.3.7.5: Gateway notifier — auto-subscribe + polling loop + notify-{subscribe,list,unsubscribe} verbs (INSERTED)
@@ -645,6 +715,7 @@ Plans:
 **Plans:** 4 plans (overview at 36.3.7.5-PLAN.md + 4 sub-plans, develop-direct strategy, 2 waves)
 
 Plans:
+
 - [x] 36.3.7.5-01-PLAN.md — Wave 1. kanban_subscriptions schema + 5 store CRUD APIs + Subscription type + 8 receiver tests (BUG-01, -02, -07a). PASS 2026-05-30. 4 commits: `fcdab1a8` schema+type, `dd59715f` 5 CRUD methods, `8519279d` 8 receiver tests, `072c3afd` SUMMARY. All 8 Task-5 gates green. ironhermes-kanban suite 115/0. Bilateral-tracing satisfied per LEARNINGS 2026-05-29. See SUMMARY.md.
 - [x] 36.3.7.5-02-PLAN.md — Wave 1. NEW notifier.rs with run_notifier_loop + run_notifier_tick + send_fn injection + notifier_poll_seconds config + 5 polling-loop receiver tests (BUG-03, -07b). PASS 2026-05-30. 4 commits: `c22febbf` notifier_poll_seconds config field (default 3), `e635e198` NEW notifier.rs (~250 LOC: NotifierContext + run_notifier_loop + run_notifier_tick + SendFn trait-object alias + format_terminal_message) + 2 store.rs helpers (list_terminal_events_after + max_event_id) + lib.rs re-exports, `f7c40e8e` 5 receiver tests in NEW tests/notifier_logic.rs (polling_loop_delivers_once_and_removes_subscription, reclaimed_event_is_ignored, watermark_advances_past_processed_event, send_fn_failure_still_removes_subscription, no_subscriptions_means_no_send), `84a94a5a` SUMMARY with bilateral-tracing table + crate-isolation audit. All 12 Task-5 gates green. ironhermes-kanban suite 120/0 (+5 from notifier_logic; exactly the planned delta from 115). Workspace suite 3552/0 — zero regressions. **Crate-isolation fence HELD** — zero ironhermes-gateway dep declarations in ironhermes-kanban/Cargo.toml; SendFn trait-object closure IS the kanban→gateway boundary (gateway injects at spawn time in Plan 03). Locked CONTEXT decisions materially observable: D-send-closure-injection, D-watermark-in-memory (AtomicI64 fetch_max), D-log-and-drop-on-fail, D-auto-remove-after-attempt. Bilateral-tracing satisfied per LEARNINGS 2026-05-29. Wave 1 of Phase 36.3.7.5 now complete; Wave 2 unblocked. See SUMMARY.md.
 - [x] 36.3.7.5-03-PLAN.md — Wave 2. Gateway runner spawn + notifier_gating helper + send-closure builder + 3 gating receiver tests (BUG-04, -07c). PASS 2026-05-30. 4 commits: `16a208ed` store-arc lift refactor in runner.rs + NEW notifier spawn block mirroring dispatcher spawn at line 1278 + NEW notifier_gating.rs (pub fn compute_notifier_gate + pub enum NotifierGate) declared via pub mod notifier_gating in lib.rs + 3 private helpers (collect_enabled_platform_names + build_adapter_snapshot + build_notifier_send_fn closure with case-insensitive platform routing), `e7865757` 3 receiver-end tests in NEW tests/notifier_spawn_gating.rs (gate_returns_disabled_no_sources_when_none locking default-off for BOTH None and Some(empty), gate_returns_disabled_no_overlap_when_no_intersection with case-insensitive non-match sub-case, gate_returns_enabled_with_overlap_when_intersection_exists with 4 sub-cases incl. caller-casing preservation + multi-source filter + insertion order), `e3904f1a` SUMMARY with bilateral-tracing table + 3-level store-arc lift audit (kanban suite still 120/120 baseline + gateway INV suite still 9/9 + structural code-level audit confirms dispatcher byte-identical) + crate-isolation fence verification + 9 gate outcomes. All 9 Task-4 gates green. ironhermes-gateway suite at 165/0 (+3 from notifier_spawn_gating; exactly the planned delta from 162). ironhermes-kanban suite still 120/0 (store-arc lift confirmed semantics-preserving for dispatcher). Workspace suite 679/0 — zero NEW regressions. **Crate-isolation fence HELD** — zero ironhermes-gateway dep declarations in ironhermes-kanban/Cargo.toml; the new build_notifier_send_fn closure in gateway captures gateway-side Arcs and produces an ironhermes_kanban::SendFn (gateway→kanban flow only). **D-gateway-gating default-off preserved** — Test 1 asserts None AND Some([]) both collapse to DisabledNoSources; the runner's match arm does NOT call join_set.spawn on that branch. **One Rule-1 fix-up applied** — INV-36.3.7-08-05 (tests/kanban_dispatcher_spawned.rs:159 asserting "kanban dispatcher will NOT start" substring) initially failed because the warn message rewording broke substring contiguity; fixed by message reword preserving greppable substring AND documenting notifier-also-skipped. Discord/Slack delivery wiring deferred as permanent fence (those adapters live inside their own spawned tasks; not retained as runner-scope Arcs; subscriptions naming those platforms log+drop per locked policy). Bilateral-tracing satisfied per LEARNINGS 2026-05-29. Wave 2 half-complete; Plan 04 unblocked. See SUMMARY.md.
@@ -657,6 +728,7 @@ Plans:
 **Goal:** Close the 3 LLM tools that v1's `docs/kanban/reference.md` §14 + §204-208 promised but deferred — `kanban_heartbeat`, `kanban_link`, `kanban_unblock` — extending the existing 6-tool LLM surface (`kanban_show`, `kanban_list`, `kanban_complete`, `kanban_block`, `kanban_comment`, `kanban_create`) shipped across Phase 36.3.7 + 36.3.7.0..5. After this phase, the full 9-tool LLM surface in the reference doc is honored. Each tool follows the existing pattern: JSON schema registration in `crates/ironhermes-tools/src/kanban_tools.rs` (verify exact location during phase research), handler that writes through `KanbanStore` (read-mostly for `heartbeat`; mutating for `link` + `unblock`), execution gating via `HERMES_KANBAN_TASK` (workers) OR explicit `task_id` argument (orchestrators), and full bilateral-tracing-by-construction per LEARNINGS 2026-05-30 — every tool ships producer + consumer in the same plan. The phase also reconciles the v1-NOTE markers in `docs/kanban/reference.md` §14 / §204-208 (currently point at defunct "Phase 36.3.7.1" assignment) to reflect their actual home at 36.3.7.6. CLI parity is OUT of scope unless the planner determines a tool handler requires a new CLI verb to materialize.
 
 **Requirements**:
+
 - BUG-36.3.7.6-01 (`kanban_heartbeat` LLM tool — no required params, optional `task_id` defaulting to `HERMES_KANBAN_TASK`; semantics: pure liveness signal. Two implementation choices the planner picks: (a) append a `Heartbeat` row to `task_events` for an audit trail, OR (b) update a `tasks.last_heartbeat_at` column without event-row write. Whichever path, the producer + receiver test pair ships together)
 - BUG-36.3.7.6-02 (`kanban_link` LLM tool — required params `parent_id` + `child_id`; semantics: write a `task_links` row asserting `parent_id` → `child_id` dependency. `task_links` table already exists per `schema.rs` line ~80. Fail closed if either id doesn't exist OR if the link would form a cycle. Orchestrator-only via the same gating that `kanban_create` uses)
 - BUG-36.3.7.6-03 (`kanban_unblock` LLM tool — required param `task_id`; semantics: move a `blocked` task back to `ready`. Append `Unblocked` event row (NEW `KanbanEventKind` variant — first new variant since the 36.3.7 baseline; or REUSE existing variant if one fits the shape). Mirror the existing `cmd_unblock` CLI verb's behavior if it exists; planner verifies during research)
@@ -668,6 +740,7 @@ Plans:
 **Plans:** 1 plan (overview at 36.3.7.6-PLAN.md + 1 sub-plan, develop-direct strategy, 1 wave)
 
 Plans:
+
 - [x] 36.3.7.6-01-PLAN.md — Wave 1. 3 LLM tools (kanban_heartbeat append-event per D-heartbeat-impl / kanban_link with WITH RECURSIVE descendant-walk cycle detection inside BEGIN IMMEDIATE per D-link-cycle-detection / kanban_unblock with handler-side status-precondition gate per D-unblock-status-precondition) + 7 receiver tests in tools_smoke.rs + hermes kanban heartbeat CLI verb + 2 CLI parity tests + 4 docs/kanban/reference.md v1-NOTE reconciliation (BUG-01, -02, -03, -04, -05). PASS 2026-05-30. 6 commits: `4a11d30c` add kanban_heartbeat LLM tool + 2 tests, `3530f52a` add kanban_link with insert_link_checked + LinkCycle variant + 3 tests, `cfb7c144` add kanban_unblock with handler-side precondition + 2 tests, `78f798db` add hermes kanban heartbeat CLI verb + 2 parity tests, `11ed521e` reference.md v1-NOTE reconciliation (Gate 11 = 0 hits), `90793e58` SUMMARY with bilateral-tracing table. All 13 phase-level gates green. ironhermes-kanban tools_smoke +7 tests (14 → 21); ironhermes-cli heartbeat_cli +2 parity tests. **Crate-isolation fence HELD** — zero ironhermes-gateway dep declarations in ironhermes-kanban/Cargo.toml. **D-tool-surface-mounts-store-directly enforced** — the 3 new tools each own Arc<TokioMutex<KanbanStore>> directly, matching the existing 6-tool pattern; KanbanStoreWriter trait (36.3.7.5) NOT extended. **D-no-deferred-subverbs-change enforced** — DEFERRED_KANBAN_SUBVERBS at handlers.rs:1143-1148 untouched (still 24 entries; "link" + "unblock" still in deferred list; "heartbeat" still absent). store.insert_link + store.unblock_task signatures byte-stable. Bilateral-tracing satisfied per LEARNINGS 2026-05-30 — every BUG ships producer + consumer in same commit set. One Rule-3 fix-up applied (heartbeat_cli.rs TestSub Debug derive dropped because pre-existing KanbanCommands enum doesn't derive Debug; out-of-scope to add). See SUMMARY.md.
 
 **Phase verdict:** Phase 36.3.7.6 CLOSED PASS. 13/13 phase-level gates verified. All 5 BUGs (heartbeat / link / unblock / receiver tests / docs reconciliation) + D-cli-heartbeat-parity ship producer + consumer in the same commit set per LEARNINGS 2026-05-30 bilateral-tracing-by-construction. All 8 locked CONTEXT decisions materially observable at file:line. All scope-fences upheld (no gateway-side slash arms; DEFERRED_KANBAN_SUBVERBS untouched; no new KanbanEventKind variants; store.insert_link / store.unblock_task signatures byte-stable; KanbanStoreWriter trait NOT extended; no tasks.last_heartbeat_at column; no external crate deps). docs/kanban/reference.md Gate 11 = 0 hits + 4 "Shipped in Phase 36.3.7.6" annotations. Crate-isolation fence held. The 9-tool LLM surface in reference.md §200-208 is now fully shipped — the v1 narrative that "IronHermes ships 6 of 9 LLM tools" is now closed; all 9 are live.
@@ -681,6 +754,7 @@ Plans:
 **Plans:** 1/1 plans complete
 
 Plans:
+
 - [x] TBD (run /gsd-plan-phase 36.3.7.7 to break down) (completed 2026-05-30)
 
 ### Phase 36.3.7.8: @mention delegation parser — inline routing from prose (INSERTED 2026-05-30)
@@ -692,6 +766,7 @@ Plans:
 **Plans:** 5/5 plans complete
 
 Plans:
+
 - [x] 36.3.7.8-01-PLAN.md — mention module: parser + resolver pure functions (Wave 1)
 - [x] 36.3.7.8-02-PLAN.md — store sibling primitive: create_mention_children + ancestor-walk cycle check + idempotency replay (Wave 1, parallel with 01)
 - [x] 36.3.7.8-03-PLAN.md — KanbanMentionTool (11th LLM tool) + register_kanban_tools wiring (Wave 2, depends on 01+02)
@@ -770,6 +845,7 @@ Plans:
 **Plans:** 5/5 plans complete
 
 Plans:
+
 - [x] 36.3.7.11-01-PLAN.md — Walking skeleton: read-side #[server] fns (fetch_board/fetch_task/fetch_task_events/fetch_task_runs/fetch_comments) + /api/ws/kanban WS tail consumer + ScreenKanban with 6 columns + Screen::Kanban variant + list_all_events_after + DashboardConfig + Cargo.toml deps. Foundational. Covers D-02, D-04, D-05, D-08, D-09, D-15, D-16, D-17, D-18, D-19, D-22, D-23.
 - [x] 36.3.7.11-02-PLAN.md — Drag-and-drop + four write #[server] fns (patch_task_status / post_comment / create_task / run_decompose_or_specify) + kanban::transitions shared validator + keyboard DnD alternative. Depends on 01. Covers D-06, D-07, D-10, D-11, D-13, D-14, D-19.
 - [x] 36.3.7.11-03-PLAN.md — Detail drawer (7 sections per D-20) + four modals (Complete/Block/Archive/Create) + per-task event counter (D-21) + comment compose + TRIAGE Decompose/Specify wiring. Depends on 01. Covers D-12, D-13, D-20, D-21.
@@ -784,6 +860,7 @@ Plans:
 **Plans:** 5/5 plans complete
 
 Plans:
+
 - [x] 36.3.7.12-01-PLAN.md — Schema + types foundation (SCHEMA_VERSION 1→2, goal_mode/goal_max_turns/goal_turns_used columns, Task + CreateTaskOptions fields, KanbanConfig.judge_model, JudgeFn typedef in new judge.rs, kanban_judge reserved-role registration). Wave 1.
 - [x] 36.3.7.12-02-PLAN.md — Producer surface (kanban_create JSON schema fields, worker_spawn HERMES_KANBAN_GOAL_* env injection, CAS-gated bump_goal_turn_counter, GOAL_SUBKIND_* CONSTs, frozen-surface event-variant guard). Wave 2, parallel with 03.
 - [x] 36.3.7.12-03-PLAN.md — CLI surface (--goal/--goal-max-turns clap args, cmd_create signature + show formatter, build_runtime_judge_fn three-tier model cascade). Wave 2, parallel with 02.
@@ -798,6 +875,7 @@ Plans:
 **Plans:** 3/4 plans executed
 
 Plans:
+
 - [x] 36.3.7.13-01-PLAN.md — F-01 cross-profile DB resolution: KanbanStore::open_from_env() + open_from_env_or_board(slug) + swap 25 dispatcher-bridged sites (CLI/gateway/dashboard/11 LLM tools); 5 bilateral tests (D-A1/D-A2/D-H1). Wave 1, parallel with 02.
 - [x] 36.3.7.13-02-PLAN.md — F-02 IRONHERMES_WORKER_BIN override: resolve_worker_bin() helper + Command::new swap + SAFE_SYSTEM_VARS 8th entry; 4 bilateral tests. Wave 1, parallel with 01 (file-disjoint).
 - [x] 36.3.7.13-03-PLAN.md — F-03 restricted toolset + schema v3 + inner-loop clamp: goal_toolset TEXT NULL column + v2→v3 migration + ToolRegistry::retain_by_name + filter_for_goal_mode_if_applicable + --goal-toolset clap + KanbanCreateTool schema + KanbanConfig.goal_inner_max_iterations (D-B1/B2/B3/E1/E2/F1/G1/Schema-v3); 13 bilateral tests (4 migration + 3 dispatch + 6 filter). Wave 2, depends on Plan 01.
@@ -811,6 +889,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.3.6 to break down)
 
 ### Phase 36.3.5: Computer use — desktop control via cua-driver (cross-provider) (INSERTED)
@@ -821,6 +900,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.3.5 to break down)
 
 ### Phase 36.3.4: Voice I/O — TTS (Edge/ElevenLabs/OpenAI/MiniMax) + STT (faster-whisper) (INSERTED)
@@ -831,6 +911,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.3.4 to break down)
 
 ### Phase 36.3.3: Video generation — unified video_generate (INSERTED)
@@ -841,6 +922,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.3.3 to break down)
 
 ### Phase 36.3.2: Image generation — image_generate with Fal/Pixverse registry (INSERTED)
@@ -851,6 +933,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.3.2 to break down)
 
 ### Phase 36.3.1: Vision tools — standalone vision_analyze (cross-provider Claude/GPT-4V/Gemini/Grok) (INSERTED)
@@ -861,6 +944,7 @@ Plans:
 **Plans:** 0 plans
 
 Plans:
+
 - [ ] TBD (run /gsd-plan-phase 36.3.1 to break down)
 
 ### Phase 36.2: Agent loop & core parity — prompt caching, per-provider rate-limit tracking, usage/cost accounting, error classification (SHIPPED 2026-05-26)
@@ -892,7 +976,6 @@ Plans:
 
 - [x] 36.2-10-PLAN.md — `/usage` slash command handler replacing todo_stub at handlers.rs:1533 (flat-flag --today/--provider/--model/--since Nd parsing); StateStore.query_usage_events with rusqlite params![] bindings only (T-36.2-10-INJ); multi-platform via CommandRouter; TUI StatusLineState gains cost_usd_micros + session_total_tokens fields with build_pills cost+token pills; web UI sidebar surface (or documented deferral); manual UAT checkpoint covering 5 verifications
 - [x] 36.2-11-PLAN.md — OPTIONAL STRETCH: OpenRouter Claude cache_control on ChatCompletions arm gated by is_openrouter_claude(provider, model) predicate; cut criterion enforced — if envelope diverges from Anthropic's, plan defers to Phase 36.2.1 without affecting Plan 05 PARITY claim
-
 
 ### Phase 36.1: Running-agent guard parity — web UI + TUI (SHIPPED 2026-05-25)
 
