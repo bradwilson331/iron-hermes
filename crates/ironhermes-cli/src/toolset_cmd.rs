@@ -11,10 +11,12 @@ use ironhermes_core::{DEFAULT_TOOLSETS, ToolsConfig, config_setter, profile};
 use ironhermes_tools::ToolRegistry;
 use std::path::Path;
 
-/// D-01/D-04: The eight concrete toolsets shipped — browser added in Phase 25.1,
+/// D-01/D-04: The nine concrete toolsets shipped — browser added in Phase 25.1,
 /// learning added in Phase 33 (autonomous skill creation, LEARN-03..05).
+/// voice added in Phase 36.17.6 (TTS toolset — text_to_speech + send_audio).
 const KNOWN_TOOLSETS: &[&str] = &[
     "web", "code", "memory", "agent", "skills", "session", "browser", "learning",
+    "voice",
 ];
 
 #[derive(Subcommand)]
@@ -118,6 +120,7 @@ async fn cmd_toolset_list(hermes_home: &Path) -> Result<()> {
     // Build a registry to get is_available info for known tool members.
     let mut registry = ToolRegistry::new();
     registry.register_defaults();
+    register_tts_for_inspection(&mut registry); // Phase 36.17.6
 
     // D-01 member map: toolset -> member tool names.
     let members_map = toolset_members_map();
@@ -139,6 +142,7 @@ async fn cmd_toolset_show(hermes_home: &Path, name: &str) -> Result<()> {
     let cfg = load_tools_config(hermes_home);
     let mut registry = ToolRegistry::new();
     registry.register_defaults();
+    register_tts_for_inspection(&mut registry); // Phase 36.17.6
 
     let (row, members) = build_toolset_show_view(&cfg, &registry, &validated);
 
@@ -270,6 +274,8 @@ fn toolset_members_map() -> std::collections::HashMap<&'static str, &'static [&'
             "browser_vision",
         ],
     );
+    // Phase 36.17.6: voice toolset — TTS tools wired for CLI inspection path.
+    m.insert("voice", &["text_to_speech", "send_audio"]);
     m
 }
 
@@ -385,6 +391,31 @@ fn browser_chromium_unavailable() -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Phase 36.17.6 TTS inspection helper
+// ---------------------------------------------------------------------------
+
+/// Phase 36.17.6: register TTS tools into an inspection-only registry.
+///
+/// Both `cmd_toolset_list` and `cmd_toolset_show` build a fresh `ToolRegistry`
+/// via `register_defaults()` and never enter `build_app_runtime_bundle`, so
+/// `register_tts_tools` from Plan 03 never fires in the CLI inspection path.
+/// This helper bridges the gap using a sentinel `SessionKey` (no real session,
+/// no dispatcher — only metadata/availability is surfaced).
+///
+/// Use `Config::default()` (not disk-loaded config) to keep the inspection path
+/// I/O-free and always resolve the default `"edge"` provider as available.
+fn register_tts_for_inspection(registry: &mut ToolRegistry) {
+    use ironhermes_core::{Platform, SessionKey};
+    use std::sync::Arc;
+    let session_key = SessionKey::new(Platform::Local, "inspect");
+    registry.register_tts_tools(
+        session_key,
+        None, // No Telegram dispatcher for CLI inspection
+        Arc::new(ironhermes_core::Config::default()),
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -480,8 +511,8 @@ mod tests {
         );
         assert_eq!(
             KNOWN_TOOLSETS.len(),
-            8,
-            "KNOWN_TOOLSETS must have exactly 8 entries after Phase 33 addition of learning toolset"
+            9,
+            "KNOWN_TOOLSETS must have exactly 9 entries after Phase 36.17.6 addition of voice toolset"
         );
     }
 
@@ -706,5 +737,33 @@ mod tests {
         let cli_map = toolset_members_map();
         let cli_web = cli_map.get("web").copied().unwrap_or(&[]);
         assert_eq!(cli_web.len(), 3, "CLI map web entry: {:?}", cli_web);
+    }
+
+    /// Phase 36.17.6: voice toolset must appear in toolset_members_map with exactly
+    /// two members. Locks against future drift where KNOWN_TOOLSETS and the map
+    /// diverge (per Pitfall 1 in RESEARCH.md).
+    #[test]
+    fn toolset_members_map_voice_entry() {
+        let m = toolset_members_map();
+        let voice = m
+            .get("voice")
+            .copied()
+            .expect("voice toolset must exist in members map after Phase 36.17.6");
+        assert!(
+            voice.contains(&"text_to_speech"),
+            "voice must contain text_to_speech; got {:?}",
+            voice
+        );
+        assert!(
+            voice.contains(&"send_audio"),
+            "voice must contain send_audio; got {:?}",
+            voice
+        );
+        assert_eq!(
+            voice.len(),
+            2,
+            "voice toolset must have exactly 2 members; got {:?}",
+            voice
+        );
     }
 }
