@@ -26,7 +26,7 @@ use ironhermes_core::{
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_tools::ToolRegistry;
 
-use crate::adapter::{MessageHandler, PlatformAdapter};
+use crate::adapter::{MediaSender, MessageHandler, PlatformAdapter};
 use crate::multimodal::ProcessedAttachments;
 use crate::rate_limiter::{PerUserRateLimiter, with_rate_limit_retry};
 use crate::session::{SessionKey, SessionStore};
@@ -167,6 +167,13 @@ pub struct GatewayMessageHandler {
     /// arm falls back to the original direct-try_push code path (degraded —
     /// no wake, but tests that hand-spawn workers do not depend on Notify).
     user_queue_manager: Option<Arc<UserQueueManager>>,
+    /// Phase 36.17.2.2 D-18: optional `MediaSender` impl wired by
+    /// `GatewayRunner` on the Telegram start path via `set_media_sender`.
+    /// Discord/Slack/web start paths leave this `None`; the D-19 dispatch
+    /// loop in `run_agent` warns and drops extracted `<MEDIA: ...>` refs
+    /// on those platforms (Pitfall 3 silent-drop mitigation — every
+    /// dropped-tag turn emits a `warn!` with the chat_id + ref count).
+    media_sender: Option<Arc<dyn MediaSender>>,
 }
 
 impl GatewayMessageHandler {
@@ -221,6 +228,12 @@ impl GatewayMessageHandler {
             // Handlers built via direct ::new() see None here and fall through
             // to the legacy direct-try_push path in the Queued arm.
             user_queue_manager: None,
+            // Phase 36.17.2.2 D-18: no MediaSender wired until
+            // `GatewayRunner` calls `set_media_sender` on the Telegram start
+            // path. Discord/Slack/web handlers leave this `None`; the D-19
+            // dispatch loop in `run_agent` warns and drops extracted tags
+            // when `media_sender.is_none()`.
+            media_sender: None,
         }
     }
 
@@ -355,6 +368,21 @@ impl GatewayMessageHandler {
     /// `session_queue.try_push` path for backward-compat (D-20 from parent phase).
     pub fn set_user_queue_manager(&mut self, uqm: Arc<UserQueueManager>) {
         self.user_queue_manager = Some(uqm);
+    }
+
+    /// Phase 36.17.2.2 D-18: install the `MediaSender` impl. In production
+    /// `GatewayRunner` clone-casts the same `Arc<TelegramAdapter>` it uses
+    /// for `Arc<dyn PlatformAdapter>` into `Arc<dyn MediaSender>` and threads
+    /// it here (clone-cast twice, NEVER upcast — see RESEARCH Open Q4 /
+    /// Assumption A7). Discord/Slack/web start paths do NOT call this; on
+    /// those platforms `media_sender` stays `None` and the D-19 dispatch
+    /// loop in `run_agent` warns + drops any extracted `<MEDIA: ...>` refs
+    /// (Pitfall 3 silent-drop mitigation — `warn!` emits chat_id + ref count
+    /// so operators can see the misconfiguration). Setter pattern (rather
+    /// than constructor param) keeps the 5 existing `GatewayMessageHandler::new`
+    /// call sites stable across production + 4 test fixtures.
+    pub fn set_media_sender(&mut self, sender: Arc<dyn MediaSender>) {
+        self.media_sender = Some(sender);
     }
 
     /// Set the hook registry for event emission.
@@ -1275,6 +1303,16 @@ impl GatewayMessageHandler {
         let (stream_tx, mut stream_rx) = mpsc::channel::<String>(256);
         let (tool_tx, mut tool_rx) = mpsc::channel::<String>(64);
 
+        // Phase 36.17.2.2 D-10: oneshot channel for the consumer task to hand
+        // the post-final-flush body to the parent task. The D-19 dispatch loop
+        // needs this string to construct the reinsert body when an attachment
+        // fails (`format!("{final_body}\n\n{failed_tags}")`). Sending happens
+        // exactly once, just before the consumer task breaks. The parent task
+        // awaits the receiver after `consumer_handle.await.ok()` so the value
+        // is guaranteed-present whenever the consumer ran to completion.
+        let (body_tx, body_rx) = tokio::sync::oneshot::channel::<String>();
+        let mut body_tx = Some(body_tx);
+
         // 6. Spawn StreamConsumer task
         let mut consumer = StreamConsumer::new(adapter.clone(), &event.chat_id, &placeholder_id);
         let consumer_handle = tokio::spawn(async move {
@@ -1305,6 +1343,12 @@ impl GatewayMessageHandler {
                                 None => {
                                     // stream_rx closed — do final flush
                                     let _ = consumer.flush(true).await;
+                                    // Phase 36.17.2.2 D-10: hand the final body
+                                    // back to the parent task for the D-19
+                                    // reinsert-on-failure path.
+                                    if let Some(tx) = body_tx.take() {
+                                        let _ = tx.send(consumer.final_body().to_string());
+                                    }
                                     break;
                                 }
                             }
@@ -1320,6 +1364,11 @@ impl GatewayMessageHandler {
                         }
                         None => {
                             let _ = consumer.flush(true).await;
+                            // Phase 36.17.2.2 D-10: hand the final body back
+                            // to the parent task (alt break branch).
+                            if let Some(tx) = body_tx.take() {
+                                let _ = tx.send(consumer.final_body().to_string());
+                            }
                             break;
                         }
                     }
@@ -1334,9 +1383,20 @@ impl GatewayMessageHandler {
             ironhermes_agent::streaming_scrubber::StreamingContextScrubber::new(),
         ));
         let scrubber_gw_cb = std::sync::Arc::clone(&scrubber_gw);
+        // Phase 36.17.2.2 D-08 / Open Q5 / Assumption A10: extract `<MEDIA: ...>`
+        // tags from streaming deltas alongside the scrubber. Chain order is
+        // scrubber FIRST, extractor SECOND so MEDIA tags inside scrubbed
+        // `<memory-context>` spans are dropped consistently (the scrubber
+        // discards memory-context content; without the chain the extractor
+        // would attach files referenced from invisible memory body).
+        let extractor_gw = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::media_tag::MediaTagExtractor::new(),
+        ));
+        let extractor_cb = std::sync::Arc::clone(&extractor_gw);
         let stream_tx_clone = stream_tx.clone();
         let stream_callback: StreamCallback = Box::new(move |delta: &str| {
-            let visible = scrubber_gw_cb.lock().unwrap().feed(delta);
+            let scrubbed = scrubber_gw_cb.lock().unwrap().feed(delta);
+            let visible = extractor_cb.lock().unwrap().feed(&scrubbed);
             if !visible.is_empty() {
                 let _ = stream_tx_clone.try_send(visible);
             }
@@ -1426,8 +1486,20 @@ impl GatewayMessageHandler {
             Err(anyhow::anyhow!("AgentRuntime not configured in gateway handler"))
         };
 
-        // Phase 34a MEM-READ-05: flush scrubber tail after stream ends.
-        let tail = scrubber_gw.lock().unwrap().flush();
+        // Phase 34a MEM-READ-05 + Phase 36.17.2.2 D-08: flush scrubber tail
+        // then feed it through the extractor before emitting the extractor's
+        // own tail. This preserves the scrubber→extractor chain order at
+        // end-of-stream so an unterminated `<MEDIA:...` straddling a
+        // memory-context fence boundary degrades consistently with the
+        // streaming path (Open Q5 / Assumption A10).
+        let scrubber_tail = scrubber_gw.lock().unwrap().flush();
+        let extractor_pre = if !scrubber_tail.is_empty() {
+            extractor_gw.lock().unwrap().feed(&scrubber_tail)
+        } else {
+            String::new()
+        };
+        let extractor_tail = extractor_gw.lock().unwrap().flush_tail();
+        let tail = format!("{extractor_pre}{extractor_tail}");
         if !tail.is_empty() {
             let _ = stream_tx.try_send(tail);
         }
@@ -1441,6 +1513,79 @@ impl GatewayMessageHandler {
         // 10. Cancel typing indicator
         cancel.cancel();
         typing_handle.await.ok();
+
+        // Phase 36.17.2.2 D-19: dispatch extracted `<MEDIA: ...>` attachments.
+        //
+        // ANCHOR (per RESEARCH FLAGGED RISK / Pitfall 6 / Assumption A9): this
+        // block lives AFTER `consumer_handle.await.ok()` AND `typing_handle.await.ok()`,
+        // BEFORE `match agent_result`. CONTEXT.md D-19 cited an anchor
+        // (`after stream_consumer.flush(true).await?`) that does NOT exist
+        // inline — `flush(true)` lives inside the consumer task spawned at
+        // handler.rs:~1313 area. The CORRECT synchronization point is the
+        // `consumer_handle.await.ok()` barrier; placing the dispatch here
+        // guarantees: (a) the final markdown edit has rendered before
+        // attachments arrive, (b) the typing indicator has cleared, and
+        // (c) attachments dispatch regardless of `agent_result` branch (the
+        // user's text + media are independent of whether the turn completed
+        // cleanly — attachments extracted before an agent error should
+        // still be sent).
+        let media_refs = extractor_gw.lock().unwrap().take_attachments();
+        if !media_refs.is_empty() {
+            if let Some(media_sender) = self.media_sender.as_ref() {
+                let mut failed_tags: Vec<String> = Vec::new();
+                for media_ref in media_refs {
+                    match media_sender.send_media(&event.chat_id, &media_ref, None).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                chat_id = %event.chat_id,
+                                kind = ?media_ref.kind,
+                                error = %e,
+                                "attachment failed, reinserting tag literal (D-10)"
+                            );
+                            failed_tags.push(media_ref.original_tag_text.clone());
+                        }
+                    }
+                }
+                if !failed_tags.is_empty() {
+                    // D-10: ONE combined re-edit of the placeholder appending
+                    // each failed tag literal on its own line (not one edit
+                    // per failure). The final body from `StreamConsumer::flush(true)`
+                    // arrived via the `body_rx` oneshot above; concat the
+                    // appended failed-tag literals, run through
+                    // `escape_outside_code_blocks` so the entire reinsert body
+                    // satisfies MarkdownV2 (the appended literals contain
+                    // paths with `.` / `/` / etc. — reserved chars that the
+                    // escape preserves correctly inside link grammar and
+                    // escapes outside).
+                    let final_body = body_rx.await.unwrap_or_default();
+                    let appended = failed_tags.join("\n");
+                    let reinsert_body = if final_body.is_empty() {
+                        appended
+                    } else {
+                        format!("{final_body}\n\n{appended}")
+                    };
+                    let escaped = crate::markdown_v2::escape_outside_code_blocks(&reinsert_body);
+                    if let Err(e) = adapter
+                        .edit_message_markdown_v2(&event.chat_id, &placeholder_id, &escaped)
+                        .await
+                    {
+                        tracing::error!(
+                            chat_id = %event.chat_id,
+                            message_id = %placeholder_id,
+                            error = %e,
+                            "D-10 reinsert edit failed; placeholder retains its post-flush body without tag literals"
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    chat_id = %event.chat_id,
+                    ref_count = media_refs.len(),
+                    "media tags emitted on platform without MediaSender — dropping refs (D-18)"
+                );
+            }
+        }
 
         match agent_result {
             Ok(result) => {

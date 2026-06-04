@@ -709,6 +709,21 @@ impl GatewayRunner {
         // (user_queue_dispatch downstream is a clone of this same Arc — both
         // reference identical workers + pending_multimodal + session_queue state).
         handler.set_user_queue_manager(user_queue.clone());
+        // Phase 36.17.2.2 D-18: install the MediaSender impl (Telegram only).
+        //
+        // Construct as `Arc<TelegramAdapter>` (already done at line 645 above),
+        // then clone-cast SEPARATELY for each trait. Do NOT upcast
+        // `Arc<dyn PlatformAdapter>` -> `Arc<dyn MediaSender>` — that was
+        // unstable on stable Rust at the time of writing (RESEARCH Open Q4 /
+        // Assumption A7). The concrete `Arc<TelegramAdapter>` at `adapter`
+        // is already used independently as `Arc<dyn PlatformAdapter>` at
+        // runner.rs:704 (`adapter.clone() as Arc<dyn crate::adapter::PlatformAdapter>`),
+        // so the second clone-cast to `Arc<dyn MediaSender>` here mirrors
+        // that pattern. Discord / Slack / web start paths do NOT call
+        // `set_media_sender` — `media_sender` stays `None` on those handlers
+        // and the D-19 dispatch loop in `run_agent` warns + drops any
+        // extracted `<MEDIA: ...>` refs (D-18 contract).
+        handler.set_media_sender(adapter.clone() as Arc<dyn crate::adapter::MediaSender>);
         let handler = Arc::new(handler);
 
         let mut join_set: JoinSet<()> = JoinSet::new();
