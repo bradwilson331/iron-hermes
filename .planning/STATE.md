@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: ready
-stopped_at: Phase 36.17.2.2 closed PASS; Phase 36.17.5 inserted (URGENT) — integrate TTS functions, not planned yet
-last_updated: "2026-06-04T02:59:39.585Z"
-last_activity: 2026-06-03 -- Phase 36.17.5 (integrate TTS functions) inserted after Phase 36.17 — URGENT
+status: "Phase 36.17.2.2 closed PASS 2026-06-03 (live UAT 9/9 approved). New phase 36.17.5 (integrate TTS functions) inserted after parent phase 36.17 — URGENT. Run `/gsd:plan-phase 36.17.5` to plan; consider `/gsd:discuss-phase 36.17.5` first if scope/decisions need clarifying."
+stopped_at: Phase 36.17.5 context gathered
+last_updated: "2026-06-04T03:49:05.129Z"
+last_activity: 2026-06-03 -- Phase 36.17.2.2 closed PASS; phase 36.17.5 (TTS integration) inserted
 progress:
   total_phases: 59
   completed_phases: 24
@@ -613,6 +613,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-06-03T19:13:46.721Z
-Stopped at: Phase 36.17.2.2 context gathered
-Resume file: .planning/phases/36.17.2.2-ironhermes-telegram-client-delivers-streaming-final-media-me/36.17.2.2-CONTEXT.md
+Last session: 2026-06-04T03:49:05.121Z
+Stopped at: Phase 36.17.5 context gathered
+Resume file: .planning/phases/36.17.5-integrate-tts-functions/36.17.5-CONTEXT.md
