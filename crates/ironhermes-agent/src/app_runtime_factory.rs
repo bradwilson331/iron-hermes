@@ -41,6 +41,13 @@ pub struct AppRuntimeFactoryInput {
     pub delegate_task: Option<DelegateTaskWiring>,
     pub hooks_config: HooksConfig,
     pub emit_mcp_startup_logs: bool,
+    /// Phase 36.17.5 D-15: per-session SessionKey for SendAudioTool dispatch.
+    /// None at startup / global construction; Some when build_app_runtime_bundle is
+    /// called per-session (gateway handler, CLI run_chat init).
+    pub session_key: Option<ironhermes_core::SessionKey>,
+    /// Phase 36.17.5 D-13 / D-15: gateway-supplied audio dispatcher for the Telegram arm.
+    /// None for CLI/Local-only paths.
+    pub telegram_adapter: Option<Arc<dyn ironhermes_tools::AudioDispatcher>>,
 }
 
 pub struct AppRuntimeBundle {
@@ -87,6 +94,18 @@ pub async fn build_app_runtime_bundle(
     let cron_dir = get_hermes_home().join("cron");
     let job_store = Arc::new(Mutex::new(JobStore::open(cron_dir)?));
     registry.register_cronjob_tool(job_store.clone());
+
+    // Phase 36.17.5 D-15: TTS tools — registered only when this bundle is built
+    // for a concrete session. session_key is None at startup / global construction,
+    // in which case the tools are not exposed to the agent that turn (D-14 — tools
+    // are tied to the agent loop, not the runtime).
+    if let Some(ref session_key) = input.session_key {
+        registry.register_tts_tools(
+            session_key.clone(),
+            input.telegram_adapter.clone(),
+            input.config.clone(),
+        );
+    }
 
     let browser_session: Arc<tokio::sync::Mutex<Option<BrowserSession>>> =
         Arc::new(tokio::sync::Mutex::new(None));
@@ -325,6 +344,8 @@ mod tests {
             delegate_task: None,
             hooks_config: HooksConfig::default(),
             emit_mcp_startup_logs: false,
+            session_key: None,
+            telegram_adapter: None,
         }
     }
 
@@ -521,6 +542,8 @@ mod tests {
             delegate_task: None,
             hooks_config: HooksConfig::default(),
             emit_mcp_startup_logs: false,
+            session_key: None,
+            telegram_adapter: None,
         };
 
         let bundle = build_app_runtime_bundle(input)
@@ -581,6 +604,8 @@ mod tests {
             delegate_task: None,
             hooks_config: HooksConfig::default(),
             emit_mcp_startup_logs: false,
+            session_key: None,
+            telegram_adapter: None,
         };
 
         let bundle = build_app_runtime_bundle(input)
@@ -632,6 +657,8 @@ mod tests {
             delegate_task: None,
             hooks_config: HooksConfig::default(),
             emit_mcp_startup_logs: false,
+            session_key: None,
+            telegram_adapter: None,
         };
 
         let bundle = build_app_runtime_bundle(input)

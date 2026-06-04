@@ -867,3 +867,35 @@ pub fn tg_message_to_event(msg: &TgMessage) -> MessageEvent {
         replied_to_id: None,
     }
 }
+
+// Phase 36.17.5 D-14 / D-15: implement AudioDispatcher for TelegramAdapter.
+//
+// The trait lives in ironhermes-tools (so tools don't depend on gateway).
+// The impl lives here (gateway) because of Rust's orphan rule: both the trait
+// and the type must be in scope; neither can cross crate boundaries as a blanket
+// impl. Method names (send_voice_file / send_audio_file) are distinct from the
+// inherent TelegramAdapter methods (send_voice / send_audio) to avoid ambiguity.
+#[async_trait::async_trait]
+impl ironhermes_tools::AudioDispatcher for TelegramAdapter {
+    async fn send_voice_file(
+        &self,
+        chat_id: &str,
+        path: &std::path::PathBuf,
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        // Use TgSendApi::send_voice (takes &Path) not MediaSender::send_voice (takes MediaSource)
+        TgSendApi::send_voice(self, chat_id, path.as_path(), thread_id).await
+    }
+
+    async fn send_audio_file(
+        &self,
+        chat_id: &str,
+        path: &std::path::PathBuf,
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        // Use inherent send_audio (takes &Path, returns Result<MessageResponse>)
+        self.send_audio(chat_id, path.as_path(), thread_id)
+            .await
+            .map(|_| ())
+    }
+}

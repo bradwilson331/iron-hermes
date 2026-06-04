@@ -635,6 +635,29 @@ impl ToolRegistry {
         self.register(Box::new(CronjobTool::new(store)));
     }
 
+    /// Phase 36.17.5: register text_to_speech + send_audio LLM tools.
+    ///
+    /// Called per-session because SendAudioTool's SessionKey + Telegram dispatcher
+    /// are injected at construction time (D-14 / D-15). The TextToSpeechTool itself
+    /// is session-independent but registered alongside for symmetry.
+    ///
+    /// `dispatcher: None` is correct for Platform::Local / CLI paths; the Local arm
+    /// in SendAudioTool::execute plays locally via rodio without needing a dispatcher.
+    pub fn register_tts_tools(
+        &mut self,
+        session_key: ironhermes_core::SessionKey,
+        dispatcher: Option<Arc<dyn crate::AudioDispatcher>>,
+        config: Arc<ironhermes_core::Config>,
+    ) {
+        use crate::tts::build_tts_registry;
+        use crate::tts_tool::TextToSpeechTool;
+        use crate::send_audio_tool::SendAudioTool;
+
+        let tts_registry = Arc::new(build_tts_registry(&config.tts));
+        self.register(Box::new(TextToSpeechTool::new(config.clone(), tts_registry)));
+        self.register(Box::new(SendAudioTool::new(session_key, dispatcher, config)));
+    }
+
     /// Phase 25.1 D-04: register all 11 browser_* tools sharing one Arc<Mutex<Option<BrowserSession>>>.
     ///
     /// Mirrors register_memory_tool / register_cronjob_tool wiring shape.
