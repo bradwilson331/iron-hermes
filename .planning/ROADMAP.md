@@ -128,14 +128,14 @@ Plans:
 **Goal:** Port hermes-agent text-to-speech into IronHermes as a faithful concept-level port of Python TTSProvider ABC + _BUILTIN_NAMES invariant. Ships a TtsProvider trait + TtsRegistry in ironhermes-core; two built-in provider impls in ironhermes-tools (Edge TTS — free default, no API key; ElevenLabs — premium ELEVENLABS_API_KEY); single LLM-callable text_to_speech tool that synthesizes to a file and returns the path; companion send_audio tool that dispatches the produced file via the current SessionKey platform (Local → rodio playback; Telegram → send_voice/send_audio with optional ffmpeg MP3→Opus conversion). Telegram delivery wired this phase; Discord and iron_hermes_ui web deferred. STT, push-to-talk, streaming TTS, and auto-speak (Path A) all out of scope.
 **Requirements**: D-01..D-16 (CONTEXT-locked decisions act as REQ-IDs per the 36.17.x precedent; no formal REQ-NN tags in REQUIREMENTS.md for this phase). Phase-local tests TTS-01..TTS-10 in VALIDATION.md.
 **Depends on:** Phase 36.17
-**Plans:** 1/4 plans executed
+**Plans:** 2/4 plans executed
 
 Plans:
 **Wave 1**
 - [x] 36.17.5-01-PLAN.md — Core trait + registry + config + constants + workspace deps (msedge-tts + rodio) + Wave-0 test scaffolds. 7 tasks (2 BLOCKING package-legitimacy human-verify gates + 5 auto). D-08/D-09/D-10/D-11/D-12. TTS-01/02/07/08.
 
 **Wave 2** *(depends on Wave 1)*
-- [ ] 36.17.5-02-PLAN.md — Provider impls (EdgeProvider via msedge-tts, ElevenLabsProvider via reqwest) + ffmpeg OnceLock probe + build_tts_registry factory. 3 tasks. D-03/D-04. TTS-03/04/09. T-text-length + T-api-key-leak.
+- [x] 36.17.5-02-PLAN.md — Provider impls (EdgeProvider via msedge-tts, ElevenLabsProvider via reqwest) + ffmpeg OnceLock probe + build_tts_registry factory. 3 tasks. D-03/D-04. TTS-03/04/09. T-text-length + T-api-key-leak.
 
 **Wave 3** *(depends on Wave 2)*
 - [ ] 36.17.5-03-PLAN.md — TextToSpeechTool + SendAudioTool + AudioDispatcher trait + register_tts_tools + AppRuntimeFactoryInput extension + per-session wiring + TelegramAdapter::impl AudioDispatcher. 4 tasks. D-05/D-06/D-07/D-13/D-14/D-15/D-16. TTS-05/06. **T-output-path BLOCKING mitigation owned here.**
