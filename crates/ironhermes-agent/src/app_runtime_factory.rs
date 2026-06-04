@@ -95,6 +95,18 @@ pub async fn build_app_runtime_bundle(
     let job_store = Arc::new(Mutex::new(JobStore::open(cron_dir)?));
     registry.register_cronjob_tool(job_store.clone());
 
+    // Phase 36.17.5 D-15: TTS tools — registered only when this bundle is built
+    // for a concrete session. session_key is None at startup / global construction,
+    // in which case the tools are not exposed to the agent that turn (D-14 — tools
+    // are tied to the agent loop, not the runtime).
+    if let Some(ref session_key) = input.session_key {
+        registry.register_tts_tools(
+            session_key.clone(),
+            input.telegram_adapter.clone(),
+            input.config.clone(),
+        );
+    }
+
     let browser_session: Arc<tokio::sync::Mutex<Option<BrowserSession>>> =
         Arc::new(tokio::sync::Mutex::new(None));
     let vision_handle = Arc::new(AnyClientVisionHandle::new(input.resolver.clone()));
