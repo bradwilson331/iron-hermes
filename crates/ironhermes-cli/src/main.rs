@@ -233,6 +233,40 @@ enum Commands {
         #[command(subcommand)]
         command: kanban::KanbanCommands,
     },
+    /// Text-to-speech CLI diagnostics (Phase 36.17.5 D-05 / D-16).
+    /// NOT an LLM tool — calls build_tts_registry directly for operator UAT.
+    Tts {
+        #[command(subcommand)]
+        command: TtsCommands,
+    },
+}
+
+/// Phase 36.17.5 — TTS diagnostic subcommands.
+/// These are CLI verbs for operator UAT; they bypass the Tool trait and LLM machinery.
+/// The LLM-callable tools are `text_to_speech` and `send_audio` (in ironhermes-tools).
+#[derive(Subcommand)]
+enum TtsCommands {
+    /// Synthesize a test phrase via a TTS provider and write an MP3 to audio_cache/.
+    /// Prints the output path on stdout and exits 0; on error prints to stderr and exits 1.
+    Test {
+        /// Provider name (must be in BUILTIN_TTS_NAMES). Default: "edge".
+        #[arg(long, default_value = "edge")]
+        provider: String,
+
+        /// Text to synthesize.
+        #[arg(long, default_value = "Hello from IronHermes Phase 36.17.5.")]
+        text: String,
+
+        /// Optional output path. Defaults to $IRONHERMES_HOME/audio_cache/<uuid>.mp3.
+        #[arg(long)]
+        output_path: Option<String>,
+    },
+    /// Play a synthesized audio file via Platform::Local (rodio). Operator UAT Gate 5.
+    Play {
+        /// Path to the audio file to play (e.g. from `hermes tts test`).
+        #[arg(long)]
+        path: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -753,6 +787,31 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        // Phase 36.17.5 Plan 04 — TTS diagnostic CLI verbs (D-05 / D-16).
+        // These bypass the Tool trait and call build_tts_registry directly.
+        // They are NOT LLM tools — `text_to_speech` / `send_audio` are the LLM surface.
+        Some(Commands::Tts {
+            command: TtsCommands::Test {
+                provider,
+                text,
+                output_path,
+            },
+        }) => match cmd_tts_test(provider, text, output_path).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                std::process::exit(1);
+            }
+        },
+        Some(Commands::Tts {
+            command: TtsCommands::Play { path },
+        }) => match cmd_tts_play(path).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                std::process::exit(1);
+            }
+        },
         None => {
             if let Some(ref prompt) = cli.execute {
                 // Phase 21.7 Plan 08 (D-12): `-e` batch mode honors top-level
@@ -790,6 +849,90 @@ async fn main() -> Result<()> {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 36.17.5 Plan 04 — TTS CLI helper functions
+// ---------------------------------------------------------------------------
+
+/// `hermes tts test` — synthesize a phrase via a named TTS provider and print
+/// the output path on stdout. Used by the UAT script for Gates 1, 2, and 3.
+///
+/// Bypasses the Tool trait and LLM machinery entirely — calls `build_tts_registry`
+/// directly. This is intentional (D-05: Tool-only entry point is `text_to_speech`).
+async fn cmd_tts_test(
+    provider: String,
+    text: String,
+    output_path: Option<String>,
+) -> anyhow::Result<()> {
+    use ironhermes_core::BUILTIN_TTS_NAMES;
+    use ironhermes_tools::tts::build_tts_registry;
+
+    // 1. Load config (mirrors pattern used by other simple subcommands in main.rs).
+    let config = ironhermes_core::Config::load().unwrap_or_default();
+
+    // 2. Build registry with both built-in providers.
+    let registry = build_tts_registry(&config.tts);
+
+    // 3. Resolve the requested provider by name.
+    let provider_arc = registry.get(&provider).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Provider '{}' not found in TtsRegistry (BUILTIN_TTS_NAMES: {:?})",
+            provider,
+            BUILTIN_TTS_NAMES
+        )
+    })?;
+
+    // 4. Check availability (ElevenLabs requires an API key; Edge is keyless).
+    if !provider_arc.is_available() {
+        anyhow::bail!(
+            "Provider '{}' is not available (missing env var?)",
+            provider
+        );
+    }
+
+    // 5. Resolve output path — default to $IRONHERMES_HOME/audio_cache/<uuid>.mp3.
+    let audio_dir = ironhermes_core::get_hermes_home().join("audio_cache");
+    std::fs::create_dir_all(&audio_dir)
+        .map_err(|e| anyhow::anyhow!("Failed to create audio_cache dir {:?}: {e}", audio_dir))?;
+
+    let path = output_path
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| audio_dir.join(format!("{}.mp3", uuid::Uuid::new_v4())));
+
+    // 6. Synthesize.
+    let written = provider_arc.synthesize(&text, &path).await?;
+
+    // 7. Print the resulting path — UAT script captures this via tail -1.
+    println!("{}", written.display());
+
+    Ok(())
+}
+
+/// `hermes tts play` — play a synthesized audio file via Platform::Local (rodio).
+/// Used by the operator UAT Gate 5. Constructs SendAudioTool with a Local SessionKey.
+///
+/// Succeeds (exit 0) if audio plays. Returns a clean Err (exit 1) if no audio
+/// device is present — never panics.
+async fn cmd_tts_play(path: String) -> anyhow::Result<()> {
+    use ironhermes_core::{SessionKey, types::Platform};
+    use ironhermes_tools::send_audio_tool::SendAudioTool;
+    use ironhermes_tools::registry::Tool;
+    use std::sync::Arc;
+
+    // 1. Construct SessionKey for Platform::Local (hardcoded — diagnostic path only).
+    let key = SessionKey::new(Platform::Local, "uat");
+
+    // 2. Construct SendAudioTool (no dispatcher needed for Local arm).
+    let config = Arc::new(ironhermes_core::Config::load().unwrap_or_default());
+    let tool = SendAudioTool::new(key, None, config);
+
+    // 3. Execute via the Tool trait.
+    let result = tool.execute(serde_json::json!({ "path": path })).await?;
+
+    println!("{result}");
+
+    Ok(())
 }
 
 fn cmd_version() -> Result<()> {
