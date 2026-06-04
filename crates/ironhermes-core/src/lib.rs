@@ -19,6 +19,7 @@ pub mod provider;
 pub mod skills;
 pub mod ssrf;
 pub mod token_estimator;
+pub mod tts;                                                   // Phase 36.17.5
 pub mod types;
 pub mod wizard;
 pub mod workspace;
@@ -62,6 +63,7 @@ pub use token_estimator::{
     TiktokenEncoding, TokenEstimator, global_estimate_tokens, init_global_estimator,
     warm_tiktoken_singletons,
 };
+pub use tts::{TtsProvider, TtsRegistry, BUILTIN_TTS_NAMES};   // Phase 36.17.5
 pub use types::*;
 
 // Phase 25.3 D-W-1 — Workspace newtype + cwd walk-up resolution helper.
