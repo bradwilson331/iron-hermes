@@ -35,6 +35,8 @@ pdf-extract = { workspace = true }                     # Phase 25.2 D-09 PDF loc
 url = { workspace = true }                             # Phase 25.2 D-03 URL classifier (dispatch.rs)
 tokio-util = { workspace = true }
 tempfile = "3"
+msedge-tts = { workspace = true }   # Phase 36.17.5 D-03 / Edge TTS
+rodio = { workspace = true }        # Phase 36.17.5 D-15 Local arm
 
 [dev-dependencies]
 # Phase 21.7 Plan 08 Task 8-03: tracing-test with `no-env-filter` so
