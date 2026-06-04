@@ -47,3 +47,7 @@ rodio = { workspace = true }        # Phase 36.17.5 D-15 Local arm
 tracing-test = { workspace = true, features = ["no-env-filter"] }
 tokio = { workspace = true, features = ["full", "test-util"] }
 wiremock = "0.6"
+# Phase 36.17.5 TTS-10: install rustls CryptoProvider before live Edge TTS network call.
+# msedge-tts tokio-runtime uses rustls 0.23 + aws-lc-rs; provider must be installed once
+# per process before any TLS connection attempt.
+rustls = "0.23"

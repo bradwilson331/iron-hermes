@@ -66,6 +66,10 @@ sha2 = { workspace = true }
 dirs = { workspace = true }
 regex = { workspace = true }
 unicode-width = "0.2"
+# Phase 36.17.5 Plan 04: install rustls CryptoProvider before Edge TTS WebSocket TLS call.
+# msedge-tts tokio-runtime uses rustls 0.23 + aws-lc-rs; provider must be installed once
+# per process before any TLS connection. Pin to same version as the rest of the workspace.
+rustls = "0.23"
 # Phase 21.7 Plan 09 Task 9-03 (D-21): LiveDeepProbe uses reqwest for
 # provider HEAD probes and rusqlite for FTS5 `PRAGMA integrity_check`.
 reqwest = { workspace = true }
