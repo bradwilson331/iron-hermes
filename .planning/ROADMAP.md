@@ -128,7 +128,7 @@ Plans:
 **Goal:** Port hermes-agent text-to-speech into IronHermes as a faithful concept-level port of Python TTSProvider ABC + _BUILTIN_NAMES invariant. Ships a TtsProvider trait + TtsRegistry in ironhermes-core; two built-in provider impls in ironhermes-tools (Edge TTS — free default, no API key; ElevenLabs — premium ELEVENLABS_API_KEY); single LLM-callable text_to_speech tool that synthesizes to a file and returns the path; companion send_audio tool that dispatches the produced file via the current SessionKey platform (Local → rodio playback; Telegram → send_voice/send_audio with optional ffmpeg MP3→Opus conversion). Telegram delivery wired this phase; Discord and iron_hermes_ui web deferred. STT, push-to-talk, streaming TTS, and auto-speak (Path A) all out of scope.
 **Requirements**: D-01..D-16 (CONTEXT-locked decisions act as REQ-IDs per the 36.17.x precedent; no formal REQ-NN tags in REQUIREMENTS.md for this phase). Phase-local tests TTS-01..TTS-10 in VALIDATION.md.
 **Depends on:** Phase 36.17
-**Plans:** 2/4 plans executed
+**Plans:** 3/4 plans executed
 
 Plans:
 **Wave 1**
@@ -138,7 +138,7 @@ Plans:
 - [x] 36.17.5-02-PLAN.md — Provider impls (EdgeProvider via msedge-tts, ElevenLabsProvider via reqwest) + ffmpeg OnceLock probe + build_tts_registry factory. 3 tasks. D-03/D-04. TTS-03/04/09. T-text-length + T-api-key-leak.
 
 **Wave 3** *(depends on Wave 2)*
-- [ ] 36.17.5-03-PLAN.md — TextToSpeechTool + SendAudioTool + AudioDispatcher trait + register_tts_tools + AppRuntimeFactoryInput extension + per-session wiring + TelegramAdapter::impl AudioDispatcher. 4 tasks. D-05/D-06/D-07/D-13/D-14/D-15/D-16. TTS-05/06. **T-output-path BLOCKING mitigation owned here.**
+- [x] 36.17.5-03-PLAN.md — TextToSpeechTool + SendAudioTool + AudioDispatcher trait + register_tts_tools + AppRuntimeFactoryInput extension + per-session wiring + TelegramAdapter::impl AudioDispatcher. 4 tasks. D-05/D-06/D-07/D-13/D-14/D-15/D-16. TTS-05/06. **T-output-path BLOCKING mitigation owned here.**
 
 **Wave 4** *(depends on Wave 3)*
 - [ ] 36.17.5-04-PLAN.md — `hermes tts test/play` CLI subcommands + 5-gate UAT script + un-ignore TTS-10 live-network test + operator UAT (2 BLOCKING human-verify gates: tool registry exposure + Platform::Local audible playback). 5 tasks. D-01/D-02. TTS-10.
