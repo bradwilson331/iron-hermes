@@ -140,6 +140,16 @@ pub struct ProcessRegistry {
     pub(crate) watch_tx: broadcast::Sender<WatchEvent>,
 }
 
+impl Default for ProcessRegistry {
+    /// Phase 36.17.7 Plan 01: `Default` is equivalent to `new_for_session("")` so
+    /// `AppRuntimeFactoryInput` can derive `Default` (used by
+    /// `agent_runtime.rs::from_config` via `..Default::default()` for the D-05 prep
+    /// rewrite). Production callers always use `new_for_session(task_id)`.
+    fn default() -> Self {
+        Self::new_for_session(String::new())
+    }
+}
+
 impl ProcessRegistry {
     pub fn new_for_session(task_id: impl Into<String>) -> Self {
         let (watch_tx, _) = broadcast::channel(256);

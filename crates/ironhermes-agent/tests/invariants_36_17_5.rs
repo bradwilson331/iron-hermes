@@ -35,14 +35,27 @@ fn build_app_runtime_bundle_source_guards_session_key() {
     );
 }
 
-/// Lock that agent_runtime.rs passes session_key: None for v1.
-/// Per-turn threading deferred to a follow-up phase.
+/// Phase 36.17.5 → 36.17.7 transition: this test originally locked the D-15
+/// deferral that `agent_runtime.rs::from_config` passed the literal
+/// `session_key: None,` to `AppRuntimeFactoryInput`. Phase 36.17.7 Plan 01
+/// (BLOCKER 1 fix for D-05) eliminates that literal by rewriting `from_config`
+/// to use `..Default::default()` and threading per-turn TTS through
+/// `TurnRequest::tts_wiring` instead. The forward-compat invariants now live in
+/// `tests/tts_per_turn_wiring.rs` (Plan 01) and `tests/invariants_36_17_7.rs`
+/// (Plan 05 Task 6). This test is repurposed to assert the rewrite is in place.
 #[test]
-fn agent_runtime_passes_session_key_none_for_v1() {
+fn agent_runtime_from_config_uses_default_default_residual() {
     const SRC: &str = include_str!("../src/agent_runtime.rs");
     assert!(
-        SRC.contains("session_key: None") || SRC.contains("session_key:None"),
-        "Phase 36.17.5: AgentRuntime::from_config must default session_key to None \
-         for v1 — per-turn threading lands in a follow-up phase"
+        SRC.contains("..Default::default()"),
+        "Phase 36.17.7 Plan 01: AgentRuntime::from_config must build the startup \
+         AppRuntimeFactoryInput via `..Default::default()` so the D-05 negative \
+         assert (no `session_key: None,` literal) is structurally guaranteed."
+    );
+    assert!(
+        !SRC.contains("session_key: None,"),
+        "Phase 36.17.7 Plan 01 (BLOCKER 1 fix): the literal `session_key: None,` \
+         must be absent from agent_runtime.rs — per-turn TTS now lives in \
+         TurnRequest::tts_wiring (D-01)."
     );
 }

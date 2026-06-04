@@ -86,6 +86,20 @@ pub struct AgentRuntimeInput {
     pub subagent_cancel_token: Option<CancellationToken>,
 }
 
+/// Phase 36.17.7 D-01: lightweight per-turn TTS session descriptor.
+///
+/// Built by each surface handler (gateway, ws.rs, event_loop.rs) and threaded
+/// into `TurnRequest` so `AgentRuntime::run_turn` can call
+/// `ToolRegistry::register_tts_tools` on the durable `bundle.registry` before
+/// the agent loop is constructed.
+///
+/// `audio_dispatcher` is `None` for `Platform::Local` (TUI) — `SendAudioTool`'s
+/// Local arm handles `rodio` playback directly without a dispatcher Arc.
+pub struct TtsPerTurnWiring {
+    pub session_key: ironhermes_core::SessionKey,
+    pub audio_dispatcher: Option<Arc<dyn ironhermes_tools::AudioDispatcher>>,
+}
+
 /// Everything that legitimately varies turn-to-turn. The channel builds the
 /// message vector (session stores differ per channel) and supplies the per-turn
 /// callbacks + identifiers.
@@ -107,6 +121,10 @@ pub struct TurnRequest {
     pub state_store: Option<Arc<std::sync::Mutex<StateStore>>>,
     /// Compression-count carry-over for multi-turn sessions (default 0).
     pub compression_count: usize,
+    /// Phase 36.17.7 D-01: per-turn TTS wiring. `None` skips TTS registration.
+    /// `Some(...)` causes `run_turn` to call `register_tts_tools` on
+    /// `bundle.registry` at the top of the turn, before the agent loop runs.
+    pub tts_wiring: Option<TtsPerTurnWiring>,
 }
 
 /// Durable, channel-agnostic agent unit. Build once via [`from_config`], then
@@ -195,6 +213,12 @@ impl AgentRuntime {
             .map(|m| m as SharedMemoryManager);
 
         let cwd_stored = cwd.clone();
+        // Phase 36.17.7 Plan 01 (BLOCKER 1 fix for D-05): the startup bundle has no
+        // TTS — per-turn TTS now lives in `TurnRequest::tts_wiring` and is registered
+        // by `run_turn` via the per-turn block below. Using `..Default::default()` for
+        // the residual `Option`-typed fields eliminates the previous deferral literal
+        // from this source file so the D-05 negative-assert in Plan 05 Task 6
+        // (`invariants_36_17_7.rs`) GREENs.
         let bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
             config: config.clone(),
             resolver: resolver.clone(),
@@ -210,10 +234,7 @@ impl AgentRuntime {
             }),
             hooks_config,
             emit_mcp_startup_logs,
-            // Phase 36.17.5 D-15: per-turn threading deferred to a follow-up phase.
-            // v1 ships the infrastructure; TTS tools activate when session_key is Some.
-            session_key: None,
-            telegram_adapter: None,
+            ..Default::default()
         })
         .await?;
 
@@ -253,6 +274,21 @@ impl AgentRuntime {
     pub async fn run_turn(&self, mut req: TurnRequest) -> Result<AgentResult> {
         // ── budget lifecycle: refill before the turn ──────────────────────
         self.budget.reset();
+
+        // Phase 36.17.7 D-01: register TTS tools for this turn's session.
+        // `ToolRegistry::register` uses `HashMap::insert` (upsert by name — verified
+        // in registry.rs:137) so repeated turns idempotently replace the previous
+        // SendAudioTool instance with the current session's SessionKey + dispatcher.
+        // No `unregister` call needed.
+        if let Some(ref wiring) = req.tts_wiring {
+            let mut reg = self.bundle.registry.write().await;
+            reg.register_tts_tools(
+                wiring.session_key.clone(),
+                wiring.audio_dispatcher.clone(),
+                self.config.clone(),
+            );
+            drop(reg);
+        }
 
         let context_length = self.resolver.resolve_for_main().context_length();
 

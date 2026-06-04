@@ -31,7 +31,17 @@ pub struct DelegateTaskWiring {
     pub progress_callback: Option<SubagentProgressCallback>,
 }
 
-#[derive(Clone)]
+/// Phase 36.17.7 Plan 01 (D-05 prep): derives `Default` so
+/// `agent_runtime.rs::from_config` can build the startup bundle via
+/// `..Default::default()`. That rewrite eliminates the literal `session_key: None,`
+/// from `agent_runtime.rs` so the D-05 invariant in Plan 05 Task 6 GREENs.
+/// All field types either already implement `Default` (`Arc<Config>`,
+/// `PathBuf`, `HooksConfig`, `Option<_>`, `bool`) or had `Default` added
+/// in Plan 01 (`Arc<ProviderResolver>`, `Arc<RwLock<ProcessRegistry>>`).
+/// The default-constructed value is never used in production — callers always
+/// supply real fields and `..Default::default()` only fills the residual
+/// (`session_key`, `telegram_adapter`) Option slots.
+#[derive(Clone, Default)]
 pub struct AppRuntimeFactoryInput {
     pub config: Arc<Config>,
     pub resolver: Arc<ProviderResolver>,

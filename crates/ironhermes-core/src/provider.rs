@@ -112,7 +112,12 @@ fn is_provider_url_safe(url: &str) -> bool {
 ///
 /// Constructed once at startup from `Config` + environment variables.
 /// Resolution precedence (D-03, PROV-03): config > env var > built-in default.
-#[derive(Debug, Clone)]
+///
+/// Phase 36.17.7 Plan 01: derives `Default` so `AppRuntimeFactoryInput` can use
+/// `..Default::default()` in `agent_runtime.rs::from_config` (D-05 prep). The
+/// `Default` impl produces an empty resolver — production callers always use
+/// `ProviderResolver::build(&config)` instead.
+#[derive(Debug, Clone, Default)]
 pub struct ProviderResolver {
     endpoints: HashMap<String, ResolvedEndpoint>,
     roles: HashMap<String, ModelRoleConfig>,
