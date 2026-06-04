@@ -374,6 +374,10 @@ pub struct Config {
     /// parse cleanly via `#[serde(default)]`.
     #[serde(default)]
     pub dashboard: DashboardConfig,
+    /// Phase 36.17.5 (D-12): TTS provider configuration.
+    /// Pre-36.17.5 configs parse cleanly via `#[serde(default)]`.
+    #[serde(default)]
+    pub tts: TtsConfig,
 }
 
 // =============================================================================
@@ -492,6 +496,88 @@ impl CacheTtl {
         match self {
             CacheTtl::FiveMinutes => "5m",
             CacheTtl::OneHour => "1h",
+        }
+    }
+}
+
+// =============================================================================
+// TtsConfig + sub-structs (Phase 36.17.5 D-12)
+// =============================================================================
+
+/// Phase 36.17.5 (D-12): Edge TTS provider configuration.
+///
+/// All fields have `#[serde(default)]` so pre-36.17.5 YAML configs parse cleanly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EdgeTtsConfig {
+    /// Edge TTS voice name (default: `"en-US-AriaNeural"`).
+    pub voice: String,
+    /// Audio output format returned by Edge TTS (default: `"mp3"`).
+    pub output_format: String,
+}
+
+impl Default for EdgeTtsConfig {
+    fn default() -> Self {
+        Self {
+            voice: "en-US-AriaNeural".to_string(),
+            output_format: "mp3".to_string(),
+        }
+    }
+}
+
+/// Phase 36.17.5 (D-12): ElevenLabs TTS provider configuration.
+///
+/// All fields have `#[serde(default)]` so pre-36.17.5 YAML configs parse cleanly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ElevenLabsConfig {
+    /// ElevenLabs voice ID (default: `"pNInz6obpgDQGcFmaJgB"` — Adam voice).
+    pub voice_id: String,
+    /// ElevenLabs model ID (default: `"eleven_multilingual_v2"`).
+    pub model_id: String,
+    /// Audio output format (default: `"mp3"`).
+    ///
+    /// [NOTE] Opus container handling deferred — RESEARCH Open Q #2 / D-04 ElevenLabs Opus path.
+    /// ElevenLabs added `opus_48000_*` output formats 2025-03-31; enabling native Opus for
+    /// Telegram voice bubbles without ffmpeg is a follow-up task.
+    pub output_format: String,
+}
+
+impl Default for ElevenLabsConfig {
+    fn default() -> Self {
+        Self {
+            voice_id: "pNInz6obpgDQGcFmaJgB".to_string(),     // Adam
+            model_id: "eleven_multilingual_v2".to_string(),
+            output_format: "mp3".to_string(),                  // Opus opt-in deferred (RESEARCH Open Q #2)
+        }
+    }
+}
+
+/// Phase 36.17.5 (D-12): Top-level TTS configuration block.
+///
+/// Strongly-typed per-provider sub-blocks — no `serde_json::Value` escape hatches
+/// per D-12. Adding a new provider in a future phase = adding a new typed field here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TtsConfig {
+    /// Active TTS provider name (default: `"edge"`).
+    pub provider: String,
+    /// Optional path to ffmpeg binary for MP3→Opus conversion (D-04).
+    /// `None` means auto-detect via `std::process::Command::new("ffmpeg")`.
+    pub ffmpeg_path: Option<String>,
+    /// Edge TTS provider configuration.
+    pub edge: EdgeTtsConfig,
+    /// ElevenLabs TTS provider configuration.
+    pub elevenlabs: ElevenLabsConfig,
+}
+
+impl Default for TtsConfig {
+    fn default() -> Self {
+        Self {
+            provider: "edge".to_string(),
+            ffmpeg_path: None,
+            edge: EdgeTtsConfig::default(),
+            elevenlabs: ElevenLabsConfig::default(),
         }
     }
 }

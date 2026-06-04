@@ -57,6 +57,7 @@ pub const DEFAULT_TOOLSETS: &[&str] =
 /// as they have no external prerequisites.
 pub const ALL_TOOLSETS: &[&str] = &[
     "memory", "session", "agent", "skills", "robotics", "learning", "web", "code", "browser",
+    "voice",   // Phase 36.17.5 D-15
 ];
 
 /// Get the IronHermes home directory (default: ~/.ironhermes).
