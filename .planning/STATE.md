@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: executing
-stopped_at: Phase 36.17.2.2 context gathered
-last_updated: "2026-06-03T21:32:42.120Z"
-last_activity: 2026-06-03 -- Phase 36.17.2.2 execution started
+status: awaiting_uat
+stopped_at: Phase 36.17.2.2 plans 01-06 merged + plan 07 Task 1 (UAT runbook) authored; Task 2 (operator-approved live Telegram UAT) pending
+last_updated: "2026-06-04T00:10:00.000Z"
+last_activity: 2026-06-03 -- Phase 36.17.2.2 plans 01-06 merged to develop; plan 07 runbook authored; awaiting operator UAT
 progress:
   total_phases: 58
   completed_phases: 23
   total_plans: 126
-  completed_plans: 115
-  percent: 40
+  completed_plans: 121
+  percent: 42
 ---
 
 # Project State
@@ -25,10 +25,35 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 ## Current Position
 
-Phase: 36.17.2.2 (ironhermes-telegram-client-delivers-streaming-final-media-me) — EXECUTING
-Plan: 1 of 7
-Status: Executing Phase 36.17.2.2
-Last activity: 2026-06-03 -- Phase 36.17.2.2 execution started
+Phase: 36.17.2.2 (ironhermes-telegram-client-delivers-streaming-final-media-me) — AWAITING UAT (6/7 plans merged; plan 07 Task 1 done, Task 2 pending operator)
+Plan: 7 of 7 (Task 1 ✓ runbook authored; Task 2 ⏸ live Telegram UAT + operator `approved` reply)
+Status: Phase 36.17.2.2 halted at live-UAT gate — runbook at `crates/ironhermes-gateway/tests/telegram_media_uat.md`; operator runs 9 scenarios + replies `approved`
+Last activity: 2026-06-03 -- Plans 01-06 merged (Wave 0-5 complete); plan 07 Task 1 runbook authored; UAT deferred
+
+## Recent close-out summary (2026-06-03 — Phase 36.17.2.2 plans 01-06 + 07 Task 1 merged, awaiting UAT)
+
+**Phase 36.17.2.2 (`<MEDIA: ...>` media delivery + MarkdownV2 final-text rendering):** 6 production plans merged to `develop` sequentially in DAG order; plan 07 Task 1 (live UAT runbook) merged; plan 07 Task 2 (operator runs 9 scenarios on a live Telegram bot + replies `approved`) deferred to a follow-up session.
+
+**Wave-by-wave commit roll-up (final HEAD `2dbcb041`):**
+- **Plan 01 (TDD — MarkdownV2 escape, D-04):** 3 commits → `321d7b33` RED golden test table, `c81316de` GREEN `escape_markdown_v2` + `escape_outside_code_blocks` (fence/inline-code/link-URL state machine, backslash respect), `b7f767d0` SUMMARY. Tests: 16/16 markdown_v2. Em-dash + emphasis-marker corrections applied per plan's catch-all branch (documented as Rule 1 deviations).
+- **Plan 02 (TDD — MediaTagExtractor, D-05/D-06/D-08/D-09):** 3 commits → `82cb360a` RED tests, `9d09881e` GREEN `MediaTagExtractor` + `MediaSource`/`MediaKind`/`MediaRef` + lib.rs wire, `fe32db13` SUMMARY. Tests: 21/21 media_tag. Diverges from `StreamingContextScrubber` only on `flush_tail` policy (emits buffered tag-text as VISIBLE per user-trust contract; scrubber discards).
+- **Plan 03 (MediaSender trait + Telegram prompt, D-17/D-18):** 3 commits → `e4e31bb2` `MediaSender` trait declaration with one-import re-export, `bfea82ec` prompt_builder.rs teaches `<MEDIA: path|url>` convention, `daf735a9` SUMMARY. Tests: 408/408 ironhermes-agent lib regression clean.
+- **Plan 04 (telegram.rs / adapter.rs reconciliation, D-01/D-02/D-12/D-13/D-14/D-15/D-18):** 5 commits → `7a65f348` `send_file_multipart -> Result<MessageResponse>` + new `send_audio` per D-13, `c6fda132` `edit_message_markdown_v2` rename across trait+impls + D-02 single-retry-as-plain-text fallback, `64754747` stream_consumer.rs:100 call-site rename, `8e75c641` `impl MediaSender for TelegramAdapter` with D-12 URL-form + D-13 5-type dispatch + D-14 ogg/opus→voice + D-15 size pre-check + T-INPUT-MEDIA-PATH canonicalization + T-INPUT-MEDIA-URL scheme gate + T-LOG-LEAK filename-only logging, `00d66b91` SUMMARY. **Rule-3 fix-up applied** (Blocking): plan enumerated only 3 test files for the trait rename, but discord.rs / slack.rs / user_queue.rs / stream_consumer.rs::MockAdapter all impl `PlatformAdapter` and required the rename — auto-rippled. Tests: 202+ in gateway, 0 fails.
+- **Plan 05 (D-01 final-text rendering complete, D-01/D-03/D-04):** 3 commits → `ae30a075` `send_message_markdown_v2` trait method + Telegram impl with D-02 fallback (added to 4 test-fixture adapters too: RecordingFailingAdapter / RecordingPlatformAdapter / FailingPlatformAdapter / GW-05 RecordingPlatformAdapter), `595df71a` `escape_outside_code_blocks` applied at stream_consumer.rs:100 final-edit AND both overflow chunk sites at :121-128 / :131-134, `31a58713` SUMMARY. D-03 invariant preserved: intermediate edits at :114, :161, :176 stay plain text. Tests: 13/13 stream_consumer including renamed `test_final_edit_uses_edit_message_markdown_v2` + new positive `send_plain_count == 0` regression guard.
+- **Plan 06 (handler wire-up + E2E integration test, D-07/D-08/D-09/D-10/D-11/D-15/D-18/D-19/D-20):** 6 commits → `cdd83fa2` `GatewayMessageHandler.set_media_sender` field+setter (constructor unchanged, 5 call sites unbroken), `6e7259ba` MediaTagExtractor chained in `run_agent` stream_callback alongside scrubber (scrubber→extractor order per Open Q5), `d8c01a67` D-19 dispatch loop at CORRECTED anchor `handler.rs:1532` between `typing_handle.await.ok()` (:1515) and `match agent_result {` (:1590) — strict awk ordering check passes (HIGH-RISK T-D19-ANCHOR-MISPLACEMENT mitigated), `88c5905c` runner.rs Telegram start path clone-cast wire-up (no trait upcasting), `216efc5e` `tests/telegram_media_delivery.rs` integration test with `RecordingMediaAdapter` + 7 named scenarios (text_only_v2_edit_renders_with_escape, single_photo_text_then_attachment_order, multi_tag_emits_in_stream_order, missing_path_reinserts_tag, oversize_path_reinserts_without_upload, tag_inside_fence_passes_through_no_attachment, parse_mode_400_retries_as_plain_text), `86597e13` SUMMARY. **Synthetic-LLM injection choice:** drove the production composition directly (`scrubber → extractor → dispatch_media_d19` helper) rather than building a `FakeStreamingProvider` — `AgentRuntime::for_tests()` is feature-gated and uses `localhost:0` which cannot stream. **Reinsert-body propagation choice:** `tokio::sync::oneshot::channel<String>` from consumer task to parent (the StreamConsumer is moved into the spawn via `async move` so the accessor alone is unreachable). Tests: 7/7 telegram_media_delivery, 209 total gateway crate.
+- **Plan 07 Task 1 (live UAT runbook):** 1 commit → `8851c147` `crates/ironhermes-gateway/tests/telegram_media_uat.md` (221 lines, 9 scenarios covering D-01/D-02/D-07/D-09/D-10/D-11/D-12/D-14/D-15, sign-off checklist with 9 unchecked boxes, document history). Mirrors `session_queue_telegram_uat.md` template per PATTERNS §12 (36.17.2 D-22 protocol inherited). Task 2 (operator runs UAT + replies `approved`) DEFERRED.
+
+**Pre-work YAML fix (`2da0ded3`):** plans 03 and 05 had `depends_on` entries with trailing YAML comments (`- 36.17.2.2-02   # MediaRef...`) which the gsd-sdk plan-index parser treated as part of the dependency ID, breaking DAG resolution and forcing plan 03/05 into wave 0. Moved comments to dedicated comment lines, restoring correct wave ordering — future plans benefit.
+
+**Phase-level must_haves status:**
+- Items 1-4 (build/test/grep): GREEN (markdown_v2 16/16, media_tag 21/21, gateway full crate 209/0/1, telegram_media_delivery 7/7).
+- Items 5-8 (source assertions): GREEN — `grep -c 'fn set_media_sender' handler.rs` = 1, `grep -c 'take_attachments' handler.rs` = 1, `grep -c 'MediaTagExtractor::new' handler.rs` = 1, `grep -c '\.canonicalize()' telegram.rs` = 3, `impl MediaSender for TelegramAdapter` = 1, `escape_outside_code_blocks` at stream_consumer = 3, `rg fn edit_message_markdown crates/ironhermes-gateway | grep -v _v2 | wc -l` = 0, `rg '\.edit_message_markdown\(' crates/ironhermes-gateway | wc -l` = 0.
+- Item 9 (UAT runbook exists): GREEN — 221 lines, 9 scenarios.
+- Item 10 (no D-03 regression): GREEN via stream_consumer's renamed test pass + 36.17.2 prior-phase tests untouched.
+
+**Phase-exit gate still open:** plan 07 Task 2 — operator runs 9 scenarios on a live Telegram bot + replies `approved`. Setup checklist documented in the runbook's Prerequisites table (TELEGRAM_BOT_TOKEN from @BotFather, IRONHERMES_HOME=/tmp/uat-36.17.2.2-home, test chat with bot admin, pre-created `/tmp/uat-{photo.png,voice.ogg,music.mp3,doc.pdf,oversize.png}` test fixtures, one reachable public PNG URL). On `approved` reply, executor will flip `nyquist_compliant: true` + `wave_0_complete: true` in VALIDATION.md frontmatter and counter `completed_plans: 121 → 122`.
+
+**Workspace test post-merge gate:** `cargo test --workspace` exit 0 with 2 pre-existing FAIL lines in kanban end_to_end tests (`duplicate_completion_is_rejected`, `full_lifecycle_via_tools_layer`) — both untouched by this phase (zero kanban files modified across plans 01-07). Failures pre-date this phase; tracked separately for follow-up. Plan 06 SUMMARY documents this in its "Deferred Issues" section. Counter update: `completed_phases` unchanged at 23 (phase 36.17.2.2 not yet fully closed); `total_plans: 119 → 126` (+7 for new phase); `completed_plans: 115 → 121` (plans 01-06 fully closed; plan 07 Task 1 only — plan 07 stays open until operator approval).
 
 ## Recent close-out summary (2026-05-30 — Phase 36.3.7.6 closed PASS)
 
