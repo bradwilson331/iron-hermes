@@ -37,7 +37,7 @@ tokio-util = { workspace = true }
 tempfile = "3"
 msedge-tts = { workspace = true }   # Phase 36.17.5 D-03 / Edge TTS
 rodio = { workspace = true }        # Phase 36.17.5 D-15 Local arm
-
+rustls = "0.23"
 [dev-dependencies]
 # Phase 21.7 Plan 08 Task 8-03: tracing-test with `no-env-filter` so
 # `#[traced_test]` captures logs from any target (not just the test

@@ -11,7 +11,6 @@ pub mod elevenlabs;
 
 pub use edge::EdgeProvider;
 pub use elevenlabs::ElevenLabsProvider;
-
 use std::sync::OnceLock;
 
 // D-04: Cache the ffmpeg probe result once per process. The probe is sync,
@@ -56,11 +55,11 @@ pub fn build_tts_registry(
 ) -> ironhermes_core::TtsRegistry {
     use std::sync::Arc;
     let mut registry = ironhermes_core::TtsRegistry::new();
-    registry.register(Arc::new(
-        crate::tts::edge::EdgeProvider::new(config.edge.clone()),
-    ));
-    registry.register(Arc::new(
-        crate::tts::elevenlabs::ElevenLabsProvider::new(config.elevenlabs.clone()),
-    ));
+    registry.register(Arc::new(crate::tts::edge::EdgeProvider::new(
+        config.edge.clone(),
+    )));
+    registry.register(Arc::new(crate::tts::elevenlabs::ElevenLabsProvider::new(
+        config.elevenlabs.clone(),
+    )));
     registry
 }

@@ -11,6 +11,7 @@
 use async_trait::async_trait;
 use ironhermes_core::config::EdgeTtsConfig;
 use ironhermes_core::tts::TtsProvider;
+
 use std::path::{Path, PathBuf};
 
 /// Edge TTS provider wrapping `msedge-tts` crate.
@@ -99,10 +100,10 @@ impl TtsProvider for EdgeProvider {
 
         // Open a new WebSocket connection per call (stateless, matches project
         // convention of per-call clients — mirrors web_search.rs reqwest pattern).
-        let mut client =
-            msedge_tts::tts::client::tokio_runtime::connect_async()
-                .await
-                .map_err(|e| anyhow::anyhow!("Edge TTS connect failed: {}", e))?;
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let mut client = msedge_tts::tts::client::tokio_runtime::connect_async()
+            .await
+            .map_err(|e| anyhow::anyhow!("Edge TTS connect failed: {}", e))?;
 
         let audio = client
             .synthesize(text, &speech_config)
