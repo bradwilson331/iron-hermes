@@ -47,7 +47,9 @@ Requirements originally defined for v2.0: Intelligence & Identity. v2.0 was audi
 - [x] **MEM-04**: Memory stores display capacity usage in system prompt header (e.g., "67% — 1,474/2,200 chars")
 - [x] **MEM-05**: Memory entries are security scanned for injection/exfiltration patterns before acceptance
 - [x] **MEM-06
+
 **: Memory snapshots are frozen at session start and injected into system prompt — mid-session writes persist to disk but do not mutate the active prompt
+
 - [x] **MEM-07**: MemoryProvider trait defines lifecycle hooks (initialize, prefetch, sync_turn, on_session_end, shutdown) with Send + Sync + 'static bounds
 - [x] **MEM-08**: Built-in file-based MemoryStore implements MemoryProvider as the default backend
 - [x] **MEM-09**: SQLite memory provider stores facts with FTS5 search capability
@@ -109,7 +111,9 @@ Requirements originally defined for v2.0: Intelligence & Identity. v2.0 was audi
 - [x] **SKILL-06**: Skills declare required_credential_files for OAuth tokens; existence checked on load, files mounted into sandboxes
 - [x] **SKILL-07**: Skill content security scanned before injection into system prompt (same patterns as context file scanning)
 - [x] **SKILL-08
+
 **: Skills Hub: publish skills to external repos, install from GitHub/skills.sh/well-known endpoints
+
 - [ ] **SKILL-09**: Trust levels for installed skills: builtin (shipped), official (optional-skills/), trusted (known repos), community (security-gated)
 - [x] **SKILL-10**: Platform-specific skills restricted via platforms field (macos/linux/windows); hidden on incompatible platforms
 - [x] **SKILL-11**: Skill env vars automatically passed through to execute_code and terminal sandboxes when set
@@ -471,6 +475,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | REQ-36.3.7.8-16 | Phase 36.3.7.8 | Pending |
 
 **Coverage:**
+
 - v2.0 requirements: 99 total (closed 2026-04-27 as `tech_debt`; 77 satisfied / 16 carried over to v2.1 / 6 ACP-specific carried over to v2.1)
 - v2.1 active: 34 reqs (29 carry-overs across 7 categories + 5 NEW Learning Loop reqs across 1 new category)
   - Carry-overs: CLI-03..08 + PRMT-08/09 + TOOL-01..05 + PROV-04/06/08 + SKILL-09 + GW-01..04, GW-06, GW-07, GW-09, GW-10 + CFG-01..04

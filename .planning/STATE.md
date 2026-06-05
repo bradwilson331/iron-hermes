@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
-stopped_at: Phase 36.17.7 context gathered
-last_updated: "2026-06-04T19:27:05.327Z"
-last_activity: 2026-06-04
+stopped_at: Phase 36.17.7 CLOSED (partial — /toolset list Live display deferred)
+last_updated: "2026-06-05T15:40:00.000Z"
+last_activity: 2026-06-05
 progress:
   total_phases: 61
-  completed_phases: 26
+  completed_phases: 27
   total_plans: 133
-  completed_plans: 129
-  percent: 43
+  completed_plans: 133
+  percent: 44
 ---
 
 # Project State
@@ -21,14 +21,33 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.17.6 — toolset-cli-tts-wiring
+**Current focus:** Phase 36.17.7 CLOSED — pick next phase from milestone-v3.0 backlog
 
 ## Current Position
 
-Phase: 36.17.6
-Plan: Not started
-Status: Executing Phase 36.17.6
-Last activity: 2026-06-04
+Phase: 36.17.7 (CLOSED, partial)
+Plan: 5 of 5 complete
+Status: Phase closed 2026-06-05 — voice TTS live on all 3 surfaces (Telegram/TUI/Web). `/toolset list` Live-display deferred.
+Last activity: 2026-06-05
+Next: pick next phase from milestone-v3.0 backlog
+
+## Recent close-out summary (2026-06-05 — Phase 36.17.7 CLOSED, partial)
+
+**Phase 36.17.7 (Gateway + web + TUI runtime TTS wiring):** Closes the 36.17.5 D-15 deferral — `register_tts_tools` was guarded behind `if let Some(ref session_key)` while `AgentRuntime::from_config` hard-coded `session_key: None`. Now wired across all three surfaces. **5 plans, 3 waves, all complete.**
+
+- **Plan 01 (Wave 1 — foundations):** `TtsPerTurnWiring` struct + `TurnRequest.tts_wiring` + per-turn `register_tts_tools`; `#[derive(Default)]` on `AppRuntimeFactoryInput` + `from_config` rewrite removing the `session_key: None` hard-code (BLOCKER 1); `NotSupportedAudioDispatcher` stub (D-03-b). Commits `da53b83a`→`3e145586`.
+- **Plan 02 (Wave 2 — gateway/Telegram):** `telegram_audio_dispatcher` field + `tts_wiring` threading; AudioDispatcher wired on all 3 gateway start paths (Telegram real + Discord/Slack NotSupported stubs, HIGH 6). Commits `f3aa5d66`, `07be9be5`. UAT-T approved.
+- **Plan 03 (Wave 2 — TUI):** per-turn `TtsPerTurnWiring` into TUI `spawn_turn` (Platform::Local + rodio). Commit `2967aa2e`. UAT-TUI approved.
+- **Plan 04 (Wave 2 — web):** `ChatStreamEvent::AudioOut` protocol + `WebAudioDispatcher` + binary WS frame + Blob URL first-play + inline `<audio controls>`. Commits `9ddfcf00`, `650c28b2`. UAT-W approved (after Web-arm hotfix below).
+- **Plan 05 (Wave 3 — audio cache + Registered column):** `AudioCacheConfig` + `GET /audio/:uuid` replay route (T-path-traversal mitigated) + audio_cache GC (startup + periodic) + D-06 `Registered` column (Live/Inspection/—, Path B) + `invariants_36_17_7.rs` (5 D-05 source-grep guards). Commits `ca83fd17`→`5fb94272`.
+
+**Post-Plan-04 hotfixes (this session):** `247e7327` added the missing `Platform::Web` arm to `send_audio_tool.rs` (the dispatcher was wired but the tool match fell through — this is what made web voice actually play); `be26f48e` installed the rustls `aws-lc-rs` CryptoProvider for Edge TTS WSS; `0cc0a396` migrated the `workspace-tests` CI job to `cargo nextest run --workspace --all-features` (+ separate `cargo test --doc`) and fixed a latent `tts_registry.rs` `&PathBuf`→`&Path` trait break that nextest surfaced.
+
+**Outcome:** Voice TTS works end-to-end on **all three** surfaces (Telegram, TUI, Web). Full `cargo nextest run --workspace` GREEN. A6 regression sweep GREEN (no 36.17.5/36.17.6 regression).
+
+**Deferred (accepted by user — partial close):** `/toolset list` slash command does not display the `voice` toolset as `Live` in running surfaces (reads `—`/`Inspection`) — a display/observability gap, not a capability gap, caused by the slash-dispatch handle reading a different registry instance than the per-turn `register_tts_tools` mutates. Root cause + suggested fix in `.planning/phases/36.17.7-gateway-web-tts-runtime-wiring/deferred-items.md`. Also deferred: ~25 pre-existing workspace compiler warnings (out of scope; separate cleanup PR — CI `-D warnings` lint job needs them before going green).
+
+**Workspace hygiene:** untracked 17 stray `.DS_Store` files (already gitignored but committed pre-rule). Counter update: `completed_phases: 26 → 27`; `completed_plans: 129 → 133`; `percent: 43 → 44`.
 
 ## Recent close-out summary (2026-06-03 — Phase 36.17.2.2 plans 01-06 + 07 Task 1 merged, awaiting UAT)
 
@@ -614,6 +633,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-06-04T19:27:05.319Z
-Stopped at: Phase 36.17.7 context gathered
-Resume file: .planning/phases/36.17.7-gateway-web-tts-runtime-wiring/36.17.7-CONTEXT.md
+Last session: 2026-06-04T19:47:39.641Z
+Stopped at: Phase 36.17.7 UI-SPEC approved
+Resume file: .planning/phases/36.17.7-gateway-web-tts-runtime-wiring/36.17.7-UI-SPEC.md
