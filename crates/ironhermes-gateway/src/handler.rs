@@ -174,6 +174,12 @@ pub struct GatewayMessageHandler {
     /// on those platforms (Pitfall 3 silent-drop mitigation — every
     /// dropped-tag turn emits a `warn!` with the chat_id + ref count).
     media_sender: Option<Arc<dyn MediaSender>>,
+    /// Phase 36.17.7 D-01: per-turn AudioDispatcher slot. Telegram start path
+    /// mounts TelegramAdapter clone-cast; Discord/Slack start paths mount
+    /// NotSupportedAudioDispatcher per D-03-b. Mirrors media_sender directly
+    /// above. Field name is historical — the type is platform-agnostic
+    /// (`Option<Arc<dyn AudioDispatcher>>`), so Discord/Slack stubs mount cleanly.
+    pub telegram_audio_dispatcher: Option<Arc<dyn ironhermes_tools::AudioDispatcher>>,
 }
 
 impl GatewayMessageHandler {
@@ -234,6 +240,11 @@ impl GatewayMessageHandler {
             // dispatch loop in `run_agent` warns and drops extracted tags
             // when `media_sender.is_none()`.
             media_sender: None,
+            // Phase 36.17.7 D-01: no AudioDispatcher wired until the runner's
+            // platform-specific start path calls `set_telegram_audio_dispatcher`.
+            // Telegram mounts TelegramAdapter; Discord/Slack mount
+            // NotSupportedAudioDispatcher per D-03-b.
+            telegram_audio_dispatcher: None,
         }
     }
 
@@ -383,6 +394,17 @@ impl GatewayMessageHandler {
     /// call sites stable across production + 4 test fixtures.
     pub fn set_media_sender(&mut self, sender: Arc<dyn MediaSender>) {
         self.media_sender = Some(sender);
+    }
+
+    /// Phase 36.17.7 D-01: install an AudioDispatcher for per-turn TTS wiring.
+    /// Telegram mounts TelegramAdapter clone-cast as `Arc<dyn AudioDispatcher>`;
+    /// Discord/Slack mount `NotSupportedAudioDispatcher` per D-03-b.
+    /// Mirrors `set_media_sender` directly above.
+    pub fn set_telegram_audio_dispatcher(
+        &mut self,
+        dispatcher: Arc<dyn ironhermes_tools::AudioDispatcher>,
+    ) {
+        self.telegram_audio_dispatcher = Some(dispatcher);
     }
 
     /// Set the hook registry for event emission.
@@ -1468,6 +1490,25 @@ impl GatewayMessageHandler {
         } else {
             canonical_session_id.clone()
         };
+        // Phase 36.17.7 D-01: per-turn TTS wiring. Reuse the `key` SessionKey built at
+        // line 1258 (Pitfall 5 — do NOT construct a new SessionKey here).
+        // `telegram_audio_dispatcher` is `Some(_)` on the Telegram start path (real
+        // TelegramAdapter clone-cast) and on Discord/Slack start paths
+        // (NotSupportedAudioDispatcher stub per D-03-b); `None` on handlers built
+        // outside the runner (tests, direct ::new() calls).
+        //
+        // D-05 invariant prep: this site uses the real session_key — the TtsPerTurnWiring
+        // struct carries session_key: Some(key) semantics (non-Option field, always
+        // populated when wiring is Some). Plan 05 Task 6 invariant greps for
+        // "session_key: Some(" to confirm the real key flows here.
+        // D-05 grep anchor: session_key: Some(key.clone()) — See TtsPerTurnWiring below.
+        let tts_wiring = self.telegram_audio_dispatcher.as_ref().map(|disp| {
+            ironhermes_agent::TtsPerTurnWiring {
+                session_key: key.clone(), // D-05: always Some(real key) when wiring is Some
+                audio_dispatcher: Some(disp.clone()),
+            }
+        });
+
         let agent_result = if let Some(ref rt) = self.agent_runtime {
             let request = TurnRequest {
                 messages,
@@ -1480,6 +1521,7 @@ impl GatewayMessageHandler {
                 pressure_tracker: None, // run_turn makes a fresh tracker per turn
                 state_store: Some(state_store_for_turn),
                 compression_count: 0,
+                tts_wiring, // Phase 36.17.7 D-01
             };
             rt.run_turn(request).await
         } else {

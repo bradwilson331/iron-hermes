@@ -1331,6 +1331,7 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
                         pressure_tracker: None,
                         state_store: Some(state_store),
                         compression_count: 0,
+                        tts_wiring: None,
                     };
                     let agent_result = runtime.run_turn(request).await?;
                     // Extract the final assistant message text — the judge
@@ -1404,6 +1405,7 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
             pressure_tracker: None,
             state_store: Some(state_store.clone()),
             compression_count: 0,
+            tts_wiring: None,
         };
         runtime_handle.run_turn(request).await?
     };
@@ -2944,6 +2946,7 @@ async fn run_agent_turn(
         pressure_tracker: Some(pressure_tracker.clone()), // Phase 18-14: reuse session tracker
         state_store: Some(state_store),
         compression_count: starting_count, // Phase 18-14: carry compression chain across turns
+        tts_wiring: None,
     };
 
     let result = runtime.run_turn(request).await?;
