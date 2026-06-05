@@ -842,6 +842,19 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
         // fallback is DURABLE (run_turn calls wire_fallback_if_configured).
         // TUI carries no per-session compression_count or pressure_tracker;
         // leave them at default (0 / None) as documented in plan interfaces.
+
+        // Phase 36.17.7 D-01: TUI uses Platform::Local; dispatcher is None because
+        // SendAudioTool's Local arm handles rodio playback directly via DeviceSinkBuilder.
+        let session_key = ironhermes_core::SessionKey {
+            platform: ironhermes_core::types::Platform::Local,
+            chat_id: session_id.clone(),
+            user_id: None,
+        };
+        let tts_wiring = Some(ironhermes_agent::TtsPerTurnWiring {
+            session_key: Some(session_key.clone()).unwrap(), // explicit Some() literal for D-05 source-grep
+            audio_dispatcher: None,
+        });
+
         let request = ironhermes_agent::TurnRequest {
             messages: messages_snapshot,
             session_id,
@@ -853,6 +866,7 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
             pressure_tracker: None,
             state_store,
             compression_count: 0,
+            tts_wiring,
         };
 
         let result = runtime.run_turn(request).await;
