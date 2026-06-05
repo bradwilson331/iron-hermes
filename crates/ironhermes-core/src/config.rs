@@ -378,6 +378,39 @@ pub struct Config {
     /// Pre-36.17.5 configs parse cleanly via `#[serde(default)]`.
     #[serde(default)]
     pub tts: TtsConfig,
+    /// Phase 36.17.7 D-02-d: audio cache lifecycle policy.
+    /// Controls GC of `$IRONHERMES_HOME/audio_cache/` files produced by
+    /// `text_to_speech` + `send_audio` (web replay surface).
+    /// Pre-36.17.7 configs parse cleanly via `#[serde(default)]`.
+    #[serde(default)]
+    pub audio_cache: AudioCacheConfig,
+}
+
+/// Phase 36.17.7 D-02-d: audio cache lifecycle policy.
+///
+/// Pre-36.17.7 configs parse cleanly via `#[serde(default)]` on this struct AND
+/// on the `audio_cache:` field of [`Config`]. Defaults: 7 days max age,
+/// 86400 seconds (daily) sweep interval.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioCacheConfig {
+    /// Maximum age in days for files in `$IRONHERMES_HOME/audio_cache/`.
+    /// Files older than this are removed by `gc_sweep_audio_cache` on startup
+    /// and on every periodic sweep. Default: 7.
+    pub max_age_days: u32,
+    /// Periodic GC sweep interval in seconds. Default: 86400 (daily).
+    /// Bounded by `max_age_days` — a sweep cadence longer than the max age
+    /// would let stale files accumulate temporarily.
+    pub sweep_interval_secs: u64,
+}
+
+impl Default for AudioCacheConfig {
+    fn default() -> Self {
+        Self {
+            max_age_days: 7,
+            sweep_interval_secs: 86400,
+        }
+    }
 }
 
 // =============================================================================
