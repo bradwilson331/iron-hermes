@@ -1,85 +1,46 @@
 {
   "version": "1.0",
-  "timestamp": "2026-06-02T18:00:00.000Z",
-  "phase": "36.3.7.11",
-  "phase_name": "dashboard-plugin-spa-rest-websocket-live-update",
-  "phase_dir": ".planning/phases/36.3.7.11-dashboard-plugin-spa-rest-websocket-live-update",
+  "timestamp": "2026-06-05T15:20:57Z",
+  "phase": "36.17.7",
+  "phase_name": "gateway-web-tts-runtime-wiring",
+  "phase_dir": ".planning/phases/36.17.7-gateway-web-tts-runtime-wiring",
   "plan": 5,
-  "task": 5,
-  "total_tasks": 5,
-  "status": "phase-closed-with-carve-outs",
-  "closure_note": "Phase closed 2026-06-02 after re-run UAT (9 PASS / 1 FAIL / 3 DEFERRED) following BUG-2 follow-up fix 4887e576. Post-closure investigation resolved U6 same day. Remaining carve-outs filed as follow-on phase candidates in 36.3.7.11-05-SUMMARY.md: (1) U9 FAIL — drawer COMMENTS does not auto-refresh on cross-process comment write (D-21 broken); (2) U12/U13/U14 — keyboard-DnD, reduced-motion, localhost-bind threat-model all DEFERRED. U6 — RESOLVED 2026-06-02 — not a defect; tester observed READY post-Complete because two duplicate-title cards existed in the test DB (one DONE, one stale READY leftover from earlier UAT iteration before --idempotency-key was added). Repro test crates/ironhermes-kanban/tests/u6_complete_via_dashboard_args.rs pins the store contract. Roadmap updated via gsd-sdk: phase status=Complete, 5/5 plans complete.",
+  "task": 7,
+  "total_tasks": 7,
+  "status": "paused",
   "completed_tasks": [
-    {"id": "36.3.7.11-01", "name": "read-side #[server] fns + WS tail consumer + ScreenKanban board", "status": "done", "commit": "9d3e6e8d"},
-    {"id": "36.3.7.11-02", "name": "drag-and-drop + 4 write #[server] fns + shared transition validator", "status": "done", "commit": "955c482a"},
-    {"id": "36.3.7.11-03", "name": "detail drawer + 4 modals + TRIAGE card decompose/specify buttons", "status": "done", "commit": "7a2a78da"},
-    {"id": "36.3.7.11-04", "name": "WheelWedge::Kanban 11-variant + Agents-page KANBAN BOARD button", "status": "done", "commit": "ad36839a"},
-    {"id": "36.3.7.11-05-task1", "name": "aggregating cross-plan integration tests (kanban_full_suite, kanban_ws_lifecycle)", "status": "done", "commit": "61696079"},
-    {"id": "36.3.7.11-05-task3", "name": "workspace gate verification (cargo build/test/clippy --workspace --features iron_hermes_ui/server -- -D warnings)", "status": "done", "commit": "orchestrator-verified"}
-  ],
-  "uat_results": {
-    "U1": "PASS — wheel + Agents navigation",
-    "U2": "FAIL — drawer/modal cards are transparent; underlying board bleeds through, form fields hard to read",
-    "U3": "PASS — read path / no REST mount / WS connect / 6+ columns populated",
-    "U4": "PASS — drag happy path TRIAGE → TODO",
-    "U5": "PASS — drag-disallowed feedback (READY → DONE rejected with hint)",
-    "U6": "FAIL — blocked by same drawer-transparency issue as U2 (cannot read Complete modal contents)",
-    "U7": "PENDING — also blocked by drawer/modal transparency",
-    "U8": "FAIL — ARCHIVED column toggle reveals an empty column even when archived tasks exist; archived cards never render in the dashboard",
-    "U9": "NOT REACHED",
-    "U10": "NOT REACHED",
-    "U11": "NOT REACHED",
-    "U12": "NOT REACHED",
-    "U13": "NOT REACHED",
-    "U14": "NOT REACHED"
-  },
-  "confirmed_defects": [
-    {
-      "id": "BUG-1",
-      "scope": "fetch_board archived filter",
-      "where": "crates/iron_hermes_ui/src/server/kanban_api.rs lines 55-58",
-      "what": "fetch_board hardcodes ListFilters { archived: false, ..Default::default() }. The dashboard's 'SHOW ARCHIVED' toolbar toggle reveals the 7th column, but fetch_board never returns archived tasks, so the column is always empty regardless of toggle state.",
-      "how_to_fix": "Add an `include_archived: bool` parameter to fetch_board (defaulting to false), and have ScreenKanban call fetch_board with the current archived_visible signal value when it changes. Alternative: split into fetch_board() + fetch_archived() and merge client-side. Either way the client must re-fetch when the user toggles SHOW ARCHIVED on.",
-      "test_gap": "tests/kanban_board_read.rs and tests/kanban_full_suite.rs both fixture out archived-fetch coverage; no test asserts that toggling archived_visible causes an archived task to appear. Add a regression test before fix lands.",
-      "affected_plan": "01 (server fn) + 01/02 (ScreenKanban toggle handler)"
-    },
-    {
-      "id": "BUG-2",
-      "scope": "drawer + modal visual contrast",
-      "where": "crates/iron_hermes_ui/assets/kanban.css drawer + modal rules",
-      "what": "The drawer panel and the four modals (Complete, Block, ArchiveConfirm, CreateTask) render with insufficient background contrast — the underlying board bleeds through, form labels/inputs/buttons are hard to read. UI-SPEC §3.9/§3.10 want a themed boundary edge + slight tinted fill matching the existing HermesApp card style (see Settings screen UI PREFERENCES card for the canonical look).",
-      "how_to_fix": "Apply the same card treatment used by the Settings screen UI PREFERENCES card: cyan-border (var(--accent-primary)) at the drawer/modal edge, opaque dark fill (slightly lighter than --bg-base so the boundary is visible), and a clear z-index layer separation. Reference the working examples in screens/settings.rs and the shared .card / .panel CSS rules.",
-      "test_gap": "Visual; not unit-testable. UAT row U2 is the contract.",
-      "affected_plan": "03 (drawer + modals shipped here; CSS in kanban.css)"
-    }
+    {"id": 1, "name": "AudioCacheConfig + Wave 0 test scaffolding", "status": "done", "commit": "ca83fd17"},
+    {"id": 2, "name": "audio_route.rs — GET /audio/:uuid replay route + T-path-traversal mitigations", "status": "done", "commit": "4a133e57"},
+    {"id": 3, "name": "audio_cache.rs — gc_sweep_audio_cache + run_audio_cache_gc_loop", "status": "done", "commit": "cc6e034f"},
+    {"id": 4, "name": "Wire startup GC sweep + periodic GC tokio task into AppState::init", "status": "done", "commit": "6525050d"},
+    {"id": 5, "name": "D-06 Path B FULL — ToolRegistry::is_tts_registered_live + CommandContext.tts_registration_status + toolset list Registered column (Live/Inspection/—)", "status": "done", "commit": "d95602c7"},
+    {"id": 6, "name": "invariants_36_17_7.rs cross-crate D-05 source-grep guards (5 guards)", "status": "done", "commit": "5fb94272"}
   ],
   "remaining_tasks": [
-    {"id": "BUG-1-fix", "name": "fetch_board: include_archived parameter + ScreenKanban re-fetch on toggle + regression test", "status": "not_started"},
-    {"id": "BUG-2-fix", "name": "kanban.css drawer + modal opacity/border treatment matching Settings card style", "status": "not_started"},
-    {"id": "36.3.7.11-05-task2-redo", "name": "Re-run UAT U1-U14 after both fixes land", "status": "blocked_on_BUG-1+BUG-2"},
-    {"id": "phase-close", "name": "roadmap.update-plan-progress for Plan 05 + final phase verification", "status": "blocked_on_UAT_signoff"}
+    {"id": 7, "name": "Operator UAT-R + UAT-Reg (Inspection AND Live) + A6 regression sweep + 36.17.7-05-SUMMARY.md", "status": "in_progress", "progress": "Executor agent acace6a96351ea9db was running A6 regression sweep when paused (cargo test -p ironhermes-agent --test invariants_36_17_5)"}
   ],
-  "blockers": [
-    {"description": "BUG-1: ARCHIVED column always empty (fetch_board excludes archived)", "type": "technical", "workaround": "none — required fix"},
-    {"description": "BUG-2: drawer + modals transparent / low-contrast — blocks U2/U6/U7 and visual review of all modal flows", "type": "technical", "workaround": "none — required fix"}
-  ],
+  "blockers": [],
   "human_actions_pending": [
-    {"action": "Decide remediation route: (a) gap-closure phase 36.3.7.11.1 covering BUG-1 + BUG-2, or (b) reopen Plans 01+03 inline with /gsd-execute-phase --gaps-only on a follow-up plan, or (c) ship phase as-is and file BUG-1/BUG-2 against a follow-on phase", "context": "Both defects are real-code issues; recommend (a) so the audit trail stays clean", "blocking": true},
-    {"action": "After fixes: re-run U1-U14 in 36.3.7.11-UAT.md", "context": "Verify the two specific failures plus no regressions on the 4 PASS rows", "blocking": true},
-    {"action": "Sign off (approved / failures list)", "context": "Resume signal back to orchestrator that triggers ROADMAP close + phase verification", "blocking": true}
+    {"action": "UAT-R — verify GET /audio/:uuid replay works in browser (cache hit + cache miss + path-traversal rejection)", "context": "Plan 05 Task 7 acceptance gate. Route implemented in crates/iron_hermes_ui/src/server/audio_route.rs.", "blocking": true},
+    {"action": "UAT-Reg — verify /toolset list shows Registered column with Live (in-session TTS-active) AND Inspection (CLI hermes toolset list) values", "context": "Plan 05 Task 7 acceptance gate for REVISION BLOCKER 2. Both display states must be observable end-to-end per D-06.", "blocking": true},
+    {"action": "A6 regression sweep across Telegram, TUI, Web platforms — confirm no regression from Plan 05 changes", "context": "Plan 05 Task 7. Executor was mid-sweep when paused.", "blocking": true}
   ],
   "decisions": [
-    {"decision": "Wave 2 plans 02 and 03 ran sequentially (not parallel)", "rationale": "files_modified overlap on screens/kanban.rs, kanban/card.rs, kanban/column.rs, assets/kanban.css forced serial execution", "phase": "36.3.7.11"},
-    {"decision": "Plan 04 (wheel-nav) shipped BEFORE Plan 01 (board body) in Wave 1", "rationale": "Plan 04 introduces Screen::Kanban placeholder; Plan 01 replaces only the body. Avoids 6-file conflict cascade.", "phase": "36.3.7.11"},
-    {"decision": "MODULE label for ScreenKanban is 14, not 10 or 11", "rationale": "Conflict resolution: 11 collides with office.rs, 10 collides with gateway.rs; Kanban is the 14th screen counting all variants.", "phase": "36.3.7.11"},
-    {"decision": "Plan 05 executor halted before workspace gate + SUMMARY.md write", "rationale": "Executor spawned cargo as background tasks and returned before notifications arrived. Orchestrator ran the gate manually (all three pass) and wrote SUMMARY.md in 6a568ca9.", "phase": "36.3.7.11"},
-    {"decision": "UAT.md needed three post-merge fix commits", "rationale": "Executor wrote nonexistent ironhermes-cli verbs/flags: kanban promote (does not exist), -t/-a short forms (only long-form), --body on comment (positional), and ~/.hermes/kanban.db path (actual is ~/.ironhermes/kanban.db). All fixed at 6a568ca9 / a98bd242 / 99d96ff9.", "phase": "36.3.7.11"}
+    {"decision": "Hotfix: add Platform::Web arm to send_audio_tool.rs", "rationale": "Plan 04 wired WebAudioDispatcher in ws.rs correctly, but send_audio_tool.rs match was missing the Web case — fell through to catch-all. Web mp3/ogg/opus/wav routes through dispatcher.send_audio_file() without ffmpeg (browser handles directly).", "phase": "36.17.7", "commit": "247e7327"},
+    {"decision": "Hotfix: install rustls aws-lc-rs CryptoProvider in edge.rs", "rationale": "Edge TTS uses msedge-tts → tokio-tungstenite → rustls 0.23. rustls 0.23 requires explicit process-level CryptoProvider; idempotent via `let _ = …install_default()`.", "phase": "36.17.7", "commit": "be26f48e"},
+    {"decision": "D-06 Path B FULL (REVISION BLOCKER 2)", "rationale": "ToolRegistry::is_tts_registered_live accessor + CommandContext.tts_registration_status field + dispatch-site threading + Registered column with Live/Inspection/— values. Distinguishes operator-toggled enablement from register_tts_tools-actually-fired state.", "phase": "36.17.7", "commit": "d95602c7"}
   ],
   "uncommitted_files": [
-    ".omc/project-memory.json (OMC plugin auto-state — non-blocking)",
-    ".omc/state/mission-state.json (OMC plugin auto-state — non-blocking)",
-    ".planning/.DS_Store / phases/.DS_Store / todos/.DS_Store (macOS metadata — non-blocking)"
+    ".omc/project-memory.json",
+    ".omc/state/mission-state.json",
+    ".planning/REQUIREMENTS.md",
+    ".planning/STATE.md",
+    ".planning/.DS_Store",
+    ".planning/phases/.DS_Store"
   ],
-  "next_action": "Resume by deciding remediation route (gap-closure phase recommended) and dispatching the BUG-1 + BUG-2 fixes. See .continue-here.md for full code citations and the rerun procedure.",
-  "context_notes": "All 5 plans for Phase 36.3.7.11 landed on develop with green workspace gate. The 14-row manual UAT surfaced 2 real defects on rows U2/U6/U7 (drawer + modal transparency) and U8 (archived fetch). U1/U3/U4/U5 PASS; U9-U14 not reached. HEAD: 99d96ff9 on develop. No outstanding worktrees. Tester debug cards still in DB (8 UAT-named tasks); recommend leaving them for re-run since the dashboard renders them fine."
+  "background_processes": [
+    {"name": "gsd-executor Plan 05 (Task 7 mid-flight)", "agent_id": "acace6a96351ea9db", "state": "running A6 regression sweep — cargo test -p ironhermes-agent --test invariants_36_17_5 (background)", "output_file": "/private/tmp/claude-501/-Users-twilson-code-ironhermes/6d30a125-5cc9-47ad-97a1-bbe63b598be1/tasks/acace6a96351ea9db.output"}
+  ],
+  "next_action": "Check executor acace6a96351ea9db output for A6 regression results, then perform UAT-R + UAT-Reg by hand (browser /audio/:uuid replay + /toolset list Registered column verification). When both UATs approve, instruct the executor to write 36.17.7-05-SUMMARY.md and return ## EXECUTION COMPLETE.",
+  "context_notes": "Phase 36.17.7 closes the 36.17.5 D-15 deferral by wiring AudioDispatcher across Telegram (Plan 02), TUI (Plan 03), and Web (Plan 04) — plus Plan 05 audio cache infra (replay route + GC) and D-06 Registered column. Wave 1 (Plan 01) shipped TtsPerTurnWiring struct + Default derive on AppRuntimeFactoryInput. Wave 2 Plans 02/03/04 all parked at UAT and were approved by user. Wave 3 Plan 05 is at Task 7 (operator UAT). Pitfall to avoid on resume: use foreground cargo check -p <crate> with extended timeout, NEVER background cargo build (caused prior executors to self-loop on stale notifications)."
 }
