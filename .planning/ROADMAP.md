@@ -86,7 +86,12 @@ Plans:
 **Plans:** 2 plans
 
 Plans:
+**Wave 1**
+
 - [ ] 37-01-PLAN.md — RUSTSEC-2026-0104 Chain 2 patch (rustls-webpki =0.103.13) + lockfile regen + build/test verify + Chain 1 documented exemption
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
 - [ ] 37-02-PLAN.md — Workspace version bump to 0.2.0 (root + iron_hermes_ui + ironhermes-exec) + CLI --version confirm
 
 ---
@@ -145,6 +150,7 @@ Plans:
 **Out of scope:** new TTS providers, streaming/chunked synthesis, push-to-talk / STT, voice-mode (auto-speak Path A). All four were deferred from 36.17.5 and stay deferred.
 
 **Sketch of locked decisions to confirm in `/gsd:discuss-phase`:**
+
 - **D-01 — where to thread session_key:** gateway handler builds a per-turn `AppRuntimeFactoryInput` with `session_key: Some(SessionKey { platform: Telegram, chat_id, user_id })` and calls `build_app_runtime_bundle` per-session, OR keeps the singleton `AgentRuntime` and adds a registry-mutator path. Default: per-turn bundle (matches 36.17.5 D-15 "tools are tied to the agent loop, not the runtime").
 - **D-02 — WebAudioDispatcher transport:** browser audio is delivered as a binary WS frame on the existing `ChatStreamEvent` channel (new typed variant `ChatStreamEvent::AudioOut { mime, bytes }`), with the wasm UI calling `HTMLAudioElement.play()` from a `Blob` URL. Reject the alternatives of (a) writing to `~/.ironhermes/audio_cache` and serving via a new `/audio/:id` HTTP route (cross-origin + cleanup pain), (b) base64-encoding inside the existing JSON event stream (3× bandwidth, blocks streaming). Confirm during discuss.
 - **D-03 — Discord/Slack adapters:** Discord supports voice via gateway voice channels (large surface — DEFER); Slack supports `files.upload` audio (small surface — could ship). Default: ship Telegram + Web in this phase; queue Discord + Slack for a separate phase. (Mirrors the 36.17.5 deferral pattern.)
@@ -152,6 +158,7 @@ Plans:
 - **D-05 — Invariant test:** add `crates/ironhermes-agent/tests/invariants_36_17_7.rs` that asserts `from_config` (or its replacement constructor) passes `session_key: Some(...)` on the production code path — flipping the negation of the 36.17.5 deferral guard.
 
 **Requirements (acceptance items, locked at discuss-phase):**
+
 - **A1** — On a live Telegram session, `text_to_speech` + `send_audio` appear in the LLM's tool-schema list for every turn (verifiable by tracing the system message or by an integration test that captures the request payload).
 - **A2** — On a live iron_hermes_ui web session, the same two tools appear in the LLM tool-schema list for every turn.
 - **A3** — On Telegram, the agent invoking `text_to_speech` + `send_audio` produces an audible voice message in the chat (operator UAT, mirrors 36.17.5 Gate 5).

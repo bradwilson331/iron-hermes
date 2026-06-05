@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
-stopped_at: Phase 36.17.7 CLOSED (partial — /toolset list Live display deferred)
-last_updated: "2026-06-05T15:40:00.000Z"
-last_activity: 2026-06-05
+stopped_at: Phase 36.17.7 UI-SPEC approved
+last_updated: "2026-06-05T20:51:12.764Z"
+last_activity: 2026-06-05 -- Phase 37 planning complete
 progress:
   total_phases: 61
-  completed_phases: 27
-  total_plans: 133
-  completed_plans: 133
-  percent: 44
+  completed_phases: 26
+  total_plans: 138
+  completed_plans: 132
+  percent: 43
 ---
 
 # Project State
@@ -27,8 +27,8 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 Phase: 36.17.7 (CLOSED, partial)
 Plan: 5 of 5 complete
-Status: Phase closed 2026-06-05 — voice TTS live on all 3 surfaces (Telegram/TUI/Web). `/toolset list` Live-display deferred.
-Last activity: 2026-06-05
+Status: Ready to execute
+Last activity: 2026-06-05 -- Phase 37 planning complete
 Next: pick next phase from milestone-v3.0 backlog
 
 ## Recent close-out summary (2026-06-05 — Phase 36.17.7 CLOSED, partial)
@@ -608,6 +608,7 @@ Recent decisions affecting current work:
 - Phase 36.3.7.12 inserted after Phase 36.3.7.11: Goal mode - kanban worker loop (Ralph loop) — autonomous worker primitives on the kanban surface: goal_mode card flag, /goal worker dispatcher loop, DecomposeFn + SpecifyFn runtime closures wired into AgentRuntime, threat model for auto-advance. Companion to Phase 36.3.7.11's manual-review dashboard. (URGENT)
 - Phase 36.17.2.2 inserted after Phase 36.17.2: IronHermes Telegram client delivers streaming final media messages (URGENT)
 - Phase 36.17.5 inserted after Phase 36.17: integrate TTS functions (URGENT)
+- Phase 37 added: RUSTSEC-2026-0104 reachable panic (urgent security advisory)
 
 ### Pending Todos
 
