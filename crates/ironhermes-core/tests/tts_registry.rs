@@ -33,7 +33,7 @@ impl TtsProvider for FakeProvider {
     async fn synthesize(
         &self,
         _text: &str,
-        _path: &PathBuf,
+        _path: &std::path::Path,
     ) -> anyhow::Result<PathBuf> {
         anyhow::bail!("fake provider — synthesize not implemented")
     }
