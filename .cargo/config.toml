@@ -1,0 +1,20 @@
+# Cargo configuration.
+#
+# Phase 36.17.7: macOS-only debuginfo split.
+#
+# On macOS/Apple Silicon the kernel validates a freshly-compiled binary's
+# ad-hoc code signature on FIRST launch (serialized via syspolicyd/amfid);
+# the cost scales with the on-disk executable size. `-Csplit-debuginfo=packed`
+# moves DWARF into a separate `.dSYM` bundle so the signed Mach-O is leaner,
+# trimming that first-launch validation time. Panic backtraces still resolve
+# via the `.dSYM`. See Cargo.toml `[profile.dev]` and `.config/nextest.toml`.
+#
+# Scoped to `cfg(target_os = "macos")` so Linux CI builds are untouched (the
+# validation problem is macOS-only).
+#
+# Caveat: cargo does NOT merge rustflags sources — if a `RUSTFLAGS` env var is
+# set, this `target.<cfg>.rustflags` block is ignored. No `RUSTFLAGS` is set
+# locally by default, so it applies on a normal dev machine. CI sets RUSTFLAGS
+# but runs on Linux, where this cfg never matches — so there is no interaction.
+[target.'cfg(target_os = "macos")']
+rustflags = ["-Csplit-debuginfo=packed"]

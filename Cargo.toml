@@ -139,3 +139,33 @@ tui-logger = { version = "0.18", features = ["tracing-support"] }
 tui-textarea-2 = "0.10.2"
 # Phase 36.3.7.9 Plan 05: notifier.toml parser for subscribe_boards config (D-03)
 toml = "0.8"
+
+# ---------------------------------------------------------------------------
+# Phase 36.17.7: shrink debug/test binaries to cut macOS first-launch
+# code-signature validation time.
+#
+# Root cause (proven): on macOS/Apple Silicon the kernel validates a freshly
+# compiled binary's ad-hoc signature on FIRST launch via the serialized
+# `syspolicyd`/`amfid` daemon; cost scales with the on-disk executable size
+# (a 26 MB debug test binary measured ~115-270s cold, 0.05s warm). nextest
+# enumerates every test binary in parallel for `--list`, so ~18 cold 26 MB
+# binaries hit the serialized validator at once → multi-minute stall. Linux
+# CI has no such validation and is unaffected.
+#
+# `line-tables-only` keeps file:line for panic backtraces while dropping the
+# heavy type DWARF, so less debuginfo is generated overall. This profile key
+# is portable and safe on every platform; `[profile.test]` inherits it.
+#
+# The macOS-specific part — moving DWARF into a `.dSYM` so the *signed*
+# executable is leaner — is set as a macOS-scoped rustflag in
+# `.cargo/config.toml` (`-Csplit-debuginfo=packed`) rather than here, so
+# Linux CI builds are completely untouched.
+#
+# NOTE: partial mitigation — most of the binary is irreducible monomorphized
+# code (~17 MB after a full strip), and per-launch validation is mandatory on
+# Apple Silicon. Combined with `.config/nextest.toml`'s bounded `test-threads`
+# this tames the storm; it does not eliminate the one-time-per-compile cost.
+# Locally, `cargo nextest run -p <crate>` validates only that crate's binaries.
+# ---------------------------------------------------------------------------
+[profile.dev]
+debug = "line-tables-only"

@@ -1,0 +1,44 @@
+# cargo-nextest configuration
+# https://nexte.st/docs/configuration/
+#
+# Phase 36.17.7: hardening added when the workspace was migrated from
+# `cargo test` to `cargo nextest`. Several integration-test binaries
+# (the iron_hermes_ui web/gateway suites — kanban_ws_lifecycle,
+# web_queue_*, websocket_lifecycle_parity, running_agent_guard_web_tests,
+# server_runtime_parity, …) link very large dependency trees
+# (dioxus-fullstack, arrow, serenity) and are slow to *start* — ~11s each
+# just to enumerate tests on macOS (dyld load + eager static init).
+#
+# Two consequences this config addresses:
+#   1. A genuinely stuck test (e.g. one blocked binding a port) must not
+#      wedge CI forever — `slow-timeout` + `terminate-after` kills it and
+#      reports it as a failure instead.
+#   2. Launching every heavy binary at once thrashes memory/IO. Bounding
+#      `test-threads` keeps run-phase concurrency sane on constrained hosts.
+#
+# NOTE: the per-binary *startup* cost is inherent to these binaries; this
+# config bounds contention but does not make a full local run instant.
+# For a fast local loop, target a crate: `cargo nextest run -p <crate>`.
+
+[profile.default]
+# Kill any single test still running after 120s; after 2 such periods
+# (~4 min) give up and mark it failed rather than hanging the run.
+slow-timeout = { period = "120s", terminate-after = 2 }
+
+# Bound concurrent test execution to tame the heavy-binary thundering herd.
+# nextest only accepts an integer or the literal "num-cpus"; 8 is roughly
+# half of an 18-core dev box and stays sane on small CI runners (where
+# run-phase tests are mostly IO-bound).
+test-threads = 8
+
+# Surface flaky hangs without masking real failures: no automatic retries
+# in the default profile (CI runs this).
+retries = 0
+
+# CI profile — invoked in GitHub Actions via `--profile ci` if desired.
+# Inherits the defaults above; adds JUnit output and fail-fast off so the
+# full matrix of failures is reported in one run.
+[profile.ci]
+slow-timeout = { period = "120s", terminate-after = 2 }
+test-threads = 8
+fail-fast = false
