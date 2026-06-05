@@ -91,6 +91,12 @@ pub struct AppState {
     /// path that calls `.cancel()`.
     #[allow(dead_code)]
     pub kanban_tail_cancel: tokio_util::sync::CancellationToken,
+    /// Phase 36.17.7 D-02-d: cancellation token for the audio cache GC
+    /// periodic loop. Mirrors `kanban_tail_cancel` above. Triggered at
+    /// shutdown via `.cancel()`; the GC loop's `tokio::select!` exits on
+    /// observation.
+    #[allow(dead_code)]
+    pub audio_gc_cancel: tokio_util::sync::CancellationToken,
 }
 
 static GLOBAL_APP_STATE: OnceLock<AppState> = OnceLock::new();
@@ -206,6 +212,28 @@ impl AppState {
             .await;
         });
 
+        // Phase 36.17.7 D-02-d: audio cache lifecycle GC.
+        //  - Startup sync sweep (before async runtime work) removes any
+        //    files older than max_age_days that survived the last run.
+        //  - Periodic tokio task sweeps at sweep_interval_secs cadence.
+        // Mirrors the kanban tail spawn pattern directly above.
+        let audio_cache_dir = get_hermes_home().join("audio_cache");
+        let gc_max_age = config.audio_cache.max_age_days;
+        let gc_interval = config.audio_cache.sweep_interval_secs;
+        crate::server::audio_cache::gc_sweep_audio_cache(&audio_cache_dir, gc_max_age);
+        let audio_gc_cancel = tokio_util::sync::CancellationToken::new();
+        let gc_dir = audio_cache_dir.clone();
+        let gc_cancel_clone = audio_gc_cancel.clone();
+        tokio::spawn(async move {
+            crate::server::audio_cache::run_audio_cache_gc_loop(
+                gc_dir,
+                gc_max_age,
+                gc_interval,
+                gc_cancel_clone,
+            )
+            .await;
+        });
+
         Ok(Self {
             config: Arc::new(config),
             command_router,
@@ -239,6 +267,9 @@ impl AppState {
             // already spawned.
             kanban_tail_broadcast,
             kanban_tail_cancel,
+            // Phase 36.17.7 D-02-d: audio cache GC cancellation token —
+            // periodic loop spawned above.
+            audio_gc_cancel,
         })
     }
 
