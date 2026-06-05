@@ -179,6 +179,29 @@ impl crate::registry::Tool for SendAudioTool {
                     ),
                 }
             }
+            ironhermes_core::Platform::Web => {
+                // Phase 36.17.7 D-02-a: Web arm dispatches through the
+                // per-turn WebAudioDispatcher, which emits a binary
+                // ChatStreamEvent::AudioOut WS frame. No ffmpeg conversion:
+                // the browser <audio> element handles mp3/ogg/opus directly.
+                let dispatcher = self.dispatcher.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "send_audio on Web requires an AudioDispatcher (none attached this session)"
+                    )
+                })?;
+                match ext.as_str() {
+                    "mp3" | "ogg" | "opus" | "wav" => {
+                        dispatcher
+                            .send_audio_file(&self.session_key.chat_id, &path, None)
+                            .await?;
+                        Ok(format!("sent audio: {}", path.display()))
+                    }
+                    other => anyhow::bail!(
+                        "send_audio Web arm: unsupported extension '{}' (need .mp3, .ogg, .opus, .wav)",
+                        other
+                    ),
+                }
+            }
             ref other => anyhow::bail!(
                 "send_audio not yet wired for platform: {:?}",
                 other
