@@ -316,6 +316,9 @@ impl AppState {
         stream_callback: StreamCallback,
         tool_progress_callback: Option<ToolProgressCallback>,
         tool_result_callback: Option<ToolResultCallback>,
+        // Phase 36.17.7 D-02-a: per-turn TTS wiring (WebAudioDispatcher + SessionKey).
+        // `None` when TTS is not configured for this session.
+        tts_wiring: Option<ironhermes_agent::TtsPerTurnWiring>,
     ) -> Result<ironhermes_agent::AgentResult> {
         // Phase 36.1 (GW-05-WEB, D-06, Pitfall 1): RAII running-agent guard.
         // Constructed INSIDE the async fn body (not in the sync caller) so Drop
@@ -360,6 +363,8 @@ impl AppState {
             trajectory_writer: None,
             compression_count: 0,
             cancel_token: None,
+            // Phase 36.17.7 D-02-a: wire per-turn TTS dispatcher into AgentRuntime.
+            tts_wiring,
         };
         let result = self.runtime.run_turn(request).await?;
 

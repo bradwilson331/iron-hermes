@@ -256,6 +256,56 @@ pub fn HermesApp() -> Element {
                             crate::protocol::ChatStreamEvent::QueueUpdated { depth, paused } => {
                                 queue_state.set((depth, paused));
                             }
+                            // Phase 36.17.7 D-02-a: AudioOut arrives as Message::Binary (see arm below).
+                            // This Text-path arm is a silent no-op — if somehow AudioOut arrives as Text,
+                            // it is acknowledged here for exhaustive-match compliance only.
+                            crate::protocol::ChatStreamEvent::AudioOut { .. } => {}
+                        }
+                    }
+                    // Phase 36.17.7 D-02-a/b HIGH 4 + HIGH 7 fix:
+                    // ChatStreamEvent::AudioOut arrives as Message::Binary.
+                    // The binary frame payload is JSON (uuid + mime + bytes array).
+                    // We deserialize, then create a Blob URL via web_sys::Url::create_object_url_with_blob
+                    // for first-play. The HTTP /audio/:uuid route ships in Plan 05 for replay only.
+                    Ok(dioxus_fullstack::Message::Binary(bytes)) => {
+                        let event: crate::protocol::ChatStreamEvent =
+                            match serde_json::from_slice(&bytes) {
+                                Ok(e) => e,
+                                Err(_) => continue,
+                            };
+                        if let crate::protocol::ChatStreamEvent::AudioOut {
+                            mime,
+                            uuid: _uuid,
+                            bytes: audio_bytes,
+                        } = event
+                        {
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                let uint8_array = js_sys::Uint8Array::from(audio_bytes.as_slice());
+                                let parts = js_sys::Array::new();
+                                parts.push(&uint8_array);
+                                let opts = web_sys::BlobPropertyBag::new();
+                                opts.set_type(&mime);
+                                if let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence_and_options(
+                                    &parts, &opts,
+                                ) {
+                                    if let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) {
+                                        let id = {
+                                            let n = *next_id.read();
+                                            next_id.set(n + 1);
+                                            n
+                                        };
+                                        bubbles
+                                            .write()
+                                            .push(ChatBubble::audio(id, url, mime));
+                                    }
+                                }
+                            }
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                // Server-side render path: no Blob API; suppress unused warnings.
+                                let _ = (mime, audio_bytes);
+                            }
                         }
                     }
                     Ok(dioxus_fullstack::Message::Close { .. }) => {
@@ -267,7 +317,7 @@ pub fn HermesApp() -> Element {
                         is_ws_connected.set(false);
                         break;
                     }
-                    _ => continue, // Skip ping/pong/binary.
+                    _ => continue, // Skip ping/pong.
                 }
             }
         }

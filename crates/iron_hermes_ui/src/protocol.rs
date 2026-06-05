@@ -41,6 +41,12 @@ pub enum ChatStreamEvent {
     /// on every push, pop, pause toggle, unpause, and queue clear. Client
     /// updates Signal<(u32, bool)> for the status-bar Queue: N pill.
     QueueUpdated { depth: u32, paused: bool },
+    /// Phase 36.17.7 D-02-a: synthesized audio delivery to the web client.
+    /// JSON wire shape (external tagging):
+    ///   {"AudioOut":{"mime":"audio/mpeg","uuid":"<uuidv4>","bytes":[<u8>...]}}
+    /// Transmitted as Message::Binary per D-02-a. The `bytes` field serializes
+    /// as a JSON array of u8 values (no `serde_bytes` dep — plain Vec<u8>).
+    AudioOut { mime: String, uuid: String, bytes: Vec<u8> },
 }
 
 // =============================================================================
@@ -301,6 +307,38 @@ mod tests {
         assert!(
             matches!(parsed, ChatStreamEvent::SubagentEvent {}),
             "round-trip must reconstruct SubagentEvent variant"
+        );
+    }
+
+    /// Phase 36.17.7 D-02-a: AudioOut wire-format lock.
+    /// External-tagged struct variant must serialize to
+    /// {"AudioOut":{"mime":"audio/mpeg","uuid":"test-uuid","bytes":[255,251]}}.
+    /// Round-trip preserved via serde_json.
+    #[test]
+    fn test_audio_out_json_shape() {
+        let ev = ChatStreamEvent::AudioOut {
+            mime: "audio/mpeg".to_string(),
+            uuid: "test-uuid".to_string(),
+            bytes: vec![0xFF, 0xFB],
+        };
+        let json = serde_json::to_string(&ev).expect("serialize AudioOut");
+        assert!(
+            json.starts_with(r#"{"AudioOut":"#),
+            "D-02-a: AudioOut must use external tagging (got {json})"
+        );
+        assert!(
+            json.contains(r#""mime":"audio/mpeg""#),
+            "D-02-a: AudioOut must serialize mime field (got {json})"
+        );
+        assert!(
+            json.contains(r#""uuid":"test-uuid""#),
+            "D-02-a: AudioOut must serialize uuid field (got {json})"
+        );
+        // Round-trip.
+        let parsed: ChatStreamEvent = serde_json::from_str(&json).expect("deserialize AudioOut");
+        assert!(
+            matches!(parsed, ChatStreamEvent::AudioOut { .. }),
+            "D-02-a: AudioOut must round-trip via serde_json"
         );
     }
 

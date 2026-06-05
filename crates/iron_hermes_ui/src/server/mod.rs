@@ -20,3 +20,7 @@ pub mod logging;
 // gates the internals.
 pub mod kanban_api;
 pub mod kanban_ws;
+// Phase 36.17.7 D-02-a: web-runtime AudioDispatcher impl.
+// Like `ws` and `kanban_ws`, the module is gated internally with
+// `#![cfg(feature = "server")]` so the WASM client never sees it.
+pub mod web_audio_dispatcher;

@@ -34,6 +34,8 @@ pub fn Block(entry: BlockEntry, on_copy: EventHandler<()>, on_rerun: EventHandle
             ..
         } => (author.clone(), time.clone(), Some(*exit_code)),
         BlockData::Tool { .. } => (None, None, None),
+        // Phase 36.17.7 D-02-a: Audio block renders under HermesApp (ScreenChat), not legacy shell.
+        BlockData::Audio { .. } => (None, None, None),
     };
     let is_ok = matches!(data, BlockData::Ok { .. });
     let is_err = matches!(data, BlockData::Err { .. });
@@ -73,6 +75,8 @@ pub fn Block(entry: BlockEntry, on_copy: EventHandler<()>, on_rerun: EventHandle
                 BlockData::Ai  { markdown, .. } => rsx! { div { class: "wh-block-body", {render_inline_code(&markdown)} } },
                 BlockData::Ok  { message, .. } => rsx! { div { class: "wh-block-body", "{message}" } },
                 BlockData::Err { message, .. } => rsx! { div { class: "wh-block-body", "{message}" } },
+                // Phase 36.17.7 D-02-a: Audio blocks only rendered in HermesApp/ScreenChat.
+                BlockData::Audio { uuid, .. } => rsx! { div { class: "wh-block-body", "audio:{uuid}" } },
             }
             // Hover-action button row — always rendered.
             // Cmd: copy + rerun. Non-Cmd: copy + rerun (disabled) + share.

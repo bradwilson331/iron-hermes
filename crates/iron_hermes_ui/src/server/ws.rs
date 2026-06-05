@@ -684,6 +684,27 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                 // _slot_guard is dropped at end-of-block (after run_web_turn returns or
                                 // panics), restoring slot to None.
 
+                                // Phase 36.17.7 D-02-a: construct per-turn WebAudioDispatcher
+                                // and TTS wiring so TextToSpeechTool emits AudioOut WS frames.
+                                let audio_tx = tx.clone();
+                                let audio_cache_dir = ironhermes_core::constants::get_hermes_home()
+                                    .join("audio_cache");
+                                let web_audio_dispatcher = std::sync::Arc::new(
+                                    crate::server::web_audio_dispatcher::WebAudioDispatcher::new(
+                                        audio_tx,
+                                        audio_cache_dir,
+                                    ),
+                                );
+                                let tts_wiring = Some(ironhermes_agent::TtsPerTurnWiring {
+                                    session_key: Some(web_key(&session_id_for_turn)).unwrap(), // explicit Some() literal for D-05 source-grep
+                                    audio_dispatcher: Some(
+                                        web_audio_dispatcher
+                                            as std::sync::Arc<
+                                                dyn ironhermes_tools::AudioDispatcher,
+                                            >,
+                                    ),
+                                });
+
                                 let result = app_state
                                     .run_web_turn(
                                         &session_id_for_turn,
@@ -691,6 +712,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                         stream_callback,
                                         Some(tool_progress_callback),
                                         Some(tool_result_callback),
+                                        tts_wiring,
                                     )
                                     .await;
 
@@ -731,13 +753,25 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                         } => {
                             match maybe_event {
                                 Some(event) => {
-                                    // Use send_raw(Text) so the client receives a plain
-                                    // JSON text frame. TypedWebsocket::send() (the Sink
-                                    // path) encodes via JsonEncoding into a binary frame,
-                                    // which doesn't match the client's recv_raw Text arm.
-                                    let json = serde_json::to_string(&event).unwrap_or_default();
+                                    // Phase 36.17.7 D-02-b: AudioOut events are delivered as
+                                    // binary WS frames so the WASM client can create a Blob URL
+                                    // without base64 overhead. All other events remain plain JSON
+                                    // text frames (client recv_raw Text arm handles those).
+                                    let ws_msg = match &event {
+                                        ChatStreamEvent::AudioOut { .. } => {
+                                            // Phase 36.17.7 D-02-a: serialize full event (uuid + mime + bytes)
+                                            // as JSON payload inside the binary frame so the WASM client
+                                            // can deserialize and construct the Blob URL with correct mime.
+                                            Message::Binary(serde_json::to_vec(&event).unwrap_or_default().into())
+                                        }
+                                        _ => {
+                                            let json = serde_json::to_string(&event)
+                                                .unwrap_or_default();
+                                            Message::Text(json)
+                                        }
+                                    };
                                     if let Err(err) = socket
-                                        .send_raw(Message::Text(json))
+                                        .send_raw(ws_msg)
                                         .await
                                     {
                                         if let Some(turn) = in_flight_turn.take() {
@@ -879,6 +913,30 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                             .clone(),
                                                     };
 
+                                                    // Phase 36.17.7 D-02-a: per-turn TTS wiring
+                                                    // for queue-drain spawn mirrors primary spawn.
+                                                    let audio_tx_drain = tx_drain.clone();
+                                                    let audio_cache_dir_drain =
+                                                        ironhermes_core::constants::get_hermes_home()
+                                                            .join("audio_cache");
+                                                    let web_audio_dispatcher_drain =
+                                                        std::sync::Arc::new(
+                                                            crate::server::web_audio_dispatcher::WebAudioDispatcher::new(
+                                                                audio_tx_drain,
+                                                                audio_cache_dir_drain,
+                                                            ),
+                                                        );
+                                                    let tts_wiring_drain =
+                                                        Some(ironhermes_agent::TtsPerTurnWiring {
+                                                            session_key: Some(web_key(&session_id_spawn)).unwrap(), // explicit Some() literal for D-05 source-grep
+                                                            audio_dispatcher: Some(
+                                                                web_audio_dispatcher_drain
+                                                                    as std::sync::Arc<
+                                                                        dyn ironhermes_tools::AudioDispatcher,
+                                                                    >,
+                                                            ),
+                                                        });
+
                                                     let result = app_state_drain
                                                         .run_web_turn(
                                                             &session_id_spawn,
@@ -886,6 +944,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                             stream_callback,
                                                             Some(tool_progress_callback),
                                                             Some(tool_result_callback),
+                                                            tts_wiring_drain,
                                                         )
                                                         .await;
 

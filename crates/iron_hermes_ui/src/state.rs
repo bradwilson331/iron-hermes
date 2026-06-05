@@ -48,6 +48,16 @@ pub enum Block {
     Tool {
         call: ToolCall,
     },
+    /// Phase 36.17.7 D-02-a/f: inline audio control rendered in the chat
+    /// transcript at the stream position of each `send_audio` emit.
+    /// `uuid` is the file stem of the audio cache file; `mime` is the
+    /// MIME type (typically "audio/mpeg"). The client constructs a Blob URL
+    /// from the binary WS frame bytes and stores it keyed by uuid so
+    /// block_stream.rs / ScreenChat can render `<audio controls src=...>`.
+    Audio {
+        uuid: String,
+        mime: String,
+    },
 }
 
 impl Block {
@@ -61,6 +71,7 @@ impl Block {
             Block::Ok { .. } => "is-ok",
             Block::Err { .. } => "is-err",
             Block::Tool { .. } => "is-tool",
+            Block::Audio { .. } => "is-ai", // audio blocks use the AI accent stripe
         }
     }
 }

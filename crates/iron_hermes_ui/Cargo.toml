@@ -39,6 +39,13 @@ web-sys = { version = "0.3", features = [
     # Transitive today but must be explicit before Plan 02 needs them.
     "DragEvent",
     "DataTransfer",
+    # Phase 36.17.7 D-02-a/b (HIGH 4 fix): Blob URL first-play for AudioOut.
+    # Client receives Message::Binary, deserializes ChatStreamEvent::AudioOut,
+    # wraps bytes in a Blob, creates an object URL, attaches to <audio controls>.
+    "Blob",
+    "BlobPropertyBag",
+    "Url",
+    "HtmlAudioElement",
 ] }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
@@ -80,6 +87,10 @@ tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
 tower-http = { workspace = true, features = ["trace"] }
 dotenvy = { workspace = true }
+# Phase 36.17.7 D-02-a: WebAudioDispatcher implements ironhermes_tools::AudioDispatcher
+# which uses #[async_trait] on its methods. The impl in server/web_audio_dispatcher.rs
+# requires async-trait for the impl-side macro.
+async-trait = { workspace = true }
 
 [dev-dependencies]
 # Test-only features for `#[tokio::test]` (macros + rt).
