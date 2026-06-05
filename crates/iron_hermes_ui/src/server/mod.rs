@@ -28,3 +28,7 @@ pub mod web_audio_dispatcher;
 // Like `ws` and `kanban_ws`, exposes a `#[get]` server function;
 // the route body is gated `#[cfg(feature = "server")]`.
 pub mod audio_route;
+// Phase 36.17.7 D-02-d: audio cache GC (startup sweep + periodic loop).
+// Gated internally with `#![cfg(feature = "server")]`.
+#[cfg(feature = "server")]
+pub mod audio_cache;
