@@ -78,6 +78,17 @@ Plans:
 - [x] 35.1-02-PLAN.md — Wire D-11 fast/full choice + D-03 in-process doctor call + D-12 completion summary into `run_setup` None arm; un-ignore d11/d03/d12 source-text invariant tests
 - [x] 35.1-03-PLAN.md — Implement `has_runnable_llm` helper (env-vars → raw .env → local base_url ordering) + integrate into `preflight.rs` Ok(config) arm (D-07/D-08); un-ignore d07_d08 integration tests; verify main.rs Phase 23 gate stays byte-for-byte unchanged
 
+### Phase 37: RUSTSEC-2026-0104 reachable panic
+
+**Goal:** Remediate RUSTSEC-2026-0104 (reachable panic in rustls-webpki CRL parsing, DoS, CVSS 7.5) by forcing the patchable 0.103.x chain to 0.103.13 via `[patch.crates-io]`, document the non-patchable serenity 0.102.8 chain as a tracked exemption, and bump the workspace version to 0.2.0.
+**Requirements**: SEC-01, SEC-02, SEC-03, SEC-04, SEC-05, VER-01, VER-02, VER-03, VER-04
+**Depends on:** Phase 36
+**Plans:** 2 plans
+
+Plans:
+- [ ] 37-01-PLAN.md — RUSTSEC-2026-0104 Chain 2 patch (rustls-webpki =0.103.13) + lockfile regen + build/test verify + Chain 1 documented exemption
+- [ ] 37-02-PLAN.md — Workspace version bump to 0.2.0 (root + iron_hermes_ui + ironhermes-exec) + CLI --version confirm
+
 ---
 
 ## Milestone v3.0: Hermes-agent parity
