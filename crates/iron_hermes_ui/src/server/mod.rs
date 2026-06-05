@@ -24,3 +24,7 @@ pub mod kanban_ws;
 // Like `ws` and `kanban_ws`, the module is gated internally with
 // `#![cfg(feature = "server")]` so the WASM client never sees it.
 pub mod web_audio_dispatcher;
+// Phase 36.17.7 D-02-c: GET /audio/:uuid replay route.
+// Like `ws` and `kanban_ws`, exposes a `#[get]` server function;
+// the route body is gated `#[cfg(feature = "server")]`.
+pub mod audio_route;
