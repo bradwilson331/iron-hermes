@@ -112,10 +112,10 @@ async fn test_tts_tool_creates_audio_cache_dir() {
     impl TtsProvider for FakeProvider {
         fn name(&self) -> &str { "edge" }
         fn is_available(&self) -> bool { true }
-        async fn synthesize(&self, _text: &str, output_path: &PathBuf) -> anyhow::Result<PathBuf> {
+        async fn synthesize(&self, _text: &str, output_path: &std::path::Path) -> anyhow::Result<PathBuf> {
             // Write a tiny stub file so the path exists after "synthesis"
             std::fs::write(output_path, b"fake-audio")?;
-            Ok(output_path.clone())
+            Ok(output_path.to_path_buf())
         }
     }
 
@@ -164,8 +164,8 @@ async fn test_output_path_traversal_blocked() {
     impl TtsProvider for FakeProvider {
         fn name(&self) -> &str { "edge" }
         fn is_available(&self) -> bool { true }
-        async fn synthesize(&self, _text: &str, output_path: &PathBuf) -> anyhow::Result<PathBuf> {
-            Ok(output_path.clone())
+        async fn synthesize(&self, _text: &str, output_path: &std::path::Path) -> anyhow::Result<PathBuf> {
+            Ok(output_path.to_path_buf())
         }
     }
 

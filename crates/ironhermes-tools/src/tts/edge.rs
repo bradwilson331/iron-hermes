@@ -11,7 +11,7 @@
 use async_trait::async_trait;
 use ironhermes_core::config::EdgeTtsConfig;
 use ironhermes_core::tts::TtsProvider;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Edge TTS provider wrapping `msedge-tts` crate.
 ///
@@ -78,7 +78,7 @@ impl TtsProvider for EdgeProvider {
     /// - MP3 format string: `"audio-24khz-48kbitrate-mono-mp3"` (confirmed from
     ///   crate source — From<&Voice> fallback default)
     /// - audio_bytes: field on SynthesizedAudio (confirmed from crate source)
-    async fn synthesize(&self, text: &str, output_path: &PathBuf) -> anyhow::Result<PathBuf> {
+    async fn synthesize(&self, text: &str, output_path: &Path) -> anyhow::Result<PathBuf> {
         let text = Self::truncate_text(text);
 
         let voice_name = if self.config.voice.is_empty() {
@@ -113,7 +113,7 @@ impl TtsProvider for EdgeProvider {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to write Edge audio file: {}", e))?;
 
-        Ok(output_path.clone())
+        Ok(output_path.to_path_buf())
     }
 }
 

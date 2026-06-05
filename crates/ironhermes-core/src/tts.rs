@@ -11,7 +11,7 @@
 
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// D-09: Minimal TTS provider trait surface for Phase 36.17.5.
@@ -49,7 +49,7 @@ pub trait TtsProvider: Send + Sync {
     ///
     /// Returns the path that was written (may differ from `output_path` if the
     /// provider appended an extension). Callers should use the returned path.
-    async fn synthesize(&self, text: &str, output_path: &PathBuf) -> anyhow::Result<PathBuf>;
+    async fn synthesize(&self, text: &str, output_path: &Path) -> anyhow::Result<PathBuf>;
 }
 
 /// D-10: Compile-time frozen set of built-in TTS provider names.

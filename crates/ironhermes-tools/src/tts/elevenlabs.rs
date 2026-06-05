@@ -14,7 +14,7 @@
 use async_trait::async_trait;
 use ironhermes_core::config::ElevenLabsConfig;
 use ironhermes_core::tts::TtsProvider;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// ElevenLabs TTS provider using the REST API.
 ///
@@ -79,7 +79,7 @@ impl TtsProvider for ElevenLabsProvider {
     /// Body: { "text": "...", "model_id": "...", "output_format": "mp3_44100_128" }
     /// Response 200: raw MP3 audio bytes (application/octet-stream)
     /// Response 4xx/5xx: { "detail": { "type", "code", "message", "request_id" } }
-    async fn synthesize(&self, text: &str, output_path: &PathBuf) -> anyhow::Result<PathBuf> {
+    async fn synthesize(&self, text: &str, output_path: &Path) -> anyhow::Result<PathBuf> {
         let text = Self::truncate_text(text);
 
         let api_key = std::env::var("ELEVENLABS_API_KEY")
@@ -129,7 +129,7 @@ impl TtsProvider for ElevenLabsProvider {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to write audio file: {}", e))?;
 
-        Ok(output_path.clone())
+        Ok(output_path.to_path_buf())
     }
 }
 
