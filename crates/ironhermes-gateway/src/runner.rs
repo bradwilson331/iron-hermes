@@ -724,6 +724,14 @@ impl GatewayRunner {
         // and the D-19 dispatch loop in `run_agent` warns + drops any
         // extracted `<MEDIA: ...>` refs (D-18 contract).
         handler.set_media_sender(adapter.clone() as Arc<dyn crate::adapter::MediaSender>);
+        // Phase 36.17.7 D-01 (Site 1 — Telegram, real dispatcher):
+        // TelegramAdapter doubles as AudioDispatcher for per-turn TTS wiring.
+        // Mirror set_media_sender pattern exactly: clone-cast the concrete
+        // Arc<TelegramAdapter>. Do NOT upcast Arc<dyn PlatformAdapter> — that
+        // was unstable on stable Rust (RESEARCH Assumption A7).
+        handler.set_telegram_audio_dispatcher(
+            adapter.clone() as Arc<dyn ironhermes_tools::AudioDispatcher>,
+        );
         let handler = Arc::new(handler);
 
         let mut join_set: JoinSet<()> = JoinSet::new();
@@ -810,7 +818,21 @@ impl GatewayRunner {
             .cloned()
             .unwrap_or_default();
         if let Some(discord_token) = resolve_token_with_env(&discord_config.token, "DISCORD_BOT_TOKEN") {
-            let handler_d = handler.clone();
+            // Phase 36.17.7 D-03-b (Site 2 — Discord, stub dispatcher):
+            // Build a separate handler for the Discord adapter so it gets its own
+            // AudioDispatcher slot independent of the Telegram handler. Discord
+            // lacks audio delivery; NotSupportedAudioDispatcher ensures tools still
+            // register for LLM schema but send_audio returns a clean Err.
+            // Deletion target when Discord gets a real AudioDispatcher impl.
+            // Also wire UQM so the Discord handler uses the same wake-notify path
+            // as Telegram (mirrors the Telegram set_user_queue_manager call above).
+            let mut handler_discord = self.build_gateway_handler();
+            handler_discord.set_user_queue_manager(user_queue.clone());
+            handler_discord.set_telegram_audio_dispatcher(
+                std::sync::Arc::new(ironhermes_tools::NotSupportedAudioDispatcher::new("discord"))
+                    as std::sync::Arc<dyn ironhermes_tools::AudioDispatcher>,
+            );
+            let handler_d = std::sync::Arc::new(handler_discord);
             let cancel_d = self.cancel.clone();
             let whitelist_d: Vec<u64> = discord_config
                 .whitelist
@@ -850,7 +872,21 @@ impl GatewayRunner {
             resolve_token_with_env(&slack_config.app_token, "SLACK_APP_TOKEN"),
             resolve_token_with_env(&slack_config.token, "SLACK_BOT_TOKEN"),
         ) {
-            let handler_s = handler.clone();
+            // Phase 36.17.7 D-03-b (Site 3 — Slack, stub dispatcher):
+            // Build a separate handler for the Slack adapter so it gets its own
+            // AudioDispatcher slot independent of the Telegram handler. Slack
+            // lacks audio delivery; NotSupportedAudioDispatcher ensures tools still
+            // register for LLM schema but send_audio returns a clean Err.
+            // Deletion target when Slack gets a real AudioDispatcher impl.
+            // Also wire UQM so the Slack handler uses the same wake-notify path
+            // as Telegram (mirrors the Telegram set_user_queue_manager call above).
+            let mut handler_slack = self.build_gateway_handler();
+            handler_slack.set_user_queue_manager(user_queue.clone());
+            handler_slack.set_telegram_audio_dispatcher(
+                std::sync::Arc::new(ironhermes_tools::NotSupportedAudioDispatcher::new("slack"))
+                    as std::sync::Arc<dyn ironhermes_tools::AudioDispatcher>,
+            );
+            let handler_s = std::sync::Arc::new(handler_slack);
             let cancel_s = self.cancel.clone();
             let whitelist_s: Vec<String> = slack_config
                 .whitelist
