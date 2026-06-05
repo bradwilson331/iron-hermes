@@ -9,8 +9,13 @@
 //!
 //! Test 5 (`mod_rs_handles_audio_out_in_recv_loop`) stays RED until Task 5
 //! ships all three markers into hermes_app/mod.rs.
-
-use iron_hermes_ui::protocol::ChatStreamEvent;
+//!
+//! NOTE: `iron_hermes_ui` is a binary crate (no `[lib]` target), so integration
+//! tests cannot `use iron_hermes_ui::...`. These are all source-string
+//! assertions (the project convention — see running_agent_guard_web_tests.rs).
+//! The AudioOut serde round-trip is unit-tested inside `protocol.rs` itself
+//! (`test_audio_out_json_shape`), which `protocol_rs_audio_out_shape_test_exists`
+//! below asserts is present.
 
 const PROTOCOL_SOURCE: &str = include_str!("../src/protocol.rs");
 const MOD_RS: &str = include_str!("../src/components/hermes_app/mod.rs");
@@ -72,34 +77,5 @@ fn mod_rs_handles_audio_out_in_recv_loop() {
     assert!(
         MOD_RS.contains("create_object_url_with_blob"),
         "HIGH 4: hermes_app/mod.rs must construct Blob URL via `web_sys::Url::create_object_url_with_blob` for first-play"
-    );
-}
-
-/// Phase 36.17.7 D-02-a: AudioOut serializes to external-tagged JSON and round-trips.
-#[test]
-fn audio_out_serializes_to_external_tagged_json() {
-    let ev = ChatStreamEvent::AudioOut {
-        mime: "audio/mpeg".into(),
-        uuid: "x".into(),
-        bytes: vec![0xFF, 0xFB],
-    };
-    let json = serde_json::to_string(&ev).expect("serialize AudioOut");
-    assert!(
-        json.starts_with(r#"{"AudioOut":"#),
-        "D-02-a: AudioOut must serialize with external tagging (got {json})"
-    );
-    assert!(
-        json.contains(r#""mime":"audio/mpeg""#),
-        "D-02-a: AudioOut must serialize `mime` field (got {json})"
-    );
-    assert!(
-        json.contains(r#""uuid":"x""#),
-        "D-02-a: AudioOut must serialize `uuid` field (got {json})"
-    );
-    // Round-trip.
-    let parsed: ChatStreamEvent = serde_json::from_str(&json).expect("deserialize AudioOut");
-    assert!(
-        matches!(parsed, ChatStreamEvent::AudioOut { .. }),
-        "D-02-a: AudioOut must round-trip via serde_json"
     );
 }

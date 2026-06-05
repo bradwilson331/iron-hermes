@@ -6,19 +6,13 @@
 //! - `ChatStreamEvent::AudioOut` emission
 //! - No re-persist (no `write_all` / `File::create`)
 //!
-//! Integration test (`dispatcher_sends_audio_out_on_send_audio_file`) builds
-//! a temp dir with a known mp3 file, constructs the dispatcher, calls
-//! `send_audio_file`, and asserts the resulting `ChatStreamEvent::AudioOut`
-//! carries the correct fields.
-
-#![cfg(feature = "server")]
-
-use iron_hermes_ui::protocol::ChatStreamEvent;
-use iron_hermes_ui::server::web_audio_dispatcher::WebAudioDispatcher;
-use ironhermes_tools::AudioDispatcher;
-use std::path::PathBuf;
-use tempfile::TempDir;
-use tokio::sync::mpsc;
+//! NOTE: `iron_hermes_ui` is a binary crate (no `[lib]` target), so integration
+//! tests cannot `use iron_hermes_ui::...` (see running_agent_guard_web_tests.rs).
+//! These are source-string assertions. The behavioral test that constructs the
+//! dispatcher, calls `send_audio_file`, and asserts the emitted
+//! `ChatStreamEvent::AudioOut` lives as a `#[cfg(test)]` unit test INSIDE
+//! `src/server/web_audio_dispatcher.rs` (`dispatcher_sends_audio_out_on_send_audio_file`),
+//! where it can name the crate-private types directly.
 
 const SOURCE: &str = include_str!("../src/server/web_audio_dispatcher.rs");
 
@@ -67,51 +61,13 @@ fn dispatcher_does_not_re_persist() {
     );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Integration test — construct + call + assert event
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Phase 36.17.7 D-02-a: dispatcher reads mp3 bytes, emits AudioOut event.
-#[tokio::test]
-async fn dispatcher_sends_audio_out_on_send_audio_file() {
-    let (tx, mut rx) = mpsc::unbounded_channel::<ChatStreamEvent>();
-
-    let temp_dir = TempDir::new().expect("create temp dir");
-    let uuid = "00000000-0000-0000-0000-000000000000";
-    let mp3_path = temp_dir.path().join(format!("{uuid}.mp3"));
-
-    // Write known bytes to the temp mp3 file.
-    let expected_bytes: Vec<u8> = vec![0xFF, 0xFB, 0x90, 0x00];
-    std::fs::write(&mp3_path, &expected_bytes).expect("write temp mp3");
-
-    let dispatcher = WebAudioDispatcher::new(tx, temp_dir.path().to_path_buf());
-
-    let result = dispatcher
-        .send_audio_file("session", &mp3_path, None)
-        .await;
-
-    assert!(result.is_ok(), "send_audio_file must return Ok(())");
-
-    let event = rx.recv().await.expect("must receive AudioOut event");
-    match event {
-        ChatStreamEvent::AudioOut {
-            mime,
-            uuid: got_uuid,
-            bytes,
-        } => {
-            assert_eq!(
-                mime, "audio/mpeg",
-                "D-02-a: AudioOut mime must be audio/mpeg"
-            );
-            assert_eq!(
-                got_uuid, uuid,
-                "D-02-a: AudioOut uuid must match file stem"
-            );
-            assert_eq!(
-                bytes, expected_bytes,
-                "D-02-a: AudioOut bytes must match file contents"
-            );
-        }
-        other => panic!("Expected ChatStreamEvent::AudioOut, got {other:?}"),
-    }
+/// Phase 36.17.7 D-02-a: the behavioral test must live as an in-source unit test
+/// (the bin-crate convention) — assert its presence so it can't silently vanish.
+#[test]
+fn behavioral_unit_test_present_in_source() {
+    assert!(
+        SOURCE.contains("dispatcher_sends_audio_out_on_send_audio_file"),
+        "D-02-a: web_audio_dispatcher.rs must contain the in-source behavioral unit test \
+         `dispatcher_sends_audio_out_on_send_audio_file`"
+    );
 }

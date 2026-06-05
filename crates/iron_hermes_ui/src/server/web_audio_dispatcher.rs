@@ -100,3 +100,55 @@ impl ironhermes_tools::AudioDispatcher for WebAudioDispatcher {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! Behavioral coverage for WebAudioDispatcher.
+    //!
+    //! Lives here (not in `tests/web_audio_dispatcher.rs`) because
+    //! `iron_hermes_ui` is a binary crate with no `[lib]` target — integration
+    //! tests cannot `use iron_hermes_ui::server::...`. As an in-source unit test
+    //! it names the crate-private types directly. The `tests/` file keeps the
+    //! source-shape (grep) guards and asserts this test's presence.
+    use super::WebAudioDispatcher;
+    use crate::protocol::ChatStreamEvent;
+    use ironhermes_tools::AudioDispatcher;
+    use tempfile::TempDir;
+    use tokio::sync::mpsc;
+
+    /// Phase 36.17.7 D-02-a: dispatcher reads mp3 bytes, emits AudioOut event
+    /// with mime=audio/mpeg, uuid=file-stem, bytes=file-contents.
+    #[tokio::test]
+    async fn dispatcher_sends_audio_out_on_send_audio_file() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<ChatStreamEvent>();
+
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let uuid = "00000000-0000-0000-0000-000000000000";
+        let mp3_path = temp_dir.path().join(format!("{uuid}.mp3"));
+
+        let expected_bytes: Vec<u8> = vec![0xFF, 0xFB, 0x90, 0x00];
+        std::fs::write(&mp3_path, &expected_bytes).expect("write temp mp3");
+
+        let dispatcher = WebAudioDispatcher::new(tx, temp_dir.path().to_path_buf());
+
+        let result = dispatcher.send_audio_file("session", &mp3_path, None).await;
+        assert!(result.is_ok(), "send_audio_file must return Ok(())");
+
+        let event = rx.recv().await.expect("must receive AudioOut event");
+        match event {
+            ChatStreamEvent::AudioOut {
+                mime,
+                uuid: got_uuid,
+                bytes,
+            } => {
+                assert_eq!(mime, "audio/mpeg", "D-02-a: AudioOut mime must be audio/mpeg");
+                assert_eq!(got_uuid, uuid, "D-02-a: AudioOut uuid must match file stem");
+                assert_eq!(
+                    bytes, expected_bytes,
+                    "D-02-a: AudioOut bytes must match file contents"
+                );
+            }
+            other => panic!("Expected ChatStreamEvent::AudioOut, got {other:?}"),
+        }
+    }
+}
