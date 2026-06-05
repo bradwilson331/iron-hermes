@@ -188,6 +188,9 @@ impl RegistryToolsetSession {
                     member_count: member_names.len(),
                     available_count,
                     member_summary,
+                    // Phase 36.17.7 D-06: this crate's ToolRegistry does not
+                    // ship TTS tool registration; render the "—" sentinel.
+                    registered: "\u{2014}",
                 }
             })
             .collect()
@@ -277,6 +280,9 @@ impl ToolsetSessionHandle for RegistryToolsetSession {
             member_count: member_names.len(),
             available_count: members.iter().filter(|(_, a, _)| *a).count(),
             member_summary: String::new(),
+            // Phase 36.17.7 D-06: this crate's ToolRegistry does not ship
+            // TTS tool registration; render the "—" sentinel.
+            registered: "\u{2014}",
         };
 
         Ok(render_toolset_show(&row, &members))

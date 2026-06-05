@@ -125,8 +125,11 @@ async fn cmd_toolset_list(hermes_home: &Path) -> Result<()> {
     // D-01 member map: toolset -> member tool names.
     let members_map = toolset_members_map();
 
-    // Build display rows.
-    let rows = build_toolset_rows(&cfg, &registry, &members_map);
+    // Phase 36.17.7 D-06 (REVISION BLOCKER 2): CLI inspection path — the
+    // sentinel SessionKey (Platform::Local, "inspect") put the registry into
+    // Inspection state. Pass None for ctx_status to honor the registry's
+    // observed status; the helper falls back to the registry-observed value.
+    let rows = build_toolset_rows(&cfg, &registry, &members_map, None);
 
     // Render and print.
     let rendered = ironhermes_core::commands::toolset_display::render_toolset_list(rows);
@@ -144,7 +147,8 @@ async fn cmd_toolset_show(hermes_home: &Path, name: &str) -> Result<()> {
     registry.register_defaults();
     register_tts_for_inspection(&mut registry); // Phase 36.17.6
 
-    let (row, members) = build_toolset_show_view(&cfg, &registry, &validated);
+    // Phase 36.17.7 D-06: CLI inspection — no live ctx, defer to registry.
+    let (row, members) = build_toolset_show_view(&cfg, &registry, &validated, None);
 
     let rendered = ironhermes_core::commands::toolset_display::render_toolset_show(&row, &members);
     print!("{}", rendered);
@@ -162,6 +166,7 @@ pub fn build_toolset_show_view(
     cfg: &ToolsConfig,
     registry: &ToolRegistry,
     validated: &str,
+    ctx_status: Option<ironhermes_core::commands::context::TtsRegistrationStatus>,
 ) -> (
     ironhermes_core::commands::toolset_display::ToolsetRow,
     Vec<(String, bool, String)>,
@@ -206,6 +211,15 @@ pub fn build_toolset_show_view(
         })
         .collect();
 
+    // Phase 36.17.7 D-06 (REVISION BLOCKER 2 — Path B): resolve the
+    // Registered column display string per row. Only `voice` carries a
+    // meaningful state; everything else renders "—".
+    let registered = if validated == "voice" {
+        resolve_registered_label(ctx_status, registry)
+    } else {
+        "\u{2014}"
+    };
+
     let row = ironhermes_core::commands::toolset_display::ToolsetRow {
         name: validated.to_string(),
         enabled,
@@ -214,6 +228,7 @@ pub fn build_toolset_show_view(
         // respects `chromium_missing` — no second branch needed here.
         available_count: members.iter().filter(|(_, avail, _)| *avail).count(),
         member_summary: String::new(), // not used for show
+        registered,
     };
 
     (row, members)
@@ -280,10 +295,16 @@ fn toolset_members_map() -> std::collections::HashMap<&'static str, &'static [&'
 }
 
 /// Build display rows for toolset list output.
+///
+/// Phase 36.17.7 D-06 (REVISION BLOCKER 2 — Path B): `ctx_status` carries the
+/// observed TTS registration status from the live slash dispatcher when set;
+/// `None` (CLI inspection path) defers to the registry's recorded sentinel
+/// state via `resolve_registered_label`.
 pub fn build_toolset_rows(
     cfg: &ToolsConfig,
     registry: &ToolRegistry,
     members_map: &std::collections::HashMap<&'static str, &'static [&'static str]>,
+    ctx_status: Option<ironhermes_core::commands::context::TtsRegistrationStatus>,
 ) -> Vec<ironhermes_core::commands::toolset_display::ToolsetRow> {
     let unavailable = registry.list_unavailable();
     let unavailable_names: std::collections::HashSet<&str> =
@@ -354,15 +375,51 @@ pub fn build_toolset_rows(
                     .join(", ")
             };
 
+            // Phase 36.17.7 D-06: per-row Registered. Only `voice` carries
+            // a meaningful state; other toolsets render "—".
+            let registered = if ts_name == "voice" {
+                resolve_registered_label(ctx_status, registry)
+            } else {
+                "\u{2014}"
+            };
+
             ironhermes_core::commands::toolset_display::ToolsetRow {
                 name: ts_name.to_string(),
                 enabled,
                 member_count: member_names.len(),
                 available_count,
                 member_summary,
+                registered,
             }
         })
         .collect()
+}
+
+/// Phase 36.17.7 D-06 (REVISION BLOCKER 2 — Path B): resolve the Registered
+/// column display string for the `voice` toolset row.
+///
+/// Priority order:
+///   1. If `ctx_status` is `Some(s)` (live slash-dispatch attached an
+///      observed status), use it. `Live` → "Live", `Inspection` →
+///      "Inspection", `NotRegistered` → "—".
+///   2. Otherwise (CLI inspection path), use the registry's recorded state
+///      via `registry.tts_registration_status()`. The CLI's
+///      `register_tts_for_inspection` always fires the sentinel, so this
+///      path resolves to `"Inspection"`.
+///
+/// Returns the `'static` display strings so `ToolsetRow.registered: &'static
+/// str` stays cheap.
+fn resolve_registered_label(
+    ctx_status: Option<ironhermes_core::commands::context::TtsRegistrationStatus>,
+    registry: &ToolRegistry,
+) -> &'static str {
+    use ironhermes_core::commands::context::TtsRegistrationStatus;
+    let status = ctx_status.unwrap_or_else(|| registry.tts_registration_status());
+    match status {
+        TtsRegistrationStatus::Live => "Live",
+        TtsRegistrationStatus::Inspection => "Inspection",
+        TtsRegistrationStatus::NotRegistered => "\u{2014}",
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -559,7 +616,7 @@ mod tests {
         registry.register_defaults();
 
         let members_map = toolset_members_map();
-        let rows = build_toolset_rows(&cfg, &registry, &members_map);
+        let rows = build_toolset_rows(&cfg, &registry, &members_map, None);
 
         let row = rows
             .iter()
@@ -611,7 +668,7 @@ mod tests {
         let mut registry = ToolRegistry::new();
         registry.register_defaults();
 
-        let (row, members) = build_toolset_show_view(&cfg, &registry, "browser");
+        let (row, members) = build_toolset_show_view(&cfg, &registry, "browser", None);
 
         assert_eq!(
             row.available_count, 0,
@@ -673,7 +730,7 @@ mod tests {
         registry.register_defaults();
 
         let members_map = toolset_members_map();
-        let rows = build_toolset_rows(&cfg, &registry, &members_map);
+        let rows = build_toolset_rows(&cfg, &registry, &members_map, None);
 
         let row = rows
             .iter()
@@ -737,6 +794,64 @@ mod tests {
         let cli_map = toolset_members_map();
         let cli_web = cli_map.get("web").copied().unwrap_or(&[]);
         assert_eq!(cli_web.len(), 3, "CLI map web entry: {:?}", cli_web);
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 36.17.7 D-06 (REVISION BLOCKER 2 — Path B): Registered column
+    // ---------------------------------------------------------------------
+
+    /// CLI inspection path: `register_tts_for_inspection` populates the
+    /// sentinel session_key, so `build_toolset_rows` (with ctx_status: None)
+    /// must render `Inspection` for the voice row.
+    #[test]
+    fn registered_column_shows_inspection_for_voice_after_inspection_register() {
+        let cfg = ToolsConfig::default();
+        let mut registry = ToolRegistry::new();
+        registry.register_defaults();
+        register_tts_for_inspection(&mut registry);
+
+        let members_map = toolset_members_map();
+        let rows = build_toolset_rows(&cfg, &registry, &members_map, None);
+        let voice = rows
+            .iter()
+            .find(|r| r.name == "voice")
+            .expect("voice row must exist after register_tts_for_inspection");
+        assert_eq!(
+            voice.registered, "Inspection",
+            "D-06: CLI inspection path must render `Inspection` for voice row, got {}",
+            voice.registered
+        );
+    }
+
+    /// In-session slash-dispatch path: the per-platform dispatcher attaches
+    /// `TtsRegistrationStatus::Live` via `ctx.with_tts_registration_status`.
+    /// When `build_toolset_rows` is called with that observed status, the
+    /// voice row's Registered column must read `Live`.
+    #[test]
+    fn registered_column_shows_live_when_command_context_carries_live_status() {
+        use ironhermes_core::commands::context::TtsRegistrationStatus;
+
+        let cfg = ToolsConfig::default();
+        let mut registry = ToolRegistry::new();
+        registry.register_defaults();
+        register_tts_for_inspection(&mut registry); // registry still Inspection
+
+        let members_map = toolset_members_map();
+        let rows = build_toolset_rows(
+            &cfg,
+            &registry,
+            &members_map,
+            Some(TtsRegistrationStatus::Live),
+        );
+        let voice = rows
+            .iter()
+            .find(|r| r.name == "voice")
+            .expect("voice row must exist");
+        assert_eq!(
+            voice.registered, "Live",
+            "D-06: when ctx carries Live status, voice row must render `Live`, got {}",
+            voice.registered
+        );
     }
 
     /// Phase 36.17.6: voice toolset must appear in toolset_members_map with exactly

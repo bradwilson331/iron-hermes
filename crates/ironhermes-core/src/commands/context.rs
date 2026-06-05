@@ -297,6 +297,37 @@ pub trait KanbanStoreWriter: Send + Sync {
 }
 
 // =============================================================================
+// TtsRegistrationStatus — Phase 36.17.7 D-06 (REVISION BLOCKER 2)
+// =============================================================================
+
+/// Phase 36.17.7 D-06 (Path B — REVISION BLOCKER 2): registration state for
+/// the `voice` toolset's two tools (`text_to_speech`, `send_audio`).
+///
+/// Surfaced by `ToolRegistry::tts_registration_status` in `ironhermes-tools`
+/// and carried on [`CommandContext::tts_registration_status`] so the in-session
+/// `/toolset list` slash dispatch can render `Live` vs `Inspection` vs `—` in
+/// the new `Registered` display column. The CLI inspection path (no live
+/// session) leaves the field as `None` and the renderer defaults to
+/// `Inspection`.
+///
+/// `Live` and `Inspection` are kept distinct because they correspond to two
+/// different code paths (real per-session `SessionKey` vs the sentinel
+/// `(Platform::Local, "inspect")` from `register_tts_for_inspection`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TtsRegistrationStatus {
+    /// Real per-turn session_key (Web, Telegram, TUI Local non-sentinel)
+    /// registered TTS tools for this session — the agent has them in its
+    /// schema list right now.
+    Live,
+    /// CLI inspection path — sentinel `(Platform::Local, "inspect")` registered
+    /// the tools for availability checks. Not actually exposed to any live
+    /// agent loop.
+    Inspection,
+    /// `register_tts_tools` was never called on this registry.
+    NotRegistered,
+}
+
+// =============================================================================
 // ToolsetSessionHandle trait — Phase 25 Plan 04 (D-06)
 // =============================================================================
 
@@ -582,6 +613,18 @@ pub struct CommandContext {
     /// Mirrors the ToolsetSessionHandle / MemoryManagerHandle / SummarizationClientHandle
     /// cycle-break pattern.
     pub trajectory_writer: Option<Arc<dyn TrajectoryWriterHandle>>,
+
+    /// Phase 36.17.7 D-06 (REVISION BLOCKER 2 — Path B): TTS registration
+    /// status observed at slash-dispatch time, populated by the per-platform
+    /// `/toolset` dispatcher (gateway handler.rs / iron_hermes_ui ws.rs /
+    /// tui event_loop.rs) by calling
+    /// `runtime.bundle.registry.tts_registration_status()` BEFORE delegating
+    /// to `cmd_toolset` / `ToolsetSessionHandle::render_list`.
+    ///
+    /// `None` here means the slash dispatcher did not attach a runtime view
+    /// — the CLI inspection path uses this as a signal to default to
+    /// `TtsRegistrationStatus::Inspection` in the display.
+    pub tts_registration_status: Option<TtsRegistrationStatus>,
 }
 
 impl CommandContext {
@@ -621,6 +664,9 @@ impl CommandContext {
             workspace: None,
             // Phase 25.3 D-T-3: TrajectoryWriter for per-tool-call JSONL ledger.
             trajectory_writer: None,
+            // Phase 36.17.7 D-06 (Path B / REVISION BLOCKER 2): TTS registration
+            // status populated by the per-platform /toolset slash dispatcher.
+            tts_registration_status: None,
         }
     }
 
@@ -758,6 +804,15 @@ impl CommandContext {
     /// CommandContext-construction sites.
     pub fn with_trajectory_writer(mut self, handle: Arc<dyn TrajectoryWriterHandle>) -> Self {
         self.trajectory_writer = Some(handle);
+        self
+    }
+
+    /// Phase 36.17.7 D-06 (REVISION BLOCKER 2 — Path B): attach the TTS
+    /// registration status observed from the per-platform `/toolset` slash
+    /// dispatcher's runtime registry. Consumed by the `Registered` column in
+    /// the toolset list / show renderer.
+    pub fn with_tts_registration_status(mut self, status: TtsRegistrationStatus) -> Self {
+        self.tts_registration_status = Some(status);
         self
     }
 

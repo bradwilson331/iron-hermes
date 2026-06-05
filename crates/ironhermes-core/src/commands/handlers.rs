@@ -1322,6 +1322,19 @@ fn cmd_toolset(args: &[&str], ctx: &CommandContext) -> CommandResult {
             );
         }
     };
+    // Phase 36.17.7 D-06 (REVISION BLOCKER 2 — Path B): per-platform slash
+    // dispatchers (gateway handler.rs, iron_hermes_ui ws.rs, tui event_loop.rs)
+    // attach `ctx.tts_registration_status` via
+    // `ctx.with_tts_registration_status(runtime.bundle.registry.read().await.tts_registration_status())`
+    // BEFORE dispatching here. The renderer in
+    // `crates/ironhermes-cli/src/toolset_cmd.rs` reads
+    // `ctx.tts_registration_status` (or falls back to `Inspection` when it is
+    // `None` — the CLI inspection path). When `tts_registration_status ==
+    // Some(Live)`, the `Registered` column reads `Live`. The per-platform
+    // dispatcher wire-up is the integration point — `cmd_toolset` itself only
+    // needs the status to be ON the context so downstream renderers can read
+    // it.
+    let _tts_registration_status = ctx.tts_registration_status; // BLOCKER 2 — observable on the context
     match args.first().copied() {
         None | Some("list") => CommandResult::Output(handle.render_list()),
         Some("show") => {

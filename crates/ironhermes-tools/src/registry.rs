@@ -108,6 +108,19 @@ pub struct ToolRegistry {
     /// When Some, get_definitions() applies toolset-level filtering (D-23).
     /// When None, no toolset filter is applied — preserves pre-Phase-25 behavior (A2/Pitfall 8).
     toolset_config: Option<ironhermes_core::config::ToolsConfig>,
+    /// Phase 36.17.7 D-06 (Path B — REVISION BLOCKER 2): the SessionKey that
+    /// last invoked `register_tts_tools` on this registry. Used by
+    /// `is_tts_registered_live` and `tts_registration_status` to distinguish:
+    ///   - `Live` — a real per-turn session_key (Web/Telegram/TUI Local
+    ///     non-sentinel) is the registered owner.
+    ///   - `Inspection` — the sentinel `(Platform::Local, "inspect")` set by
+    ///     `register_tts_for_inspection` (CLI inspection path).
+    ///   - `NotRegistered` — `register_tts_tools` never fired.
+    ///
+    /// `None` here means TTS tools were never registered; `Some(key)` is set
+    /// every time `register_tts_tools` is called. Path B avoids adding `Any`
+    /// to the `Tool` trait — the SessionKey lives directly on the registry.
+    tts_session_key: Option<ironhermes_core::SessionKey>,
 }
 
 impl ToolRegistry {
@@ -118,7 +131,47 @@ impl ToolRegistry {
             error_detail: ironhermes_hooks::ErrorDetailLevel::Full,
             intercepts: HashMap::new(),
             toolset_config: None,
+            // Phase 36.17.7 D-06: TTS session key is set by `register_tts_tools`.
+            tts_session_key: None,
         }
+    }
+
+    /// Phase 36.17.7 D-06 (Path B — REVISION BLOCKER 2): returns the current
+    /// TTS registration status of this registry.
+    ///
+    /// - `Live` when `text_to_speech` AND `send_audio` are registered AND the
+    ///   recording session_key is NOT the sentinel `(Platform::Local, "inspect")`.
+    /// - `Inspection` when both tools are registered AND the session_key is
+    ///   the sentinel.
+    /// - `NotRegistered` otherwise (either tool missing OR `register_tts_tools`
+    ///   was never called).
+    pub fn tts_registration_status(
+        &self,
+    ) -> ironhermes_core::commands::context::TtsRegistrationStatus {
+        use ironhermes_core::commands::context::TtsRegistrationStatus;
+        if !self.tools.contains_key("text_to_speech")
+            || !self.tools.contains_key("send_audio")
+        {
+            return TtsRegistrationStatus::NotRegistered;
+        }
+        let Some(key) = self.tts_session_key.as_ref() else {
+            return TtsRegistrationStatus::NotRegistered;
+        };
+        if key.platform == ironhermes_core::types::Platform::Local && key.chat_id == "inspect" {
+            TtsRegistrationStatus::Inspection
+        } else {
+            TtsRegistrationStatus::Live
+        }
+    }
+
+    /// Phase 36.17.7 D-06 (Path B — REVISION BLOCKER 2): returns `true` iff
+    /// `tts_registration_status() == Live` — i.e. TTS tools are registered AND
+    /// the session_key is NOT the inspection sentinel.
+    pub fn is_tts_registered_live(&self) -> bool {
+        matches!(
+            self.tts_registration_status(),
+            ironhermes_core::commands::context::TtsRegistrationStatus::Live
+        )
     }
 
     /// Set the toolset configuration for runtime filtering (D-22, Phase 25).
@@ -250,6 +303,10 @@ impl ToolRegistry {
             error_detail: self.error_detail.clone(),
             intercepts: HashMap::new(),
             toolset_config: None,
+            // Phase 36.17.7 D-06: scoped registry inherits the parent's TTS
+            // session_key so `tts_registration_status` continues to reflect
+            // the original registration provenance.
+            tts_session_key: self.tts_session_key.clone(),
         }
     }
 
@@ -654,6 +711,10 @@ impl ToolRegistry {
         use crate::send_audio_tool::SendAudioTool;
 
         let tts_registry = Arc::new(build_tts_registry(&config.tts));
+        // Phase 36.17.7 D-06 (Path B): record the session_key on the registry
+        // BEFORE SendAudioTool consumes it via move — so
+        // `tts_registration_status()` can later distinguish Live vs Inspection.
+        self.tts_session_key = Some(session_key.clone());
         self.register(Box::new(TextToSpeechTool::new(config.clone(), tts_registry)));
         self.register(Box::new(SendAudioTool::new(session_key, dispatcher, config)));
     }
@@ -2689,6 +2750,74 @@ mod tests {
         assert_eq!(
             names_a, names_b,
             "register_defaults() and register_defaults_except(&[]) must register identical tool sets"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 36.17.7 D-06 (REVISION BLOCKER 2 — Path B): TTS registration
+    // status accessor — Live / Inspection / NotRegistered.
+    // ---------------------------------------------------------------------
+
+    /// Empty registry — `tts_registration_status` is `NotRegistered`,
+    /// `is_tts_registered_live` is false.
+    #[test]
+    fn tts_registration_status_empty_registry_is_not_registered() {
+        use ironhermes_core::commands::context::TtsRegistrationStatus;
+        let reg = ToolRegistry::new();
+        assert_eq!(
+            reg.tts_registration_status(),
+            TtsRegistrationStatus::NotRegistered,
+            "empty registry must report NotRegistered"
+        );
+        assert!(
+            !reg.is_tts_registered_live(),
+            "empty registry must not be live"
+        );
+    }
+
+    /// Sentinel SessionKey (Platform::Local, "inspect") → Inspection.
+    #[test]
+    fn tts_registration_status_inspection_sentinel() {
+        use ironhermes_core::commands::context::TtsRegistrationStatus;
+        use ironhermes_core::{Platform, SessionKey};
+        let mut reg = ToolRegistry::new();
+        let key = SessionKey::new(Platform::Local, "inspect");
+        reg.register_tts_tools(
+            key,
+            None,
+            std::sync::Arc::new(ironhermes_core::Config::default()),
+        );
+        assert_eq!(
+            reg.tts_registration_status(),
+            TtsRegistrationStatus::Inspection,
+            "sentinel session_key must report Inspection"
+        );
+        assert!(
+            !reg.is_tts_registered_live(),
+            "sentinel session_key must NOT be live"
+        );
+    }
+
+    /// Real session_key (Platform::Web, "session-uuid") → Live.
+    #[test]
+    fn tts_registration_status_live_for_real_session_key() {
+        use ironhermes_core::commands::context::TtsRegistrationStatus;
+        use ironhermes_core::{Platform, SessionKey};
+        let mut reg = ToolRegistry::new();
+        let key = SessionKey::new(Platform::Web, "session-abc-123");
+        reg.register_tts_tools(
+            key,
+            None,
+            std::sync::Arc::new(ironhermes_core::Config::default()),
+        );
+        assert_eq!(
+            reg.tts_registration_status(),
+            TtsRegistrationStatus::Live,
+            "real (Web, ..) session_key must report Live"
+        );
+        assert!(
+            reg.is_tts_registered_live(),
+            "real (Web, ..) session_key must be live"
         );
     }
 }
