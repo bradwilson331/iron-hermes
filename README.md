@@ -59,6 +59,28 @@ IRONHERMES_REPO=http://192.168.7.6:8418/twilson/ironhermes bash install.sh
 # https://github.com/bradwilson331/iron-hermes
 ```
 
+### Windows (install only)
+
+Download `install.ps1` from the latest release and run it in PowerShell:
+
+```powershell
+# Option A — pipe from raw.githubusercontent.com (PowerShell 5.1+)
+iwr -useb https://raw.githubusercontent.com/bradwilson331/iron-hermes/main/install.ps1 | iex
+
+# Option B — download first, then run
+Invoke-WebRequest -Uri https://raw.githubusercontent.com/bradwilson331/iron-hermes/main/install.ps1 -OutFile install.ps1
+.\install.ps1
+```
+
+The script downloads the prebuilt `ironhermes-windows-x86_64.tar.gz` from the latest GitHub release, extracts `ironhermes.exe` to `%LOCALAPPDATA%\Programs\ironhermes\`, and adds that directory to your **user** PATH (no admin rights required). Open a new terminal after install for PATH to take effect.
+
+```powershell
+# Override to a private mirror or LAN Gitea instance
+$env:IRONHERMES_REPO = 'http://192.168.7.6:8418/twilson/ironhermes'; .\install.ps1
+```
+
+> **Note:** `update`, `reinstall`, and `uninstall` verbs are not yet supported on Windows (deferred, D-12). To update, re-run the script. To remove, delete `%LOCALAPPDATA%\Programs\ironhermes\` and remove it from your user PATH.
+
 ### Option 2 — build from source
 
 Requires a stable Rust toolchain (2024 edition). Install via [rustup.rs](https://rustup.rs) if needed.
