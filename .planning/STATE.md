@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: executing
-stopped_at: Phase 37 CLOSED — RUSTSEC-2026-0104 remediated + v0.2.0
-last_updated: "2026-06-06T04:13:00.000Z"
+status: Ready to pick next phase
+stopped_at: Phase 37.1 context gathered
+last_updated: "2026-06-06T18:57:32.673Z"
 last_activity: 2026-06-06 -- Phase 37 CLOSED (RUSTSEC-2026-0104 + v0.2.0)
 progress:
   total_phases: 61
-  completed_phases: 27
+  completed_phases: 26
   total_plans: 138
-  completed_plans: 134
-  percent: 44
+  completed_plans: 132
+  percent: 43
 ---
 
 # Project State
@@ -29,7 +29,7 @@ Phase: 37 (rustsec-2026-0104-reachable-panic) — CLOSED
 Plan: 2 of 2 complete
 Status: Ready to pick next phase
 Last activity: 2026-06-06 -- Phase 37 CLOSED (RUSTSEC-2026-0104 + v0.2.0)
-Next: pick next phase from milestone-v3.0 backlog
+Next: plan urgent Phase 37.1 (setup script not working on macos) — /gsd:plan-phase 37.1
 
 ## Recent close-out summary (2026-06-06 — Phase 37 CLOSED)
 
@@ -39,6 +39,7 @@ Next: pick next phase from milestone-v3.0 backlog
 - **Plan 02 (Wave 2 — release boundary):** Workspace version `0.1.0 → 0.2.0` in the 3 version-bearing Cargo.toml files (root `[workspace.package]` + hardcoded `iron_hermes_ui` + `ironhermes-exec`); ~15 `version.workspace=true` crates inherit; CLI `--version` reads `env!("CARGO_PKG_VERSION")` (no source edit). Security pin preserved through the bump. Commits `041a124a`→`0da6e891`.
 
 **Gate results:**
+
 - SEC-01 (0.103.10 absent), SEC-02 (0.103.13 present), SEC-05 (RUSTSEC comment): **PASS** via `Cargo.lock` + grep. `0.102.8` present = expected Chain-1 exemption.
 - SEC-03: `cargo build --workspace` **exit 0** (post-merge integrated tree; 100m cold build under sccache).
 - VER-01/02/03 (`version = "0.2.0"` ×3), VER-04 (`--version` via `CARGO_PKG_VERSION`): **PASS** (committed grep + structural + Wave-2 executor worktree `--version | grep 0.2.0` green).
@@ -628,6 +629,7 @@ Recent decisions affecting current work:
 - Phase 36.17.2.2 inserted after Phase 36.17.2: IronHermes Telegram client delivers streaming final media messages (URGENT)
 - Phase 36.17.5 inserted after Phase 36.17: integrate TTS functions (URGENT)
 - Phase 37 added: RUSTSEC-2026-0104 reachable panic (urgent security advisory)
+- Phase 37.1 inserted after Phase 37: setup script not working on macos (URGENT)
 
 ### Pending Todos
 
@@ -653,6 +655,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-06-04T19:47:39.641Z
-Stopped at: Phase 36.17.7 UI-SPEC approved
-Resume file: .planning/phases/36.17.7-gateway-web-tts-runtime-wiring/36.17.7-UI-SPEC.md
+Last session: 2026-06-06T18:57:32.665Z
+Stopped at: Phase 37.1 context gathered
+Resume file: .planning/phases/37.1-setup-script-not-working-on-macos/37.1-CONTEXT.md
