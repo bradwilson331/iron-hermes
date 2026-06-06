@@ -169,3 +169,32 @@ toml = "0.8"
 # ---------------------------------------------------------------------------
 [profile.dev]
 debug = "line-tables-only"
+
+# ---------------------------------------------------------------------------
+# Security patch: RUSTSEC-2026-0104 — reachable panic in rustls-webpki CRL
+# parsing (DoS, CVSS 7.5).
+#
+# CHAIN 2 — FIXED by this patch:
+#   reqwest / hyper-rustls / slack-morphism / chromiumoxide → rustls 0.23.x
+#   → rustls-webpki 0.103.10 (VULNERABLE) → pinned here to =0.103.13 (FIXED).
+#   Exact pin (`=0.103.13`) prevents a future `cargo update` from silently
+#   advancing past the tested version.
+#
+# CHAIN 1 — RISK-ACCEPTED EXEMPTION (cannot be patched here):
+#   serenity 0.12.5 → tokio-tungstenite 0.21 → rustls 0.22.4
+#   → rustls-webpki 0.102.8 (VULNERABLE).
+#   rustls 0.22.x requires rustls-webpki "0.102" (semver-incompatible with
+#   0.103.x), so this [patch.crates-io] entry has NO effect on Chain 1.
+#   As of 2026-06-05, no serenity 0.13.x release exists that would pull in
+#   rustls 0.23.x and make this patch applicable.
+#   Risk-accepted rationale: serenity's rustls-webpki usage is via the Discord
+#   WebSocket TLS handshake — a trusted endpoint under Serenity's control, not
+#   arbitrary CRL parsing from attacker-controlled input. The residual panic
+#   surface is therefore reachable only from a malformed CRL delivered by
+#   Discord itself (not a realistic attack vector).
+#   ACTION: re-evaluate this exemption when serenity 0.13.x ships and upgrades
+#   to rustls 0.23.x. At that point this [patch.crates-io] entry will cover
+#   both chains automatically and this comment can be removed.
+# ---------------------------------------------------------------------------
+[patch.crates-io]
+rustls-webpki = { version = "=0.103.13" }
