@@ -461,3 +461,224 @@ providers:
 # hooks:
 #   jsonl_log: true
 #   webhooks: []
+
+# --- Tools ---
+# Mirrors `ToolsConfig::default()` in `ironhermes-core/src/config.rs`.
+# Each key under `toolsets:` is a toolset name; `enabled: false` keeps all
+# of that toolset's tools out of the LLM tool list entirely.
+tools:
+  # toolsets:
+  #   memory:
+  #     enabled: true
+  #   session:
+  #     enabled: true
+  #   agent:
+  #     enabled: true
+  #   skills:
+  #     enabled: true
+  #   robotics:
+  #     enabled: true   # gates further on HEXAPOD_IP env var
+  #   learning:
+  #     enabled: true   # Phase 33 — autonomous skill creation (skill_manage tool)
+  #   web:
+  #     enabled: false   # opt-in required
+  #   code:
+  #     enabled: false   # opt-in required
+  #   browser:
+  #     enabled: false   # opt-in required
+
+# --- Auxiliary Model Routing ---
+# Optional per-role model assignments. Absent = all helper tasks use the main provider.
+auxiliary:
+  # provider: ""        # provider name for auxiliary calls (empty = inherit from main)
+  # model: ""           # model identifier (empty = inherit from main)
+  # kanban_decomposer:  # decomposer role (Phase 36.3.7.10)
+  #   provider: ""
+  #   model: ""
+  # kanban_judge:       # goal-mode judge role (Phase 36.3.7.12)
+  #   provider: ""
+  #   model: ""
+
+# --- Custom Providers ---
+# User-defined OpenAI-compatible endpoints. A common use is naming a local
+# Ollama / llama.cpp server here and listing it under a primary's
+# `fallback_providers` so the agent falls back to it on hard failure.
+custom_providers: []
+# custom_providers:
+#   - name: "local-llama"
+#     base_url: "http://localhost:11434/v1"
+#     api_key: "ollama"
+#     api_mode: chat_completions
+#     default_model: "llama3.2:latest"
+
+# --- MCP Servers ---
+# MCP server configurations (Phase 21.2). Each key is a server name; value is
+# a free-form map parsed by ironhermes-mcp at startup.
+mcp_servers: {}
+# mcp_servers:
+#   my-mcp-server:
+#     command: "npx"
+#     args: ["-y", "@my-org/my-mcp-server"]
+#     env:
+#       MY_API_KEY_ENV: MY_API_KEY
+
+# --- Autonomous Mode ---
+# Controls yolo (auto-approve dangerous commands) behavior. D-11/D-12/D-14.
+autonomous:
+  # When true, skip dangerous-command approval prompts. Budget 100% /
+  # fatal error / user interrupt remain unskippable (G-01/G-04/G-09).
+  # yolo: false
+
+# --- Browser Automation ---
+# Phase 25.1 D-18: chromiumoxide browser configuration.
+browser:
+  # Launch browser in headed mode (visible window). Default: false (headless).
+  # headed: false
+
+  # Disable Chrome sandbox (required in some CI/Docker environments). Default: false.
+  # no_sandbox: false
+
+  # Allowed domains for browser navigation (SSRF protection). Empty = allow all.
+  # allowed_domains: []
+
+  # Allowed URL schemes. Default: ["http", "https"].
+  # allowed_schemes: ["http", "https"]
+
+  # Path to Chromium/Chrome binary (null = auto-detect). Default: null.
+  # chromium_path: null
+
+  # Navigation timeout in seconds. Default: 30.
+  # timeout_seconds: 30
+
+  # Persistent user data directory for cookies/localStorage (null = ephemeral per session).
+  # user_data_dir: null
+
+# --- Web Extract ---
+# Phase 25.2 D-22: web content extraction and summarization configuration.
+extract:
+  # Maximum parallel summarization LLM calls. Default: 4.
+  # max_parallel_summaries: 4
+
+  # Character chunk size for summarization passes. Default: 100000.
+  # summary_chunk_chars: 100000
+
+  # Content length above which extraction is refused entirely. Default: 2000000.
+  # refuse_threshold_chars: 2000000
+
+  # Tier-2 summary threshold in chars (content > this triggers a second pass). Default: 5000.
+  # summary_tier2_threshold_chars: 5000
+
+  # Tier-3 summary threshold (very large content, extra compression). Default: 500000.
+  # summary_tier3_threshold_chars: 500000
+
+  # URL patterns to redact from extracted content (regex list). Default: [].
+  # redact_url_patterns: []
+
+# --- Prompt Caching ---
+# Phase 36.2 D-CACHE-02: Anthropic cache_control breakpoint configuration.
+prompt_caching:
+  # Enable prompt caching for Anthropic models. Default: true.
+  # enabled: true
+
+  # Cache TTL for Anthropic cache_control markers. Valid values: "5m" or "1h".
+  # Default: "1h" (long TTL for cross-session cached prefixes).
+  # ttl: "1h"
+
+# --- Kanban ---
+# Phase 36.3.7 D-09: Kanban dispatcher configuration.
+# Stored as raw YAML (kanban is serde_yaml::Value in Config to avoid circular deps).
+# The gateway runner deserializes this into KanbanConfig at startup.
+# All 17 KanbanConfig fields with defaults from KanbanConfig::default():
+kanban:
+  # Run dispatcher tokio task inside the gateway runtime. Default: true (D-09).
+  # dispatch_in_gateway: true
+
+  # Dispatcher tick period in seconds. Default: 60.
+  # dispatch_interval_seconds: 60
+
+  # Concurrency cap for running tasks (null = unlimited). Default: 8 (D-11).
+  # max_in_progress: 8
+
+  # Circuit-breaker consecutive-failure limit before auto-blocking a task. Default: 2 (D-12).
+  # failure_limit: 2
+
+  # Stranded-task diagnostic threshold in seconds. Default: 1800 (30 min, D-14).
+  # stranded_threshold_seconds: 1800
+
+  # Running-task stale timeout in seconds. Default: 14400 (4 h).
+  # dispatch_stale_timeout_seconds: 14400
+
+  # Board-level default workdir (null = no override; per-task workspace wins). Default: null (D-32).
+  # default_workdir: null
+
+  # RESERVED: Cross-profile gateway subscription source names (deferred notifier phase, D-37).
+  # null = notifier disabled. Default: null.
+  # notification_sources: null
+
+  # Notifier poll tick in seconds (Phase 36.3.7.5). Default: 3.
+  # notifier_poll_seconds: 3
+
+  # Auto-decompose triage tasks each dispatcher tick (opt-in). Default: false.
+  # auto_decompose: false
+
+  # LLM decomposition cap per tick. Default: 3.
+  # auto_decompose_per_tick: 3
+
+  # Profile for decomposition; empty = active default. Default: "".
+  # orchestrator_profile: ""
+
+  # Fallback assignee; empty = active default. Default: "".
+  # default_assignee: ""
+
+  # Model for decomposer; empty = auxiliary.kanban_decomposer then main. Default: "".
+  # decomposer_model: ""
+
+  # Auto-promote decomposed children with no blockers to ready. Default: true.
+  # auto_promote_children: true
+
+  # Model for goal-mode judge; empty = auxiliary.kanban_judge then main. Default: "".
+  # judge_model: ""
+
+  # Inner-loop iteration cap for goal-mode workers (F-03). Default: 10.
+  # goal_inner_max_iterations: 10
+
+# --- Dashboard ---
+# Phase 36.3.7.11 D-17: dashboard tail consumer configuration.
+dashboard:
+  # kanban:
+  #   # Tail consumer polling interval in milliseconds. Default: 250 ms.
+  #   tail_interval_ms: 250
+
+# --- TTS (Text-to-Speech) ---
+# Phase 36.17.5 D-12: TTS provider configuration.
+tts:
+  # Active TTS provider. Supported: "edge" (Microsoft Edge TTS), "elevenlabs". Default: "edge".
+  # provider: "edge"
+
+  # Optional path to ffmpeg binary for MP3→Opus conversion. null = auto-detect. Default: null.
+  # ffmpeg_path: null
+
+  # Edge TTS provider settings
+  # edge:
+  #   # Edge TTS voice name. Default: "en-US-AriaNeural".
+  #   voice: "en-US-AriaNeural"
+  #   # Audio output format. Default: "mp3".
+  #   output_format: "mp3"
+
+  # ElevenLabs provider settings (requires ELEVENLABS_API_KEY in .env)
+  # elevenlabs:
+  #   # ElevenLabs voice ID. Default: "pNInz6obpgDQGcFmaJgB" (Adam voice).
+  #   voice_id: "pNInz6obpgDQGcFmaJgB"
+  #   # ElevenLabs model ID. Default: "eleven_multilingual_v2".
+  #   model_id: "eleven_multilingual_v2"
+  #   # Audio output format. Default: "mp3".
+  #   output_format: "mp3"
+
+# --- Audio Cache ---
+# Phase 36.17.7 D-02-d: audio cache lifecycle policy for ~/.ironhermes/audio_cache/.
+audio_cache:
+  # Maximum age in days for cached audio files. Default: 7.
+  # max_age_days: 7
+
+  # Periodic GC sweep interval in seconds. Default: 86400 (daily).
+  # sweep_interval_secs: 86400
