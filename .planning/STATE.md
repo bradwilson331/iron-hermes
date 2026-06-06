@@ -4,8 +4,8 @@ milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
 stopped_at: Phase 37.1 context gathered
-last_updated: "2026-06-06T19:56:28.716Z"
-last_activity: 2026-06-06 -- Phase 37.1 execution started
+last_updated: "2026-06-06T20:19:48.618Z"
+last_activity: 2026-06-06
 progress:
   total_phases: 61
   completed_phases: 26
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 37.1 (setup-script-not-working-on-macos) — EXECUTING
-Plan: 1 of 6
-Status: Executing Phase 37.1
-Last activity: 2026-06-06 -- Phase 37.1 execution started
+Plan: 2 of 6
+Status: Ready to execute
+Last activity: 2026-06-06
 Next: plan urgent Phase 37.1 (setup script not working on macos) — /gsd:plan-phase 37.1
 
 ## Recent close-out summary (2026-06-06 — Phase 37 CLOSED)
@@ -311,6 +311,7 @@ Counter update: `completed_phases: 26 → 27`; `completed_plans: 132 → 134`; `
 | Phase 32.2-subagent-delegation-parity P03 | 1105 | 2 tasks | 4 files |
 | Phase 36.17.3 P01 | 25min | 3 tasks | 5 files |
 | Phase 36.17.3 P06 | 10min | 3 tasks | 4 files |
+| Phase 37.1 P02 | 4 | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -655,6 +656,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-06-06T18:57:32.665Z
+Last session: 2026-06-06T20:19:48.610Z
 Stopped at: Phase 37.1 context gathered
-Resume file: .planning/phases/37.1-setup-script-not-working-on-macos/37.1-CONTEXT.md
+Resume file: None
