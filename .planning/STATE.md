@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
-status: Ready to pick next phase
+status: executing
 stopped_at: Phase 37.1 context gathered
-last_updated: "2026-06-06T18:57:32.673Z"
-last_activity: 2026-06-06 -- Phase 37 CLOSED (RUSTSEC-2026-0104 + v0.2.0)
+last_updated: "2026-06-06T19:51:18.346Z"
+last_activity: 2026-06-06 -- Phase 37.1 planning complete
 progress:
   total_phases: 61
   completed_phases: 26
@@ -27,8 +27,8 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 
 Phase: 37 (rustsec-2026-0104-reachable-panic) — CLOSED
 Plan: 2 of 2 complete
-Status: Ready to pick next phase
-Last activity: 2026-06-06 -- Phase 37 CLOSED (RUSTSEC-2026-0104 + v0.2.0)
+Status: Ready to execute
+Last activity: 2026-06-06 -- Phase 37.1 planning complete
 Next: plan urgent Phase 37.1 (setup script not working on macos) — /gsd:plan-phase 37.1
 
 ## Recent close-out summary (2026-06-06 — Phase 37 CLOSED)
