@@ -4,8 +4,8 @@ milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
 stopped_at: Phase 37.1 context gathered
-last_updated: "2026-06-06T19:51:18.346Z"
-last_activity: 2026-06-06 -- Phase 37.1 planning complete
+last_updated: "2026-06-06T19:56:28.716Z"
+last_activity: 2026-06-06 -- Phase 37.1 execution started
 progress:
   total_phases: 61
   completed_phases: 26
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 37 CLOSED — pick next phase from milestone-v3.0 backlog
+**Current focus:** Phase 37.1 — setup-script-not-working-on-macos
 
 ## Current Position
 
-Phase: 37 (rustsec-2026-0104-reachable-panic) — CLOSED
-Plan: 2 of 2 complete
-Status: Ready to execute
-Last activity: 2026-06-06 -- Phase 37.1 planning complete
+Phase: 37.1 (setup-script-not-working-on-macos) — EXECUTING
+Plan: 1 of 6
+Status: Executing Phase 37.1
+Last activity: 2026-06-06 -- Phase 37.1 execution started
 Next: plan urgent Phase 37.1 (setup script not working on macos) — /gsd:plan-phase 37.1
 
 ## Recent close-out summary (2026-06-06 — Phase 37 CLOSED)

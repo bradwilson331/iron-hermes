@@ -101,15 +101,15 @@ Plans:
 **Goal:** Replace the fragmented, broken IronHermes setup scripts with one unified cross-platform bash installer handling the full lifecycle (install/update/reinstall/uninstall), stand up a GitHub Actions release pipeline that produces the prebuilt binaries the installer downloads, and bring `cli-config.yaml.example` + the setup wizard to full `Config` struct parity. Root-fixes the reported macOS failure (wrong repo name `ironhermes`->`iron-hermes`, no release pipeline, dead crates.io fallback).
 **Requirements**: REQ-37.1-01, REQ-37.1-02, REQ-37.1-03, REQ-37.1-04, REQ-37.1-05, REQ-37.1-06, REQ-37.1-07, REQ-37.1-08
 **Depends on:** Phase 37
-**Plans:** 6 plans (2 waves)
+**Plans:** 2/6 plans executed
 
 Plans:
 **Wave 0/1**
-- [ ] 37.1-01-PLAN.md -- Wave 0 test scaffolding (config_parity.rs, wizard_coverage.rs, installer_integration.sh; intentionally red)
+- [x] 37.1-01-PLAN.md -- Wave 0 test scaffolding (config_parity.rs, wizard_coverage.rs, installer_integration.sh; intentionally red)
 **Wave 1**
 - [ ] 37.1-02-PLAN.md -- Unified installer: install|update|reinstall|uninstall verbs, repo-name fix, IRONHERMES_REPO, quarantine strip, cargo-git fallback, existing-install detection; retire redundant scripts
 - [ ] 37.1-03-PLAN.md -- Config completeness: 9 missing sections + 17-field kanban section in cli-config.yaml.example; config_parity green
-- [ ] 37.1-04-PLAN.md -- GitHub Actions release.yml: 5-target matrix (macOS arm64/x64, Linux x86_64/aarch64, Windows x86_64), ad-hoc sign + notarization slot-in (has human-verify checkpoint)
+- [x] 37.1-04-PLAN.md -- GitHub Actions release.yml: 5-target matrix (macOS arm64/x64, Linux x86_64/aarch64, Windows x86_64), ad-hoc sign + notarization slot-in (has human-verify checkpoint)
 **Wave 2**
 - [ ] 37.1-05-PLAN.md -- Setup wizard: every section accounted for (13 commented-default blocks + 17-field kanban), additive merge never clobbers SET values; wizard_coverage green
 - [ ] 37.1-06-PLAN.md -- Minimal Windows install.ps1 (install verb only; update/reinstall/uninstall deferred per D-12)
