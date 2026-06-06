@@ -4,7 +4,7 @@ milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
 stopped_at: Phase 37.1 context gathered
-last_updated: "2026-06-06T20:39:51.579Z"
+last_updated: "2026-06-06T20:44:36.015Z"
 last_activity: 2026-06-06
 progress:
   total_phases: 61
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-04-11)
 ## Current Position
 
 Phase: 37.1 (setup-script-not-working-on-macos) — EXECUTING
-Plan: 4 of 6
+Plan: 5 of 6
 Status: Ready to execute
 Last activity: 2026-06-06
 Next: plan urgent Phase 37.1 (setup script not working on macos) — /gsd:plan-phase 37.1
@@ -657,6 +657,6 @@ Recent decisions affecting current work:
 
 ## Session Continuity
 
-Last session: 2026-06-06T20:39:51.571Z
+Last session: 2026-06-06T20:44:36.002Z
 Stopped at: Phase 37.1 context gathered
 Resume file: None
