@@ -4,8 +4,8 @@ milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
 stopped_at: Phase 36.17.7 UI-SPEC approved
-last_updated: "2026-06-05T20:51:12.764Z"
-last_activity: 2026-06-05 -- Phase 37 planning complete
+last_updated: "2026-06-06T04:07:32.592Z"
+last_activity: 2026-06-06 -- Phase 37 execution started
 progress:
   total_phases: 61
   completed_phases: 26
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 36.17.7 CLOSED — pick next phase from milestone-v3.0 backlog
+**Current focus:** Phase 37 — rustsec-2026-0104-reachable-panic
 
 ## Current Position
 
-Phase: 36.17.7 (CLOSED, partial)
-Plan: 5 of 5 complete
-Status: Ready to execute
-Last activity: 2026-06-05 -- Phase 37 planning complete
+Phase: 37 (rustsec-2026-0104-reachable-panic) — EXECUTING
+Plan: 1 of 2
+Status: Executing Phase 37
+Last activity: 2026-06-06 -- Phase 37 execution started
 Next: pick next phase from milestone-v3.0 backlog
 
 ## Recent close-out summary (2026-06-05 — Phase 36.17.7 CLOSED, partial)
