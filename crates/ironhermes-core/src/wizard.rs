@@ -154,6 +154,199 @@ pub fn apply_tools_section_answer(_config: &mut Config, _selection: &str) -> any
     Ok(())
 }
 
+/// Apply kanban section wizard answer (D-10, Plan 05).
+///
+/// Returns a `serde_yaml::Mapping` with all 17 KanbanConfig fields and their
+/// default values. The caller splices this under the `kanban:` key in config.yaml
+/// via the raw-YAML load-mutate-save path (same pattern as apply_learning_loop_answer).
+///
+/// The `_enable` parameter is reserved for future use (e.g. a wizard yes/no prompt);
+/// defaults are written regardless for now so every field is self-documenting.
+pub fn apply_kanban_section_answer(config: &mut Config, _enable: &str) -> serde_yaml::Mapping {
+    // Config does not have a typed kanban field (it is stored as serde_yaml::Value).
+    // We only touch the returned Mapping; config is accepted for API symmetry with
+    // the other apply_*_answer helpers.
+    let _ = config;
+
+    let mut block = serde_yaml::Mapping::new();
+
+    macro_rules! kv_bool {
+        ($k:expr, $v:expr) => {
+            block.insert(
+                serde_yaml::Value::String($k.into()),
+                serde_yaml::Value::Bool($v),
+            );
+        };
+    }
+    macro_rules! kv_u64 {
+        ($k:expr, $v:expr) => {
+            block.insert(
+                serde_yaml::Value::String($k.into()),
+                serde_yaml::Value::Number(($v as u64).into()),
+            );
+        };
+    }
+    macro_rules! kv_u32 {
+        ($k:expr, $v:expr) => {
+            block.insert(
+                serde_yaml::Value::String($k.into()),
+                serde_yaml::Value::Number(($v as u64).into()),
+            );
+        };
+    }
+    macro_rules! kv_null {
+        ($k:expr) => {
+            block.insert(
+                serde_yaml::Value::String($k.into()),
+                serde_yaml::Value::Null,
+            );
+        };
+    }
+    macro_rules! kv_str {
+        ($k:expr, $v:expr) => {
+            block.insert(
+                serde_yaml::Value::String($k.into()),
+                serde_yaml::Value::String($v.into()),
+            );
+        };
+    }
+
+    // 17 KanbanConfig fields in declaration order (config.rs).
+    kv_bool!("dispatch_in_gateway", true);
+    kv_u64!("dispatch_interval_seconds", 60u64);
+    kv_u64!("max_in_progress", 8u64);
+    kv_u32!("failure_limit", 2u32);
+    kv_u64!("stranded_threshold_seconds", 1800u64);
+    kv_u64!("dispatch_stale_timeout_seconds", 14400u64);
+    kv_null!("default_workdir");
+    kv_null!("notification_sources");
+    kv_u64!("notifier_poll_seconds", 3u64);
+    kv_bool!("auto_decompose", false);
+    kv_u32!("auto_decompose_per_tick", 3u32);
+    kv_str!("orchestrator_profile", "");
+    kv_str!("default_assignee", "");
+    kv_str!("decomposer_model", "");
+    kv_bool!("auto_promote_children", true);
+    kv_str!("judge_model", "");
+    kv_u32!("goal_inner_max_iterations", 10u32);
+
+    block
+}
+
+/// Additive-merge helper: insert `section_key` into `yaml_value` only when absent.
+///
+/// Contract (D-11, never-clobber rule):
+/// - If `yaml_value` is a Mapping and does NOT contain `section_key`, parse
+///   `default_block` via `serde_yaml::from_str` and insert it under `section_key`.
+/// - If `section_key` is already present, this is a no-op — the existing value
+///   is never overwritten (idempotent).
+/// - If `yaml_value` is not a Mapping (e.g. Null on an empty file), it is
+///   promoted to a Mapping before inserting, so a fresh-install always works.
+///
+/// The caller is responsible for the load-mutate-save cycle.
+pub fn write_defaults_if_absent(
+    yaml_value: &mut serde_yaml::Value,
+    section_key: &str,
+    default_block: &str,
+) {
+    // Promote Null to empty Mapping (fresh install / empty file).
+    if yaml_value.is_null() {
+        *yaml_value = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    }
+
+    if let serde_yaml::Value::Mapping(map) = yaml_value {
+        let key = serde_yaml::Value::String(section_key.to_string());
+        if map.contains_key(&key) {
+            // Key already present — never clobber (D-11).
+            return;
+        }
+        // Parse the default_block YAML into a Value, then insert under the key.
+        // If parsing fails (malformed constant), skip silently — don't crash setup.
+        if let Ok(parsed) = serde_yaml::from_str::<serde_yaml::Value>(default_block) {
+            map.insert(key, parsed);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Default-block YAML strings for the 13 missing config sections (D-10).
+// These mirror cli-config.yaml.example and are used by setup.rs via
+// write_defaults_if_absent for a fresh install or on update/reinstall.
+// All values are COMMENTED-OUT so user edits survive (additive merge only).
+// ---------------------------------------------------------------------------
+
+/// Return the default commented-block YAML string for a config section.
+/// Returns `None` for unknown section names.
+pub fn default_block_for(section: &str) -> Option<&'static str> {
+    match section {
+        "agent" => Some(AGENT_DEFAULT_BLOCK),
+        "terminal" => Some(TERMINAL_DEFAULT_BLOCK),
+        "web" => Some(WEB_DEFAULT_BLOCK),
+        "exec" => Some(EXEC_DEFAULT_BLOCK),
+        "cron" => Some(CRON_DEFAULT_BLOCK),
+        "compression" => Some(COMPRESSION_DEFAULT_BLOCK),
+        "skills" => Some(SKILLS_DEFAULT_BLOCK),
+        "delegation" => Some(DELEGATION_DEFAULT_BLOCK),
+        "rate_limit" => Some(RATE_LIMIT_DEFAULT_BLOCK),
+        "batch" => Some(BATCH_DEFAULT_BLOCK),
+        "security" => Some(SECURITY_DEFAULT_BLOCK),
+        "custom_providers" => Some(CUSTOM_PROVIDERS_DEFAULT_BLOCK),
+        "kanban" => Some(KANBAN_DEFAULT_BLOCK),
+        "gateway" => Some(GATEWAY_DEFAULT_BLOCK),
+        "tools" => Some(TOOLS_DEFAULT_BLOCK),
+        _ => None,
+    }
+}
+
+/// Agent section default block (mirrors cli-config.yaml.example).
+/// The `{}` base ensures serde_yaml::from_str parses to an empty Mapping rather than Null,
+/// so the section key is inserted with a valid value on a fresh install.
+pub const AGENT_DEFAULT_BLOCK: &str = "{}";
+
+/// Terminal section default block.
+pub const TERMINAL_DEFAULT_BLOCK: &str = "{}";
+
+/// Web section default block.
+pub const WEB_DEFAULT_BLOCK: &str = "{}";
+
+/// Exec section default block.
+pub const EXEC_DEFAULT_BLOCK: &str = "{}";
+
+/// Cron section default block.
+pub const CRON_DEFAULT_BLOCK: &str = "{}";
+
+/// Compression section default block.
+pub const COMPRESSION_DEFAULT_BLOCK: &str = "{}";
+
+/// Skills section default block.
+pub const SKILLS_DEFAULT_BLOCK: &str = "{}";
+
+/// Delegation section default block.
+pub const DELEGATION_DEFAULT_BLOCK: &str = "{}";
+
+/// Rate limit section default block.
+pub const RATE_LIMIT_DEFAULT_BLOCK: &str = "{}";
+
+/// Batch section default block.
+pub const BATCH_DEFAULT_BLOCK: &str = "{}";
+
+/// Security section default block.
+pub const SECURITY_DEFAULT_BLOCK: &str = "{}";
+
+/// Custom providers section default block (empty list placeholder).
+pub const CUSTOM_PROVIDERS_DEFAULT_BLOCK: &str = "[]";
+
+/// Kanban section default block (all 17 fields, commented).
+/// Actual values come from apply_kanban_section_answer which builds a typed Mapping;
+/// this constant is a fallback for the write_defaults_if_absent path.
+pub const KANBAN_DEFAULT_BLOCK: &str = "{}";
+
+/// Gateway section default block (empty platforms map).
+pub const GATEWAY_DEFAULT_BLOCK: &str = "platforms: {}";
+
+/// Tools section default block.
+pub const TOOLS_DEFAULT_BLOCK: &str = "{}";
+
 /// Phase 26 D-05/D-19: write Config.auxiliary from wizard input.
 /// Pure mutation — no I/O. Skip semantics match D-06 default-None: if `provider`
 /// is empty/whitespace, leave config.auxiliary unchanged (operator opted out).
@@ -176,6 +369,69 @@ pub fn apply_auxiliary_answer(config: &mut Config, provider: &str, model: &str) 
 mod tests {
     use super::*;
     use crate::config::Config;
+
+    // -----------------------------------------------------------------------
+    // Plan 05 inline tests: apply_kanban_section_answer + write_defaults_if_absent
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn apply_kanban_section_answer_has_17_fields() {
+        let mut config = Config::default();
+        let block = apply_kanban_section_answer(&mut config, "");
+        let expected_fields = &[
+            "dispatch_in_gateway",
+            "dispatch_interval_seconds",
+            "max_in_progress",
+            "failure_limit",
+            "stranded_threshold_seconds",
+            "dispatch_stale_timeout_seconds",
+            "default_workdir",
+            "notification_sources",
+            "notifier_poll_seconds",
+            "auto_decompose",
+            "auto_decompose_per_tick",
+            "orchestrator_profile",
+            "default_assignee",
+            "decomposer_model",
+            "auto_promote_children",
+            "judge_model",
+            "goal_inner_max_iterations",
+        ];
+        for field in expected_fields {
+            assert!(
+                block.contains_key(&serde_yaml::Value::String(field.to_string())),
+                "apply_kanban_section_answer must emit field `{field}`"
+            );
+        }
+        assert_eq!(block.len(), 17, "block must contain exactly 17 entries");
+    }
+
+    #[test]
+    fn write_defaults_if_absent_inserts_when_absent() {
+        let mut yaml: serde_yaml::Value = serde_yaml::from_str("{}").unwrap();
+        write_defaults_if_absent(&mut yaml, "new_section", "enabled: false");
+        let map = yaml.as_mapping().expect("must remain a mapping");
+        assert!(
+            map.contains_key(&serde_yaml::Value::String("new_section".to_string())),
+            "write_defaults_if_absent must insert the key when absent"
+        );
+    }
+
+    #[test]
+    fn write_defaults_if_absent_is_idempotent_no_clobber() {
+        let mut yaml: serde_yaml::Value = serde_yaml::from_str("{}").unwrap();
+        write_defaults_if_absent(&mut yaml, "test_section", "value: original");
+        let after_first = yaml.clone();
+        write_defaults_if_absent(&mut yaml, "test_section", "value: clobbered");
+        assert_eq!(
+            yaml, after_first,
+            "write_defaults_if_absent must not clobber an existing section on second call (D-11)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Existing tests for apply_auxiliary_answer
+    // -----------------------------------------------------------------------
 
     #[test]
     fn apply_auxiliary_answer_writes_when_provider_nonempty() {
