@@ -1,0 +1,86 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+  # Release builds intentionally omit -D warnings so compiler warnings never fail a release.
+
+jobs:
+  build:
+    name: Build ${{ matrix.artifact }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15            # ARM64 Apple Silicon
+            target: aarch64-apple-darwin
+            artifact: ironhermes-macos-aarch64
+          - os: macos-15-intel      # Intel x86_64 — must be explicit; macos-15 alone = ARM64 only
+            target: x86_64-apple-darwin
+            artifact: ironhermes-macos-x86_64
+          - os: ubuntu-24.04        # Linux x86_64 (native)
+            target: x86_64-unknown-linux-gnu
+            artifact: ironhermes-linux-x86_64
+          - os: ubuntu-24.04-arm    # Linux aarch64 (native — no cross-compile needed)
+            target: aarch64-unknown-linux-gnu
+            artifact: ironhermes-linux-aarch64
+          - os: windows-latest      # Windows x86_64 (required by install.ps1, Plan 06)
+            target: x86_64-pc-windows-msvc
+            artifact: ironhermes-windows-x86_64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --bin ironhermes
+
+      - name: Sign binary (macOS only)
+        if: runner.os == 'macOS'
+        run: |
+          # Phase 37.1: ad-hoc sign (no Apple Developer account yet — D-07 deferred)
+          # Future notarization slot-in: when Apple Developer account is provisioned,
+          # replace the codesign line below with:
+          #
+          #   codesign --sign "Developer ID Application: <Name> (<TeamID>)" \
+          #     --timestamp --options runtime target/release/ironhermes
+          #
+          #   xcrun notarytool submit ${{ matrix.artifact }}.tar.gz \
+          #     --apple-id "${{ secrets.APPLE_ID }}" \
+          #     --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+          #     --password "${{ secrets.NOTARYTOOL_PASSWORD }}" \
+          #     --wait
+          #
+          #   xcrun stapler staple ${{ matrix.artifact }}.tar.gz
+          #
+          # The quarantine-strip in install.sh (xattr -d com.apple.quarantine) can
+          # remain as a no-op safety net once notarization is active.
+          codesign -s - target/release/ironhermes
+
+      - name: Package tarball (non-Windows)
+        if: runner.os != 'Windows'
+        run: |
+          cp target/release/ironhermes ironhermes
+          tar czf ${{ matrix.artifact }}.tar.gz ironhermes
+
+      - name: Package tarball (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          cp target/release/ironhermes.exe ironhermes.exe
+          tar czf ${{ matrix.artifact }}.tar.gz ironhermes.exe
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact }}.tar.gz
