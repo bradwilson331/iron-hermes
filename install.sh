@@ -408,13 +408,24 @@ cmd_uninstall() {
     fi
 
     # Remove installer-added PATH lines from shell RCs (T-37.1-02-02).
-    # Keys on the literal '# Added by IronHermes installer' marker + exact PATH line.
+    # Whole-line fixed-string match (grep -vxF) on the literal marker + the exact
+    # PATH line the installer wrote, so unrelated user lines that merely contain the
+    # substring are never deleted. The grep exit code is captured (|| rc_rc=$?) so
+    # neither an all-lines-removed result (exit 1) nor a real error (exit >1) trips
+    # `set -euo pipefail`; on a real error the original rc is left untouched.
+    local path_line="export PATH=\"${INSTALL_DIR}:\$PATH\""
+    local rc rc_rc
     for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-        if [ -f "$rc" ]; then
-            grep -v "# Added by IronHermes installer" "$rc" | \
-            grep -v "export PATH=\"${INSTALL_DIR}:" > "${rc}.ironhermes_tmp" \
-                && mv "${rc}.ironhermes_tmp" "$rc" \
-                || rm -f "${rc}.ironhermes_tmp"
+        [ -f "$rc" ] || continue
+        rc_rc=0
+        grep -vxF \
+            -e "# Added by IronHermes installer" \
+            -e "$path_line" \
+            "$rc" > "${rc}.ironhermes_tmp" || rc_rc=$?
+        if [ "$rc_rc" -le 1 ]; then
+            mv "${rc}.ironhermes_tmp" "$rc"
+        else
+            rm -f "${rc}.ironhermes_tmp"
         fi
     done
     log_ok "PATH entries removed from shell configs"
