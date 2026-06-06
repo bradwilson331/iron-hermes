@@ -17,10 +17,10 @@ The system accepts prompts through three entry points: an interactive CLI REPL, 
 
 ### Option 1 — one-line installer (recommended)
 
-Downloads a prebuilt binary, scaffolds `~/.ironhermes/`, copies config templates, and adds the binary to `~/.local/bin`. Falls back to `cargo install` if no prebuilt binary is available for your platform.
+Downloads a prebuilt binary, scaffolds `~/.ironhermes/`, copies config templates, and adds the binary to `~/.local/bin`. Falls back to `cargo install --git` if no prebuilt binary is available for your platform.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bradwilson331/ironhermes/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/bradwilson331/iron-hermes/main/install.sh | bash
 ```
 
 Reload your shell after install:
@@ -30,16 +30,53 @@ source ~/.bashrc   # bash
 source ~/.zshrc    # zsh
 ```
 
+#### Installer subcommands
+
+```bash
+# Default — download + scaffold ~/.ironhermes/ + add to PATH
+bash install.sh
+
+# Update binary only; never clobbers user-set config values
+bash install.sh update
+
+# Force re-fetch + re-scaffold; preserves .env and config.yaml
+bash install.sh reinstall
+
+# Remove binary + PATH lines; preserve ~/.ironhermes/
+bash install.sh uninstall
+
+# Remove binary + PATH lines + ~/.ironhermes/ user data
+bash install.sh uninstall --purge
+```
+
+#### Custom distribution source
+
+```bash
+# Override to a private mirror or LAN Gitea instance
+IRONHERMES_REPO=http://192.168.7.6:8418/twilson/ironhermes bash install.sh
+
+# Default GitHub source (used when IRONHERMES_REPO is not set):
+# https://github.com/bradwilson331/iron-hermes
+```
+
 ### Option 2 — build from source
 
 Requires a stable Rust toolchain (2024 edition). Install via [rustup.rs](https://rustup.rs) if needed.
 
 ```bash
-git clone https://github.com/bradwilson331/ironhermes
-cd ironhermes
+git clone https://github.com/bradwilson331/iron-hermes
+cd iron-hermes
 cargo build --release
 # Binary: target/release/ironhermes
 ```
+
+**Developer install via cargo (without cloning):**
+
+```bash
+cargo install --git https://github.com/bradwilson331/iron-hermes ironhermes
+```
+
+This replaces the retired `setup-ironhermes.sh` (dev from-source setup) and `install-gitea.sh` (Gitea-specific build). Both use cases are now covered by `install.sh` with the `IRONHERMES_REPO` override or `cargo install --git` directly.
 
 ---
 
