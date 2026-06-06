@@ -83,7 +83,7 @@ Plans:
 **Goal:** Remediate RUSTSEC-2026-0104 (reachable panic in rustls-webpki CRL parsing, DoS, CVSS 7.5) by forcing the patchable 0.103.x chain to 0.103.13 via `[patch.crates-io]`, document the non-patchable serenity 0.102.8 chain as a tracked exemption, and bump the workspace version to 0.2.0.
 **Requirements**: SEC-01, SEC-02, SEC-03, SEC-04, SEC-05, VER-01, VER-02, VER-03, VER-04
 **Depends on:** Phase 36
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
 **Wave 1**
@@ -92,7 +92,7 @@ Plans:
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
-- [ ] 37-02-PLAN.md — Workspace version bump to 0.2.0 (root + iron_hermes_ui + ironhermes-exec) + CLI --version confirm
+- [x] 37-02-PLAN.md — Workspace version bump to 0.2.0 (root + iron_hermes_ui + ironhermes-exec) + CLI --version confirm
 
 ---
 

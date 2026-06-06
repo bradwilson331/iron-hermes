@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v3.0
 milestone_name: Hermes-agent parity
 status: executing
-stopped_at: Phase 36.17.7 UI-SPEC approved
-last_updated: "2026-06-06T04:07:32.592Z"
-last_activity: 2026-06-06 -- Phase 37 execution started
+stopped_at: Phase 37 CLOSED — RUSTSEC-2026-0104 remediated + v0.2.0
+last_updated: "2026-06-06T04:13:00.000Z"
+last_activity: 2026-06-06 -- Phase 37 CLOSED (RUSTSEC-2026-0104 + v0.2.0)
 progress:
   total_phases: 61
-  completed_phases: 26
+  completed_phases: 27
   total_plans: 138
-  completed_plans: 132
-  percent: 43
+  completed_plans: 134
+  percent: 44
 ---
 
 # Project State
@@ -21,15 +21,34 @@ progress:
 See: .planning/PROJECT.md (updated 2026-04-11)
 
 **Core value:** A working conversational AI agent with personality (context files) that operates reliably over Telegram — the core loop of receive message, think with tools, respond must work flawlessly.
-**Current focus:** Phase 37 — rustsec-2026-0104-reachable-panic
+**Current focus:** Phase 37 CLOSED — pick next phase from milestone-v3.0 backlog
 
 ## Current Position
 
-Phase: 37 (rustsec-2026-0104-reachable-panic) — EXECUTING
-Plan: 1 of 2
-Status: Executing Phase 37
-Last activity: 2026-06-06 -- Phase 37 execution started
+Phase: 37 (rustsec-2026-0104-reachable-panic) — CLOSED
+Plan: 2 of 2 complete
+Status: Ready to pick next phase
+Last activity: 2026-06-06 -- Phase 37 CLOSED (RUSTSEC-2026-0104 + v0.2.0)
 Next: pick next phase from milestone-v3.0 backlog
+
+## Recent close-out summary (2026-06-06 — Phase 37 CLOSED)
+
+**Phase 37 (RUSTSEC-2026-0104 reachable-panic remediation + v0.2.0 bump):** 2 plans, 2 waves, both complete. Wave-based execution with worktree isolation, merged to `develop` (HEAD after merges `1457f449`).
+
+- **Plan 01 (Wave 1 — security remediation):** Closed the actively-exploitable Chain 2 (`reqwest`/`hyper-rustls`/`slack-morphism`/`chromiumoxide` → rustls 0.23.x) reachable CRL-parse panic (DoS, CVSS 7.5) by forcing `rustls-webpki` 0.103.10 → **0.103.13**. **Documented deviation (Rule 1):** the plan specified a `[patch.crates-io]` block, but Cargo rejects same-registry patches ("patches must point to different sources"); the executor used the correct mechanism — `cargo update -p rustls-webpki@0.103.10 --precise 0.103.13` (pin in `Cargo.lock`) — and kept a `RUSTSEC-2026-0104` audit-comment block in root `Cargo.toml` (SEC-05 grep anchor). Chain 1 (`serenity 0.12.5` → tokio-tungstenite 0.21 → rustls 0.22.4 → rustls-webpki **0.102.8**) is semver-unpatchable (no serenity 0.13.x) → **risk-accepted + documented**, re-evaluate when serenity 0.13.x ships. Commits `572ee94e`→`cbcf1f6b`.
+- **Plan 02 (Wave 2 — release boundary):** Workspace version `0.1.0 → 0.2.0` in the 3 version-bearing Cargo.toml files (root `[workspace.package]` + hardcoded `iron_hermes_ui` + `ironhermes-exec`); ~15 `version.workspace=true` crates inherit; CLI `--version` reads `env!("CARGO_PKG_VERSION")` (no source edit). Security pin preserved through the bump. Commits `041a124a`→`0da6e891`.
+
+**Gate results:**
+- SEC-01 (0.103.10 absent), SEC-02 (0.103.13 present), SEC-05 (RUSTSEC comment): **PASS** via `Cargo.lock` + grep. `0.102.8` present = expected Chain-1 exemption.
+- SEC-03: `cargo build --workspace` **exit 0** (post-merge integrated tree; 100m cold build under sccache).
+- VER-01/02/03 (`version = "0.2.0"` ×3), VER-04 (`--version` via `CARGO_PKG_VERSION`): **PASS** (committed grep + structural + Wave-2 executor worktree `--version | grep 0.2.0` green).
+- SEC-04 (no new TLS failures): satisfied by Wave-1 executor's green `cargo nextest run --workspace` + post-merge build exit 0. The post-merge full-suite nextest re-run was **terminated as inconclusive — environmentally dominated** by network/browser integration-test hangs (`hub_search_test`, `browser_prereq`, `sse_provider_error_stream`, `extra_request_options`, `client_invariant`, `shrike_service`) blocking on I/O past `slow-timeout` (which was NOT reaping them — procs seen at 17:38 elapsed vs ~4min terminate-after) plus host saturation. None are rustls/TLS/webpki-related; not a regression from this phase.
+
+**Side finding — macOS codesign mitigation (36.17.7) CONFIRMED working:** during the post-merge nextest, freshly-built test binaries produced split `.dSYM` bundles (`deps/*.dSYM` 3 → 6) and launched with **zero `codesign` processes** throughout the run phase — i.e. the syspolicyd/amfid first-launch serialization stall is gone for binaries built under `[profile.dev] debug = "line-tables-only"` + `-Csplit-debuginfo=packed`. The large 170–296 MB binaries observed earlier were confirmed **stale pre-mitigation artifacts** (full `debug=2`; "rebuilt since build start: 0"), not products of the current config. `RUSTFLAGS` unset, so the macOS `cfg` rustflags block is active.
+
+**Operational note (sccache):** the 100-minute cold workspace build + the nextest test-target rebuild were dominated by **sccache overhead** on a partly-cold cache (low aggregate CPU ~1.5 cores across 36 rustc procs, all waiting on the wrapper). sccache disabled at user request after close-out (commented `rustc-wrapper` in `~/.cargo/config.toml`). Note: removing the wrapper invalidates cargo fingerprints → next build is a one-time full rebuild.
+
+Counter update: `completed_phases: 26 → 27`; `completed_plans: 132 → 134`; `percent: 43 → 44`.
 
 ## Recent close-out summary (2026-06-05 — Phase 36.17.7 CLOSED, partial)
 
