@@ -49,6 +49,16 @@ jobs:
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
+      # Linux-only system deps: rodio -> cpal -> alsa-sys needs ALSA dev headers
+      # (alsa.pc) to build. macOS uses CoreAudio and Windows uses WASAPI — no
+      # system package required there. Both Linux legs are native (no cross), so
+      # apt installs the correct arch automatically.
+      - name: Install Linux audio system deps (ALSA)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+
       - name: Build release binary
         run: cargo build --release --bin ironhermes
 
