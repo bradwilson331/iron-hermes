@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::adapter::PlatformAdapter;
+use crate::markdown_v2::escape_outside_code_blocks;
 
 const EDIT_INTERVAL: Duration = Duration::from_millis(300);
 const MAX_MESSAGE_LEN: usize = 4096;
@@ -55,6 +56,19 @@ impl StreamConsumer {
         self.dirty = true;
     }
 
+    /// Phase 36.17.2.2 D-10: expose the post-flush final body as a borrowed
+    /// slice. Used by the D-19 dispatch loop in
+    /// `GatewayMessageHandler::run_agent` to construct the reinsert body
+    /// (`format!("{final_body}\n\n{failed_tags}")`) when one or more
+    /// attachments fail or trip the D-15 size pre-check. The body is the
+    /// canonical text that was edited into the placeholder by `flush(true)`
+    /// at the call site above — accessible AFTER the final flush has run.
+    /// Owned by the consumer task and handed to the parent task via a
+    /// `tokio::sync::oneshot::channel<String>` (see handler.rs:1308 area).
+    pub fn final_body(&self) -> &str {
+        &self.buffer
+    }
+
     /// Set a tool status line shown during tool execution (D-02).
     /// Format: "\n\n⚙️ Running: {tool_name}..."
     pub fn tool_status(&mut self, tool_name: &str) {
@@ -74,7 +88,9 @@ impl StreamConsumer {
     ///   interval hasn't elapsed, this is a no-op.
     /// - If `final_edit` is true, edits with Markdown parse mode and no cursor.
     /// - If content exceeds `MAX_MESSAGE_LEN`, splits at the best paragraph
-    ///   boundary and chains a new message.
+    ///   boundary and chains a new message. This applies to both final and
+    ///   intermediate flushes — Telegram rejects editMessageText calls with
+    ///   content > 4096 chars regardless of parse_mode.
     pub async fn flush(&mut self, final_edit: bool) -> Result<()> {
         let now = Instant::now();
 
@@ -84,11 +100,93 @@ impl StreamConsumer {
         }
 
         if final_edit {
-            // Final edit: Markdown mode, no cursor, no tool line
-            let content = self.buffer.clone();
-            self.adapter
-                .edit_message_markdown(&self.chat_id, &self.current_message_id, &content)
-                .await?;
+            // Final edit: Markdown mode, no cursor, no tool line.
+            // Must chunk at MAX_MESSAGE_LEN — Telegram rejects editMessageText
+            // with content > 4096 chars even in Markdown mode (Bug fix: the
+            // overflow check was previously only in the non-final branch, causing
+            // silent 400 errors and dropped long-form responses).
+            let mut remaining = self.buffer.clone();
+            let mut first_chunk = true;
+            loop {
+                if remaining.len() <= MAX_MESSAGE_LEN {
+                    // Last (or only) chunk: edit the current placeholder with
+                    // Telegram MarkdownV2 (Phase 36.17.2.2-04 D-01 rename;
+                    // Phase 36.17.2.2-05 D-01 + D-04 escape applied).
+                    //
+                    // `escape_outside_code_blocks` walks the body to escape
+                    // the 18 MarkdownV2 reserved chars OUTSIDE of fenced code
+                    // blocks, inline-code spans, and `[label](url)` link
+                    // URLs — preserving real model-authored markdown syntax
+                    // (`*bold*`, ` ```fence``` `, links) while ensuring
+                    // literal reserved chars in prose render correctly.
+                    // The D-02 single-retry-as-plain-text fallback inside
+                    // `TelegramAdapter::edit_message_markdown_v2` is now the
+                    // safety net for the rare model-emitted-malformed-markdown
+                    // case, not the common-path crutch.
+                    self.adapter
+                        .edit_message_markdown_v2(
+                            &self.chat_id,
+                            &self.current_message_id,
+                            &escape_outside_code_blocks(&remaining),
+                        )
+                        .await?;
+                    break;
+                }
+
+                // Content exceeds limit — split at best boundary
+                let split_point = find_split_point(&remaining, MAX_MESSAGE_LEN);
+                let chunk = remaining[..split_point].to_string();
+                let rest = remaining[split_point..].trim_start().to_string();
+
+                if first_chunk {
+                    // Finalize the placeholder message with the first chunk (plain
+                    // text, no Markdown, to avoid partial-markdown parse failures)
+                    self.adapter
+                        .edit_message(&self.chat_id, &self.current_message_id, &chunk)
+                        .await?;
+                    self.overflow_message_ids
+                        .push(self.current_message_id.clone());
+                    first_chunk = false;
+                } else {
+                    // Phase 36.17.2.2-05 D-Discretion: send overflow chunks
+                    // as MarkdownV2 with pre-escaped body so the entire
+                    // final response renders consistently (per CONTEXT.md
+                    // "every overflow chunk uses send_message_markdown_v2").
+                    let new_msg = self
+                        .adapter
+                        .send_message_markdown_v2(
+                            &self.chat_id,
+                            &escape_outside_code_blocks(&chunk),
+                            None,
+                        )
+                        .await?;
+                    self.overflow_message_ids
+                        .push(self.current_message_id.clone());
+                    self.current_message_id = new_msg.message_id;
+                }
+
+                // Phase 36.17.2.2-05: send the rest as a new MarkdownV2
+                // message and continue the loop (the rest may either fit
+                // on the next iteration and become the final MarkdownV2
+                // edit, or split again into more overflow chunks).
+                let new_msg = self
+                    .adapter
+                    .send_message_markdown_v2(
+                        &self.chat_id,
+                        &escape_outside_code_blocks(&rest),
+                        None,
+                    )
+                    .await?;
+                self.current_message_id = new_msg.message_id;
+                remaining = rest;
+
+                // If after sending the new message the remaining content fits,
+                // the loop will edit it with Markdown on the next iteration.
+                // Guard against infinite loops on empty remainder.
+                if remaining.is_empty() {
+                    break;
+                }
+            }
         } else {
             // Build display: buffer + optional tool line + cursor
             let mut display = self.buffer.clone();
@@ -194,12 +292,16 @@ mod tests {
             message_id: String,
             content: String,
         },
-        EditMessageMarkdown {
+        EditMessageMarkdownV2 {
             chat_id: String,
             message_id: String,
             content: String,
         },
         SendMessage {
+            chat_id: String,
+            content: String,
+        },
+        SendMessageMarkdownV2 {
             chat_id: String,
             content: String,
         },
@@ -255,7 +357,7 @@ mod tests {
             Ok(())
         }
 
-        async fn edit_message_markdown(
+        async fn edit_message_markdown_v2(
             &self,
             chat_id: &str,
             message_id: &str,
@@ -264,12 +366,38 @@ mod tests {
             self.calls
                 .lock()
                 .unwrap()
-                .push(AdapterCall::EditMessageMarkdown {
+                .push(AdapterCall::EditMessageMarkdownV2 {
                     chat_id: chat_id.to_string(),
                     message_id: message_id.to_string(),
                     content: content.to_string(),
                 });
             Ok(())
+        }
+
+        async fn send_message_markdown_v2(
+            &self,
+            chat_id: &str,
+            content: &str,
+            _thread_id: Option<&str>,
+        ) -> Result<MessageResponse> {
+            // Phase 36.17.2.2-05: record overflow-chunk MarkdownV2 sends
+            // as a distinct call so tests can distinguish plain `SendMessage`
+            // (used by the intermediate-edit / non-final cursor-strip
+            // overflow path per D-03) from MarkdownV2 sends (the final-edit
+            // overflow path).
+            let id = self.next_message_id.lock().unwrap().clone();
+            self.calls
+                .lock()
+                .unwrap()
+                .push(AdapterCall::SendMessageMarkdownV2 {
+                    chat_id: chat_id.to_string(),
+                    content: content.to_string(),
+                });
+            Ok(MessageResponse {
+                message_id: id,
+                chat_id: chat_id.to_string(),
+                platform: Platform::Telegram,
+            })
         }
 
         async fn delete_message(&self, _chat_id: &str, _message_id: &str) -> Result<()> {
@@ -312,14 +440,14 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         match &calls[0] {
-            AdapterCall::EditMessageMarkdown { content, .. } => {
+            AdapterCall::EditMessageMarkdownV2 { content, .. } => {
                 assert!(
                     !content.contains('\u{2588}'),
                     "Final edit should not have cursor"
                 );
                 assert_eq!(content, "hello");
             }
-            other => panic!("Expected EditMessageMarkdown, got {:?}", other),
+            other => panic!("Expected EditMessageMarkdownV2, got {:?}", other),
         }
     }
 
@@ -396,6 +524,65 @@ mod tests {
         assert_eq!(send_count, 1, "Should send new message for overflow");
     }
 
+    /// Regression test: final flush with content > 4096 chars must chunk, not
+    /// attempt a single editMessageText that Telegram would reject with 400.
+    #[tokio::test]
+    async fn test_final_flush_overflow_chunks_long_content() {
+        let (adapter, calls) = MockAdapter::new();
+        let mut sc = StreamConsumer::new(adapter, "chat1", "msg-1");
+
+        // Build content clearly over 4096 chars with a paragraph split point
+        let para1 = "A".repeat(2500);
+        let para2 = "B".repeat(2500);
+        let big_content = format!("{}\n\n{}", para1, para2);
+        assert!(big_content.len() > MAX_MESSAGE_LEN, "test content must exceed limit");
+
+        sc.push(&big_content);
+        sc.flush(true).await.unwrap();
+
+        let calls = calls.lock().unwrap();
+        // First chunk: edit_message (plain text, no Markdown) on placeholder
+        let edit_plain_count = calls
+            .iter()
+            .filter(|c| matches!(c, AdapterCall::EditMessage { .. }))
+            .count();
+        // Phase 36.17.2.2-05: continuation chunk(s) now route through
+        // send_message_markdown_v2 (D-Discretion: "every overflow chunk
+        // uses send_message_markdown_v2 so the entire response renders
+        // consistently"). Plain SendMessage from the final branch is now
+        // never expected.
+        let send_md_count = calls
+            .iter()
+            .filter(|c| matches!(c, AdapterCall::SendMessageMarkdownV2 { .. }))
+            .count();
+        let send_plain_count = calls
+            .iter()
+            .filter(|c| matches!(c, AdapterCall::SendMessage { .. }))
+            .count();
+        // Final chunk: edit_message_markdown_v2 on the last message id
+        let edit_md_count = calls
+            .iter()
+            .filter(|c| matches!(c, AdapterCall::EditMessageMarkdownV2 { .. }))
+            .count();
+
+        assert!(
+            edit_plain_count >= 1,
+            "Should have at least one plain edit for the first chunk"
+        );
+        assert!(
+            send_md_count >= 1,
+            "Should send at least one new MarkdownV2 message for overflow content (D-Discretion)"
+        );
+        assert_eq!(
+            send_plain_count, 0,
+            "Final-edit overflow path must NOT use plain SendMessage (D-Discretion: every overflow chunk is MarkdownV2)"
+        );
+        assert_eq!(
+            edit_md_count, 1,
+            "Should have exactly one final markdown edit for the last chunk"
+        );
+    }
+
     #[tokio::test]
     async fn test_tool_status_appears_in_display() {
         let (adapter, calls) = MockAdapter::new();
@@ -442,7 +629,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_final_edit_uses_edit_message_markdown() {
+    async fn test_final_edit_uses_edit_message_markdown_v2() {
         let (adapter, calls) = MockAdapter::new();
         let mut sc = StreamConsumer::new(adapter, "chat1", "msg-1");
         sc.push("**bold** text");
@@ -451,8 +638,8 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert!(
-            matches!(&calls[0], AdapterCall::EditMessageMarkdown { .. }),
-            "Final edit should use edit_message_markdown, got {:?}",
+            matches!(&calls[0], AdapterCall::EditMessageMarkdownV2 { .. }),
+            "Final edit should use edit_message_markdown_v2, got {:?}",
             calls[0]
         );
     }

@@ -24,6 +24,14 @@ url = { workspace = true }
 tiktoken-rs = "0.11.0"
 reqwest = { workspace = true }
 tokio = { workspace = true }
+toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
+# Phase 36.3.7.5 BUG-36.3.7.5-07d: lifecycle e2e test in
+# tests/handlers_kanban_notify.rs drives the full cross-crate pipeline
+# (cmd_kanban Create arm -> auto-subscribe -> notifier_tick -> mock send_fn).
+# Dev-only — does NOT participate in the production dep graph; ironhermes-kanban
+# already depends on ironhermes-core (regular dep), so Cargo handles this dev-dep
+# without forming a build cycle (dev-deps are excluded from the lib's link graph).
+ironhermes-kanban = { path = "../ironhermes-kanban" }

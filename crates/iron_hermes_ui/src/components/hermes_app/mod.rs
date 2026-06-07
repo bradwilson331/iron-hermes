@@ -131,6 +131,11 @@ pub fn HermesApp() -> Element {
     let mut subagent_events = use_signal(|| 0u64);
     let mut is_ws_connected = use_signal(|| false);
 
+    // Phase 36.17.4 (D-03a): queue pill state — (depth, paused). Updated on every
+    // QueueUpdated event from the server (Plan 02 protocol variant). Consumed by
+    // AppFooter via use_context.
+    let mut queue_state = use_signal(|| (0u32, false));
+
     // Bootstrap the chat session via the existing server fn from
     // Phase 25.5 (D-02 — no edits to the server file). Mirrors
     // warp_hermes.rs:104-129 adapted for the new bubble shape.
@@ -247,6 +252,60 @@ pub fn HermesApp() -> Element {
                                 let cur = *subagent_events.read();
                                 subagent_events.set(cur + 1);
                             }
+                            // Phase 36.17.4 (D-03a): (u32, bool) is Copy — direct .set call satisfies signal-borrow-across-await clippy rule (no .await in this arm).
+                            crate::protocol::ChatStreamEvent::QueueUpdated { depth, paused } => {
+                                queue_state.set((depth, paused));
+                            }
+                            // Phase 36.17.7 D-02-a: AudioOut arrives as Message::Binary (see arm below).
+                            // This Text-path arm is a silent no-op — if somehow AudioOut arrives as Text,
+                            // it is acknowledged here for exhaustive-match compliance only.
+                            crate::protocol::ChatStreamEvent::AudioOut { .. } => {}
+                        }
+                    }
+                    // Phase 36.17.7 D-02-a/b HIGH 4 + HIGH 7 fix:
+                    // ChatStreamEvent::AudioOut arrives as Message::Binary.
+                    // The binary frame payload is JSON (uuid + mime + bytes array).
+                    // We deserialize, then create a Blob URL via web_sys::Url::create_object_url_with_blob
+                    // for first-play. The HTTP /audio/:uuid route ships in Plan 05 for replay only.
+                    Ok(dioxus_fullstack::Message::Binary(bytes)) => {
+                        let event: crate::protocol::ChatStreamEvent =
+                            match serde_json::from_slice(&bytes) {
+                                Ok(e) => e,
+                                Err(_) => continue,
+                            };
+                        if let crate::protocol::ChatStreamEvent::AudioOut {
+                            mime,
+                            uuid: _uuid,
+                            bytes: audio_bytes,
+                        } = event
+                        {
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                let uint8_array = js_sys::Uint8Array::from(audio_bytes.as_slice());
+                                let parts = js_sys::Array::new();
+                                parts.push(&uint8_array);
+                                let opts = web_sys::BlobPropertyBag::new();
+                                opts.set_type(&mime);
+                                if let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence_and_options(
+                                    &parts, &opts,
+                                ) {
+                                    if let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) {
+                                        let id = {
+                                            let n = *next_id.read();
+                                            next_id.set(n + 1);
+                                            n
+                                        };
+                                        bubbles
+                                            .write()
+                                            .push(ChatBubble::audio(id, url, mime));
+                                    }
+                                }
+                            }
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                // Server-side render path: no Blob API; suppress unused warnings.
+                                let _ = (mime, audio_bytes);
+                            }
                         }
                     }
                     Ok(dioxus_fullstack::Message::Close { .. }) => {
@@ -258,7 +317,7 @@ pub fn HermesApp() -> Element {
                         is_ws_connected.set(false);
                         break;
                     }
-                    _ => continue, // Skip ping/pong/binary.
+                    _ => continue, // Skip ping/pong.
                 }
             }
         }
@@ -333,6 +392,8 @@ pub fn HermesApp() -> Element {
     // Phase 26.7.1 Plan 01 — context for ScreenAgents (D-07 / D-08). subagent_events drives push-restart in Plan 02; is_ws_connected drives dynamic poll cadence.
     use_context_provider(|| subagent_events);
     use_context_provider(|| is_ws_connected);
+    // Phase 36.17.4 (D-03a): expose queue_state to AppFooter via context.
+    use_context_provider(|| queue_state);
 
     rsx! {
         hud_chrome::HudChrome {}

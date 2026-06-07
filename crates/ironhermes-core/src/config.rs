@@ -1,3 +1,4 @@
+use crate::config_extras::ProviderModelConfig;
 use crate::constants::{DEFAULT_MAX_ITERATIONS, DEFAULT_MODEL, get_hermes_home};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -44,7 +45,7 @@ pub fn validate_api_key_env(value: &str) -> anyhow::Result<()> {
 // Reserved role names (D-05, Phase 26)
 // =============================================================================
 
-/// The seven reserved auxiliary role names (D-05, PROV-06, Phase 26 + Phase 25.2 D-13 + Phase 25.3 D-P0-1).
+/// The nine reserved auxiliary role names (D-05, PROV-06, Phase 26 + Phase 25.2 D-13 + Phase 25.3 D-P0-1 + Phase 36.3.7.10 + Phase 36.3.7.12).
 ///
 /// Used by `model.roles:` map keys and `auxiliary` per-task overrides.
 /// Unknown role names must be rejected at config load (Phase 26 anti-pattern
@@ -55,14 +56,17 @@ pub const RESERVED_ROLE_NAMES: &[&str] = &[
     "session_search",
     "skills_hub",
     "mcp_helper",
-    "summarization", // Phase 25.2 D-13 — second resolve_role consumer (web_extract)
-    "curator",       // Phase 25.3 D-P0-1 — Phase 25.4 Curator cascade prerequisite
+    "summarization",     // Phase 25.2 D-13 — second resolve_role consumer (web_extract)
+    "curator",           // Phase 25.3 D-P0-1 — Phase 25.4 Curator cascade prerequisite
+    "kanban_decomposer", // Phase 36.3.7.10 — bridges to auxiliary.kanban_decomposer config key (reference.md §449-451)
+    "kanban_judge",      // Phase 36.3.7.12 D-05 — auxiliary judge for the goal-mode worker loop
 ];
 
-/// Validate that a role name is one of the seven reserved helper-task roles.
+/// Validate that a role name is one of the nine reserved helper-task roles.
 ///
 /// Valid: `vision`, `compression`, `session_search`, `skills_hub`, `mcp_helper`,
-/// `summarization`, `curator` (Phase 26 D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1).
+/// `summarization`, `curator`, `kanban_decomposer`, `kanban_judge`
+/// (Phase 26 D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1 + Phase 36.3.7.10 + Phase 36.3.7.12).
 ///
 /// # Errors
 /// Returns an error if `name` is not in `RESERVED_ROLE_NAMES`.
@@ -207,6 +211,18 @@ pub struct ProviderConfig {
     /// When `true`, this provider is excluded from the resolver (D-14, Phase 26).
     /// `hermes provider disable <name>` writes this flag; `enable` clears it.
     pub disabled: Option<bool>,
+    /// Per-provider extra request body options forwarded to the LLM API (D-01 fallback, Phase 36.15).
+    /// Provider-level defaults; per-model overrides live under `models.<model>.extra_request_options`.
+    /// Uses `HashMap<String, serde_json::Value>` (D-01 deviation — avoids serde_yaml untagged
+    /// enum ambiguity with all-Optional struct fields; see config_extras.rs module doc).
+    /// `#[serde(default)]` ensures pre-36.15 configs parse cleanly with an empty map.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub extra_request_options: HashMap<String, serde_json::Value>,
+    /// Per-model configuration overrides (D-02, Phase 36.15).
+    /// Keys are model identifiers (e.g., `"llama3.1:8b"`); YAML keys with colons must be quoted.
+    /// `#[serde(default)]` ensures pre-36.15 configs parse cleanly with an empty map.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub models: HashMap<String, ProviderModelConfig>,
 }
 
 impl Default for ProviderConfig {
@@ -219,6 +235,8 @@ impl Default for ProviderConfig {
             default_model: None,
             fallback_providers: vec![],
             disabled: None,
+            extra_request_options: HashMap::new(),
+            models: HashMap::new(),
         }
     }
 }
@@ -333,6 +351,268 @@ pub struct Config {
     /// `#[serde(default)]` makes this field optional in YAML — pre-25.2 configs parse cleanly.
     #[serde(default)]
     pub extract: ExtractConfig,
+    /// Phase 36.2 (D-CACHE-02): prompt caching configuration.
+    /// Pre-36.2 configs parse cleanly via `#[serde(default)]`.
+    #[serde(default)]
+    pub prompt_caching: PromptCachingConfig,
+    /// Phase 36.3.7 (D-09): kanban subsystem configuration.
+    ///
+    /// Stored as raw `serde_yaml::Value` (same pattern as `mcp_servers`) to
+    /// avoid a circular crate dependency — `ironhermes-kanban` already depends
+    /// on `ironhermes-core`, so `ironhermes-core` cannot depend on
+    /// `ironhermes-kanban`. The gateway runner deserializes this value into
+    /// `ironhermes_kanban::KanbanConfig` at the task-spawn site.
+    ///
+    /// Pre-36.3.7 configs parse cleanly with a `Null` value, which the
+    /// gateway runner treats as all-defaults.
+    #[serde(default)]
+    pub kanban: serde_yaml::Value,
+    /// Phase 36.3.7.11 (D-17): dashboard tail consumer configuration.
+    ///
+    /// `dashboard.kanban.tail_interval_ms` controls the dashboard tail
+    /// consumer's polling interval (default 250 ms). Pre-36.3.7.11 configs
+    /// parse cleanly via `#[serde(default)]`.
+    #[serde(default)]
+    pub dashboard: DashboardConfig,
+    /// Phase 36.17.5 (D-12): TTS provider configuration.
+    /// Pre-36.17.5 configs parse cleanly via `#[serde(default)]`.
+    #[serde(default)]
+    pub tts: TtsConfig,
+    /// Phase 36.17.7 D-02-d: audio cache lifecycle policy.
+    /// Controls GC of `$IRONHERMES_HOME/audio_cache/` files produced by
+    /// `text_to_speech` + `send_audio` (web replay surface).
+    /// Pre-36.17.7 configs parse cleanly via `#[serde(default)]`.
+    #[serde(default)]
+    pub audio_cache: AudioCacheConfig,
+}
+
+/// Phase 36.17.7 D-02-d: audio cache lifecycle policy.
+///
+/// Pre-36.17.7 configs parse cleanly via `#[serde(default)]` on this struct AND
+/// on the `audio_cache:` field of [`Config`]. Defaults: 7 days max age,
+/// 86400 seconds (daily) sweep interval.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AudioCacheConfig {
+    /// Maximum age in days for files in `$IRONHERMES_HOME/audio_cache/`.
+    /// Files older than this are removed by `gc_sweep_audio_cache` on startup
+    /// and on every periodic sweep. Default: 7.
+    pub max_age_days: u32,
+    /// Periodic GC sweep interval in seconds. Default: 86400 (daily).
+    /// Bounded by `max_age_days` — a sweep cadence longer than the max age
+    /// would let stale files accumulate temporarily.
+    pub sweep_interval_secs: u64,
+}
+
+impl Default for AudioCacheConfig {
+    fn default() -> Self {
+        Self {
+            max_age_days: 7,
+            sweep_interval_secs: 86400,
+        }
+    }
+}
+
+// =============================================================================
+// DashboardConfig + DashboardKanbanConfig (Phase 36.3.7.11 D-17)
+// =============================================================================
+
+/// Phase 36.3.7.11 (D-17): dashboard configuration block.
+///
+/// Surfaced in `config.yaml` as a top-level `dashboard:` block with a
+/// `kanban:` sub-block. `#[serde(default)]` on the field site in
+/// [`Config`] makes pre-36.3.7.11 configs parse cleanly with the
+/// defaults applied.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DashboardConfig {
+    pub kanban: DashboardKanbanConfig,
+}
+
+/// Phase 36.3.7.11 (D-17): kanban-specific dashboard configuration.
+///
+/// `tail_interval_ms` controls the tail consumer's polling interval in
+/// milliseconds. Default 250 ms (sub-second perceived latency). The
+/// tail loop is spawned in `AppState::init` at this cadence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardKanbanConfig {
+    /// Tail consumer polling interval in milliseconds. Default: 250 ms.
+    pub tail_interval_ms: u64,
+}
+
+impl Default for DashboardKanbanConfig {
+    fn default() -> Self {
+        Self {
+            tail_interval_ms: 250,
+        }
+    }
+}
+
+#[cfg(test)]
+mod dashboard_config_tests {
+    use super::*;
+
+    /// Phase 36.3.7.11 (D-17): YAML without `dashboard:` key parses with
+    /// the canonical default `tail_interval_ms = 250`.
+    #[test]
+    fn dashboard_default_tail_interval_is_250() {
+        let yaml = "model:\n  default: gpt-4\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse base config");
+        assert_eq!(
+            cfg.dashboard.kanban.tail_interval_ms, 250,
+            "missing `dashboard:` key must default to 250 ms (D-17)"
+        );
+    }
+
+    /// Phase 36.3.7.11 (D-17): YAML override of
+    /// `dashboard.kanban.tail_interval_ms` deserializes correctly.
+    #[test]
+    fn dashboard_yaml_override() {
+        let yaml = "dashboard:\n  kanban:\n    tail_interval_ms: 500\n";
+        let cfg: Config = serde_yaml::from_str(yaml).expect("parse override config");
+        assert_eq!(cfg.dashboard.kanban.tail_interval_ms, 500);
+    }
+}
+
+// =============================================================================
+// PromptCachingConfig + CacheTtl (Phase 36.2 D-CACHE-02)
+// =============================================================================
+
+/// Phase 36.2 (D-CACHE-02): prompt caching configuration.
+///
+/// Surfaced in `config.yaml` as a top-level `prompt_caching:` block with two
+/// fields: `ttl` (`"5m"` | `"1h"`, default `"1h"`) and `enabled` (default `true`).
+/// `#[serde(default)]` on the field site in [`Config`] makes pre-36.2 configs
+/// parse cleanly with the defaults applied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PromptCachingConfig {
+    /// Cache TTL for Anthropic `cache_control` markers. Only `"5m"` and `"1h"`
+    /// are valid — see [`CacheTtl`]. Default: `"1h"` (D-CACHE-02).
+    pub ttl: CacheTtl,
+    /// Enable prompt caching for Anthropic models. When `false`, no
+    /// `cache_control` markers are attached to the request body.
+    /// Default: `true` (D-CACHE-02).
+    pub enabled: bool,
+}
+
+impl Default for PromptCachingConfig {
+    fn default() -> Self {
+        Self {
+            ttl: CacheTtl::OneHour,
+            enabled: true,
+        }
+    }
+}
+
+/// Phase 36.2 (D-CACHE-02): closed enum for Anthropic `cache_control.ttl`.
+///
+/// Anthropic's `cache_control` envelope accepts exactly two TTL string values:
+/// `"5m"` and `"1h"`. Modeling this as a closed enum with `#[serde(rename = ...)]`
+/// rejects any other value at deserialization time (T-36.2-05-CFG mitigation —
+/// no string interpolation into the request body).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CacheTtl {
+    /// `"5m"` — short TTL for rolling breakpoints during burst conversations.
+    #[serde(rename = "5m")]
+    FiveMinutes,
+    /// `"1h"` — long TTL for cross-session cached prefixes (D-CACHE-02 default).
+    #[default]
+    #[serde(rename = "1h")]
+    OneHour,
+}
+
+impl CacheTtl {
+    /// Return the string form used in the Anthropic `cache_control` JSON
+    /// envelope (`{"type":"ephemeral","ttl":"1h"}` or `"5m"`).
+    pub fn as_anthropic_ttl(&self) -> &'static str {
+        match self {
+            CacheTtl::FiveMinutes => "5m",
+            CacheTtl::OneHour => "1h",
+        }
+    }
+}
+
+// =============================================================================
+// TtsConfig + sub-structs (Phase 36.17.5 D-12)
+// =============================================================================
+
+/// Phase 36.17.5 (D-12): Edge TTS provider configuration.
+///
+/// All fields have `#[serde(default)]` so pre-36.17.5 YAML configs parse cleanly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EdgeTtsConfig {
+    /// Edge TTS voice name (default: `"en-US-AriaNeural"`).
+    pub voice: String,
+    /// Audio output format returned by Edge TTS (default: `"mp3"`).
+    pub output_format: String,
+}
+
+impl Default for EdgeTtsConfig {
+    fn default() -> Self {
+        Self {
+            voice: "en-US-AriaNeural".to_string(),
+            output_format: "mp3".to_string(),
+        }
+    }
+}
+
+/// Phase 36.17.5 (D-12): ElevenLabs TTS provider configuration.
+///
+/// All fields have `#[serde(default)]` so pre-36.17.5 YAML configs parse cleanly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ElevenLabsConfig {
+    /// ElevenLabs voice ID (default: `"pNInz6obpgDQGcFmaJgB"` — Adam voice).
+    pub voice_id: String,
+    /// ElevenLabs model ID (default: `"eleven_multilingual_v2"`).
+    pub model_id: String,
+    /// Audio output format (default: `"mp3"`).
+    ///
+    /// [NOTE] Opus container handling deferred — RESEARCH Open Q #2 / D-04 ElevenLabs Opus path.
+    /// ElevenLabs added `opus_48000_*` output formats 2025-03-31; enabling native Opus for
+    /// Telegram voice bubbles without ffmpeg is a follow-up task.
+    pub output_format: String,
+}
+
+impl Default for ElevenLabsConfig {
+    fn default() -> Self {
+        Self {
+            voice_id: "pNInz6obpgDQGcFmaJgB".to_string(),     // Adam
+            model_id: "eleven_multilingual_v2".to_string(),
+            output_format: "mp3".to_string(),                  // Opus opt-in deferred (RESEARCH Open Q #2)
+        }
+    }
+}
+
+/// Phase 36.17.5 (D-12): Top-level TTS configuration block.
+///
+/// Strongly-typed per-provider sub-blocks — no `serde_json::Value` escape hatches
+/// per D-12. Adding a new provider in a future phase = adding a new typed field here.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TtsConfig {
+    /// Active TTS provider name (default: `"edge"`).
+    pub provider: String,
+    /// Optional path to ffmpeg binary for MP3→Opus conversion (D-04).
+    /// `None` means auto-detect via `std::process::Command::new("ffmpeg")`.
+    pub ffmpeg_path: Option<String>,
+    /// Edge TTS provider configuration.
+    pub edge: EdgeTtsConfig,
+    /// ElevenLabs TTS provider configuration.
+    pub elevenlabs: ElevenLabsConfig,
+}
+
+impl Default for TtsConfig {
+    fn default() -> Self {
+        Self {
+            provider: "edge".to_string(),
+            ffmpeg_path: None,
+            edge: EdgeTtsConfig::default(),
+            elevenlabs: ElevenLabsConfig::default(),
+        }
+    }
 }
 
 // =============================================================================
@@ -979,7 +1259,10 @@ pub struct SubagentConfig {
     /// Maximum concurrent child agents. Default: 3.
     /// (D-07: renamed from `max_subagents`)
     pub max_concurrent_children: usize,
-    /// Maximum LLM iterations per child agent. Default: 50 (D-08: raised from 10).
+    /// Maximum LLM iterations per child agent. Default: 20 (lowered from 50 to
+    /// bound the cost when a failing child loops on tool errors; D-08 had raised
+    /// from 10 to 50 but the worst case there pairs with the parent budget for a
+    /// multi-hour grind on a single bad delegation).
     pub max_iterations: usize,
     /// Default toolset groups for child agents (D-01). Default: ["terminal", "file", "web"].
     pub default_toolsets: Vec<String>,
@@ -1009,7 +1292,7 @@ impl Default for SubagentConfig {
             // D-07 confirmed no-op: child_timeout_seconds stays at 300.
             stale_warn_seconds: 120,
             max_concurrent_children: 3,
-            max_iterations: 50,
+            max_iterations: 20,
             default_toolsets: vec!["terminal".into(), "file".into(), "web".into()],
             model: None,
             provider: None,
@@ -1126,6 +1409,8 @@ impl Config {
                             default_model: custom.default_model.clone(),
                             fallback_providers: vec![],
                             disabled: None,
+                            extra_request_options: HashMap::new(),
+                            models: HashMap::new(),
                         },
                     );
                 }
@@ -1383,8 +1668,8 @@ model:
         let default = SubagentConfig::default();
         assert_eq!(default.child_timeout_seconds, 300);
         assert_eq!(default.max_concurrent_children, 3);
-        // D-08: default max_iterations raised from 10 to 50
-        assert_eq!(default.max_iterations, 50);
+        // Lowered from 50 to 20 to bound runaway-delegation cost (supersedes D-08).
+        assert_eq!(default.max_iterations, 20);
         // Phase 32.3 Plan 01 (D-05): stale_warn_seconds defaults to 120.
         assert_eq!(
             default.stale_warn_seconds, 120,
@@ -1423,8 +1708,8 @@ model:
         let config = Config::default();
         assert_eq!(config.delegation.child_timeout_seconds, 300);
         assert_eq!(config.delegation.max_concurrent_children, 3);
-        // D-08: default max_iterations raised from 10 to 50
-        assert_eq!(config.delegation.max_iterations, 50);
+        // Lowered from 50 to 20 to bound runaway-delegation cost (supersedes D-08).
+        assert_eq!(config.delegation.max_iterations, 20);
     }
 
     #[test]
@@ -1437,8 +1722,8 @@ model:
         let config: Config = serde_yaml::from_str(yaml).expect("must parse");
         assert_eq!(config.delegation.child_timeout_seconds, 300);
         assert_eq!(config.delegation.max_concurrent_children, 3);
-        // D-08: default max_iterations raised from 10 to 50
-        assert_eq!(config.delegation.max_iterations, 50);
+        // Lowered from 50 to 20 to bound runaway-delegation cost (supersedes D-08).
+        assert_eq!(config.delegation.max_iterations, 20);
     }
 
     #[test]
@@ -1466,8 +1751,8 @@ model:
         // D-32.2 new fields
         assert_eq!(default.max_spawn_depth, 1, "max_spawn_depth must default to 1");
         assert!(default.orchestrator_enabled, "orchestrator_enabled must default to true");
-        // D-08: raised from 10 to 50
-        assert_eq!(default.max_iterations, 50, "max_iterations must default to 50 per D-08");
+        // Lowered from 50 to 20 to bound runaway-delegation cost (supersedes D-08).
+        assert_eq!(default.max_iterations, 20, "max_iterations must default to 20 (runaway-delegation guard)");
         // Phase 32.3 Plan 01 (D-05): new soft-stale warn threshold field.
         assert_eq!(
             default.stale_warn_seconds, 120,
@@ -1485,8 +1770,8 @@ delegation:
         let config: Config = serde_yaml::from_str(yaml).expect("must parse");
         assert_eq!(config.delegation.child_timeout_seconds, 600);
         assert_eq!(config.delegation.max_concurrent_children, 3);
-        // D-08: default max_iterations raised from 10 to 50
-        assert_eq!(config.delegation.max_iterations, 50);
+        // Lowered from 50 to 20 to bound runaway-delegation cost (supersedes D-08).
+        assert_eq!(config.delegation.max_iterations, 20);
         assert_eq!(
             config.delegation.default_toolsets,
             vec![
@@ -2379,14 +2664,16 @@ custom_providers:
     // Phase 26 Plan 01 Task 2: validate_role_name + RESERVED_ROLE_NAMES (D-05)
     // =========================================================================
 
-    /// D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1: RESERVED_ROLE_NAMES must hold exactly
-    /// the seven roles (5 from Phase 26 + summarization from Phase 25.2 + curator from Phase 25.3).
+    /// D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1 + Phase 36.3.7.10 + Phase 36.3.7.12:
+    /// RESERVED_ROLE_NAMES must hold exactly the nine roles (5 from Phase 26 +
+    /// summarization from Phase 25.2 + curator from Phase 25.3 + kanban_decomposer
+    /// from Phase 36.3.7.10 + kanban_judge from Phase 36.3.7.12).
     #[test]
-    fn reserved_role_names_contains_all_seven_roles_with_curator() {
+    fn reserved_role_names_contains_all_nine_roles_with_kanban_judge() {
         assert_eq!(
             RESERVED_ROLE_NAMES.len(),
-            7,
-            "Phase 26 D-05 + Phase 25.2 D-13 + Phase 25.3 D-P0-1 specify exactly 7 reserved roles"
+            9,
+            "Phase 36.3.7.12 adds kanban_judge as the 9th reserved role"
         );
         for required in &[
             "vision",
@@ -2396,6 +2683,8 @@ custom_providers:
             "mcp_helper",
             "summarization",
             "curator",
+            "kanban_decomposer",
+            "kanban_judge",
         ] {
             assert!(
                 RESERVED_ROLE_NAMES.contains(required),
@@ -2403,6 +2692,11 @@ custom_providers:
                 required
             );
         }
+        // Phase 36.3.7.12 — explicit "WHY the count went up" anchor.
+        assert!(
+            RESERVED_ROLE_NAMES.contains(&"kanban_judge"),
+            "Phase 36.3.7.12 D-05 requires kanban_judge in RESERVED_ROLE_NAMES"
+        );
     }
 
     /// D-05: validate_role_name accepts every reserved role.
@@ -2670,6 +2964,195 @@ custom_providers:
         assert_eq!(
             mc.nudge_interval, 0,
             "Phase 32 LEARN-01: nudge_interval=0 must deserialize as 0 (disable sentinel)"
+        );
+    }
+
+    /// Phase 36.15 backward compat: pre-36.15 configs (no extra_request_options, no models)
+    /// must parse cleanly with the new fields defaulting to empty maps.
+    #[test]
+    fn pre_36_15_config_yaml_still_parses() {
+        let yaml = r#"
+providers:
+  ollama:
+    base_url: "http://localhost:11434/v1"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("pre-36.15 Config must parse");
+        let provider = config
+            .providers
+            .get("ollama")
+            .expect("ollama provider must be present");
+        assert!(
+            provider.extra_request_options.is_empty(),
+            "extra_request_options must default to empty map for pre-36.15 configs"
+        );
+        assert!(
+            provider.models.is_empty(),
+            "models must default to empty map for pre-36.15 configs"
+        );
+    }
+}
+
+#[cfg(test)]
+mod extras_canary {
+    //! Wave 0 (Phase 36.15) canary tests. These lock the D-03 YAML deserialization shape.
+    //!
+    //! D-01 DEVIATION applied: the original plan used `#[serde(untagged)] enum ProviderExtraOptions`
+    //! on ProviderConfig.extra_request_options. This was tested and FAILED for the OpenRouter
+    //! variant (serde_yaml with all-Optional fields always matches the first variant — Pitfall 1).
+    //! The fallback `HashMap<String, serde_json::Value>` is now in use. These tests have been
+    //! updated accordingly to use .get("key") HashMap access instead of enum pattern matching.
+    use super::*;
+
+    /// Test 1: provider-level extra_request_options.num_ctx = 8192 round-trips through Config.
+    ///
+    /// Locks the D-03 acceptance shape: a YAML doc with
+    /// `providers.ollama.extra_request_options.num_ctx = 8192` must deserialize into Config
+    /// such that `config.providers["ollama"].extra_request_options["num_ctx"] == 8192`.
+    #[test]
+    fn extras_canary_provider_level_num_ctx_roundtrips() {
+        let yaml = r#"
+providers:
+  ollama:
+    base_url: "http://localhost:11434"
+    extra_request_options:
+      num_ctx: 8192
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("Config must parse");
+        let provider = config
+            .providers
+            .get("ollama")
+            .expect("ollama provider must be present");
+        assert!(
+            !provider.extra_request_options.is_empty(),
+            "extra_request_options must be non-empty"
+        );
+        assert_eq!(
+            provider.extra_request_options.get("num_ctx"),
+            Some(&serde_json::json!(8192)),
+            "provider-level num_ctx must round-trip as 8192"
+        );
+    }
+
+    /// Test 2: per-model override wins; provider-level default preserved at deserialization.
+    ///
+    /// Locks D-03: YAML with provider-level num_ctx=8192 AND
+    /// providers.ollama.models."llama3.1:8b".extra_request_options.num_ctx=32768
+    /// must deserialize such that:
+    ///   - the per-model entry's num_ctx == 32768
+    ///   - the provider-level num_ctx == 8192 (merge happens in resolve_extras, not at deserialization)
+    #[test]
+    fn extras_canary_per_model_override_wins() {
+        let yaml = r#"
+providers:
+  ollama:
+    base_url: "http://localhost:11434"
+    extra_request_options:
+      num_ctx: 8192
+    models:
+      "llama3.1:8b":
+        extra_request_options:
+          num_ctx: 32768
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("Config must parse");
+        let provider = config
+            .providers
+            .get("ollama")
+            .expect("ollama provider must be present");
+
+        // Provider-level num_ctx must remain 8192 (deserialization only; merge happens in resolve_extras).
+        assert_eq!(
+            provider.extra_request_options.get("num_ctx"),
+            Some(&serde_json::json!(8192)),
+            "provider-level num_ctx must be preserved as 8192"
+        );
+
+        // Per-model entry must have num_ctx == 32768.
+        let model_cfg = provider
+            .models
+            .get("llama3.1:8b")
+            .expect("llama3.1:8b model entry must be present");
+        assert_eq!(
+            model_cfg.extra_request_options.get("num_ctx"),
+            Some(&serde_json::json!(32768)),
+            "per-model num_ctx must be 32768"
+        );
+    }
+
+    /// Test 3: YAML key with colon ("llama3.1:8b") parses without serde error.
+    ///
+    /// Locks the quoted-key requirement: YAML keys containing colons must be quoted.
+    /// Verifies that serde_yaml handles the quoted key `"llama3.1:8b"` in providers.models.
+    #[test]
+    fn extras_canary_quoted_yaml_key_with_colon_parses() {
+        let yaml = r#"
+providers:
+  ollama:
+    models:
+      "llama3.1:8b":
+        extra_request_options:
+          num_ctx: 32768
+      "llama3.1:70b":
+        extra_request_options:
+          num_ctx: 4096
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("Config must parse with colon-bearing keys");
+        let provider = config
+            .providers
+            .get("ollama")
+            .expect("ollama provider must be present");
+        assert!(
+            provider.models.contains_key("llama3.1:8b"),
+            "models map must contain key 'llama3.1:8b' (colon in key)"
+        );
+        assert!(
+            provider.models.contains_key("llama3.1:70b"),
+            "models map must contain key 'llama3.1:70b' (colon in key)"
+        );
+    }
+
+    /// Test 4: OpenRouter nested provider.order list round-trips.
+    ///
+    /// Locks D-03: YAML with providers.openrouter.extra_request_options.provider.order =
+    /// ["anthropic", "openai"] must deserialize such that the nested order object is preserved.
+    /// Under the D-01 fallback (HashMap deserialization), the nested `provider` object becomes
+    /// a serde_json::Value::Object, and `order` is a Value::Array — both survive the round-trip.
+    #[test]
+    fn extras_canary_openrouter_provider_order_nested() {
+        let yaml = r#"
+providers:
+  openrouter:
+    base_url: "https://openrouter.ai/api/v1"
+    extra_request_options:
+      provider:
+        order:
+          - anthropic
+          - openai
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("Config must parse");
+        let provider = config
+            .providers
+            .get("openrouter")
+            .expect("openrouter provider must be present");
+        assert!(
+            !provider.extra_request_options.is_empty(),
+            "extra_request_options must be non-empty for openrouter"
+        );
+        let provider_val = provider
+            .extra_request_options
+            .get("provider")
+            .expect("provider key must be present in extras");
+        let order = provider_val
+            .as_object()
+            .and_then(|o| o.get("order"))
+            .and_then(|v| v.as_array())
+            .expect("provider.order must be a JSON array");
+        assert_eq!(
+            order,
+            &vec![
+                serde_json::Value::String("anthropic".to_string()),
+                serde_json::Value::String("openai".to_string()),
+            ],
+            "OpenRouter provider.order must round-trip as [anthropic, openai]"
         );
     }
 }

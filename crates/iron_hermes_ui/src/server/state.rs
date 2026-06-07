@@ -36,6 +36,28 @@ pub struct AppState {
     /// "agent:main:web:dm:{uuid}" produced by api.rs create_session).
     /// (Phase 32 LEARN-01 — web UI nudge wiring)
     pub nudge_turns: Arc<std::sync::Mutex<HashMap<String, u32>>>,
+    /// Phase 36.1 (GW-05-WEB, D-03): per-session running-agent flag map.
+    /// Each session_id maps to its own Arc<AtomicBool>. When the flag is true,
+    /// a turn is in flight for that session; new slash commands (non-bypass)
+    /// and plain-text messages are rejected with the D-02 rejection message.
+    ///
+    /// Mutex choice: std::sync::Mutex (non-async brief access), matching the
+    /// nudge_turns field directly above. The Arc is cloned out of the map before
+    /// any async work — the lock is never held across an .await point.
+    ///
+    /// Map grows unbounded (Pitfall 5 accepted tradeoff — matches nudge_turns precedent).
+    pub running_agents: Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    /// Phase 36.17.4 (D-01a): per-session queue-drain paused flags.
+    /// Arc<Mutex<HashMap>> mirrors `running_agents` above. std::sync::Mutex
+    /// — never held across `.await`. Map grows unbounded (accepted tradeoff,
+    /// matches `running_agents` + `nudge_turns` precedent).
+    pub queue_paused: Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+    /// Phase 36.17.4 (D-01): shared FIFO queue for all sessions, keyed by
+    /// `SessionKey`. Single `SessionQueue` instance; each WS connection
+    /// constructs its own `SessionKey { platform: Platform::Web, chat_id,
+    /// user_id: Some("web") }` at call sites. Queue survives WS
+    /// disconnect/reconnect; two browser tabs on the same session_id share it.
+    pub queue: Arc<dyn ironhermes_core::queue::MessageQueue<ironhermes_core::session::SessionKey>>,
     /// Phase 32.3 Plan 04 (D-08): subagent registry Arc — same handle threaded
     /// into the AgentRuntime via `subagent_registry`. Held on
     /// AppState so the four `/api/agents/*` endpoints can read it for status
@@ -57,6 +79,24 @@ pub struct AppState {
     /// scope per CONTEXT.md.
     pub subagent_callback_slot:
         Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<crate::protocol::ChatStreamEvent>>>>,
+    /// Phase 36.3.7.11 Plan 01 (D-08 / D-15): dashboard kanban tail
+    /// broadcaster. The tail loop (`run_kanban_tail_loop`) holds the
+    /// `Sender`; every `/api/ws/kanban` connection creates its own
+    /// `Receiver` via `.subscribe()`. `SendError` when no receivers is
+    /// silently discarded (Q1).
+    pub kanban_tail_broadcast: tokio::sync::broadcast::Sender<String>,
+    /// Phase 36.3.7.11 Plan 01 (D-15): cancellation token for the kanban
+    /// tail loop. Triggered at shutdown via `cancel()`; the tail loop's
+    /// `tokio::select!` exits on observation. Plan 04 wires the shutdown
+    /// path that calls `.cancel()`.
+    #[allow(dead_code)]
+    pub kanban_tail_cancel: tokio_util::sync::CancellationToken,
+    /// Phase 36.17.7 D-02-d: cancellation token for the audio cache GC
+    /// periodic loop. Mirrors `kanban_tail_cancel` above. Triggered at
+    /// shutdown via `.cancel()`; the GC loop's `tokio::select!` exits on
+    /// observation.
+    #[allow(dead_code)]
+    pub audio_gc_cancel: tokio_util::sync::CancellationToken,
 }
 
 static GLOBAL_APP_STATE: OnceLock<AppState> = OnceLock::new();
@@ -151,6 +191,49 @@ impl AppState {
         .await
         .context("building AgentRuntime for web UI")?;
 
+        // Phase 36.3.7.11 Plan 01 (D-15 / D-17): construct the kanban
+        // tail broadcaster + cancellation token, then spawn the tail
+        // loop unconditionally (no lazy-on-first-client) so the first WS
+        // subscriber's connect sees the live event stream immediately.
+        // `config.dashboard.kanban.tail_interval_ms` is the source-of-
+        // truth interval (default 250 ms via DashboardKanbanConfig::Default).
+        let (kanban_tail_broadcast, _initial_rx) =
+            tokio::sync::broadcast::channel::<String>(256);
+        let kanban_tail_cancel = tokio_util::sync::CancellationToken::new();
+        let tail_tx = kanban_tail_broadcast.clone();
+        let tail_cancel = kanban_tail_cancel.clone();
+        let tail_interval_ms = config.dashboard.kanban.tail_interval_ms;
+        tokio::spawn(async move {
+            crate::server::kanban_ws::run_kanban_tail_loop(
+                tail_tx,
+                tail_cancel,
+                tail_interval_ms,
+            )
+            .await;
+        });
+
+        // Phase 36.17.7 D-02-d: audio cache lifecycle GC.
+        //  - Startup sync sweep (before async runtime work) removes any
+        //    files older than max_age_days that survived the last run.
+        //  - Periodic tokio task sweeps at sweep_interval_secs cadence.
+        // Mirrors the kanban tail spawn pattern directly above.
+        let audio_cache_dir = get_hermes_home().join("audio_cache");
+        let gc_max_age = config.audio_cache.max_age_days;
+        let gc_interval = config.audio_cache.sweep_interval_secs;
+        crate::server::audio_cache::gc_sweep_audio_cache(&audio_cache_dir, gc_max_age);
+        let audio_gc_cancel = tokio_util::sync::CancellationToken::new();
+        let gc_dir = audio_cache_dir.clone();
+        let gc_cancel_clone = audio_gc_cancel.clone();
+        tokio::spawn(async move {
+            crate::server::audio_cache::run_audio_cache_gc_loop(
+                gc_dir,
+                gc_max_age,
+                gc_interval,
+                gc_cancel_clone,
+            )
+            .await;
+        });
+
         Ok(Self {
             config: Arc::new(config),
             command_router,
@@ -159,6 +242,17 @@ impl AppState {
             runtime: Arc::new(runtime),
             memory_manager,
             nudge_turns: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            // Phase 36.1 (GW-05-WEB, D-03): per-session running-agent flag map.
+            // std::sync::Mutex matches nudge_turns precedent; Arc for Clone.
+            running_agents: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            // Phase 36.17.4 (D-01a): per-session queue-drain paused flags —
+            // same shape as running_agents, mirrored byte-for-byte.
+            queue_paused: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            // Phase 36.17.4 (D-01): single shared SessionQueue instance keyed
+            // by SessionKey. Explicit `as Arc<dyn ...>` widens the concrete
+            // Arc<SessionQueue> to the trait-object field type.
+            queue: Arc::new(ironhermes_gateway::session_queue::SessionQueue::new())
+                as Arc<dyn ironhermes_core::queue::MessageQueue<ironhermes_core::session::SessionKey>>,
             // Phase 32.3 Plan 04: subagent_registry + shrike — same Arcs the
             // delegate-task runner uses, so the four `/api/agents/*` endpoints
             // operate on the live registry.
@@ -168,6 +262,14 @@ impl AppState {
             // installs the per-turn sender before run_web_turn, RAII guard clears
             // it on return/panic.
             subagent_callback_slot,
+            // Phase 36.3.7.11 Plan 01 (D-15): dashboard kanban tail state —
+            // broadcaster + cancellation token created above; tail loop
+            // already spawned.
+            kanban_tail_broadcast,
+            kanban_tail_cancel,
+            // Phase 36.17.7 D-02-d: audio cache GC cancellation token —
+            // periodic loop spawned above.
+            audio_gc_cancel,
         })
     }
 
@@ -205,6 +307,39 @@ impl AppState {
         );
     }
 
+    /// Phase 36.1 (GW-05-WEB, D-03): get or create the per-session running-agent flag.
+    ///
+    /// Returns an `Arc<AtomicBool>` for the given session_id, creating a
+    /// fresh `false`-initialized flag if none exists yet. Multiple calls with
+    /// the same `session_id` return handles to the SAME underlying AtomicBool
+    /// (get-OR-create semantics — the second call does NOT create a fresh flag).
+    ///
+    /// Mirrors `SessionStore::get_running_flag` in `ironhermes-gateway/src/session.rs`.
+    pub fn get_or_create_running_flag(
+        &self,
+        session_id: &str,
+    ) -> Arc<std::sync::atomic::AtomicBool> {
+        let mut map = self.running_agents.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .clone()
+    }
+
+    /// Phase 36.17.4 (D-01a): mirror of `get_or_create_running_flag` above.
+    /// Entry-or-insert under std::sync::Mutex — Mutex must NEVER be held
+    /// across `.await`. Returns the SAME `Arc<AtomicBool>` on repeat lookups
+    /// for the same session_id (idempotent), and distinct `Arc`s for distinct
+    /// session_ids (session isolation).
+    pub fn get_or_create_paused_flag(
+        &self,
+        session_id: &str,
+    ) -> Arc<std::sync::atomic::AtomicBool> {
+        let mut map = self.queue_paused.lock().unwrap_or_else(|e| e.into_inner());
+        map.entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .clone()
+    }
+
     pub async fn run_web_turn(
         &self,
         session_id: &str,
@@ -212,7 +347,19 @@ impl AppState {
         stream_callback: StreamCallback,
         tool_progress_callback: Option<ToolProgressCallback>,
         tool_result_callback: Option<ToolResultCallback>,
+        // Phase 36.17.7 D-02-a: per-turn TTS wiring (WebAudioDispatcher + SessionKey).
+        // `None` when TTS is not configured for this session.
+        tts_wiring: Option<ironhermes_agent::TtsPerTurnWiring>,
     ) -> Result<ironhermes_agent::AgentResult> {
+        // Phase 36.1 (GW-05-WEB, D-06, Pitfall 1): RAII running-agent guard.
+        // Constructed INSIDE the async fn body (not in the sync caller) so Drop
+        // fires when this future completes — on Ok return, Err propagation via ?,
+        // panic, and future cancellation. Sets the per-session flag to true on
+        // construction; Drop sets it to false on every exit path.
+        let _agent_guard = ironhermes_core::commands::running_agent::RunningAgentGuard::new(
+            self.get_or_create_running_flag(session_id),
+        );
+
         let messages = self.build_messages_for_turn(session_id, user_input).await?;
         // Snapshot the messages BEFORE agent.run consumes them — the nudge
         // (if it fires) sees the exact turn the model just consumed, not any
@@ -247,6 +394,8 @@ impl AppState {
             trajectory_writer: None,
             compression_count: 0,
             cancel_token: None,
+            // Phase 36.17.7 D-02-a: wire per-turn TTS dispatcher into AgentRuntime.
+            tts_wiring,
         };
         let result = self.runtime.run_turn(request).await?;
 
@@ -543,6 +692,191 @@ impl AppState {
     /// Phase 32.3 Plan 04: thin AppState wrapper over `api_agents_status`.
     pub fn api_agents_status(&self, id: &str) -> Option<serde_json::Value> {
         api_agents_status(self.shrike.as_deref(), id)
+    }
+}
+
+// =============================================================================
+// Phase 36.1 Plan 02 (GW-05-WEB) — running_agents helper unit tests
+// =============================================================================
+
+#[cfg(test)]
+mod phase_36_1_02_state_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// Helper: build a minimal AppState for unit testing. Skips the heavy
+    /// AgentRuntime / StateStore init by constructing only the running_agents
+    /// field directly — tests operate on the public helper, not AppState::init.
+    fn make_running_agents() -> Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> {
+        Arc::new(std::sync::Mutex::new(HashMap::new()))
+    }
+
+    /// get_or_create_running_flag helper as a free fn so unit tests don't need
+    /// to build AppState. Mirrors the method body exactly.
+    fn get_or_create(
+        map: &Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+        session_id: &str,
+    ) -> Arc<std::sync::atomic::AtomicBool> {
+        let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .clone()
+    }
+
+    /// Test 1 (GW-05-WEB behavior): fresh session flag starts false.
+    #[test]
+    fn new_session_flag_starts_false() {
+        let map = make_running_agents();
+        let flag = get_or_create(&map, "session-A");
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "A freshly created session flag must start as false"
+        );
+    }
+
+    /// Test 2 (GW-05-WEB behavior): get-OR-create semantics — two lookups with
+    /// the same session_id must return handles to the SAME AtomicBool, not a
+    /// fresh allocation.
+    #[test]
+    fn flag_persists_across_lookups() {
+        let map = make_running_agents();
+        let flag1 = get_or_create(&map, "session-A");
+        flag1.store(true, Ordering::SeqCst);
+        let flag2 = get_or_create(&map, "session-A");
+        assert!(
+            flag2.load(Ordering::SeqCst),
+            "Second lookup for session-A must see the value set via the first handle (same Arc)"
+        );
+    }
+
+    /// Test 3 (GW-05-WEB behavior, T-36.1-06 mitigation): per-session isolation.
+    /// Setting session A's flag must NOT affect session B's flag.
+    #[test]
+    fn session_isolation() {
+        let map = make_running_agents();
+        // Set A's flag to true
+        get_or_create(&map, "session-A").store(true, Ordering::SeqCst);
+        // B must still be false
+        let flag_b = get_or_create(&map, "session-B");
+        assert!(
+            !flag_b.load(Ordering::SeqCst),
+            "Session B's flag must remain false after session A's flag is set (no cross-session bleed)"
+        );
+    }
+
+    /// Test 4 (RAII smoke): RunningAgentGuard::new sets the flag to true;
+    /// Drop sets it back to false. Proves the guard type from ironhermes_core
+    /// integrates correctly with the helper-returned Arc.
+    #[test]
+    fn running_agent_guard_raii_sets_and_clears_flag() {
+        use ironhermes_core::commands::running_agent::RunningAgentGuard;
+
+        let map = make_running_agents();
+        let flag = get_or_create(&map, "session-raii");
+        assert!(!flag.load(Ordering::SeqCst), "pre: flag must start false");
+
+        {
+            let _guard = RunningAgentGuard::new(flag.clone());
+            assert!(
+                flag.load(Ordering::SeqCst),
+                "flag must be true while guard is in scope"
+            );
+        } // guard drops here
+
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "flag must be false after guard drops (RAII discipline)"
+        );
+    }
+
+    // =========================================================================
+    // Phase 36.17.4 Plan 03 (D-01a) — queue_paused helper unit tests
+    // Mirror the running_agents helper tests above byte-for-byte (same
+    // entry-or-insert under std::sync::Mutex), just operating on the
+    // queue_paused map shape.
+    // =========================================================================
+
+    /// Helper: build an empty queue_paused map for unit testing — same shape
+    /// as `make_running_agents` above, namespaced for paused-flag tests.
+    fn make_queue_paused()
+        -> Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>
+    {
+        Arc::new(std::sync::Mutex::new(HashMap::new()))
+    }
+
+    /// get_or_create_paused_flag free-fn equivalent — mirrors the method body
+    /// in `AppState::get_or_create_paused_flag` byte-for-byte so unit tests
+    /// don't need to build a full AppState.
+    fn get_or_create_paused(
+        map: &Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
+        session_id: &str,
+    ) -> Arc<std::sync::atomic::AtomicBool> {
+        let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+        guard
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+            .clone()
+    }
+
+    /// Phase 36.17.4 Plan 03 (D-01a behavior): a freshly created session's
+    /// paused flag starts as false.
+    #[test]
+    fn paused_flag_starts_false() {
+        let map = make_queue_paused();
+        let flag = get_or_create_paused(&map, "session-A");
+        assert!(
+            !flag.load(Ordering::SeqCst),
+            "A freshly created paused flag must start as false"
+        );
+    }
+
+    /// Phase 36.17.4 Plan 03 (D-01a behavior): get-OR-create semantics — two
+    /// lookups with the same session_id must return handles to the SAME
+    /// AtomicBool (Arc::ptr_eq), AND mutations via the first handle must be
+    /// visible through the second.
+    #[test]
+    fn paused_flag_persists_across_lookups() {
+        let map = make_queue_paused();
+        let first = get_or_create_paused(&map, "session-A");
+        first.store(true, Ordering::SeqCst);
+
+        let second = get_or_create_paused(&map, "session-A");
+        assert!(
+            second.load(Ordering::SeqCst),
+            "Second lookup must observe the store(true) via the first handle"
+        );
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "Idempotent get_or_create must return the SAME Arc<AtomicBool> — \
+             not a fresh allocation"
+        );
+    }
+
+    /// Phase 36.17.4 Plan 03 (D-01a behavior): per-session isolation — two
+    /// different session_ids produce two independent `Arc<AtomicBool>`
+    /// instances. Setting session A's paused flag must NOT affect session B.
+    #[test]
+    fn paused_flag_session_isolation() {
+        let map = make_queue_paused();
+        let flag_a = get_or_create_paused(&map, "session-A");
+        flag_a.store(true, Ordering::SeqCst);
+
+        let flag_b = get_or_create_paused(&map, "session-B");
+        assert!(
+            !flag_b.load(Ordering::SeqCst),
+            "Session B's paused flag must remain false after session A's is set"
+        );
+        assert!(
+            flag_a.load(Ordering::SeqCst),
+            "Session A's paused flag must still be true (mutating B does not \
+             reset A)"
+        );
+        assert!(
+            !Arc::ptr_eq(&flag_a, &flag_b),
+            "Distinct session_ids must produce distinct Arc<AtomicBool> \
+             instances (no cross-session bleed)"
+        );
     }
 }
 

@@ -27,10 +27,17 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
+// Phase 36.3.7 Plan 05 (D-26/D-20): Kanban worker prompt injection + tool registration.
+// When HERMES_KANBAN_TASK is present at process start, inject KANBAN_GUIDANCE into the
+// PromptBuilder and register the 6 kanban_* tools on the session's ToolRegistry.
+use ironhermes_kanban::{KANBAN_GUIDANCE, KanbanStore};
+use ironhermes_kanban::tools::register_kanban_tools;
+
 mod batch;
 mod config_cli;
 mod cron;
 mod doctor;
+mod kanban;
 mod mcp_config;
 mod memory_cmd;
 mod memory_setup;
@@ -125,6 +132,14 @@ enum Commands {
     Chat {
         /// Initial message to send
         message: Option<String>,
+        /// Phase 36.3.7 (D-15): run a single non-interactive prompt
+        /// (worker-spawn shape for kanban). Functionally equivalent to the
+        /// top-level `-e/--execute` flag — the dispatcher uses this form
+        /// (`ironhermes --profile P chat -q "work kanban task <id>"`) to
+        /// match upstream `hermes -p P chat -q` verbatim. Wins over
+        /// `message` when both are supplied.
+        #[arg(short = 'q', long = "query")]
+        query: Option<String>,
         /// Phase 21.7 Plan 08 (D-11 / D-12): enable autonomous (yolo) mode
         /// for this chat session. OR'd with the top-level `--yolo` flag and
         /// `autonomous.yolo` config key; CLI wins over config (D-12).
@@ -170,6 +185,11 @@ enum Commands {
         #[command(subcommand)]
         command: models_cmd::ModelsSubcommand,
     },
+    /// Show or refresh the pricing table for cost accounting (Phase 36.2 Plan 09).
+    Pricing {
+        #[command(subcommand)]
+        command: ironhermes_cli::pricing_cmd::PricingSubcommand,
+    },
     /// Manage MCP server connections
     Mcp {
         #[command(subcommand)]
@@ -203,6 +223,49 @@ enum Commands {
     Session {
         #[command(subcommand)]
         subcommand: session_cmd::SessionSubcommand,
+    },
+    /// Manage kanban board and tasks (Phase 36.3.7).
+    Kanban {
+        /// Select board by slug (D-02 4-tier precedence: flag > HERMES_KANBAN_BOARD env > current-file > "default").
+        /// Use "default" to explicitly open the legacy kanban.db (D-01 back-compat).
+        #[arg(long, global = false)]
+        board: Option<String>,
+        #[command(subcommand)]
+        command: kanban::KanbanCommands,
+    },
+    /// Text-to-speech CLI diagnostics (Phase 36.17.5 D-05 / D-16).
+    /// NOT an LLM tool — calls build_tts_registry directly for operator UAT.
+    Tts {
+        #[command(subcommand)]
+        command: TtsCommands,
+    },
+}
+
+/// Phase 36.17.5 — TTS diagnostic subcommands.
+/// These are CLI verbs for operator UAT; they bypass the Tool trait and LLM machinery.
+/// The LLM-callable tools are `text_to_speech` and `send_audio` (in ironhermes-tools).
+#[derive(Subcommand)]
+enum TtsCommands {
+    /// Synthesize a test phrase via a TTS provider and write an MP3 to audio_cache/.
+    /// Prints the output path on stdout and exits 0; on error prints to stderr and exits 1.
+    Test {
+        /// Provider name (must be in BUILTIN_TTS_NAMES). Default: "edge".
+        #[arg(long, default_value = "edge")]
+        provider: String,
+
+        /// Text to synthesize.
+        #[arg(long, default_value = "Hello from IronHermes Phase 36.17.5.")]
+        text: String,
+
+        /// Optional output path. Defaults to $IRONHERMES_HOME/audio_cache/<uuid>.mp3.
+        #[arg(long)]
+        output_path: Option<String>,
+    },
+    /// Play a synthesized audio file via Platform::Local (rodio). Operator UAT Gate 5.
+    Play {
+        /// Path to the audio file to play (e.g. from `hermes tts test`).
+        #[arg(long)]
+        path: String,
     },
 }
 
@@ -241,6 +304,215 @@ fn should_use_classic_tui(cli: &Cli) -> bool {
         return true;
     }
     false
+}
+
+/// Phase 36.3.7 Plan 05 (D-26): Inject KANBAN_GUIDANCE into the PromptBuilder
+/// when the process was spawned as a Kanban worker (HERMES_KANBAN_TASK is set).
+///
+/// Must be called AFTER `load_skills()` and BEFORE `build_system_message()` so the
+/// overlay is included in the cached prefix (slots 1-6) but does not affect
+/// non-worker sessions (zero footprint guarantee per D-26).
+fn inject_kanban_guidance_if_worker(prompt_builder: &mut PromptBuilder) {
+    if std::env::var("HERMES_KANBAN_TASK").is_ok() {
+        // activate_skill prepends (name, body) to skill_overlays which are
+        // injected into the system message in build_system_message().
+        prompt_builder.activate_skill("KANBAN_GUIDANCE", KANBAN_GUIDANCE);
+        tracing::debug!("KANBAN_GUIDANCE overlay applied for worker session");
+    }
+}
+
+/// Phase 36.3.7 Plan 05 (D-20): Register the 6 kanban_* tools on `registry`
+/// when the process is a Kanban worker (HERMES_KANBAN_TASK present) or when the
+/// "kanban" toolset is explicitly enabled in profile config.
+///
+/// Worker mode (HERMES_KANBAN_TASK set): opens kanban.db and registers with
+/// `explicit_enable = false` — the tools gate on the env var themselves.
+///
+/// Orchestrator mode (config.toolsets contains "kanban"): registers with
+/// `explicit_enable = true` so the 6 tools are visible without the env var.
+async fn register_kanban_tools_if_applicable(
+    registry: &Arc<RwLock<ToolRegistry>>,
+    toolsets: &std::collections::HashSet<String>,
+) -> anyhow::Result<()> {
+    let worker_mode = std::env::var("HERMES_KANBAN_TASK").is_ok();
+    let orchestrator_mode = toolsets.contains("kanban");
+
+    if worker_mode || orchestrator_mode {
+        // Phase 36.3.7.13 D-A1: env-bridged open so the store-Arc passed to
+        // register_kanban_tools (which flows to ALL 13 tools, including
+        // decompose/specify via constructor injection) honors HERMES_KANBAN_DB.
+        let store = match KanbanStore::open_from_env() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to open kanban.db — kanban tools unavailable");
+                return Ok(());
+            }
+        };
+        let store_arc = Arc::new(tokio::sync::Mutex::new(store));
+        let explicit_enable = orchestrator_mode && !worker_mode;
+        register_kanban_tools(&mut *registry.write().await, store_arc, explicit_enable);
+        tracing::debug!(
+            worker_mode,
+            orchestrator_mode,
+            "Kanban tools registered on session ToolRegistry"
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 36.3.7.13 F-03 — goal-mode toolset filter + inner-loop clamp helpers
+// ---------------------------------------------------------------------------
+
+/// Canonical tool allowlists for goal-mode workers (Phase 36.3.7.13 D-B1).
+///
+/// RESTRICTED (15 tools): 13 kanban_* tools + 2 file I/O tools.
+/// EXTENDED  (18 tools): RESTRICTED + memory + skill management.
+///
+/// Tool names are verified against the registry's `fn name()` return values
+/// (RESEARCH Risk 3): file tools register as "read_file"/"write_file" (NOT
+/// "file_read"/"file_write"); memory as "memory" (NOT "memory_tool");
+/// skills as "skills" + "skill_manage" (NOT "skills_tool"/"memory_manager_handle").
+const GOAL_TOOLSET_RESTRICTED: &[&str] = &[
+    "kanban_show",
+    "kanban_list",
+    "kanban_comment",
+    "kanban_complete",
+    "kanban_block",
+    "kanban_create",
+    "kanban_heartbeat",
+    "kanban_link",
+    "kanban_unblock",
+    "kanban_swarm",
+    "kanban_mention",
+    "kanban_decompose",
+    "kanban_specify",  // 13 kanban_*
+    "read_file",
+    "write_file",      // +2 file I/O
+];
+
+const GOAL_TOOLSET_EXTENDED: &[&str] = &[
+    "kanban_show",
+    "kanban_list",
+    "kanban_comment",
+    "kanban_complete",
+    "kanban_block",
+    "kanban_create",
+    "kanban_heartbeat",
+    "kanban_link",
+    "kanban_unblock",
+    "kanban_swarm",
+    "kanban_mention",
+    "kanban_decompose",
+    "kanban_specify",  // 13 kanban_*
+    "read_file",
+    "write_file",      // +2 file I/O
+    "memory",
+    "skills",
+    "skill_manage",    // +3 memory / skill tools
+];
+
+/// Apply goal-mode toolset filtering to the tool registry.
+///
+/// Called at BOTH worker-mode entry points (run_single + run_chat), immediately
+/// after `register_kanban_tools_if_applicable`, per D-B2 requirement.
+///
+/// No-ops when:
+/// - `HERMES_KANBAN_TASK` is unset (not a kanban worker process)
+/// - `HERMES_KANBAN_GOAL_MODE` is not exactly "1" (non-goal task)
+///
+/// When `HERMES_KANBAN_GOAL_TOOLSET` is unset under goal_mode=1, this function
+/// emits a LOUD `tracing::warn!` and early-returns WITHOUT applying any filter.
+/// This surfaces dispatcher misconfiguration (D-E2 single-source-of-truth:
+/// the dispatcher is the only place that resolves NULL→"restricted"; the worker
+/// must NOT silently apply a second default — BLOCKER 3 from plan-checker).
+///
+/// For the "full" preset: no-op (all registered tools remain visible).
+/// For "extended": retain_by_name(GOAL_TOOLSET_EXTENDED).
+/// For "restricted" (or any unrecognized value): retain_by_name(GOAL_TOOLSET_RESTRICTED).
+async fn filter_for_goal_mode_if_applicable(
+    registry: &Arc<RwLock<ToolRegistry>>,
+) -> anyhow::Result<()> {
+    // Gate 1: must be a kanban worker process.
+    let worker_mode = std::env::var("HERMES_KANBAN_TASK").is_ok();
+    if !worker_mode {
+        return Ok(());
+    }
+
+    // Gate 2: goal mode must be active for this task.
+    let goal_mode = std::env::var("HERMES_KANBAN_GOAL_MODE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if !goal_mode {
+        return Ok(());
+    }
+
+    // D-E2: HERMES_KANBAN_GOAL_TOOLSET must have been set by the dispatcher.
+    // If absent under goal_mode=1, this is a dispatcher misconfiguration — warn
+    // LOUD and early-return rather than applying a silent "restricted" default
+    // (BLOCKER 3 fix: worker must not be a second resolver).
+    let preset = match std::env::var("HERMES_KANBAN_GOAL_TOOLSET") {
+        Ok(v) => v,
+        Err(_) => {
+            tracing::warn!(
+                target: "kanban.goal_toolset",
+                "HERMES_KANBAN_GOAL_TOOLSET is unset under HERMES_KANBAN_GOAL_MODE=1 — \
+                 dispatcher should have resolved NULL→\"restricted\" and emitted this var. \
+                 Skipping toolset filter to avoid silent misconfiguration masking (D-E2)."
+            );
+            return Ok(());
+        }
+    };
+
+    let removed = match preset.as_str() {
+        "full" => {
+            tracing::info!(
+                target: "kanban.goal_mode",
+                preset = "full",
+                "goal-mode: full preset — no toolset filter applied"
+            );
+            return Ok(());
+        }
+        "extended" => {
+            let n = registry.write().await.retain_by_name(GOAL_TOOLSET_EXTENDED);
+            tracing::info!(
+                target: "kanban.goal_mode",
+                preset = "extended",
+                removed = n,
+                "goal-mode: extended toolset filter applied"
+            );
+            n
+        }
+        other => {
+            if other != "restricted" {
+                tracing::warn!(
+                    target: "kanban.goal_toolset",
+                    preset = other,
+                    "goal-mode: unrecognized toolset preset — falling back to \"restricted\""
+                );
+            }
+            let n = registry.write().await.retain_by_name(GOAL_TOOLSET_RESTRICTED);
+            tracing::info!(
+                target: "kanban.goal_mode",
+                preset = "restricted",
+                removed = n,
+                "goal-mode: restricted toolset filter applied"
+            );
+            n
+        }
+    };
+    let _ = removed; // logged above; suppress unused-variable lint
+    Ok(())
+}
+
+/// Phase 36.3.7.13 D-F1: clamp the agent inner-loop iteration cap.
+///
+/// Returns `min(config_iter, kanban_iter as usize)` so the worker's
+/// per-turn LLM call count is bounded by the board-level config knob.
+///
+/// Extracted as a pure fn for unit-testability (goal_toolset_filter.rs Test 6).
+pub fn clamp_goal_inner_iterations(config_iter: usize, kanban_iter: u32) -> usize {
+    std::cmp::min(config_iter, kanban_iter as usize)
 }
 
 #[tokio::main]
@@ -321,10 +593,27 @@ async fn main() -> Result<()> {
     // running daemon, not an interactive REPL, and must keep the
     // `ironhermes=info` log filter (otherwise startup diagnostics get
     // suppressed for operators following the canonical onboarding).
+    // Phase 36.3.7.0 Plan 05 (BUG-36.3.7-04): `chat -q "..."` is functionally
+    // equivalent to `-e/--execute` (both short-circuit through `run_single` —
+    // see the Chat match arm at line ~430 below). The original preflight gate
+    // (added in Phase 36.3.7 Plan 01 alongside the `-q` flag) only excluded
+    // the `cli.execute.is_some()` non-interactive path and forgot the new
+    // `chat -q` non-interactive path, so worker subprocesses spawned by the
+    // kanban dispatcher (which use `chat -q`) tried to launch the FirstRun /
+    // FixMode wizard, hit `EOF on stdin`, and died. Exclude `chat -q` here
+    // and at the sibling `is_interactive_repl` gate below so both paths
+    // (preflight wizard + interactive-log-filter) correctly recognize
+    // `chat -q` as a non-interactive entry.
+    let chat_has_query = matches!(
+        &cli.command,
+        Some(Commands::Chat { query: Some(_), .. })
+    );
+    // Phase 26.4.1 CFG-03: run_preflight gate widening — see doc-comment block above for full rationale.
     let run_preflight = matches!(
         cli.command,
         Some(Commands::Chat { .. }) | Some(Commands::Gateway { .. }) | None
-    ) && cli.execute.is_none();
+    ) && cli.execute.is_none()
+      && !chat_has_query;
     if run_preflight {
         preflight::run_preflight_check(&cli).await?;
     }
@@ -337,8 +626,11 @@ async fn main() -> Result<()> {
     // RUST_LOG in the environment ALWAYS wins (via EnvFilter::try_from_default_env).
     // Interactive = `hermes chat` subcommand, OR bare `hermes` with no `-e/--execute` flag.
     // `hermes -e "prompt"` enters `run_single` via the `None` arm — that's batch, NOT interactive.
+    // Phase 36.3.7.0 Plan 05 (BUG-36.3.7-04): `chat -q "..."` is ALSO non-interactive.
     let is_interactive_repl =
-        matches!(cli.command, Some(Commands::Chat { .. }) | None) && cli.execute.is_none();
+        matches!(cli.command, Some(Commands::Chat { .. }) | None)
+        && cli.execute.is_none()
+        && !chat_has_query;
     let env_filter = match std::env::var("RUST_LOG") {
         Ok(_) => tracing_subscriber::EnvFilter::from_default_env(),
         Err(_) if is_interactive_repl => tracing_subscriber::EnvFilter::new("error"),
@@ -369,6 +661,7 @@ async fn main() -> Result<()> {
         Some(Commands::Version) => cmd_version(),
         Some(Commands::Chat {
             ref message,
+            ref query,
             yolo: ref chat_yolo,
         }) => {
             // Phase 21.7 Plan 08 (D-12): OR top-level + subcommand yolo flags.
@@ -376,6 +669,15 @@ async fn main() -> Result<()> {
             // `hermes chat --yolo ...`. Either path reaches the REPL with the
             // same effective state.
             let cli_yolo_flag = cli.yolo || *chat_yolo;
+            // Phase 36.3.7 (D-15): `chat -q/--query <PROMPT>` runs the same
+            // non-interactive single-shot path as the top-level `-e/--execute`
+            // flag (worker-spawn shape: `ironhermes --profile P chat -q "..."`).
+            // When `query` is set, short-circuit through `run_single` and skip
+            // the interactive REPL entirely. `-e` on the top-level still wins
+            // when both are supplied to preserve back-compat for scripted callers.
+            if let Some(prompt) = query.clone() {
+                return run_single(&cli, prompt, cli_yolo_flag).await;
+            }
             // Phase 22.4 D-03/D-04: default to ratatui REPL; classic opt-out via
             // --classic-tui flag, IRONHERMES_CLASSIC_TUI=1 env var, or non-TTY.
             if should_use_classic_tui(&cli) {
@@ -435,6 +737,9 @@ async fn main() -> Result<()> {
             action: MemorySubcommand::Off,
         }) => memory_cmd::handle_memory_off().await,
         Some(Commands::Models { command }) => models_cmd::handle_models_command(command).await,
+        Some(Commands::Pricing { command }) => {
+            ironhermes_cli::pricing_cmd::handle_pricing_command(command).await
+        }
         Some(Commands::Mcp { action }) => match mcp_config::handle_mcp_command(action).await {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -468,6 +773,45 @@ async fn main() -> Result<()> {
             // Phase 25.3 Plan 11 (D-F-1 / D-F-2): single + bulk session export.
             session_cmd::handle_session_command(subcommand).await
         }
+        Some(Commands::Kanban { command, board }) => {
+            // Phase 36.3.7 (D-33/D-34/D-35): full kanban CLI verb surface.
+            // Phase 36.3.7.9 Plan 04: board is the parent-level --board <slug> flag.
+            match kanban::handle_kanban_command(command, board).await {
+                Ok(0) => Ok(()),
+                Ok(code) => {
+                    std::process::exit(code);
+                }
+                Err(e) => {
+                    eprintln!("{}: {}", "Error".red().bold(), e);
+                    std::process::exit(1);
+                }
+            }
+        }
+        // Phase 36.17.5 Plan 04 — TTS diagnostic CLI verbs (D-05 / D-16).
+        // These bypass the Tool trait and call build_tts_registry directly.
+        // They are NOT LLM tools — `text_to_speech` / `send_audio` are the LLM surface.
+        Some(Commands::Tts {
+            command: TtsCommands::Test {
+                provider,
+                text,
+                output_path,
+            },
+        }) => match cmd_tts_test(provider, text, output_path).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                std::process::exit(1);
+            }
+        },
+        Some(Commands::Tts {
+            command: TtsCommands::Play { path },
+        }) => match cmd_tts_play(path).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                std::process::exit(1);
+            }
+        },
         None => {
             if let Some(ref prompt) = cli.execute {
                 // Phase 21.7 Plan 08 (D-12): `-e` batch mode honors top-level
@@ -505,6 +849,95 @@ async fn main() -> Result<()> {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 36.17.5 Plan 04 — TTS CLI helper functions
+// ---------------------------------------------------------------------------
+
+/// `hermes tts test` — synthesize a phrase via a named TTS provider and print
+/// the output path on stdout. Used by the UAT script for Gates 1, 2, and 3.
+///
+/// Bypasses the Tool trait and LLM machinery entirely — calls `build_tts_registry`
+/// directly. This is intentional (D-05: Tool-only entry point is `text_to_speech`).
+async fn cmd_tts_test(
+    provider: String,
+    text: String,
+    output_path: Option<String>,
+) -> anyhow::Result<()> {
+    use ironhermes_core::BUILTIN_TTS_NAMES;
+    use ironhermes_tools::tts::build_tts_registry;
+
+    // msedge-tts uses rustls 0.23 + aws-lc-rs for its WebSocket TLS connection.
+    // The process-level CryptoProvider must be installed before the first TLS call.
+    // `.ok()` is intentional: ignore Err if a provider was already installed.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    // 1. Load config (mirrors pattern used by other simple subcommands in main.rs).
+    let config = ironhermes_core::Config::load().unwrap_or_default();
+
+    // 2. Build registry with both built-in providers.
+    let registry = build_tts_registry(&config.tts);
+
+    // 3. Resolve the requested provider by name.
+    let provider_arc = registry.get(&provider).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Provider '{}' not found in TtsRegistry (BUILTIN_TTS_NAMES: {:?})",
+            provider,
+            BUILTIN_TTS_NAMES
+        )
+    })?;
+
+    // 4. Check availability (ElevenLabs requires an API key; Edge is keyless).
+    if !provider_arc.is_available() {
+        anyhow::bail!(
+            "Provider '{}' is not available (missing env var?)",
+            provider
+        );
+    }
+
+    // 5. Resolve output path — default to $IRONHERMES_HOME/audio_cache/<uuid>.mp3.
+    let audio_dir = ironhermes_core::get_hermes_home().join("audio_cache");
+    std::fs::create_dir_all(&audio_dir)
+        .map_err(|e| anyhow::anyhow!("Failed to create audio_cache dir {:?}: {e}", audio_dir))?;
+
+    let path = output_path
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| audio_dir.join(format!("{}.mp3", uuid::Uuid::new_v4())));
+
+    // 6. Synthesize.
+    let written = provider_arc.synthesize(&text, &path).await?;
+
+    // 7. Print the resulting path — UAT script captures this via tail -1.
+    println!("{}", written.display());
+
+    Ok(())
+}
+
+/// `hermes tts play` — play a synthesized audio file via Platform::Local (rodio).
+/// Used by the operator UAT Gate 5. Constructs SendAudioTool with a Local SessionKey.
+///
+/// Succeeds (exit 0) if audio plays. Returns a clean Err (exit 1) if no audio
+/// device is present — never panics.
+async fn cmd_tts_play(path: String) -> anyhow::Result<()> {
+    use ironhermes_core::{SessionKey, types::Platform};
+    use ironhermes_tools::send_audio_tool::SendAudioTool;
+    use ironhermes_tools::registry::Tool;
+    use std::sync::Arc;
+
+    // 1. Construct SessionKey for Platform::Local (hardcoded — diagnostic path only).
+    let key = SessionKey::new(Platform::Local, "uat");
+
+    // 2. Construct SendAudioTool (no dispatcher needed for Local arm).
+    let config = Arc::new(ironhermes_core::Config::load().unwrap_or_default());
+    let tool = SendAudioTool::new(key, None, config);
+
+    // 3. Execute via the Tool trait.
+    let result = tool.execute(serde_json::json!({ "path": path })).await?;
+
+    println!("{result}");
+
+    Ok(())
 }
 
 fn cmd_version() -> Result<()> {
@@ -568,6 +1001,13 @@ fn ensure_home_dirs() -> Result<()> {
         std::fs::create_dir_all(home.join(sub))
             .with_context(|| format!("Failed to create {}/{}", home.display(), sub))?;
     }
+    // D-30 (Plan 07): sync bundled kanban skills into ~/.ironhermes/skills/ on
+    // first run.  Non-fatal — a warn is intentional so the operator can still
+    // use the CLI even if the skills sync fails (e.g. disk full).
+    let skills_root = home.join("skills");
+    if let Err(e) = ironhermes_kanban::sync_bundled_kanban_skills(&skills_root, /*force=*/ false) {
+        tracing::warn!(error = %e, "Failed to sync bundled kanban skills (non-fatal)");
+    }
     Ok(())
 }
 
@@ -579,7 +1019,27 @@ fn ensure_home_dirs() -> Result<()> {
 
 /// Run a single prompt and exit.
 async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()> {
-    let (client, config, resolver) = build_client(cli)?;
+    let (client, mut config, resolver) = build_client(cli)?;
+
+    // Phase 36.3.7.13 D-F1: clamp inner-loop iteration cap for goal-mode workers.
+    // Applied HERE (before AgentRuntime::from_config captures the config) so the
+    // clamped value is baked into the runtime's budget handle from the start.
+    if std::env::var("HERMES_KANBAN_GOAL_MODE").map(|v| v == "1").unwrap_or(false) {
+        let kanban_cfg = crate::kanban::commands::load_kanban_config(&config);
+        let clamped = clamp_goal_inner_iterations(
+            config.agent.max_iterations,
+            kanban_cfg.goal_inner_max_iterations,
+        );
+        if clamped != config.agent.max_iterations {
+            tracing::info!(
+                target: "kanban.goal_mode",
+                original = config.agent.max_iterations,
+                clamped_to = clamped,
+                "goal-mode: inner agent loop clamped (D-F1)"
+            );
+            config.agent.max_iterations = clamped;
+        }
+    }
     // Phase 21.7 Plan 08 (D-11 / D-12 / D-14): resolve yolo from CLI + config,
     // print the banner ONCE per session. `run_single` is batch mode — a single
     // `-e "prompt"` invocation — so "per session" means "per process".
@@ -733,6 +1193,18 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     prompt_builder.set_active_toolsets(runtime.merged_tools().enabled_toolset_names());
     prompt_builder.load_memory().await;
     prompt_builder.load_skills();
+    // Phase 36.3.7 Plan 05 (D-26): Inject KANBAN_GUIDANCE when worker-spawned.
+    inject_kanban_guidance_if_worker(&mut prompt_builder);
+    // Phase 36.3.7 Plan 05 (D-20): Register kanban tools when worker/orchestrator mode.
+    register_kanban_tools_if_applicable(
+        runtime.registry(),
+        &runtime.merged_tools().enabled_toolset_names(),
+    )
+    .await?;
+    // Phase 36.3.7.13 F-03 / D-B2: apply goal-mode toolset filter after kanban tools
+    // are registered. No-ops when not in goal-mode worker. BOTH main.rs call sites
+    // (run_single:this + run_chat:~1700) must call this (D-B2 requirement).
+    filter_for_goal_mode_if_applicable(runtime.registry()).await?;
     let system_msg = prompt_builder.build_system_message();
 
     let user_msg = ChatMessage::user(prompt);
@@ -763,28 +1235,180 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     // the writer but then held it in a let-_-binding): run_turn threads it into
     // the AgentLoop so per-tool-call TrajectoryEntry records land in the JSONL.
     let _ = max_turns; // max_turns is baked into runtime via config.agent.max_turns
-    let request = ironhermes_agent::TurnRequest {
-        messages,
-        session_id: session_id.clone(),
-        cancel_token: None,
-        stream: Some(Box::new(move |delta| {
-            let visible = scrubber_single_cb.lock().unwrap().feed(delta);
-            if !visible.is_empty() {
-                print!("{}", visible);
-                io::stdout().flush().ok();
-            }
-        })),
-        tool_progress: Some(Box::new(|name, args| {
-            eprintln!("{} {} {}", "Tool:".dimmed(), name.yellow(), args.dimmed());
-        })),
-        tool_result: None,
-        trajectory_writer: trajectory_writer.clone(),
-        pressure_tracker: None, // one-shot: fresh tracker per run
-        state_store: Some(state_store.clone()),
-        compression_count: 0, // one-shot: no cross-turn carry-over
-    };
 
-    let result = runtime.run_turn(request).await?;
+    // Phase 36.3.7.12-04 Plan 04 Task 2 — goal-mode dispatch.
+    //
+    // When the process is a kanban worker (HERMES_KANBAN_TASK set) AND the
+    // task carries goal_mode=true (signaled via HERMES_KANBAN_GOAL_MODE=1 in
+    // the worker env per Plan 02), wrap `runtime.run_turn` in the budget-bounded
+    // goal loop. The wrapper handles both goal_mode AND non-goal cases
+    // internally — the non-goal branch is a single passthrough call so the
+    // existing chat -q worker path stays byte-for-byte equivalent (D-06).
+    //
+    // Outside worker mode (no HERMES_KANBAN_TASK), the wrapper is bypassed
+    // entirely so a normal `ironhermes chat -q "prompt"` invocation retains
+    // its exact pre-Plan-04 semantics.
+    let worker_mode = std::env::var("HERMES_KANBAN_TASK").is_ok();
+    // Wrap runtime in an Arc up-front so both the goal-loop wrapper's
+    // TurnRunner closure (which needs to clone the runtime across turns)
+    // and the post-loop `runtime.registry()` consumer (line ~1141) can
+    // share ownership without taking either by value.
+    let runtime_handle = std::sync::Arc::new(runtime);
+    let result = if worker_mode {
+        // Build the kanban + judge inputs for the wrapper.
+        let kanban_config = crate::kanban::commands::load_kanban_config(&config);
+        let judge_fn = crate::kanban::commands::build_runtime_judge_fn(&kanban_config, &config)
+            .context("build_runtime_judge_fn for worker-mode goal-loop wrapper")?;
+        let task_id = std::env::var("HERMES_KANBAN_TASK").unwrap_or_default();
+        let run_id = std::env::var("HERMES_KANBAN_RUN_ID").unwrap_or_default();
+        let claim_lock = std::env::var("HERMES_KANBAN_CLAIM_LOCK").unwrap_or_default();
+        // Phase 36.3.7.13 D-A1: env-bridged open closes F-01 (cross-profile
+        // DB mismatch) on the CLI one-shot dispatcher → worker bridge.
+        let kanban_store_for_loop = ironhermes_kanban::KanbanStore::open_from_env()
+            .context("open kanban store for goal-loop wrapper")?;
+        let kanban_store_arc = std::sync::Arc::new(tokio::sync::Mutex::new(kanban_store_for_loop));
+
+        // The TurnRunner closure captures the runtime + per-call inputs and
+        // produces the textual assistant output the judge will evaluate.
+        // Inputs that are non-Clone per-call (the scrubber callback closures)
+        // are rebuilt inside each invocation so the wrapper can iterate
+        // freely without consuming them on turn 1.
+        let runtime_for_runner = runtime_handle.clone();
+        let session_id_for_runner = session_id.clone();
+        let trajectory_for_runner = trajectory_writer.clone();
+        let state_store_for_runner = state_store.clone();
+        let scrubber_for_runner = scrubber_single.clone();
+        let initial_messages = messages.clone();
+        let mut initial_taken = false;
+        let turn_runner: crate::kanban::goal_loop::TurnRunner =
+            Box::new(move |_msgs_history: Vec<String>| {
+                // Plan 04 D-06: the wrapper's `messages` is a textual history;
+                // the runtime owns the canonical ChatMessage sequence via its
+                // internal state. On the FIRST call we feed the seeded
+                // `messages` vec into run_turn; subsequent calls receive an
+                // empty vec because run_turn's run_chat path appends judge
+                // feedback into the existing session via the worker's tool
+                // surface. For run_single (which is single-turn batch),
+                // subsequent goal-loop turns build a synthetic user-message
+                // out of the wrapper's textual history string.
+                let runtime = runtime_for_runner.clone();
+                let session_id = session_id_for_runner.clone();
+                let trajectory = trajectory_for_runner.clone();
+                let state_store = state_store_for_runner.clone();
+                let scrubber = scrubber_for_runner.clone();
+                let messages_for_call = if initial_taken {
+                    // Subsequent turns: synthesize a user message from the
+                    // judge's most-recent feedback (last entry in the textual
+                    // history). When the history is empty (e.g., the wrapper
+                    // chose not to push feedback), we send a no-op continue
+                    // prompt; the worker LLM is expected to consult kanban_show
+                    // for state.
+                    let last = _msgs_history.last().cloned().unwrap_or_else(|| {
+                        "Continue working toward the acceptance criteria.".to_string()
+                    });
+                    vec![ironhermes_core::ChatMessage::user(last)]
+                } else {
+                    initial_messages.clone()
+                };
+                initial_taken = true;
+                Box::pin(async move {
+                    let request = ironhermes_agent::TurnRequest {
+                        messages: messages_for_call,
+                        session_id,
+                        cancel_token: None,
+                        stream: Some(Box::new(move |delta: &str| {
+                            let visible = scrubber.lock().unwrap().feed(delta);
+                            if !visible.is_empty() {
+                                print!("{}", visible);
+                                io::stdout().flush().ok();
+                            }
+                        })),
+                        tool_progress: Some(Box::new(|name: &str, args: &str| {
+                            eprintln!("{} {} {}", "Tool:".dimmed(), name.yellow(), args.dimmed());
+                        })),
+                        tool_result: None,
+                        trajectory_writer: trajectory,
+                        pressure_tracker: None,
+                        state_store: Some(state_store),
+                        compression_count: 0,
+                        tts_wiring: None,
+                    };
+                    let agent_result = runtime.run_turn(request).await?;
+                    // Extract the final assistant message text — the judge
+                    // evaluates it against title + body. Prefer the
+                    // `final_response` field (set by run_turn's normal exit
+                    // paths); fall back to the last assistant entry in
+                    // `messages` for paths that leave `final_response = None`.
+                    // Empty string is a legitimate fallback — judge will say
+                    // NotMet, advancing the budget normally.
+                    let final_text = agent_result
+                        .final_response
+                        .clone()
+                        .or_else(|| {
+                            agent_result.messages.iter().rev().find_map(|m| {
+                                if m.role == ironhermes_core::types::Role::Assistant {
+                                    m.content
+                                        .as_ref()
+                                        .and_then(|c| c.as_text())
+                                        .map(String::from)
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                        .unwrap_or_default();
+                    Ok::<String, anyhow::Error>(final_text)
+                })
+            });
+
+        crate::kanban::goal_loop::run_goal_loop_if_enabled(
+            turn_runner,
+            Vec::new(), // wrapper-internal textual history seed
+            &task_id,
+            &run_id,
+            &claim_lock,
+            &judge_fn,
+            kanban_store_arc.clone(),
+        )
+        .await
+        .context("run_goal_loop_if_enabled in worker-mode dispatch")?;
+
+        // The wrapper returns Ok(()) on every behavioral path. The
+        // downstream tail-rendering paths (scrubber flush, context-warnings
+        // block, drain-and-kill-session) consume only the
+        // `context_warnings` field; an empty AgentResult is the right
+        // sentinel because the wrapper's per-turn run_turn invocations
+        // already streamed everything to stdout in real time. We reuse
+        // the existing `budget_exhausted` constructor as a neutral
+        // "wrapper drove the session" shape — turns_used is left at the
+        // wrapper-tracked count via best-available approximation (the
+        // bumped counter on the DB is the canonical record).
+        ironhermes_agent::AgentResult::budget_exhausted(Vec::new(), 0)
+    } else {
+        // Non-worker mode: untouched chat -q semantics.
+        let request = ironhermes_agent::TurnRequest {
+            messages,
+            session_id: session_id.clone(),
+            cancel_token: None,
+            stream: Some(Box::new(move |delta| {
+                let visible = scrubber_single_cb.lock().unwrap().feed(delta);
+                if !visible.is_empty() {
+                    print!("{}", visible);
+                    io::stdout().flush().ok();
+                }
+            })),
+            tool_progress: Some(Box::new(|name, args| {
+                eprintln!("{} {} {}", "Tool:".dimmed(), name.yellow(), args.dimmed());
+            })),
+            tool_result: None,
+            trajectory_writer: trajectory_writer.clone(),
+            pressure_tracker: None,
+            state_store: Some(state_store.clone()),
+            compression_count: 0,
+            tts_wiring: None,
+        };
+        runtime_handle.run_turn(request).await?
+    };
 
     // Phase 34a MEM-READ-05: flush scrubber tail (emits held partial-tag if stream ended
     // mid-tag and it proved to not be a memory-context tag).
@@ -855,7 +1479,7 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     // per D-14) get a chance to clean up. Best-effort, log-and-continue --
     // matches the surrounding memory_manager.on_session_end pattern.
     // Read lock only; do NOT hold a write lock here (see RESEARCH Pitfall 6).
-    runtime.registry().read().await.call_session_end_hooks();
+    runtime_handle.registry().read().await.call_session_end_hooks();
 
     // Persist assistant response messages to SQLite
     for msg in &result.messages {
@@ -910,6 +1534,9 @@ fn build_cmd_ctx(
     trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
     // Phase 21.8.2: skill_registry so /skills list shows catalog and /skills reload works.
     skill_registry: Option<Arc<ironhermes_core::SkillRegistry>>,
+    // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02): KanbanStoreReader handle for /kanban slash UI.
+    // Best-effort — None when kanban DB is unavailable (matches cmd_cron fallback pattern).
+    kanban_store: Option<Arc<dyn ironhermes_core::commands::context::KanbanStoreReader>>,
 ) -> CommandContext {
     let base = CommandContext::new(Platform::Local, session_id.to_string(), agent_running);
     let base = if let Some(mgr) = mcp_manager {
@@ -951,8 +1578,15 @@ fn build_cmd_ctx(
     };
     // Phase 21.8.2: wire skill_registry so /skills list shows catalog and
     // /skills reload returns SkillsReload for the REPL loop to process.
-    if let Some(sr) = skill_registry {
+    let ctx = if let Some(sr) = skill_registry {
         ctx.with_skill_registry(sr)
+    } else {
+        ctx
+    };
+    // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02): wire KanbanStoreReader so /kanban
+    // slash dispatch reaches the kanban board. Best-effort — None if store unavailable.
+    if let Some(handle) = kanban_store {
+        ctx.with_kanban_store(handle)
     } else {
         ctx
     }
@@ -1011,7 +1645,28 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     io::stdout().flush().ok();
     io::stderr().flush().ok();
 
-    let (client, config, resolver) = build_client(cli)?;
+    let (client, mut config, resolver) = build_client(cli)?;
+
+    // Phase 36.3.7.13 D-F1: clamp inner-loop iteration cap for goal-mode workers.
+    // Applied HERE (before AgentRuntime::from_config captures the config) so the
+    // clamped value is baked into the runtime's budget handle from the start.
+    if std::env::var("HERMES_KANBAN_GOAL_MODE").map(|v| v == "1").unwrap_or(false) {
+        let kanban_cfg = crate::kanban::commands::load_kanban_config(&config);
+        let clamped = clamp_goal_inner_iterations(
+            config.agent.max_iterations,
+            kanban_cfg.goal_inner_max_iterations,
+        );
+        if clamped != config.agent.max_iterations {
+            tracing::info!(
+                target: "kanban.goal_mode",
+                original = config.agent.max_iterations,
+                clamped_to = clamped,
+                "goal-mode: inner agent loop clamped (D-F1)"
+            );
+            config.agent.max_iterations = clamped;
+        }
+    }
+
     // Phase 21.7 Plan 08 (D-11 / D-12 / D-14): resolve yolo + emit the
     // bold-red stderr banner ONCE per REPL session before we enter the
     // main loop. CLI flag wins over config; gateway reads config only
@@ -1323,6 +1978,17 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     prompt_builder.set_active_toolsets(runtime.merged_tools().enabled_toolset_names());
     prompt_builder.load_memory().await;
     prompt_builder.load_skills();
+    // Phase 36.3.7 Plan 05 (D-26): Inject KANBAN_GUIDANCE when worker-spawned.
+    inject_kanban_guidance_if_worker(&mut prompt_builder);
+    // Phase 36.3.7 Plan 05 (D-20): Register kanban tools when worker/orchestrator mode.
+    register_kanban_tools_if_applicable(
+        &registry,
+        &runtime.merged_tools().enabled_toolset_names(),
+    )
+    .await?;
+    // Phase 36.3.7.13 F-03 / D-B2: apply goal-mode toolset filter (second call site).
+    // Mirrors the run_single site above — both must call this per D-B2 requirement.
+    filter_for_goal_mode_if_applicable(&registry).await?;
     let system_msg = prompt_builder.build_system_message();
 
     let mut messages = vec![system_msg];
@@ -1330,6 +1996,18 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     // Phase 21.1 Plan 02: unified CommandRouter and agent_running flag.
     let command_router = CommandRouter::new(build_command_registry());
     let agent_running = Arc::new(AtomicBool::new(false));
+
+    // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02): open KanbanStore once at session start
+    // for /kanban slash dispatch. Best-effort — failure logs a warning and leaves the
+    // field None (cmd_kanban returns "not configured" in that case, matching cmd_cron).
+    let kanban_store_handle: Option<Arc<dyn ironhermes_core::commands::context::KanbanStoreReader>> =
+        match crate::kanban::KanbanStoreReaderImpl::open_default() {
+            Ok(imp) => Some(Arc::new(imp) as Arc<dyn ironhermes_core::commands::context::KanbanStoreReader>),
+            Err(e) => {
+                tracing::warn!(error = %e, "kanban store unavailable for /kanban slash dispatch");
+                None
+            }
+        };
 
     // Plan 11 spawn relocated earlier in run_chat (before the
     // SubagentProgressCallback construction) so the ExternalPrinterHandle
@@ -1509,6 +2187,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                         workspace.clone(),
                         trajectory_writer.clone(),
                         Some(skill_registry.clone()),
+                        kanban_store_handle.clone(), // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02)
                     );
 
                     // dispatch_command: extension-first -> CommandRouter -> skill catch-all
@@ -1905,6 +2584,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                                         workspace.clone(),
                                         trajectory_writer.clone(),
                                         Some(skill_registry.clone()),
+                                        kanban_store_handle.clone(), // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02)
                                     );
                                     match dispatch_command(
                                         tui.extensions(),
@@ -2266,6 +2946,7 @@ async fn run_agent_turn(
         pressure_tracker: Some(pressure_tracker.clone()), // Phase 18-14: reuse session tracker
         state_store: Some(state_store),
         compression_count: starting_count, // Phase 18-14: carry compression chain across turns
+        tts_wiring: None,
     };
 
     let result = runtime.run_turn(request).await?;
@@ -2495,7 +3176,10 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     if let Some(ref mgr) = mcp_manager {
         runner.set_mcp_manager(mgr.clone());
     }
-    runner.start().await
+    // Phase 36.17.1 Plan 02 Task 3: GatewayRunner::start now takes Arc<Self>
+    // so per-chat workers can capture Arc<GatewayRunner> and invoke
+    // `runner.drain_pending(...)` after each handler turn.
+    std::sync::Arc::new(runner).start().await
 }
 
 fn build_client(cli: &Cli) -> Result<(AnyClient, Config, ProviderResolver)> {

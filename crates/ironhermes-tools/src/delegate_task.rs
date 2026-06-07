@@ -659,6 +659,11 @@ impl Tool for DelegateTaskTool {
     }
 
     fn schema(&self) -> ToolSchema {
+        // Bug fix: the previous schema used `"required": []` with runtime-only
+        // enforcement, causing LLMs to call delegate_task with neither `task` nor
+        // `tasks`. The `oneOf` constraint makes the requirement schema-visible so
+        // the model knows at tool-definition parse time that exactly one of the two
+        // discriminator fields is required.
         ToolSchema::new(
             "delegate_task",
             self.description(),
@@ -667,7 +672,7 @@ impl Tool for DelegateTaskTool {
                 "properties": {
                     "task": {
                         "type": "string",
-                        "description": "Clear description of the task for the child agent to complete."
+                        "description": "Single-task mode: clear description of the task for the child agent to complete. Required when not using 'tasks' (batch mode). Mutually exclusive with `tasks` — provide exactly one of `task` (single mode) or `tasks` (batch mode)."
                     },
                     "allowed_tools": {
                         "type": "array",
@@ -694,7 +699,7 @@ impl Tool for DelegateTaskTool {
                             },
                             "required": ["goal"]
                         },
-                        "description": "Array of tasks for parallel batch execution. Max 3 tasks. Mutually exclusive with 'task' param."
+                        "description": "Batch mode: array of tasks for parallel execution. Max 3 tasks. Required when not using 'task' (single mode). Mutually exclusive with `task` — provide exactly one of `tasks` (batch mode) or `task` (single mode)."
                     },
                     "detach": {
                         "type": "boolean",
@@ -725,6 +730,11 @@ impl Tool for DelegateTaskTool {
                 },
                 "required": []
             }),
+            // Mutual-exclusion of `task` vs `tasks` is enforced at runtime in execute()
+            // (see line 745). The schema-level oneOf was dropped per
+            // BUG-IRONHERMES-TOOLS-SCHEMA-COMPAT-01 because Anthropic's tool API rejects
+            // top-level boolean schema combinators. The LLM continues to see the mutex
+            // constraint through the `task` and `tasks` property descriptions.
         )
     }
 
@@ -1205,27 +1215,38 @@ mod tests {
     }
 
     #[test]
-    fn test_delegate_task_schema_task_and_tasks_are_mutually_exclusive_optional() {
-        // Per WR-01 (commit bbf48db): `task` and `tasks` are mutually exclusive,
-        // so neither appears in `required`. Runtime validation in `execute()` enforces
-        // that at least one is present.
+    fn test_delegate_task_schema_has_no_top_level_boolean_combinator() {
+        // BUG-IRONHERMES-TOOLS-SCHEMA-COMPAT-01: top-level boolean schema
+        // combinators are rejected by Anthropic's tool API. The schema is now flat
+        // (no top-level oneOf/allOf/anyOf) and the mutex constraint between `task`
+        // and `tasks` lives in (a) the runtime check in execute() at line 745 and
+        // (b) the prose descriptions of the two properties.
         let tool = make_delegate_tool();
         let schema = tool.schema();
         let params = &schema.function.parameters;
-        let required = params["required"].as_array().unwrap();
+
         assert!(
-            required.is_empty(),
-            "schema 'required' must be empty — mutual exclusivity is enforced at runtime"
+            params.get("oneOf").is_none(),
+            "schema MUST NOT have top-level oneOf per BUG-IRONHERMES-TOOLS-SCHEMA-COMPAT-01 (Anthropic rejects top-level boolean combinators)"
         );
+        assert!(
+            params.get("allOf").is_none(),
+            "schema MUST NOT have top-level allOf per BUG-IRONHERMES-TOOLS-SCHEMA-COMPAT-01"
+        );
+        assert!(
+            params.get("anyOf").is_none(),
+            "schema MUST NOT have top-level anyOf per BUG-IRONHERMES-TOOLS-SCHEMA-COMPAT-01"
+        );
+
         let props = &params["properties"];
-        assert!(
-            props.get("task").is_some(),
-            "schema should expose 'task' property"
-        );
-        assert!(
-            props.get("tasks").is_some(),
-            "schema should expose 'tasks' property"
-        );
+        assert!(props.get("task").is_some(), "schema should expose 'task' property");
+        assert!(props.get("tasks").is_some(), "schema should expose 'tasks' property");
+
+        let task_desc = props["task"]["description"].as_str().expect("task description must be a string");
+        assert!(task_desc.contains("Mutually exclusive"), "task description must mention mutual exclusion; got: {}", task_desc);
+
+        let tasks_desc = props["tasks"]["description"].as_str().expect("tasks description must be a string");
+        assert!(tasks_desc.contains("Mutually exclusive"), "tasks description must mention mutual exclusion; got: {}", tasks_desc);
     }
 
     #[tokio::test]

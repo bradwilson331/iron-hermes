@@ -15,6 +15,8 @@ ironhermes-exec = { path = "../ironhermes-exec" }
 ironhermes-state = { path = "../ironhermes-state" }
 ironhermes-cron = { path = "../ironhermes-cron" }
 ironhermes-cron-runner = { path = "../ironhermes-cron-runner" }
+# Phase 36.3.7 (D-09): gateway-embedded kanban dispatcher
+ironhermes-kanban = { path = "../ironhermes-kanban" }
 ironhermes-hooks = { path = "../ironhermes-hooks" }
 ironhermes-mcp = { path = "../ironhermes-mcp" }
 # Phase 25.3 D-T-3: gateway opens TrajectoryWriter alongside StateStore and
@@ -23,6 +25,7 @@ ironhermes-mcp = { path = "../ironhermes-mcp" }
 ironhermes-trajectory = { path = "../ironhermes-trajectory" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
@@ -41,3 +44,7 @@ slack-morphism = { version = "2.22.0", features = ["axum"] }
 
 [dev-dependencies]
 # tempfile promoted to [dependencies] — needed at runtime for write_gateway_pid atomic write (Phase 24 D-10)
+# Phase 36.17.1 D-07: proptest powers the #[cfg(test)] SplitSlotQueue parity suite in session_queue.rs.
+# Dev-only — zero runtime cost. ASSUMED legitimate per RESEARCH.md Package Legitimacy Audit.
+proptest = "1"
+tracing-subscriber = { workspace = true }

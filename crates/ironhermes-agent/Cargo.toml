@@ -37,6 +37,13 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 regex = { workspace = true }
+sha2 = { workspace = true }
+# Phase 36.2 Plan 07: per-turn usage_events INSERT + sessions UPDATE inside a
+# single rusqlite unchecked_transaction. The transaction borrows
+# `&rusqlite::Connection` so the writes use `tx.execute(...)` directly instead
+# of the `&mut self` methods on `StateStore` (mirrors the b7_* atomicity tests
+# in ironhermes-state).
+rusqlite = { workspace = true }
 memory-sqlite = { path = "../../providers/memory-sqlite", optional = true }
 memory-grafeo = { path = "../../providers/memory-grafeo", optional = true }
 memory-duckdb = { path = "../../providers/memory-duckdb", optional = true }
@@ -48,3 +55,5 @@ tracing-test = { workspace = true }
 insta = { workspace = true }
 # Phase 25.1 GAP-7 — pre-send invariant integration tests
 wiremock = { workspace = true }
+# Phase 36.17.7 Plan 01 — async behavioral tests for tts_per_turn_wiring
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -3,7 +3,7 @@
 //! Replaces the Phase 19.1 `.hub/*.json` manifest. One file at $HERMES_HOME/skills-lock.json,
 //! skills[] sorted alphabetically by name, timestamp-free hashed region (installedAt is
 //! metadata, NOT in the hash). On-disk JSON is camelCase to match reference TS exactly
-//! (`/Users/twilson/code/skills/src/local-lock.ts`). See D-10..D-14 in CONTEXT.md.
+//! (`/Users/you/code/skills/src/local-lock.ts`). See D-10..D-14 in CONTEXT.md.
 
 use crate::{HubError, HubErrorKind};
 use serde::{Deserialize, Serialize};
@@ -105,7 +105,7 @@ impl SkillLock {
 // ============================================================================
 // Folder hash (D-13 corrected — NO separators)
 //
-// EXACT algorithm from /Users/twilson/code/skills/src/local-lock.ts:108-114:
+// EXACT algorithm from /Users/you/code/skills/src/local-lock.ts:108-114:
 //   files.sort(...)
 //   for each file: hasher.update(relativePath); hasher.update(content);
 //

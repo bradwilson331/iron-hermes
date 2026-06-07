@@ -4,12 +4,19 @@
 # =============================================================================
 # Usage: curl -fsSL https://raw.githubusercontent.com/bradwilson331/iron-hermes/main/install.sh | bash
 #
-# Installs IronHermes by:
-# 1. Detecting OS and architecture
-# 2. Downloading prebuilt binary from GitHub Releases (or falling back to cargo install)
-# 3. Scaffolding ~/.ironhermes/ directory structure
-# 4. Copying config templates
-# 5. Adding binary to PATH
+# Subcommands (default = install):
+#   bash install.sh                  # install (default)
+#   bash install.sh install          # install
+#   bash install.sh update           # update binary + re-seed only missing config keys
+#   bash install.sh reinstall        # force re-fetch + re-scaffold (preserves .env/config.yaml)
+#   bash install.sh uninstall        # remove binary + PATH lines; preserve ~/.ironhermes/
+#   bash install.sh uninstall --purge  # also removes ~/.ironhermes/
+#
+# Environment overrides:
+#   IRONHERMES_REPO    Distribution source URL (default: https://github.com/bradwilson331/iron-hermes)
+#   IRONHERMES_HOME    Home directory (default: ~/.ironhermes)
+#   IRONHERMES_VERSION Version to install (default: latest)
+#   IRONHERMES_PURGE   Set to "true" to purge on uninstall (same as --purge)
 # =============================================================================
 set -euo pipefail
 
@@ -19,6 +26,7 @@ REPO_NAME="iron-hermes"
 INSTALL_DIR="$HOME/.local/bin"
 IRONHERMES_HOME="${IRONHERMES_HOME:-$HOME/.ironhermes}"
 VERSION="${IRONHERMES_VERSION:-latest}"
+IRONHERMES_REPO="${IRONHERMES_REPO:-https://github.com/${REPO_OWNER}/${REPO_NAME}}"
 
 # --- Interactive detection (curl-pipe has no TTY) ---
 IS_INTERACTIVE=false
@@ -47,6 +55,30 @@ log_ok()    { echo "${GREEN}${BOLD}[OK]${RESET}    $*"; }
 log_warn()  { echo "${YELLOW}${BOLD}[WARN]${RESET}  $*"; }
 log_error() { echo "${RED}${BOLD}[ERROR]${RESET} $*" >&2; }
 
+# --- Security: validate IRONHERMES_REPO (T-37.1-02-01) ---
+# Accept only https:// or http://192.168. (Gitea LAN); reject shell metacharacters.
+validate_repo_url() {
+    local url="$1"
+    # Reject shell metacharacters
+    case "$url" in
+        *";"*|*"|"*|*"&"*|*'$'*|*"\`"*|*" "*|*"("*|*")"*|*"<"*|*">"*)
+            log_error "IRONHERMES_REPO contains invalid characters: $url"
+            exit 1
+            ;;
+    esac
+    # Accept https:// or http://192.168. only
+    case "$url" in
+        https://*)
+            ;;
+        http://192.168.*)
+            ;;
+        *)
+            log_error "IRONHERMES_REPO must start with https:// or http://192.168. (got: $url)"
+            exit 1
+            ;;
+    esac
+}
+
 # --- OS / Arch Detection ---
 detect_platform() {
     local os arch
@@ -73,7 +105,7 @@ resolve_version() {
     if [ "$VERSION" = "latest" ]; then
         local latest
         latest=$(curl -fsSL "https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest" 2>/dev/null \
-            | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/') || true
+            | grep '"tag_name"' | head -1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
         if [ -n "$latest" ]; then
             VERSION="$latest"
             log_info "Latest version: $VERSION"
@@ -106,6 +138,10 @@ download_binary() {
             tar -xzf "${tmpdir}/ironhermes.tar.gz" -C "${tmpdir}/"
             mkdir -p "$INSTALL_DIR"
             install -m 755 "${tmpdir}/ironhermes" "$INSTALL_DIR/ironhermes"
+            # macOS quarantine strip (T-37.1-02-03, D-07): strip xattr set by curl download
+            if [ "$OS" = "macos" ]; then
+                xattr -d com.apple.quarantine "$INSTALL_DIR/ironhermes" 2>/dev/null || true
+            fi
             log_ok "Binary installed to ${INSTALL_DIR}/ironhermes"
             exit 0
         else
@@ -115,7 +151,7 @@ download_binary() {
     )
 }
 
-# --- Fallback: cargo install ---
+# --- Fallback: cargo install --git ---
 cargo_install() {
     if ! command -v cargo >/dev/null 2>&1; then
         log_error "Neither prebuilt binary nor cargo found."
@@ -123,9 +159,11 @@ cargo_install() {
         exit 1
     fi
 
-    log_info "Building from source via cargo install (this may take several minutes)..."
-    cargo install --git "https://github.com/${REPO_OWNER}/${REPO_NAME}" --bin ironhermes ironhermes-cli
-    log_ok "Installed via cargo install"
+    validate_repo_url "$IRONHERMES_REPO"
+    local repo="$IRONHERMES_REPO"
+    log_info "Building from source via cargo install --git (this may take several minutes)..."
+    cargo install --git "$repo" ironhermes
+    log_ok "Installed from source"
 }
 
 # --- Scaffold ~/.ironhermes/ directories ---
@@ -136,7 +174,11 @@ scaffold_home() {
 }
 
 # --- Copy config templates ---
+# mode: install | update | reinstall
+# install/update: skip files that already exist (additive guard)
+# reinstall: same guard (preserves .env/config.yaml; scaffold_home is called separately)
 seed_templates() {
+    local mode="${1:-install}"
     # Templates may come from the repo (if running from checkout) or be downloaded.
     # For curl-pipe install: download templates from the repo.
     local base_url="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${VERSION:-main}"
@@ -150,12 +192,33 @@ seed_templates() {
         fi
     fi
 
+    # Protect .env file permissions (contains API keys — T-37.1-02-04)
+    chmod 600 "$IRONHERMES_HOME/.env" 2>/dev/null || true
+
     if [ ! -f "$IRONHERMES_HOME/config.yaml" ]; then
         if [ -f "cli-config.yaml.example" ]; then
             cp "cli-config.yaml.example" "$IRONHERMES_HOME/config.yaml"
         else
             curl -fsSL "${base_url}/cli-config.yaml.example" -o "$IRONHERMES_HOME/config.yaml" 2>/dev/null || \
                 log_warn "Could not download config.yaml template"
+        fi
+    elif [ "$mode" = "reinstall" ]; then
+        log_warn "config.yaml exists — only missing sections will be appended"
+        # Additive-merge: append missing top-level sections as commented blocks.
+        # For each section key in the example, only append if the key is absent.
+        if [ -f "cli-config.yaml.example" ]; then
+            while IFS= read -r line; do
+                # Match uncommented top-level keys (no leading spaces/tabs, ends with ':')
+                if echo "$line" | grep -qE '^[a-z_]+:'; then
+                    local section
+                    section=$(echo "$line" | sed 's/:.*//')
+                    if ! grep -qE "^${section}:" "$IRONHERMES_HOME/config.yaml" 2>/dev/null; then
+                        echo "" >> "$IRONHERMES_HOME/config.yaml"
+                        echo "# --- ${section} (appended by reinstall) ---" >> "$IRONHERMES_HOME/config.yaml"
+                        echo "# ${line}" >> "$IRONHERMES_HOME/config.yaml"
+                    fi
+                fi
+            done < "cli-config.yaml.example"
         fi
     fi
 
@@ -167,9 +230,6 @@ seed_templates() {
                 log_warn "Could not download SOUL.md template"
         fi
     fi
-
-    # Protect .env file permissions (contains API keys)
-    chmod 600 "$IRONHERMES_HOME/.env" 2>/dev/null || true
 
     log_ok "Config templates seeded"
 }
@@ -197,8 +257,32 @@ update_shell_path() {
     fi
 }
 
-# --- Main ---
-main() {
+# --- Detect existing installations (D-11) ---
+# Sets IRONHERMES_EXISTS, HERMES_AGENT_EXISTS, OPENCLAW_EXISTS globals.
+# NEVER reads or writes ~/.hermes/ contents (T-37.1-02-05).
+detect_existing_install() {
+    IRONHERMES_EXISTS=false
+    HERMES_AGENT_EXISTS=false
+    OPENCLAW_EXISTS=false
+
+    if [ -f "${IRONHERMES_HOME}/config.yaml" ] || [ -f "${IRONHERMES_HOME}/.env" ]; then
+        IRONHERMES_EXISTS=true
+    fi
+
+    # Detection is existence-check only; never read contents, never write (T-37.1-02-05)
+    if [ -d "$HOME/.hermes" ] || [ -f "$HOME/.hermes/config.yaml" ]; then
+        HERMES_AGENT_EXISTS=true
+        log_info "Legacy hermes-agent detected at ~/.hermes/. IronHermes uses ~/.ironhermes/ — your existing hermes-agent data is untouched."
+    fi
+
+    if [ -d "$HOME/.openclaw" ]; then
+        OPENCLAW_EXISTS=true
+        log_info "openclaw installation detected at ~/.openclaw/ (forward-compat notice only)."
+    fi
+}
+
+# --- Verb: install ---
+cmd_install() {
     echo ""
     echo "${BOLD}IronHermes Installer${RESET}"
     echo "========================================"
@@ -207,15 +291,19 @@ main() {
     detect_platform
     log_info "Detected platform: ${OS} ${ARCH}"
 
+    detect_existing_install
+
     resolve_version
 
-    # Try prebuilt binary first, fall back to cargo install
+    validate_repo_url "$IRONHERMES_REPO"
+
+    # Try prebuilt binary first, fall back to cargo install --git
     if ! download_binary; then
         cargo_install
     fi
 
     scaffold_home
-    seed_templates
+    seed_templates install
     update_shell_path
 
     echo ""
@@ -235,4 +323,147 @@ main() {
     fi
 }
 
-main "$@"
+# --- Verb: update ---
+# Swaps the binary; never clobbers SET config values (additive merge via seed_templates update).
+cmd_update() {
+    echo ""
+    echo "${BOLD}IronHermes Update${RESET}"
+    echo "========================================"
+    echo ""
+
+    detect_platform
+    log_info "Detected platform: ${OS} ${ARCH}"
+
+    resolve_version
+
+    validate_repo_url "$IRONHERMES_REPO"
+
+    # Re-fetch binary
+    if ! download_binary; then
+        cargo_install
+    fi
+
+    # Re-seed only missing templates (update mode: skip if file exists)
+    seed_templates update
+
+    # Re-enforce .env permissions on update (T-37.1-02-04)
+    chmod 600 "$IRONHERMES_HOME/.env" 2>/dev/null || true
+
+    echo ""
+    echo "========================================"
+    log_ok "IronHermes updated successfully!"
+    echo ""
+}
+
+# --- Verb: reinstall ---
+# Force re-fetch + scaffold_home; preserves .env/config.yaml (additive-merge).
+cmd_reinstall() {
+    echo ""
+    echo "${BOLD}IronHermes Reinstall${RESET}"
+    echo "========================================"
+    echo ""
+
+    detect_platform
+    log_info "Detected platform: ${OS} ${ARCH}"
+
+    resolve_version
+
+    validate_repo_url "$IRONHERMES_REPO"
+
+    # Force re-fetch binary
+    if ! download_binary; then
+        cargo_install
+    fi
+
+    scaffold_home
+    seed_templates reinstall
+    update_shell_path
+
+    echo ""
+    echo "========================================"
+    log_ok "IronHermes reinstalled successfully!"
+    echo ""
+}
+
+# --- Verb: uninstall ---
+# Removes binary and installer-added PATH lines.
+# Preserves ~/.ironhermes/ by default; --purge or IRONHERMES_PURGE=true removes it.
+cmd_uninstall() {
+    local purge="${IRONHERMES_PURGE:-false}"
+    for arg in "$@"; do
+        [ "$arg" = "--purge" ] && purge=true
+    done
+
+    echo ""
+    echo "${BOLD}IronHermes Uninstall${RESET}"
+    echo "========================================"
+    echo ""
+
+    # Remove binary (T-37.1-02-03: only remove the named ironhermes binary)
+    if [ -f "$INSTALL_DIR/ironhermes" ]; then
+        rm -f "$INSTALL_DIR/ironhermes"
+        log_ok "Binary removed from $INSTALL_DIR"
+    else
+        log_info "Binary not found at $INSTALL_DIR/ironhermes (already removed?)"
+    fi
+
+    # Remove installer-added PATH lines from shell RCs (T-37.1-02-02).
+    # Whole-line fixed-string match (grep -vxF) on the literal marker + the exact
+    # PATH line the installer wrote, so unrelated user lines that merely contain the
+    # substring are never deleted. The grep exit code is captured (|| rc_rc=$?) so
+    # neither an all-lines-removed result (exit 1) nor a real error (exit >1) trips
+    # `set -euo pipefail`; on a real error the original rc is left untouched.
+    local path_line="export PATH=\"${INSTALL_DIR}:\$PATH\""
+    local rc rc_rc
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
+        [ -f "$rc" ] || continue
+        rc_rc=0
+        grep -vxF \
+            -e "# Added by IronHermes installer" \
+            -e "$path_line" \
+            "$rc" > "${rc}.ironhermes_tmp" || rc_rc=$?
+        if [ "$rc_rc" -le 1 ]; then
+            mv "${rc}.ironhermes_tmp" "$rc"
+        else
+            rm -f "${rc}.ironhermes_tmp"
+        fi
+    done
+    log_ok "PATH entries removed from shell configs"
+
+    # Preserve ~/.ironhermes/ by default; --purge removes it
+    if [ "$purge" = "true" ]; then
+        rm -rf "$IRONHERMES_HOME"
+        log_ok "~/.ironhermes/ purged (--purge flag)"
+    else
+        log_info "~/.ironhermes/ preserved (use --purge to remove user data)"
+    fi
+
+    echo ""
+    echo "========================================"
+    log_ok "IronHermes uninstalled."
+    echo ""
+}
+
+# --- Subcommand dispatch (D-02) ---
+# First positional arg = verb; default = install (curl-pipe safe).
+VERB="${1:-install}"
+case "$VERB" in
+    install)
+        cmd_install
+        ;;
+    update)
+        cmd_update
+        ;;
+    reinstall)
+        cmd_reinstall
+        ;;
+    uninstall)
+        shift
+        cmd_uninstall "$@"
+        ;;
+    *)
+        log_error "Unknown subcommand: $VERB"
+        log_error "Usage: $0 [install|update|reinstall|uninstall [--purge]]"
+        exit 1
+        ;;
+esac

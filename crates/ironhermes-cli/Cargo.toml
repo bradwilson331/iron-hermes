@@ -32,6 +32,7 @@ ironhermes-cron = { path = "../ironhermes-cron" }
 ironhermes-cron-runner = { path = "../ironhermes-cron-runner" }
 ironhermes-hooks = { path = "../ironhermes-hooks" }
 ironhermes-hub = { path = "../ironhermes-hub" }
+ironhermes-kanban = { path = "../ironhermes-kanban" }
 ironhermes-mcp = { path = "../ironhermes-mcp" }
 # Phase 25.3 D-T-3: cli opens TrajectoryWriter at session start in run_chat,
 # run_single, run_gateway, AND tui_rata::build_app_deps; the resulting handle
@@ -40,6 +41,7 @@ ironhermes-trajectory = { path = "../ironhermes-trajectory" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+toml = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
@@ -48,6 +50,7 @@ tokio-stream = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
 crossterm = { workspace = true }
 ansi-to-tui = { workspace = true }
 ratatui = { workspace = true }
@@ -62,6 +65,11 @@ dotenvy = { workspace = true }
 sha2 = { workspace = true }
 dirs = { workspace = true }
 regex = { workspace = true }
+unicode-width = "0.2"
+# Phase 36.17.5 Plan 04: install rustls CryptoProvider before Edge TTS WebSocket TLS call.
+# msedge-tts tokio-runtime uses rustls 0.23 + aws-lc-rs; provider must be installed once
+# per process before any TLS connection. Pin to same version as the rest of the workspace.
+rustls = "0.23"
 # Phase 21.7 Plan 09 Task 9-03 (D-21): LiveDeepProbe uses reqwest for
 # provider HEAD probes and rusqlite for FTS5 `PRAGMA integrity_check`.
 reqwest = { workspace = true }

@@ -32,6 +32,7 @@ pub fn dispatch(
         "status" => cmd_status(ctx),
         "title" => cmd_title(args, ctx),
         "sessions" => cmd_sessions(args, ctx),
+        "usage" => cmd_usage(args, ctx),
         "export-session" => cmd_export_session(args, ctx),
         "resume" => cmd_resume(args, ctx),
         "save" => cmd_save(args, ctx),
@@ -68,6 +69,7 @@ pub fn dispatch(
         "commands" => cmd_commands(args, ctx, router),
         "skills" => cmd_skills(args, ctx),
         "cron" => cmd_cron(args, ctx),
+        "kanban" => cmd_kanban(args, ctx), // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02) — /kanban slash command dispatch.
 
         // -------------------------------------------------------------------
         // Toolset slash command (Phase 25 Plan 04 — D-06 session-only)
@@ -647,6 +649,105 @@ fn cmd_sessions(args: &[&str], ctx: &CommandContext) -> CommandResult {
     CommandResult::Output(text)
 }
 
+/// `/usage [--today | --provider X | --since Nd | --model X]` — show per-turn
+/// usage and cost rollups from the `usage_events` ledger (Phase 36.2 Plan 10).
+///
+/// Subcommands (flat-flag parsing, mirrors `cmd_sessions` style):
+/// - bare `/usage` — totals for the current `ctx.session_id`.
+/// - `--today` — cross-session totals, today-only (local midnight cutoff).
+/// - `--provider X` — cross-session, filtered by provider name.
+/// - `--model X` — cross-session, filtered by model name.
+/// - `--since Nd|Nh|Nm` — cross-session, rolling time window relative to now.
+///
+/// Any of the cross-session flags clear the `session_id` filter so they
+/// aggregate across all sessions (matches the documented `/usage` semantics
+/// in CONTEXT.md / `36.2-10-PLAN.md`).
+///
+/// T-36.2-10-INJ: every filter value flows through `rusqlite::params!`
+/// bindings inside `StateStore::query_usage_events` — never `format!`-
+/// interpolated into SQL. The dispatch into the state crate happens via
+/// `StateStoreHandle::usage_text(...)`, which is platform-neutral.
+///
+/// Guard pattern (D-05): when `ctx.state_store` is None, returns informational
+/// text rather than panicking (gateway / classic-tui compat).
+fn cmd_usage(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let store = match &ctx.state_store {
+        Some(s) => s.clone(),
+        None => return CommandResult::Output("Session storage not configured.".to_string()),
+    };
+
+    let mut session_id: Option<String> = Some(ctx.session_id.clone());
+    let mut today_only = false;
+    let mut provider: Option<String> = None;
+    let mut model: Option<String> = None;
+    let mut since_seconds: Option<i64> = None;
+
+    let mut iter = args.iter().peekable();
+    while let Some(a) = iter.next() {
+        match *a {
+            "--today" => {
+                today_only = true;
+                session_id = None;
+            }
+            "--provider" => {
+                if let Some(v) = iter.next() {
+                    provider = Some((*v).to_string());
+                    session_id = None;
+                }
+            }
+            "--model" => {
+                if let Some(v) = iter.next() {
+                    model = Some((*v).to_string());
+                    session_id = None;
+                }
+            }
+            "--since" => {
+                if let Some(v) = iter.next() {
+                    if let Some(secs) = parse_since(v) {
+                        since_seconds = Some(secs);
+                        session_id = None;
+                    }
+                }
+            }
+            _ => { /* unknown flag — ignore so future additions don't break old call sites */ }
+        }
+    }
+
+    let text = store.usage_text(
+        session_id.as_deref(),
+        today_only,
+        provider.as_deref(),
+        model.as_deref(),
+        since_seconds,
+    );
+    CommandResult::Output(text)
+}
+
+/// Parse a `--since` argument like `"7d"` / `"24h"` / `"30m"` into seconds.
+///
+/// Returns `None` for empty input, missing-number input, or any unit
+/// character outside the accepted set `{d, h, m}`. The handler treats `None`
+/// as "skip this filter" (don't apply a window) — matches the plan's
+/// permissive UX (unknown flags don't error out).
+pub fn parse_since(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    // Split on the LAST byte (must be ASCII unit char).
+    let (num_part, unit) = s.split_at(s.len() - 1);
+    if num_part.is_empty() {
+        return None;
+    }
+    let n: i64 = num_part.parse().ok()?;
+    match unit {
+        "d" => Some(n * 86400),
+        "h" => Some(n * 3600),
+        "m" => Some(n * 60),
+        _ => None,
+    }
+}
+
 /// `/export-session [session_id]` — export a session to the 4-file layout (Phase 25.3 D-F-1).
 ///
 /// With no args, exports the current session (`ctx.session_id`).
@@ -1028,6 +1129,180 @@ fn cmd_cron(args: &[&str], ctx: &CommandContext) -> CommandResult {
     }
 }
 
+// Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02) — /kanban slash command sub-dispatch.
+//
+// Mirrors `cmd_cron` (handlers.rs:1062). v1 active subverbs: list / show / tip.
+// Deferred operator-recovery subverbs route to a 'use the CLI verb directly' message —
+// NOT to `todo_stub` (which would hide receiver-end gaps per the 36.3.7.0 Meta-finding:
+// the catch-all `todo_stub` hid BUG-36.3.7-02 from grep-based verifiers).
+// All KanbanStore reads are sync (via Arc<Mutex<KanbanStore>>) — no async bridge needed.
+
+/// Deferred operator-recovery subverbs for `/kanban` slash command.
+/// These are KNOWN deferred names that route to a CLI-redirect message.
+/// UNKNOWN names fall through to typo-suggest (matching cmd_cron behavior).
+const DEFERRED_KANBAN_SUBVERBS: &[&str] = &[
+    "claim", "complete", "block", "unblock", "comment", "archive",
+    "reclaim", "reassign", "assign", "link", "unlink",
+    "init", "tail", "watch", "runs", "assignees", "dispatch",
+    "stats", "log", "context", "gc", "daemon", "diagnostics",
+    "swarm",
+    "mention",
+    "boards",      // Phase 36.3.7.9
+    "decompose",   // Phase 36.3.7.10 — use `hermes kanban decompose` CLI verb
+    "specify",     // Phase 36.3.7.10 — use `hermes kanban specify` CLI verb
+];
+
+/// Map ironhermes-core's Platform enum to the lowercase string form used by
+/// kanban subscriptions + the gateway's notification_sources config.
+/// Phase 36.3.7.5 BUG-36.3.7.5-06.
+fn platform_to_str(p: &crate::types::Platform) -> String {
+    // Platform implements Display with lowercase strings ("telegram", "discord",
+    // "slack", "local", etc.) matching the notification_sources contract verbatim.
+    p.to_string()
+}
+
+fn cmd_kanban(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let store = match &ctx.kanban_store {
+        Some(s) => s.clone(),
+        None => return CommandResult::Output("/kanban: kanban store not configured.".to_string()),
+    };
+    match args.first().copied() {
+        None | Some("list") => CommandResult::Output(store.list_text()),
+        Some("show") => {
+            let id = match args.get(1) {
+                Some(s) => *s,
+                None => return CommandResult::Error("/kanban show <id>: missing id".to_string()),
+            };
+            match store.show_text(id) {
+                Some(text) => CommandResult::Output(text),
+                None => CommandResult::Error(format!("No kanban task found: {}", id)),
+            }
+        }
+        Some("tip") => CommandResult::Output(store.tip_text()),
+        // Phase 36.3.7.5 BUG-36.3.7.5-06: gateway-side /kanban create arm with
+        // auto-subscribe hook. Replaces the deferred-subverb routing for "create"
+        // (which used to fall into DEFERRED_KANBAN_SUBVERBS).
+        //
+        // Auto-subscribe: if CommandContext carries chat_id AND --json is NOT set,
+        // append a source='auto' subscription so the gateway notifier (Phase 36.3.7.5)
+        // delivers terminal events to the originating chat.
+        Some("create") => {
+            // Parse: args[1] = title; subsequent args = --assignee NAME, --json.
+            let title = match args.get(1) {
+                Some(t) => *t,
+                None => {
+                    return CommandResult::Error(
+                        "/kanban create <title> --assignee <name> [--json]: missing title"
+                            .to_string(),
+                    );
+                }
+            };
+            let mut assignee: Option<&str> = None;
+            let mut json = false;
+            let mut i = 2usize;
+            while i < args.len() {
+                match args[i] {
+                    "--assignee" => {
+                        assignee = args.get(i + 1).copied();
+                        i += 2;
+                    }
+                    "--json" => {
+                        json = true;
+                        i += 1;
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+            let assignee = match assignee {
+                Some(a) => a,
+                None => {
+                    return CommandResult::Error(
+                        "/kanban create: --assignee <name> is required".to_string(),
+                    );
+                }
+            };
+            let writer = match &ctx.kanban_store_writer {
+                Some(w) => w.clone(),
+                None => {
+                    return CommandResult::Output(
+                        "/kanban create: kanban store writer not configured.".to_string(),
+                    );
+                }
+            };
+            let task_id = match writer.create_task_simple(title, assignee, json) {
+                Ok(id) => id,
+                Err(e) => return CommandResult::Error(format!("/kanban create: {}", e)),
+            };
+            // Auto-subscribe hook (skip if --json per CONTEXT.md locked decision +
+            // docs/kanban/reference.md:718). Failures here are logged but do NOT
+            // fail the whole arm — the task was successfully created.
+            if !json {
+                if let Some(chat_id) = ctx.chat_id.as_deref() {
+                    let platform = platform_to_str(&ctx.platform);
+                    match writer.append_subscription(
+                        &task_id,
+                        &platform,
+                        chat_id,
+                        ctx.thread_id.as_deref(),
+                        "auto",
+                    ) {
+                        Ok(_) => {
+                            tracing::debug!(
+                                task_id = %task_id,
+                                platform = %platform,
+                                chat_id = chat_id,
+                                "auto-subscribed origin chat to task"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                error = %e,
+                                "auto-subscribe failed; task created OK but notifier won't deliver"
+                            );
+                        }
+                    }
+                }
+            }
+            if json {
+                CommandResult::Output(format!(
+                    "{{\"task_id\":\"{}\",\"status\":\"ready\",\"assignee\":\"{}\"}}",
+                    task_id, assignee
+                ))
+            } else {
+                let subscribed_note = if ctx.chat_id.is_some() {
+                    format!(
+                        "\n(subscribed — you'll be notified when {} completes or blocks)",
+                        task_id
+                    )
+                } else {
+                    String::new()
+                };
+                CommandResult::Output(format!(
+                    "Created {} (ready, assignee={}){}",
+                    task_id, assignee, subscribed_note
+                ))
+            }
+        }
+        Some(other) => {
+            if DEFERRED_KANBAN_SUBVERBS.contains(&other) {
+                // Known deferred subverb — route to CLI-redirect message (NOT todo_stub).
+                // This distinct arm is GREPPABLE so future grep-based verifiers can find it.
+                CommandResult::Output(store.deferred_subverb_message(other))
+            } else {
+                // Unknown subverb — typo-suggest against the ACTIVE subverbs only.
+                let candidates: &[&str] = &["list", "show", "tip", "create"];
+                let suffix = suggest_typo(other, candidates)
+                    .map(|s| format!(" {}", s))
+                    .unwrap_or_default();
+                CommandResult::Error(format!("Unknown /kanban subcommand: {}{}", other, suffix))
+            }
+        }
+    }
+}
+
 // Phase 25 Plan 04 (D-06) — `/toolset` slash command sub-dispatch.
 //
 // Mirrors `cmd_cron` (handlers.rs above) for sub-dispatch shape.
@@ -1047,6 +1322,19 @@ fn cmd_toolset(args: &[&str], ctx: &CommandContext) -> CommandResult {
             );
         }
     };
+    // Phase 36.17.7 D-06 (REVISION BLOCKER 2 — Path B): per-platform slash
+    // dispatchers (gateway handler.rs, iron_hermes_ui ws.rs, tui event_loop.rs)
+    // attach `ctx.tts_registration_status` via
+    // `ctx.with_tts_registration_status(runtime.bundle.registry.read().await.tts_registration_status())`
+    // BEFORE dispatching here. The renderer in
+    // `crates/ironhermes-cli/src/toolset_cmd.rs` reads
+    // `ctx.tts_registration_status` (or falls back to `Inspection` when it is
+    // `None` — the CLI inspection path). When `tts_registration_status ==
+    // Some(Live)`, the `Registered` column reads `Live`. The per-platform
+    // dispatcher wire-up is the integration point — `cmd_toolset` itself only
+    // needs the status to be ON the context so downstream renderers can read
+    // it.
+    let _tts_registration_status = ctx.tts_registration_status; // BLOCKER 2 — observable on the context
     match args.first().copied() {
         None | Some("list") => CommandResult::Output(handle.render_list()),
         Some("show") => {
@@ -1500,25 +1788,31 @@ fn cmd_btw(args: &[&str], ctx: &CommandContext) -> CommandResult {
 
 /// `/queue [message]` — add a message to the input queue.
 ///
-/// Queues a message to be submitted after the current turn completes.
-/// The actual queuing happens in the tui_rata post-router hook.
+/// Phase 36.17.1 (D-01.c / D-08, Pitfall 3): returns
+/// `CommandResult::Queued { message }`. The gateway handler intercepts this
+/// variant, synthesizes a `MessageEvent`, and calls `session_queue.try_push(...)`
+/// (gateway/src/handler.rs Queued arm) — the actual queuing is a side-effect at
+/// the gateway boundary, NOT inside this handler. That keeps `handlers.rs`
+/// side-effect free, consistent with how `cmd_new` returns `NewSession {..}`
+/// and the gateway intercepts.
 ///
-/// Guard pattern (D-05): when `ctx.agent_loop` is None, returns informational text.
-fn cmd_queue(args: &[&str], ctx: &CommandContext) -> CommandResult {
-    if ctx.agent_loop.is_none() {
-        return CommandResult::Output(
-            "Agent loop not configured. Queue requires agent threading.".to_string(),
-        );
-    }
+/// Pitfall 3 mitigation: the previous stub gated on `ctx.agent_loop.is_none()`,
+/// but `agent_loop` is never set in the gateway `CommandContext`, so the gate
+/// was always true and `/queue` always returned "Agent loop not configured."
+/// That gate is removed entirely — the real gate is "does the session queue
+/// accept this event?" which is the result of `try_push` at the gateway
+/// boundary, not whether an agent loop is wired here.
+///
+/// Pre-resolution bypass: `/queue` is in `is_bypass` (Phase 36 / GW-05) so it
+/// works during an active agent turn (D-01.c).
+fn cmd_queue(args: &[&str], _ctx: &CommandContext) -> CommandResult {
     if args.is_empty() {
         return CommandResult::Output(
             "Usage: /queue <message> — add a message to the input queue.".to_string(),
         );
     }
     let message = args.join(" ");
-    CommandResult::Output(format!(
-        "Message queued: \"{message}\" (post-router hook will submit after current turn)."
-    ))
+    CommandResult::Queued { message }
 }
 
 // =============================================================================
@@ -1530,7 +1824,9 @@ fn todo_stub(name: &str) -> CommandResult {
         "voice" => "No TTS infrastructure",
         "snapshot" => "No checkpoint system",
         "insights" => "No analytics infrastructure",
-        "usage" => "No token cost tracking",
+        // Phase 36.2 Plan 10: "usage" handled by cmd_usage in the dispatch
+        // match above — entry removed so b10's "is not yet available" guard
+        // catches any future regression that re-routes /usage to todo_stub.
         "update" => "Binary build \u{2014} use package manager",
         "sethome" | "set-home" => "No home channel concept",
         "approve" => "No approval queue",
@@ -1839,7 +2135,7 @@ mod tests {
             // "rollback" removed — now has real handler (Phase 22.4.2 Plan 04)
             "snapshot",
             "insights",
-            "usage",
+            // "usage" removed — now has real handler (Phase 36.2 Plan 10)
             "update",
             "sethome",
             // "retry" removed — now has real handler (Phase 22.4.2 Plan 04)
@@ -2510,6 +2806,77 @@ mod tests {
             matches!(result, ResolveResult::Exact(c) if c.name == "export-session"),
             "expected /export-session Exact match, got: {:?}",
             result
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 36.17.1 Plan 03 Task 1 — cmd_queue tests
+    // ---------------------------------------------------------------------------
+
+    /// Non-empty args produce `CommandResult::Queued { message }` where the
+    /// message is the space-joined args. The gateway handler intercepts this
+    /// variant and calls `session_queue.try_push(...)` (D-08).
+    #[test]
+    fn test_cmd_queue_produces_queued() {
+        let ctx = make_ctx(false);
+        let result = cmd_queue(&["hello", "world"], &ctx);
+        assert_eq!(
+            result,
+            CommandResult::Queued {
+                message: "hello world".to_string(),
+            },
+            "cmd_queue with non-empty args must return Queued {{ message }}"
+        );
+    }
+
+    /// Empty args return a `CommandResult::Output` usage string. The usage
+    /// string MUST contain the literal `"Usage: /queue"` so the acceptance
+    /// grep check passes and the user sees actionable guidance.
+    #[test]
+    fn test_cmd_queue_empty_args_returns_usage() {
+        let ctx = make_ctx(false);
+        let result = cmd_queue(&[], &ctx);
+        match result {
+            CommandResult::Output(s) => assert!(
+                s.contains("Usage: /queue"),
+                "Empty args must return Output containing 'Usage: /queue'; got: {}",
+                s
+            ),
+            other => panic!(
+                "Empty args must return CommandResult::Output(...); got {:?}",
+                other
+            ),
+        }
+    }
+
+    /// Pitfall 3 mitigation: the `ctx.agent_loop.is_none()` gate is gone.
+    /// The previous stub always returned "Agent loop not configured." in the
+    /// gateway. Verify cmd_queue returns Queued regardless of agent_running
+    /// state — only args.is_empty() controls the output.
+    #[test]
+    fn test_cmd_queue_agent_running_state_is_irrelevant() {
+        // ctx with agent_running == true
+        let ctx_busy = make_ctx(true);
+        let result_busy = cmd_queue(&["test"], &ctx_busy);
+        assert_eq!(
+            result_busy,
+            CommandResult::Queued {
+                message: "test".to_string(),
+            },
+            "Pitfall 3: cmd_queue must NOT gate on agent_running — got {:?}",
+            result_busy
+        );
+
+        // ctx with agent_running == false
+        let ctx_idle = make_ctx(false);
+        let result_idle = cmd_queue(&["test"], &ctx_idle);
+        assert_eq!(
+            result_idle,
+            CommandResult::Queued {
+                message: "test".to_string(),
+            },
+            "Pitfall 3: cmd_queue must NOT gate on agent_running flag — got {:?}",
+            result_idle
         );
     }
 }

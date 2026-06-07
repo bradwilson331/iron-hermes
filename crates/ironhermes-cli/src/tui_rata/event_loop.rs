@@ -53,7 +53,9 @@ pub async fn run_chat_ratatui(
     initial: Option<String>,
     yolo: bool,
 ) -> Result<()> {
-    install_tui_logger_subscriber();
+    // The WorkerGuard must outlive the TUI session — dropping it shuts down the
+    // non-blocking file-appender thread and any buffered log lines are lost.
+    let _file_log_guard = install_tui_logger_subscriber();
 
     let mut terminal = ratatui::init();
     execute!(io::stdout(), EnableMouseCapture)?;
@@ -63,22 +65,55 @@ pub async fn run_chat_ratatui(
 
     drop(_mouse_guard);
     ratatui::restore();
+    drop(_file_log_guard);
     result
 }
 
 // ── Tracing subscriber install ────────────────────────────────────────────────
 
-/// Install `tui_logger::TuiTracingSubscriberLayer` before `ratatui::init()`.
+/// Install `tui_logger::TuiTracingSubscriberLayer` + a daily-rolling file
+/// appender writing to `$IRONHERMES_HOME/logs/tui.log` before `ratatui::init()`.
+///
+/// Returns the `tracing_appender::non_blocking::WorkerGuard` for the file
+/// appender — the caller MUST hold this for the duration of the TUI session
+/// (dropping it shuts down the writer thread and loses buffered output).
+/// `None` is returned only when the logs directory can't be created (e.g.
+/// read-only home in tests); the in-TUI log panel still works in that case.
 ///
 /// Uses `try_init` so double-install in tests (or when the classic subscriber
 /// is already installed) is a no-op rather than a panic (Pitfall 2).
-fn install_tui_logger_subscriber() {
+fn install_tui_logger_subscriber() -> Option<tracing_appender::non_blocking::WorkerGuard> {
     use tracing_subscriber::prelude::*;
-    let layer = tui_logger::TuiTracingSubscriberLayer;
-    let registry = tracing_subscriber::registry().with(layer);
-    let _ = registry.try_init();
+
+    let log_dir = ironhermes_core::constants::get_hermes_home().join("logs");
+    let file_layer_pair = std::fs::create_dir_all(&log_dir).ok().map(|_| {
+        let file_appender = tracing_appender::rolling::daily(&log_dir, "tui.log");
+        let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ironhermes=info"));
+        let layer = tracing_subscriber::fmt::layer()
+            .with_writer(non_blocking)
+            .with_ansi(false)
+            .with_target(true)
+            .with_filter(env_filter);
+        (layer, guard)
+    });
+
+    let tui_layer = tui_logger::TuiTracingSubscriberLayer;
+    let registry = tracing_subscriber::registry().with(tui_layer);
+    let guard = match file_layer_pair {
+        Some((file_layer, guard)) => {
+            let _ = registry.with(file_layer).try_init();
+            Some(guard)
+        }
+        None => {
+            let _ = registry.try_init();
+            None
+        }
+    };
     let _ = tui_logger::init_logger(tui_logger::LevelFilter::Trace);
     tui_logger::set_default_level(tui_logger::LevelFilter::Info);
+    guard
 }
 
 // ── Main bootstrap ────────────────────────────────────────────────────────────
@@ -535,6 +570,13 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     let fast_enabled = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let skin = Arc::new(std::sync::RwLock::new("default".to_string()));
 
+    // Phase 36.17.3 (D-03 / D-06 amended): TUI-owned queue + pause toggle.
+    // The TUI uses a single fixed SessionKey (Platform::Local / "local" / "local"),
+    // populated in App::new — only the queue + paused toggle flow through deps.
+    let queue: Arc<dyn ironhermes_core::queue::MessageQueue<ironhermes_core::session::SessionKey>> =
+        Arc::new(ironhermes_gateway::session_queue::SessionQueue::new());
+    let queue_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
     Ok(AppDeps {
         agent_runtime,
         hook_registry,
@@ -562,6 +604,9 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         statusbar_enabled,
         debug_enabled,
         fast_enabled,
+        // Phase 36.17.3 (D-03 / D-06 amended): queue + paused toggle.
+        queue,
+        queue_paused,
         skin,
         // Phase 25.2 Plan 15 follow-up: the wireup the original plan missed
         toolset_session: Some(toolset_session),
@@ -685,7 +730,7 @@ async fn recv_pending(app: &mut App) -> Option<StreamEvent> {
 /// Compute the transcript chunk area by mirroring the 4-chunk layout from ui.rs.
 ///
 /// Used by `run_app_inner` to pass `transcript_area` to `reconcile_scroll`.
-fn compute_transcript_area(size: ratatui::prelude::Size) -> ratatui::layout::Rect {
+pub(crate) fn compute_transcript_area(size: ratatui::prelude::Size) -> ratatui::layout::Rect {
     use ratatui::layout::{Constraint, Direction, Layout, Rect};
     let frame_area = Rect {
         x: 0,
@@ -720,9 +765,20 @@ fn compute_transcript_area(size: ratatui::prelude::Size) -> ratatui::layout::Rec
 ///   - Streaming: Delta
 ///   - Tool: ToolCall, ToolProgress, ToolResult
 fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationToken) {
+    use ironhermes_core::commands::running_agent::RunningAgentGuard;
     let runtime = app.agent_runtime.clone();
     let trajectory_writer = app.trajectory_writer.clone(); // Phase 25.3 D-T-3
     let cancel_token = cancel.clone();
+    // Phase 36.1 (GW-05-TUI, D-09, Pitfall 1): clone the Arc in the SYNC body so it can
+    // be moved into the async block. The guard MUST be bound inside tokio::spawn so Drop
+    // fires when the future completes, NOT when spawn_turn returns synchronously.
+    let agent_running = app.agent_running.clone();
+    // Phase 36.2 Plan 07 fix: thread state_store so the post-LLM-call
+    // write site in `agent_loop.rs` records `usage_events` rows and
+    // updates session aggregates. Without this, the write is silently
+    // skipped (`if let Some(store) = &self.state_store`) and /usage stays
+    // empty, the status-bar cost/tok pills never render.
+    let state_store = app.state_store.clone();
     let mut messages_snapshot = app.history.clone();
 
     // Phase 21.8.3.1 D-03 / D-04 / D-06: inject active personality overlay
@@ -740,6 +796,11 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
     let session_id = app.session_id.clone();
 
     tokio::spawn(async move {
+        // Phase 36.1 (GW-05-TUI, D-09, Pitfall 1): RAII guard MUST be bound inside the async
+        // block so Drop fires when the future completes, NOT when spawn_turn returns
+        // synchronously. Binding this outside the tokio::spawn would set the flag true then
+        // immediately clear it before the turn runs, providing zero protection.
+        let _agent_guard = RunningAgentGuard::new(agent_running);
         let _ = tx.send(StreamEvent::Started);
 
         // Build streaming + tool callbacks that forward to the UI event loop.
@@ -781,6 +842,19 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
         // fallback is DURABLE (run_turn calls wire_fallback_if_configured).
         // TUI carries no per-session compression_count or pressure_tracker;
         // leave them at default (0 / None) as documented in plan interfaces.
+
+        // Phase 36.17.7 D-01: TUI uses Platform::Local; dispatcher is None because
+        // SendAudioTool's Local arm handles rodio playback directly via DeviceSinkBuilder.
+        let session_key = ironhermes_core::SessionKey {
+            platform: ironhermes_core::types::Platform::Local,
+            chat_id: session_id.clone(),
+            user_id: None,
+        };
+        let tts_wiring = Some(ironhermes_agent::TtsPerTurnWiring {
+            session_key: Some(session_key.clone()).unwrap(), // explicit Some() literal for D-05 source-grep
+            audio_dispatcher: None,
+        });
+
         let request = ironhermes_agent::TurnRequest {
             messages: messages_snapshot,
             session_id,
@@ -790,14 +864,19 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
             tool_result: Some(tool_result_cb),
             trajectory_writer,
             pressure_tracker: None,
-            state_store: None,
+            state_store,
             compression_count: 0,
+            tts_wiring,
         };
 
         let result = runtime.run_turn(request).await;
 
         let terminal_event = match result {
-            Ok(_) => StreamEvent::Finished,
+            // Phase 36.2 Plan 07/10 fix: forward the per-turn aggregated
+            // token count so the status-bar `tokens_used` field updates.
+            Ok(agent_result) => StreamEvent::Finished {
+                total_tokens: agent_result.total_usage.total_tokens,
+            },
             Err(_) if cancel_token.is_cancelled() => StreamEvent::Cancelled,
             Err(e) => StreamEvent::Error(e.to_string()),
         };
@@ -867,6 +946,40 @@ mod tests {
             "Phase 25.1 GAP-8 / 28.1-05: AgentRuntime::run_turn MUST chain \
              .with_browser_session(...) so the rata chat REPL's browser tools reach \
              the per-turn agent loop."
+        );
+    }
+
+    /// INV-36.2-07-TUI: Phase 36.2 Plan 07 regression net.
+    /// `spawn_turn` MUST thread `app.state_store.clone()` into the per-turn
+    /// `TurnRequest`. If `state_store: None` is passed, the post-LLM-call write
+    /// site in `agent_loop.rs` (gated by `if let Some(store) = &self.state_store`)
+    /// silently skips — `usage_events` stays empty, `/usage` returns "no data",
+    /// and the status-bar cost/tok pills (Plan 10) never render.
+    #[test]
+    fn inv_36_2_07_tui_threads_state_store_into_turn_request() {
+        let source = include_str!("event_loop.rs");
+        let non_comment: String = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            non_comment.contains("let state_store = app.state_store.clone();"),
+            "Phase 36.2 Plan 07 fix: spawn_turn MUST clone app.state_store into a \
+             local so it can be moved into the tokio::spawn body and threaded into \
+             TurnRequest; otherwise usage_events writes silently skip in the TUI."
+        );
+
+        // Ensure the TurnRequest in spawn_turn does NOT pass the unwired sentinel
+        // (the literal pattern is intentionally split across concatenated string
+        // literals so this assertion's own message does not match itself).
+        let bad_pattern = concat!("state_store", ": None");
+        assert!(
+            !non_comment.contains(bad_pattern),
+            "Phase 36.2 Plan 07 fix: spawn_turn MUST thread the state store \
+             through the TurnRequest; passing the unwired sentinel disables the \
+             agent_loop write site and breaks /usage + status-bar cost/tok pills."
         );
     }
 

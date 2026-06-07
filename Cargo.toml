@@ -12,6 +12,7 @@ members = [
     "crates/ironhermes-hooks",
     "crates/ironhermes-exec",
     "crates/ironhermes-hub",
+    "crates/ironhermes-kanban",
     "crates/ironhermes-mcp",
     "providers/memory-sqlite",
     "providers/memory-grafeo",
@@ -38,6 +39,7 @@ default-members = [
     "crates/ironhermes-hooks",
     "crates/ironhermes-exec",
     "crates/ironhermes-hub",
+    "crates/ironhermes-kanban",
     "crates/ironhermes-mcp",
     "providers/memory-sqlite",
     "providers/memory-grafeo",
@@ -46,7 +48,7 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["Nous Research"]
 license = "MIT"
@@ -70,6 +72,8 @@ clap = { version = "4", features = ["derive"] }
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+tower-http = { version = "0.6", features = ["trace"] }
 # Error handling
 anyhow = "1"
 thiserror = "2"
@@ -124,8 +128,71 @@ sysinfo = "0.30"
 nix = { version = "0.29", features = ["process"] }
 # ISS-10: shell-words workspace dep (Plan 02 Task 2-02 consumer)
 shell-words = "1"
+# Phase 36.17.5 D-03 / Edge TTS (operator-approved 0.4, supersedes plan's 0.3)
+msedge-tts = { version = "0.4", features = ["tokio-runtime"] }
+# Phase 36.17.5 D-15 Local arm (operator-approved 0.22.2, supersedes plan's 0.20)
+rodio = { version = "0.22.2", features = ["mp3"] }
 # Phase 22.4: ratatui-backed REPL (tmon architecture) — D-13/D-14 dep floor
 ansi-to-tui = "8"
 ratatui = "0.30"
 tui-logger = { version = "0.18", features = ["tracing-support"] }
 tui-textarea-2 = "0.10.2"
+# Phase 36.3.7.9 Plan 05: notifier.toml parser for subscribe_boards config (D-03)
+toml = "0.8"
+
+# ---------------------------------------------------------------------------
+# Phase 36.17.7: shrink debug/test binaries to cut macOS first-launch
+# code-signature validation time.
+#
+# Root cause (proven): on macOS/Apple Silicon the kernel validates a freshly
+# compiled binary's ad-hoc signature on FIRST launch via the serialized
+# `syspolicyd`/`amfid` daemon; cost scales with the on-disk executable size
+# (a 26 MB debug test binary measured ~115-270s cold, 0.05s warm). nextest
+# enumerates every test binary in parallel for `--list`, so ~18 cold 26 MB
+# binaries hit the serialized validator at once → multi-minute stall. Linux
+# CI has no such validation and is unaffected.
+#
+# `line-tables-only` keeps file:line for panic backtraces while dropping the
+# heavy type DWARF, so less debuginfo is generated overall. This profile key
+# is portable and safe on every platform; `[profile.test]` inherits it.
+#
+# The macOS-specific part — moving DWARF into a `.dSYM` so the *signed*
+# executable is leaner — is set as a macOS-scoped rustflag in
+# `.cargo/config.toml` (`-Csplit-debuginfo=packed`) rather than here, so
+# Linux CI builds are completely untouched.
+#
+# NOTE: partial mitigation — most of the binary is irreducible monomorphized
+# code (~17 MB after a full strip), and per-launch validation is mandatory on
+# Apple Silicon. Combined with `.config/nextest.toml`'s bounded `test-threads`
+# this tames the storm; it does not eliminate the one-time-per-compile cost.
+# Locally, `cargo nextest run -p <crate>` validates only that crate's binaries.
+# ---------------------------------------------------------------------------
+[profile.dev]
+debug = "line-tables-only"
+
+# ---------------------------------------------------------------------------
+# Security fix: RUSTSEC-2026-0104 — reachable panic in rustls-webpki CRL
+# parsing (DoS, CVSS 7.5).
+#
+# CHAIN 2 — FIXED: rustls-webpki 0.103.10 → 0.103.13 pinned in Cargo.lock via
+#   `cargo update -p rustls-webpki@0.103.10 --precise 0.103.13`.
+#   Consumers: reqwest / hyper-rustls / slack-morphism / chromiumoxide
+#   (all via rustls 0.23.x).
+#   Pin mechanism: Cargo does not support same-registry [patch.crates-io]
+#   overrides (toolchain rejects same-source patches). The pin lives in
+#   Cargo.lock, applied via `cargo update -p rustls-webpki@0.103.10 --precise
+#   0.103.13`. This comment block is the authoritative audit-grep anchor for
+#   SEC-05: `grep RUSTSEC-2026-0104 Cargo.toml`.
+#
+# CHAIN 1 — RISK-ACCEPTED EXEMPTION (cannot be patched):
+#   serenity 0.12.5 → tokio-tungstenite 0.21 → rustls 0.22.4
+#   → rustls-webpki 0.102.8 (VULNERABLE).
+#   rustls 0.22.x requires rustls-webpki "0.102" (semver-incompatible with
+#   0.103.x) — no lock pin or patch can bridge this incompatibility.
+#   As of 2026-06-05, no serenity 0.13.x release exists.
+#   Risk-accepted rationale: serenity's rustls-webpki usage is via the Discord
+#   WebSocket TLS handshake — a trusted endpoint, not arbitrary CRL parsing
+#   from attacker-controlled input. Residual panic is reachable only from a
+#   malformed CRL delivered by Discord itself (not a realistic attack vector).
+#   ACTION: re-evaluate when serenity 0.13.x ships.
+# ---------------------------------------------------------------------------

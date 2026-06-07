@@ -131,7 +131,7 @@ providers:
 | `memory` | Memory provider selection |
 | `compression` | Context compression tuning |
 | `skills` | Skills subsystem enable/disable and scan paths |
-| `subagent` | Subagent delegation limits |
+| `delegation` | Subagent delegation limits (renamed from `subagent` in Phase 32.2 — see [Delegation](#delegation-delegation)) |
 | `rate_limit` | Per-user inbound rate limiting |
 | `batch` | Batch processing worker settings |
 | `security` | Secret redaction in logs |
@@ -180,12 +180,12 @@ All default values are sourced from the Rust structs in `crates/ironhermes-core/
 
 | Key | Default | Description |
 |---|---|---|
-| `agent.max_turns` | `90` | Maximum agent loop iterations per turn |
+| `agent.max_iterations` | `50` | Canonical per-turn cap — sizes both the `AgentLoop` iteration limit and the `BudgetHandle` it builds. Lowered from 90 by the runaway-delegation guard (commit `aaa1b0ac`); pairs with the consecutive-failure circuit breaker in `AgentLoop`. Read by `AgentRuntime::from_config` (Phase 28.1) |
+| `agent.max_turns` | _(deprecated alias)_ | Deprecated in Phase 28.1. If present, `AgentConfig::normalize()` folds it onto `max_iterations` and emits a `warn!`. Remove from new configs |
 | `agent.context_compression` | `0.5` | Context compression ratio |
 | `agent.tool_delay_secs` | `1.0` | Delay between tool calls in seconds |
 | `agent.context_engine` | `summarizing` | Context engine: `summarizing` or `local_prune` |
 | `agent.compression_threshold` | `0.5` | Fraction of context_length at which compression triggers |
-| `agent.max_iterations` | `50` | Maximum agent budget iterations |
 | `agent.system_message` | `""` | Optional injected system message (empty = omitted) |
 
 ### Terminal (`terminal:`)
@@ -629,6 +629,52 @@ custom_providers:
     api_mode: chat_completions
     default_model: "llama3.2:latest"
 ```
+
+### Per-Provider Extra Request Options (PROV-11..PROV-14)
+
+Each provider entry under `providers:` may set `extra_request_options` — a free-form map merged into the outgoing chat-completions request body at the wire level. This lets you tune small-model knobs (Ollama `num_ctx`, vLLM `top_k`, OpenRouter `provider.order`) without code changes.
+
+Per-model overrides under `providers.<name>.models.<model>.extra_request_options` win on a per-key basis (provider-level keys are kept; the per-model entry adds or overrides individual keys).
+
+```yaml
+providers:
+  ollama:
+    base_url: "http://localhost:11434/v1"
+    api_mode: chat_completions
+    # Provider-level defaults — applied to every request to this provider
+    extra_request_options:
+      num_ctx: 8192          # default 8K context window
+      num_predict: 512
+    # Per-model overrides — merged per-key on top of provider-level defaults
+    models:
+      "llama3.1:8b":
+        extra_request_options:
+          num_ctx: 32768     # bump just this model to 32K
+      "qwen2.5-coder:7b":
+        extra_request_options:
+          top_k: 40
+
+  vllm:
+    base_url: "http://localhost:8000/v1"
+    api_mode: chat_completions
+    extra_request_options:
+      top_k: 40
+      top_p: 0.95
+
+  openrouter:
+    api_key_env: OPENROUTER_API_KEY
+    extra_request_options:
+      provider:
+        order: ["anthropic", "openai"]    # OpenRouter routing preference
+```
+
+**Merge semantics:** `resolve_extras(providers, provider_name, model_name)` clones the provider-level map, then inserts each entry from the per-model map on top. Provider-level keys that are not overridden remain.
+
+**Caller wins:** Code paths that explicitly set fields on `ChatRequest` (e.g. `extra` arg supplied by `call_llm`) still override anything sourced from config — `extra_request_options` is the floor, not a hard override.
+
+**Reserved-key caveat (T-36.15-09 open):** Keys that collide with named `ChatRequest` fields (`model`, `messages`, `stream`, `temperature`, `max_tokens`, `tools`) currently shadow the named field via `#[serde(flatten)]`. A blocklist filter is planned in a follow-up phase. Treat reserved keys as undefined behavior for now.
+
+**CLI surface:** `hermes config show` exposes the canonical extras keys (`num_ctx`, `num_predict`, `top_k`, `top_p`, `provider.order`); arbitrary additional keys are allowed but not listed in the schema.
 
 ### Auxiliary Model Routing
 

@@ -22,6 +22,8 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use tui_textarea::TextArea;
 
+use unicode_width::UnicodeWidthChar;
+
 use crate::tui_rata::double_ctrl_c::{CtrlCDecision, DoubleCtrlCState};
 use crate::tui_rata::history::{DEFAULT_MAX, ReplHistory};
 use crate::tui_rata::status_line::StatusLineState;
@@ -37,7 +39,9 @@ use ironhermes_agent::subagent_registry::SubagentRegistry;
 use ironhermes_core::ProviderResolver;
 use ironhermes_core::commands::CommandRouter;
 use ironhermes_core::commands::context::ToolsetSessionHandle;
-use ironhermes_core::types::{ChatMessage, MessageContent, Role};
+use ironhermes_core::queue::MessageQueue;
+use ironhermes_core::session::SessionKey;
+use ironhermes_core::types::{ChatMessage, MessageContent, Platform, Role};
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_hooks::HookRegistry;
 use ironhermes_mcp::McpManager;
@@ -116,6 +120,14 @@ pub struct AppDeps {
     pub debug_enabled: Arc<AtomicBool>,
     /// `/fast` preset toggle (D-09).
     pub fast_enabled: Arc<AtomicBool>,
+    /// Phase 36.17.3 (D-03): shared FIFO queue keyed by SessionKey.
+    /// The TUI uses a single fixed `SessionKey` (Platform::Local + "local"
+    /// chat_id + "local" user_id); the App derives the key in `App::new`.
+    pub queue: Arc<dyn MessageQueue<SessionKey>>,
+    /// Phase 36.17.3 (D-06 amended): queue drain pause toggle.
+    /// Arc-wrapped per PATTERNS §2 / RESEARCH Pitfall 6 so slash handlers
+    /// running in shared-context closures can mutate without `&mut App`.
+    pub queue_paused: Arc<AtomicBool>,
     /// `/skin <name>` setter (D-09).
     pub skin: Arc<std::sync::RwLock<String>>,
 
@@ -208,8 +220,23 @@ pub struct App {
     pub debug_enabled: Arc<AtomicBool>,
     /// `/fast` preset toggle (D-09).
     pub fast_enabled: Arc<AtomicBool>,
+    /// Phase 36.17.3 (D-03): shared FIFO queue keyed by SessionKey.
+    pub queue: Arc<dyn MessageQueue<SessionKey>>,
+    /// Phase 36.17.3 (D-03): fixed TUI session key. Constructed in `App::new`
+    /// from `SessionKey::new(Platform::Local, "local").with_user("local")`
+    /// because the TUI never multiplexes chats — see RESEARCH §SessionKey Position.
+    pub queue_key: SessionKey,
+    /// Phase 36.17.3 (D-06 amended): when true, post-turn drain check skips
+    /// popping. Arc-wrapped per RESEARCH Pitfall 6.
+    pub queue_paused: Arc<AtomicBool>,
     /// `/skin <name>` setter (D-09).
     pub skin: Arc<std::sync::RwLock<String>>,
+    /// Phase 36.1 (GW-05-TUI, D-08): persistent per-session running flag.
+    /// Set to true by `RunningAgentGuard::new()` at spawn_turn entry; cleared by Drop on
+    /// all turn exit paths (Ok/Err/?/panic/cancel). Replaces the `pending_rx.is_some()`
+    /// snapshot anti-pattern at commands.rs:537 (Pitfall 4). DO NOT remove or repurpose
+    /// pending_rx — it still owns the streaming receive role.
+    pub agent_running: Arc<AtomicBool>,
 
     // — D-18 parity handles (Arc-held) ───────────────────────────────────────
     /// Phase 28.1-05: durable agent runtime. spawn_turn builds TurnRequest and
@@ -323,7 +350,13 @@ impl App {
             statusbar_enabled: deps.statusbar_enabled,
             debug_enabled: deps.debug_enabled,
             fast_enabled: deps.fast_enabled,
+            // Phase 36.17.3 (D-03): queue + fixed TUI key + Arc<AtomicBool> pause toggle.
+            queue: deps.queue,
+            queue_key: SessionKey::new(Platform::Local, "local").with_user("local"),
+            queue_paused: deps.queue_paused,
             skin: deps.skin,
+            // Phase 36.1 (GW-05-TUI, D-08): persistent running flag — false at session start.
+            agent_running: Arc::new(AtomicBool::new(false)),
             agent_runtime: deps.agent_runtime,
             hook_registry: deps.hook_registry,
             mcp_manager: deps.mcp_manager,
@@ -449,31 +482,32 @@ impl App {
             // No role currently returns None post-22.4-17; this is a structural guard for future
             // Role variants. See .planning/phases/21.8.3.../21.8.3-RESEARCH.md Pitfall 1.
             let Some(_color) = color else { continue };
-            let prefix_len = role_label.len() + 2; // ": " separator
             let body = render_message_body(msg);
             for (i, line) in body.lines().enumerate() {
                 let rows = if i == 0 {
                     // First row: prefix + body share the same terminal row.
-                    // ceil((prefix + body) / width), minimum 1.
-                    let body_chars = line.chars().count();
-                    let total_chars = prefix_len + body_chars;
-                    if width == 0 || total_chars == 0 { 1 } else { (total_chars + width - 1) / width }
+                    // Build the full first-line string and run word_wrapped_line_count on it.
+                    // prefix is ASCII ("You: ", "Hermes: " etc.) so len() == display width.
+                    // Fixes D-01: word-wrap semantics + unicode display width (RESEARCH §3).
+                    let first_line = format!("{}: {}", role_label, line);
+                    word_wrapped_line_count(&first_line, width)
                 } else {
-                    wrapped_line_count(line, width)
+                    word_wrapped_line_count(line, width)
                 };
                 total = total.saturating_add(rows);
             }
         }
         if let Some(buf) = &self.assistant_buffer {
             // assistant_buffer renders with "Hermes: " prefix on line 0 (transcript_text:807-819)
-            let prefix_len = "Hermes".len() + 2; // 8
             for (i, line) in buf.lines().enumerate() {
                 let rows = if i == 0 {
-                    let body_chars = line.chars().count();
-                    let total_chars = prefix_len + body_chars;
-                    if width == 0 || total_chars == 0 { 1 } else { (total_chars + width - 1) / width }
+                    // First row: prefix + body share the same terminal row.
+                    // Build the full first-line string and run word_wrapped_line_count on it.
+                    // Fixes D-01: word-wrap semantics + unicode display width (RESEARCH §3).
+                    let first_line = format!("Hermes: {}", line);
+                    word_wrapped_line_count(&first_line, width)
                 } else {
-                    wrapped_line_count(line, width)
+                    word_wrapped_line_count(line, width)
                 };
                 total = total.saturating_add(rows);
             }
@@ -720,7 +754,7 @@ impl App {
                 let icon = if ok { "✓" } else { "✗" };
                 self.status.hint = format!("{icon} {name}");
             }
-            StreamEvent::Finished => {
+            StreamEvent::Finished { total_tokens } => {
                 self.commit_assistant_buffer();
                 // D-08: snap-to-bottom safety net — defense-in-depth against future
                 // line-count drift. Cheap because reconcile_scroll runs every render tick anyway.
@@ -730,18 +764,42 @@ impl App {
                 self.pending_rx = None;
                 self.cancel_child = None;
                 self.status.hint = String::new();
+                // Phase 36.2 Plan 07/10 fix: stamp the per-turn token total
+                // onto the status bar. `0` means the provider didn't return
+                // usage data — preserve the prior count rather than reset to
+                // 0 so the pill doesn't visibly regress on providers that
+                // omit usage (older Ollama, custom gateways, etc.).
+                if total_tokens > 0 {
+                    self.status.tokens_used = total_tokens;
+                }
+                // Phase 36.17.3 (D-04): auto-drain next queued item, if any.
+                // Guards inside maybe_drain_queue (paused / in-flight) short-
+                // circuit if the conditions aren't right.
+                self.maybe_drain_queue();
             }
             StreamEvent::Error(e) => {
                 self.commit_assistant_buffer();
                 self.status.hint = format!("error: {e}");
                 self.pending_rx = None;
                 self.cancel_child = None;
+                // Phase 36.17.3 (Resolution 4): on stream error, set paused=true
+                // so the user sees the paused state and can /unpause to recover.
+                // The maybe_drain_queue call below is symmetric belt-and-
+                // suspenders — its first guard (paused) short-circuits the pop
+                // so no item is consumed by an errored turn.
+                self.queue_paused
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                self.maybe_drain_queue();
             }
             StreamEvent::Cancelled => {
                 self.commit_assistant_buffer();
                 self.status.hint = "cancelled".to_string();
                 self.pending_rx = None;
                 self.cancel_child = None;
+                // Phase 36.17.3: do NOT drain on cancel (RESEARCH Pitfall 1 —
+                // /stop clears queue before firing cancel; a drain here would
+                // be either a no-op (queue already empty) or a regression
+                // (drain pops a queued item after a deliberate hard-stop).
             }
         }
     }
@@ -752,6 +810,40 @@ impl App {
             if !buf.is_empty() {
                 self.history.push(assistant_message(buf));
             }
+        }
+    }
+
+    /// Phase 36.17.3 (D-04 / D-05 / T-04 mitigation): pop one queued item and
+    /// set up the next pending turn. Called from `handle_stream_event` on
+    /// `StreamEvent::Finished` (and defensively on `Error`).
+    ///
+    /// Guards (both mandatory — RESEARCH Pitfall 3 / Pitfall 6):
+    /// 1. `queue_paused.load(Relaxed)` → skip drain (D-06).
+    /// 2. `pending_tx.is_some()` → skip drain (T-04: prevents double-spawn
+    ///    deadlock if drain fires while a turn is still in flight).
+    ///
+    /// On Some(text): mirror `submit()`'s channel + cancel-token setup so the
+    /// event loop picks the queued item up as the next turn.
+    fn maybe_drain_queue(&mut self) {
+        // Guard 1 (D-06): paused → skip drain.
+        if self.queue_paused.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        // Guard 2 (RESEARCH Pitfall 3 — T-04 mitigation): turn already in
+        // flight → skip drain. Without this guard, a future double-Finished
+        // (or Finished racing a still-active turn) would double-spawn and
+        // deadlock the event loop on the second channel.
+        if self.pending_tx.is_some() {
+            return;
+        }
+        if let Some(text) = self.queue.pop(&self.queue_key) {
+            self.history.push(user_message(text));
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
+            self.pending_rx = Some(rx);
+            self.pending_tx = Some(tx);
+            self.cancel_child = Some(self.cancel_parent.child_token());
+            self.auto_follow = true;
+            self.assistant_buffer = None;
         }
     }
 
@@ -888,6 +980,27 @@ impl App {
         app.history = msgs.into_iter().map(|(r, b)| test_message(r, b)).collect();
         app
     }
+
+    /// Construct an App with a caller-provided `MessageQueue` for integration
+    /// tests (Phase 36.17.3 Plan 03). Plan 06 fills in the test bodies that
+    /// drive this constructor; this signature is the harness anchor.
+    ///
+    /// Mirrors `new_test_empty` (same `test-support` gating, same `test_deps()`
+    /// factory) but swaps the default queue for the caller's instance so the
+    /// test can assert push/pop/len/clear behavior against a known queue.
+    #[cfg(feature = "test-support")]
+    pub fn new_test_with_queue(
+        queue: std::sync::Arc<
+            dyn ironhermes_core::queue::MessageQueue<ironhermes_core::session::SessionKey>,
+        >,
+    ) -> Self {
+        let mut app = Self::new(test_deps());
+        app.queue = queue;
+        app.queue_key =
+            ironhermes_core::session::SessionKey::new(ironhermes_core::Platform::Local, "local")
+                .with_user("local");
+        app
+    }
 }
 
 // ── Free helpers ──────────────────────────────────────────────────────────────
@@ -932,20 +1045,117 @@ fn assistant_message(body: String) -> ChatMessage {
     ChatMessage::assistant(&body)
 }
 
-/// Compute wrapped line count for `line` at terminal width `width`.
+/// Count the terminal rows that `line` occupies when rendered by ratatui's
+/// `WordWrapper { trim: false }` at the given column `width`.
 ///
-/// - Empty line → 1 (blank line still occupies a row).
-/// - `width == 0` → 1 (defensive; avoids divide-by-zero).
-/// - Otherwise → ceil(char_count / width).
-pub(crate) fn wrapped_line_count(line: &str, width: usize) -> usize {
-    if line.is_empty() {
+/// Mirrors the word-boundary logic from ratatui-widgets `WordWrapper::process_input`
+/// for the `trim: false` case, using `unicode_width::UnicodeWidthChar` for per-char
+/// display widths. This is the corrected replacement for the old `wrapped_line_count`
+/// which used character-ceiling-divide and diverged from ratatui on word-wrapped lines.
+///
+/// Properties:
+/// - Empty line → 1  (blank row is still rendered)
+/// - `width == 0` → 1  (defensive; avoids divide-by-zero)
+/// - Long single word → character-wraps (ratatui's `line_full` fallback)
+/// - Leading whitespace preserved (char-level iteration, not `split_whitespace`)
+///
+/// See D-01 root cause and algorithm in
+/// `.planning/phases/36.6.1-.../36.6.1-RESEARCH.md` §3.
+pub(crate) fn word_wrapped_line_count(line: &str, width: usize) -> usize {
+    if line.is_empty() || width == 0 {
         return 1;
     }
-    let cols = line.chars().count();
-    if width == 0 {
-        return 1;
+
+    let mut rows: usize = 1;
+    let mut current_row_width: usize = 0; // display columns used on the current row
+
+    // We track two "pending" accumulators mirroring ratatui WordWrapper's
+    // `pending_word` and `pending_whitespace` buffers (trim: false).
+    let mut pending_word_width: usize = 0;
+    let mut pending_ws_width: usize = 0;
+    let mut in_word = false;
+
+    let flush_word = |rows: &mut usize,
+                      current_row_width: &mut usize,
+                      pending_ws_width: &mut usize,
+                      pending_word_width: &mut usize,
+                      width: usize| {
+        if *pending_word_width == 0 {
+            return;
+        }
+        let needed = *current_row_width + *pending_ws_width + *pending_word_width;
+        if needed <= width {
+            // Word fits on current row (including whitespace separator).
+            *current_row_width = needed;
+        } else {
+            // Word doesn't fit on the current row.
+            // If we are not already at the start of a row, wrap to a new row first.
+            if *current_row_width > 0 || *pending_ws_width > 0 {
+                *rows += 1;
+                *current_row_width = 0;
+                *pending_ws_width = 0; // whitespace before a break is consumed (trim: false)
+            }
+            // Now place the word at the start of the (possibly just-started) current row.
+            if *pending_word_width <= width {
+                // Word fits on a fresh row.
+                *current_row_width = *pending_word_width;
+            } else {
+                // Oversized word: character-wrap it across rows (ratatui line_full path).
+                // We are at the start of a row, so the first row is already counted.
+                let word_rows = (*pending_word_width + width - 1) / width;
+                *rows += word_rows - 1; // additional rows beyond the current one
+                let remainder = *pending_word_width % width;
+                *current_row_width = if remainder == 0 { width } else { remainder };
+            }
+        }
+        *pending_word_width = 0;
+        *pending_ws_width = 0;
+    };
+
+    for c in line.chars() {
+        let char_w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if c.is_whitespace() {
+            if in_word {
+                // Flush the accumulated word before processing the whitespace.
+                flush_word(
+                    &mut rows,
+                    &mut current_row_width,
+                    &mut pending_ws_width,
+                    &mut pending_word_width,
+                    width,
+                );
+                in_word = false;
+            }
+            // Accumulate whitespace (trim: false keeps it on the row).
+            // If whitespace alone overflows, it wraps — mirror ratatui's grapheme accumulation.
+            if char_w > 0 {
+                if current_row_width + pending_ws_width + char_w > width {
+                    // Whitespace causes a row overflow: emit a new row.
+                    rows += 1;
+                    current_row_width = 0;
+                    pending_ws_width = char_w;
+                } else {
+                    pending_ws_width += char_w;
+                }
+            }
+        } else {
+            in_word = true;
+            pending_word_width += char_w;
+        }
     }
-    (cols + width - 1) / width
+
+    // Flush any remaining word at end-of-line.
+    if pending_word_width > 0 {
+        flush_word(
+            &mut rows,
+            &mut current_row_width,
+            &mut pending_ws_width,
+            &mut pending_word_width,
+            width,
+        );
+    }
+
+    rows
 }
 
 // ── test-support helpers ──────────────────────────────────────────────────────
@@ -1023,6 +1233,10 @@ fn test_deps() -> AppDeps {
         statusbar_enabled: Arc::new(AtomicBool::new(true)),
         debug_enabled: Arc::new(AtomicBool::new(false)),
         fast_enabled: Arc::new(AtomicBool::new(false)),
+        // Phase 36.17.3 (D-03 / D-06 amended): test queue + paused toggle.
+        queue: Arc::new(ironhermes_gateway::session_queue::SessionQueue::new())
+            as Arc<dyn MessageQueue<SessionKey>>,
+        queue_paused: Arc::new(AtomicBool::new(false)),
         skin: Arc::new(std::sync::RwLock::new("default".to_string())),
         // Phase 25.2 Plan 15 follow-up: tests don't exercise the toolset slash UI
         toolset_session: None,
@@ -1097,26 +1311,27 @@ mod scroll_tests {
         }
     }
 
-    // — wrapped_line_count ──────────────────────────────────────────────────
+    // — word_wrapped_line_count ──────────────────────────────────────────────
 
     #[test]
     fn wrapped_empty_is_one() {
-        assert_eq!(wrapped_line_count("", 10), 1);
+        assert_eq!(word_wrapped_line_count("", 10), 1);
     }
 
     #[test]
     fn wrapped_fits_one_row() {
-        assert_eq!(wrapped_line_count("hello", 10), 1);
+        assert_eq!(word_wrapped_line_count("hello", 10), 1);
     }
 
     #[test]
     fn wrapped_exactly_one_row() {
-        assert_eq!(wrapped_line_count("helloworld", 10), 1);
+        assert_eq!(word_wrapped_line_count("helloworld", 10), 1);
     }
 
     #[test]
     fn wrapped_overflows_one_row() {
-        assert_eq!(wrapped_line_count("helloworld!", 10), 2);
+        // "helloworld!" is a single word of width 11 at width=10 → character-wraps to 2 rows
+        assert_eq!(word_wrapped_line_count("helloworld!", 10), 2);
     }
 
     // — scroll helpers ───────────────────────────────────────────────────────
@@ -1159,7 +1374,7 @@ mod scroll_tests {
         app.pending_rx = Some(rx);
         app.pending_tx = Some(tx);
         app.assistant_buffer = Some("response text".to_string());
-        app.handle_stream_event(StreamEvent::Finished);
+        app.handle_stream_event(StreamEvent::Finished { total_tokens: 0 });
         assert!(app.pending_rx.is_none());
         assert!(app.assistant_buffer.is_none());
         assert_eq!(app.history.len(), 1);
@@ -1466,7 +1681,7 @@ mod scroll_tests {
         app.handle_stream_event(StreamEvent::Delta("some text".to_string()));
         // Simulate user re-engaging auto_follow before stream finishes
         app.auto_follow = true;
-        app.handle_stream_event(StreamEvent::Finished);
+        app.handle_stream_event(StreamEvent::Finished { total_tokens: 0 });
         assert_eq!(
             app.transcript_scroll, 0,
             "Finished with auto_follow=true must call scroll_to_bottom() which zeros transcript_scroll"
@@ -1562,6 +1777,158 @@ mod scroll_tests {
         assert_eq!(
             app.transcript_scroll, max,
             "reconcile_scroll with auto_follow=true must snap transcript_scroll to transcript_max_scroll (post-fix the max is correct)"
+        );
+    }
+}
+
+// ── D-02 Word-wrap unit tests (Phase 36.6.1 Plan 01) ──────────────────────────
+//
+// These tests verify that `word_wrapped_line_count` matches ratatui's actual
+// render output (via TestBackend) for representative inputs, pinning the
+// formula's correctness independently of the full UI stack.
+//
+// Test IDs per VALIDATION.md: 36.6.1-01-01 through 36.6.1-01-05.
+
+#[cfg(all(test, feature = "test-support"))]
+mod word_wrap_tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend, widgets::{Paragraph, Wrap}};
+
+    /// Helper: count rows ratatui actually renders for `text` at column `width`.
+    ///
+    /// Uses a `TestBackend` tall enough (200 rows) to never clip, renders
+    /// `Paragraph::new(text).wrap(Wrap { trim: false })`, then counts non-blank
+    /// rows from the top, stopping at the first all-blank row after content starts.
+    fn ratatui_line_count(text: &str, width: u16) -> usize {
+        let height = 200u16;
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| {
+            let para = Paragraph::new(text).wrap(Wrap { trim: false });
+            f.render_widget(para, f.area());
+        }).unwrap();
+        let buf = terminal.backend().buffer();
+        let mut count = 0usize;
+        for row in 0..height {
+            let row_blank = (0..width).all(|col| {
+                buf.cell((col, row)).map(|c| c.symbol() == " ").unwrap_or(true)
+            });
+            if row_blank && row > 0 {
+                break;
+            }
+            if !row_blank {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// 36.6.1-01-01: A long sentence that wraps at width 78 must produce the
+    /// same row count as ratatui's actual render.
+    #[test]
+    fn word_wrapped_line_count_matches_ratatui_for_wrapping_sentence() {
+        let line = "This is a long sentence that definitely wraps at a standard terminal \
+                    width because it exceeds eighty characters in total length blah blah.";
+        let width = 78usize;
+        let our_count = word_wrapped_line_count(line, width);
+        let ratatui_count = ratatui_line_count(line, width as u16);
+        assert_eq!(
+            our_count, ratatui_count,
+            "word_wrapped_line_count({width}) = {our_count}, ratatui = {ratatui_count}\nline: {line:?}"
+        );
+    }
+
+    /// 36.6.1-01-02: Short line, empty line, and exact-width line each produce 1 row.
+    #[test]
+    fn word_wrapped_line_count_short_empty_exact() {
+        // Short line
+        assert_eq!(word_wrapped_line_count("Hi!", 78), 1);
+        assert_eq!(word_wrapped_line_count("Hi!", 78), ratatui_line_count("Hi!", 78));
+        // Empty line
+        assert_eq!(word_wrapped_line_count("", 78), 1);
+        // Exact-width line (78 'a' chars) — fills one row, no wrap
+        let exact = "a".repeat(78);
+        assert_eq!(word_wrapped_line_count(&exact, 78), 1);
+        assert_eq!(word_wrapped_line_count(&exact, 78), ratatui_line_count(&exact, 78));
+    }
+
+    /// 36.6.1-01-03: A word that straddles the column-78 boundary is pushed to
+    /// the next row, producing exactly 2 rows.
+    #[test]
+    fn word_wrapped_line_count_word_that_straddles_boundary() {
+        // 70 'a' + space + "boundary" (8 chars) = 79 cols — "boundary" doesn't fit on row 1
+        let line = format!("{} boundary", "a".repeat(70));
+        let width = 78usize;
+        let our_count = word_wrapped_line_count(&line, width);
+        let ratatui_count = ratatui_line_count(&line, width as u16);
+        assert_eq!(
+            our_count, ratatui_count,
+            "word boundary wrap mismatch: our={our_count}, ratatui={ratatui_count}"
+        );
+        assert_eq!(our_count, 2, "should need exactly 2 rows");
+    }
+
+    /// 36.6.1-01-04: A line with 4 leading spaces followed by enough words to
+    /// wrap at width 78 must match ratatui's row count.
+    ///
+    /// Regression test for RESEARCH §6 Risk 1 (leading whitespace): a naive
+    /// `split_whitespace`-based simulator would drop the leading spaces and
+    /// potentially produce one fewer row than ratatui.
+    #[test]
+    fn word_wrapped_line_count_leading_whitespace() {
+        let line = "    bullet item with enough words to overflow the available column width when wrapped at seventy-eight";
+        let width = 78usize;
+        let our_count = word_wrapped_line_count(line, width);
+        let ratatui_count = ratatui_line_count(line, width as u16);
+        assert_eq!(
+            our_count, ratatui_count,
+            "leading-whitespace wrap mismatch: our={our_count}, ratatui={ratatui_count}\nline: {line:?}"
+        );
+    }
+
+    /// 36.6.1-01-05: A 25-line assistant message — `transcript_line_count(78)`
+    /// must equal the non-blank row count ratatui actually renders via `ui()`.
+    #[test]
+    fn transcript_line_count_matches_ratatui() {
+        use crate::tui_rata::ui::ui;
+
+        let body: &'static str = Box::leak(
+            (1..=25)
+                .map(|i| format!("Line {i}: this is content"))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into_boxed_str(),
+        );
+        let app = App::new_test_with_messages(vec![("assistant", body)]);
+        let inner_width = 78usize; // 80-col terminal minus 2 border cols
+        let our_count = app.transcript_line_count(inner_width);
+
+        // Render to a tall TestBackend and count non-blank rows in the transcript
+        // content area. We exclude:
+        // - Col 0 and col 79: block border characters
+        // - Col 78: scrollbar track (always non-blank in every interior row)
+        // So we check cols 1..78 (exclusive of 78) for actual text content.
+        // Rows start at 1 (below top border) and stop at the first blank row
+        // after content has been seen.
+        let backend = TestBackend::new(80, 200);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let mut ratatui_count = 0usize;
+        for row in 1u16..199 {
+            let row_blank = (1u16..78).all(|col| {
+                buf.cell((col, row)).map(|c| c.symbol() == " ").unwrap_or(true)
+            });
+            if row_blank && ratatui_count > 0 {
+                break;
+            }
+            if !row_blank {
+                ratatui_count += 1;
+            }
+        }
+        assert_eq!(
+            our_count, ratatui_count,
+            "transcript_line_count mismatch: our={our_count}, ratatui={ratatui_count}"
         );
     }
 }

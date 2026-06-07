@@ -146,19 +146,33 @@ impl RegistryToolsetSession {
     /// Build the per-toolset display rows for `render_list`. Mirrors
     /// `build_toolset_rows` in toolset_cmd.rs but uses the local registry
     /// snapshot directly.
+    ///
+    /// Phase 36.17.7 D-06 (REVISION BLOCKER 2 — Path B): for the `voice`
+    /// row, the live registry's `tts_registration_status()` is consulted
+    /// directly — this is the in-session slash-dispatch path, so the
+    /// observed status is the source of truth. CLI inspection rows (the
+    /// `toolset_cmd.rs build_toolset_rows` path) take the same status from
+    /// the inspection registry, which `register_tts_for_inspection`
+    /// populates with the sentinel SessionKey.
     fn build_rows(&self) -> Vec<ToolsetRow> {
         let cfg = self.config.lock().unwrap().clone();
         let registry = self.registry.clone();
-        let unavailable_list = tokio::task::block_in_place(|| {
+        let (unavailable_list, tts_status) = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async move {
                 let guard = registry.read().await;
-                guard.list_unavailable()
+                (guard.list_unavailable(), guard.tts_registration_status())
             })
         });
         let unavailable_names: std::collections::HashSet<String> = unavailable_list
             .iter()
             .map(|(name, _)| name.clone())
             .collect();
+
+        let voice_registered = match tts_status {
+            ironhermes_core::commands::context::TtsRegistrationStatus::Live => "Live",
+            ironhermes_core::commands::context::TtsRegistrationStatus::Inspection => "Inspection",
+            ironhermes_core::commands::context::TtsRegistrationStatus::NotRegistered => "\u{2014}",
+        };
 
         let members_map = Self::members_map();
         // Stable sort order: alphabetical toolset name (matches CLI behavior).
@@ -184,12 +198,18 @@ impl RegistryToolsetSession {
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
+                let registered = if ts_name == "voice" {
+                    voice_registered
+                } else {
+                    "\u{2014}"
+                };
                 ToolsetRow {
                     name: ts_name.to_string(),
                     enabled,
                     member_count: member_names.len(),
                     available_count,
                     member_summary,
+                    registered,
                 }
             })
             .collect()
@@ -235,10 +255,13 @@ impl ToolsetSessionHandle for RegistryToolsetSession {
 
         let cfg = self.config.lock().unwrap().clone();
         let registry = self.registry.clone();
-        let unavailable_list = tokio::task::block_in_place(|| {
+        // Phase 36.17.7 D-06 (REVISION BLOCKER 2 — Path B): batch the
+        // registry reads under one async block so the render_show output also
+        // surfaces the Registered state for the `voice` toolset.
+        let (unavailable_list, tts_status) = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async move {
                 let guard = registry.read().await;
-                guard.list_unavailable()
+                (guard.list_unavailable(), guard.tts_registration_status())
             })
         });
         let unavailable_names: std::collections::HashSet<String> = unavailable_list
@@ -273,12 +296,28 @@ impl ToolsetSessionHandle for RegistryToolsetSession {
             })
             .collect();
 
+        // Phase 36.17.7 D-06: per-row Registered state for show view.
+        let registered = if validated == "voice" {
+            match tts_status {
+                ironhermes_core::commands::context::TtsRegistrationStatus::Live => "Live",
+                ironhermes_core::commands::context::TtsRegistrationStatus::Inspection => {
+                    "Inspection"
+                }
+                ironhermes_core::commands::context::TtsRegistrationStatus::NotRegistered => {
+                    "\u{2014}"
+                }
+            }
+        } else {
+            "\u{2014}"
+        };
+
         let row = ToolsetRow {
             name: validated.clone(),
             enabled: cfg.is_toolset_enabled(&validated),
             member_count: member_names.len(),
             available_count: members.iter().filter(|(_, a, _)| *a).count(),
             member_summary: String::new(),
+            registered,
         };
 
         Ok(render_toolset_show(&row, &members))

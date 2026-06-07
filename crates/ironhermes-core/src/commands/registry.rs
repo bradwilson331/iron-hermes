@@ -81,6 +81,14 @@ pub fn build_registry() -> Vec<CommandDef> {
         CommandDef::new("queue", "Queue a prompt for after current turn", Session)
             .args_hint("<prompt>")
             .platform(Universal),
+        // Phase 36.17.3 (D-06 amended): /pause toggles queue drain pause.
+        // Alias is /unpause (NOT /resume) — /resume already exists below as
+        // "Resume a previous session". CliOnly because the queue-drain
+        // pause/unpause flow is a TUI affordance; gateway adapters do not
+        // expose user-facing pause toggles (see RESEARCH Pitfall 4).
+        CommandDef::new("pause", "Pause or resume queue drain", Session)
+            .aliases(&["unpause"])
+            .platform(CliOnly),
         CommandDef::new("status", "Show current session status", Session).platform(Universal),
         CommandDef::new("sethome", "Set home channel for delivery", Session)
             .aliases(&["set-home"])
@@ -201,6 +209,12 @@ pub fn build_registry() -> Vec<CommandDef> {
         CommandDef::new("cron", "Manage cron jobs", ToolsAndSkills)
             .args_hint("[subcommand]")
             .platform(CliOnly),
+        // Phase 36.3.7 (D-35/D-36): /kanban slash command registered with Universal
+        // platform so it propagates to TG/Discord/Slack/UI via CommandRouter. NOT
+        // CliOnly (unlike cron) — D-36 requires mid-run bypass to work on gateway+UI.
+        CommandDef::new("kanban", "Manage kanban board and tasks", ToolsAndSkills)
+            .args_hint("[subcommand]")
+            .platform(Universal),
         CommandDef::new("reload-mcp", "Reload MCP servers", ToolsAndSkills)
             .aliases(&["reload_mcp"])
             .platform(Universal),
@@ -218,7 +232,13 @@ pub fn build_registry() -> Vec<CommandDef> {
             .args_hint("[page]")
             .platform(GatewayOnly),
         CommandDef::new("help", "Show this help message", Info).platform(All),
-        CommandDef::new("usage", "Show token usage", Info).platform(Universal),
+        // Phase 36.2 Plan 10: `/usage` now wires through cmd_usage with flat-
+        // flag filters; description + args_hint updated to reflect the new
+        // subcommand surface (CommandRouter dispatch fans out to CLI / TUI /
+        // gateway / web UI for free).
+        CommandDef::new("usage", "Show token usage and costs", Info)
+            .args_hint("[--today | --provider X | --since Nd | --model X]")
+            .platform(Universal),
         CommandDef::new("models", "Show or refresh model metadata", Info)
             .args_hint("[refresh|info <model>]")
             .platform(Universal),

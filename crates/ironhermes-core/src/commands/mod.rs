@@ -6,6 +6,7 @@ pub mod context;
 pub mod handlers;
 pub mod provider_display;
 pub mod registry;
+pub mod running_agent;
 pub mod toolset_display;
 pub mod typo;
 
@@ -172,6 +173,37 @@ pub enum CommandResult {
     /// (kebab-case); `body` is the full SKILL.md body text returned by
     /// `SkillRegistry::read_content`.
     SkillActivated { name: String, body: String },
+
+    /// Phase 36.17.1 (D-01.c / D-08): `/queue <message>` produced an event that
+    /// should be queued for replay after the current agent turn finishes. The
+    /// gateway handler intercepts this variant, synthesizes a `MessageEvent`
+    /// inheriting platform / chat_id / sender_id / message_id from the triggering
+    /// event, and calls `session_queue.try_push(...)` (handler.rs Queued arm).
+    ///
+    /// Non-gateway surfaces (CLI/TUI) without a per-session queue should map
+    /// this variant to `CommandResult::Output(format!("Queued: {message}"))` or
+    /// a surface-appropriate equivalent so the user receives feedback even
+    /// without a real queue (the SessionQueue lives on `GatewayRunner` only).
+    ///
+    /// This keeps `cmd_queue` (handlers.rs) side-effect free — the actual push
+    /// happens at the gateway boundary, mirroring how `NewSession` is
+    /// intercepted by the gateway/TUI handlers.
+    Queued { message: String },
+
+    /// Phase 36.17.3 (D-06 amended): `/pause` — toggle queue drain pause state.
+    /// TUI maps to AtomicBool flip in `handle_session_control` (Plan 05);
+    /// gateway and CLI REPL treat as no-op since they have no TUI-side queue
+    /// drain loop. Every match site on `CommandResult` must handle this
+    /// variant (alongside `UnpauseQueue`).
+    PauseQueue,
+
+    /// Phase 36.17.3 (D-06 amended): `/unpause` — explicit unpause (alias of
+    /// `/pause` set-to-false). Sets pause=false unconditionally. Same
+    /// consumer impact as `PauseQueue` — every match site must handle both.
+    /// The alias is `/unpause` (NOT `/resume`) to avoid collision with the
+    /// existing session-resume `/resume` command at
+    /// `commands::registry::build_registry` (RESEARCH Pitfall 4).
+    UnpauseQueue,
 }
 
 // =============================================================================

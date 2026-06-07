@@ -148,6 +148,20 @@ fn map_core_to_tui(core: CoreCommandResult) -> CommandResult {
         CoreCommandResult::SkillsReload => CommandResult::SkillsReload,
         CoreCommandResult::SkillActivated { name, body } => CommandResult::SkillActivated { name, body },
         CoreCommandResult::PersonalityApplied(text) => CommandResult::Handled(text),
+        // Phase 36.17.1 Plan 03 Task 1: the SessionQueue lives on GatewayRunner
+        // only — the legacy TUI surface has no per-session FIFO and cannot
+        // actually enqueue the message. Map to a visible Output so the user
+        // gets feedback that the /queue command was understood. Future TUI
+        // queue wiring (deferred per D-02) can replace this with a real push.
+        CoreCommandResult::Queued { message } => {
+            CommandResult::Handled(format!("Queued: {message}"))
+        }
+        // Phase 36.17.3 (D-06 amended): defensive no-op. /pause and /unpause
+        // are CliOnly + Session, but the classic legacy TUI has no queue-drain
+        // loop (the real toggle lives in tui_rata::handle_session_control —
+        // Plan 05). Map to Silent so the legacy REPL stays exhaustive without
+        // surfacing user-visible behavior change.
+        CoreCommandResult::PauseQueue | CoreCommandResult::UnpauseQueue => CommandResult::Silent,
     }
 }
 

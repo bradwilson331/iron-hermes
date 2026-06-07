@@ -86,7 +86,7 @@ A pixel-perfect Dioxus 0.7 port of the Warp × IronHermes design prototype — a
 - RSX macro blocks indented consistently within `rsx! { ... }`
 - `clippy` with custom `clippy.toml` at project root
 - Key enforced rule: do NOT hold `GenerationalRef`, `GenerationalRefMut`, or `dioxus_signals::WriteLock` across `.await` points — this causes borrow panics at runtime
-- Config: `/Users/twilson/code/iron_hermes_ui/clippy.toml`
+- Config: `/Users/you/code/iron_hermes_ui/clippy.toml`
 ## Import Organization
 - None configured — imports use full crate paths
 - `use dioxus::prelude::*` is standard and expected — do not enumerate individual Dioxus items

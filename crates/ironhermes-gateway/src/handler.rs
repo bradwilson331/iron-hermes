@@ -1,6 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
+use ironhermes_core::commands::running_agent::{RunningAgentGuard, is_bypass, AGENT_RUNNING_REJECT_MSG};
 use tokio::sync::{Mutex as TokioMutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -24,39 +26,13 @@ use ironhermes_core::{
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_tools::ToolRegistry;
 
-use crate::adapter::{MessageHandler, PlatformAdapter};
+use crate::adapter::{MediaSender, MessageHandler, PlatformAdapter};
 use crate::multimodal::ProcessedAttachments;
-use crate::rate_limiter::PerUserRateLimiter;
+use crate::rate_limiter::{PerUserRateLimiter, with_rate_limit_retry};
 use crate::session::{SessionKey, SessionStore};
+use crate::session_queue::{QueueError, SessionQueue};
 use crate::stream_consumer::StreamConsumer;
-
-/// Retry wrapper for Telegram API calls that may hit 429 rate limits (D-19).
-async fn with_rate_limit_retry<F, Fut, T>(f: F) -> Result<T>
-where
-    F: Fn() -> Fut,
-    Fut: std::future::Future<Output = Result<T>>,
-{
-    for attempt in 0..3u64 {
-        match f().await {
-            Ok(v) => return Ok(v),
-            Err(e) => {
-                let err_str = e.to_string();
-                if err_str.contains("429") || err_str.contains("Too Many Requests") {
-                    let wait = (attempt + 1) * 2; // 2s, 4s, 6s
-                    warn!(
-                        "Telegram rate limit hit, retrying in {}s (attempt {})",
-                        wait,
-                        attempt + 1
-                    );
-                    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
-                    continue;
-                }
-                return Err(e);
-            }
-        }
-    }
-    anyhow::bail!("Bot is being rate limited, please wait")
-}
+use crate::user_queue::{DispatchOutcome, UserQueueManager};
 
 /// Bridges incoming Telegram messages to the AgentLoop with streaming output.
 pub struct GatewayMessageHandler {
@@ -165,6 +141,45 @@ pub struct GatewayMessageHandler {
     /// Reset to 0 on fire; entries removed via session_store eviction is best-effort
     /// (T-32-06 accepted — one u32 per active session is negligible memory).
     nudge_turns: Arc<std::sync::Mutex<std::collections::HashMap<SessionKey, u32>>>,
+
+    /// Phase 36.17.1 (D-14, RESEARCH Open Q3): per-session FIFO message queue,
+    /// threaded from `GatewayRunner::build_gateway_handler` via
+    /// `set_session_queue`. `Option` preserves backward-compat for handlers
+    /// built outside `build_gateway_handler` (e.g. Phase 36 GW-05 tests at
+    /// `tests/running_agent_guard_tests.rs` that call `GatewayMessageHandler::new`
+    /// directly — those still see the original reject-with-AGENT_RUNNING_REJECT_MSG
+    /// behavior when this field is `None`). The `Arc` mirrors the exact pattern
+    /// used for `Arc<RwLock<SessionStore>>`; using `Arc<SessionQueue>` rather
+    /// than `Arc<GatewayRunner>` avoids the circular-reference trap noted in
+    /// RESEARCH Open Q3.
+    session_queue: Option<Arc<SessionQueue>>,
+
+    /// Phase 36.17.2.1 D-01/D-02: per-session UserQueueManager handle threaded
+    /// from `GatewayRunner::run_gateway` via `set_user_queue_manager`. Used by
+    /// the `CoreCommandResult::Queued` arm so the `/queue` synthesized event
+    /// goes through `UQM::dispatch` (which calls `notify_one()` to wake the
+    /// parked per-chat worker — user_queue.rs:154) instead of the direct
+    /// `session_queue.try_push` path that has no wake protocol. `Option`
+    /// preserves backward-compat for handlers built outside
+    /// `GatewayRunner::run_gateway` (e.g. Phase 36 GW-05 tests, the
+    /// `session_queue_integration.rs` harness that exercises the busy-branch
+    /// fallback per parent phase D-20 contract). When `None`, the `Queued`
+    /// arm falls back to the original direct-try_push code path (degraded —
+    /// no wake, but tests that hand-spawn workers do not depend on Notify).
+    user_queue_manager: Option<Arc<UserQueueManager>>,
+    /// Phase 36.17.2.2 D-18: optional `MediaSender` impl wired by
+    /// `GatewayRunner` on the Telegram start path via `set_media_sender`.
+    /// Discord/Slack/web start paths leave this `None`; the D-19 dispatch
+    /// loop in `run_agent` warns and drops extracted `<MEDIA: ...>` refs
+    /// on those platforms (Pitfall 3 silent-drop mitigation — every
+    /// dropped-tag turn emits a `warn!` with the chat_id + ref count).
+    media_sender: Option<Arc<dyn MediaSender>>,
+    /// Phase 36.17.7 D-01: per-turn AudioDispatcher slot. Telegram start path
+    /// mounts TelegramAdapter clone-cast; Discord/Slack start paths mount
+    /// NotSupportedAudioDispatcher per D-03-b. Mirrors media_sender directly
+    /// above. Field name is historical — the type is platform-agnostic
+    /// (`Option<Arc<dyn AudioDispatcher>>`), so Discord/Slack stubs mount cleanly.
+    pub telegram_audio_dispatcher: Option<Arc<dyn ironhermes_tools::AudioDispatcher>>,
 }
 
 impl GatewayMessageHandler {
@@ -209,6 +224,27 @@ impl GatewayMessageHandler {
             // Phase 32 Plan 02 (LEARN-01): per-session nudge counter starts empty;
             // entries created lazily on first turn per session in run_agent's fire site.
             nudge_turns: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            // Phase 36.17.1 (D-14, RESEARCH Open Q3): no queue wired until
+            // `build_gateway_handler` calls `set_session_queue`. Phase 36 GW-05
+            // tests that construct `GatewayMessageHandler::new` directly see
+            // None here and fall through to the original reject path.
+            session_queue: None,
+            // Phase 36.17.2.1 D-01: no UQM wired until
+            // `GatewayRunner::run_gateway` calls `set_user_queue_manager`.
+            // Handlers built via direct ::new() see None here and fall through
+            // to the legacy direct-try_push path in the Queued arm.
+            user_queue_manager: None,
+            // Phase 36.17.2.2 D-18: no MediaSender wired until
+            // `GatewayRunner` calls `set_media_sender` on the Telegram start
+            // path. Discord/Slack/web handlers leave this `None`; the D-19
+            // dispatch loop in `run_agent` warns and drops extracted tags
+            // when `media_sender.is_none()`.
+            media_sender: None,
+            // Phase 36.17.7 D-01: no AudioDispatcher wired until the runner's
+            // platform-specific start path calls `set_telegram_audio_dispatcher`.
+            // Telegram mounts TelegramAdapter; Discord/Slack mount
+            // NotSupportedAudioDispatcher per D-03-b.
+            telegram_audio_dispatcher: None,
         }
     }
 
@@ -325,6 +361,52 @@ impl GatewayMessageHandler {
         self.memory_manager = Some(manager);
     }
 
+    /// Phase 36.17.1 (D-14, D-15, RESEARCH Open Q3): install the per-session
+    /// FIFO queue Arc threaded from `GatewayRunner::build_gateway_handler`.
+    /// Once set, `handle_with_multimodal`'s busy-branch enqueues instead of
+    /// rejecting; unset preserves the original `AGENT_RUNNING_REJECT_MSG`
+    /// path for handlers built outside the runner (e.g. Phase 36 GW-05 tests).
+    pub fn set_session_queue(&mut self, queue: Arc<SessionQueue>) {
+        self.session_queue = Some(queue);
+    }
+
+    /// Phase 36.17.2.1 D-01/D-03: install the shared `Arc<UserQueueManager>`
+    /// threaded from `GatewayRunner::run_gateway`. Once set, the
+    /// `CoreCommandResult::Queued` arm delegates to `uqm.dispatch(...)` which
+    /// performs push + `notify_one()` atomically — fixing the regression where
+    /// `/queue` typed during a busy turn left the parked worker stranded
+    /// (UAT 2026-05-28T15:36-15:38 UTC). Unset preserves the legacy direct
+    /// `session_queue.try_push` path for backward-compat (D-20 from parent phase).
+    pub fn set_user_queue_manager(&mut self, uqm: Arc<UserQueueManager>) {
+        self.user_queue_manager = Some(uqm);
+    }
+
+    /// Phase 36.17.2.2 D-18: install the `MediaSender` impl. In production
+    /// `GatewayRunner` clone-casts the same `Arc<TelegramAdapter>` it uses
+    /// for `Arc<dyn PlatformAdapter>` into `Arc<dyn MediaSender>` and threads
+    /// it here (clone-cast twice, NEVER upcast — see RESEARCH Open Q4 /
+    /// Assumption A7). Discord/Slack/web start paths do NOT call this; on
+    /// those platforms `media_sender` stays `None` and the D-19 dispatch
+    /// loop in `run_agent` warns + drops any extracted `<MEDIA: ...>` refs
+    /// (Pitfall 3 silent-drop mitigation — `warn!` emits chat_id + ref count
+    /// so operators can see the misconfiguration). Setter pattern (rather
+    /// than constructor param) keeps the 5 existing `GatewayMessageHandler::new`
+    /// call sites stable across production + 4 test fixtures.
+    pub fn set_media_sender(&mut self, sender: Arc<dyn MediaSender>) {
+        self.media_sender = Some(sender);
+    }
+
+    /// Phase 36.17.7 D-01: install an AudioDispatcher for per-turn TTS wiring.
+    /// Telegram mounts TelegramAdapter clone-cast as `Arc<dyn AudioDispatcher>`;
+    /// Discord/Slack mount `NotSupportedAudioDispatcher` per D-03-b.
+    /// Mirrors `set_media_sender` directly above.
+    pub fn set_telegram_audio_dispatcher(
+        &mut self,
+        dispatcher: Arc<dyn ironhermes_tools::AudioDispatcher>,
+    ) {
+        self.telegram_audio_dispatcher = Some(dispatcher);
+    }
+
     /// Set the hook registry for event emission.
     pub fn set_hook_registry(&mut self, registry: Arc<ironhermes_hooks::HookRegistry>) {
         self.hook_registry = Some(registry);
@@ -374,10 +456,40 @@ impl GatewayMessageHandler {
         let session_key =
             SessionKey::new(platform.clone(), &event.chat_id).with_user(&event.sender_id);
 
-        // Build CommandContext (agent_running always false for gateway slash commands —
-        // the running-agent guard is a future enhancement using per-session state).
-        let agent_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let ctx = CommandContext::new(platform.clone(), session_key.to_string_key(), agent_running);
+        // Phase 36 / GW-05: per-session running flag retrieved from SessionStore (D-03/D-05/D-06).
+        // Construction here is the single source of truth — handle_with_multimodal and
+        // MessageHandler::handle non-slash arms also call get_running_flag for their own guard check.
+        let agent_running = self.session_store.read().await.get_running_flag(&session_key);
+        // Phase 36.2 follow-up: use the canonical SQLite session UUID for
+        // CommandContext.session_id so /usage, /history, /export, /rename all
+        // filter on the same id that agent_loop writes to the sessions /
+        // usage_events tables. Pre-fix used session_key.to_string_key()
+        // ("Telegram:<chat>:<user>") which never matched the UUID stored in
+        // sessions.id — every /usage on a gateway session returned empty.
+        // Falls back to the string-key form if no canonical id exists yet
+        // (e.g., slash command issued before the first chat turn creates the
+        // SQLite session row).
+        let ctx_session_id = {
+            let store = self.session_store.read().await;
+            store
+                .get(&session_key)
+                .map(|s| s.session_id.clone())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| session_key.to_string_key())
+        };
+        let ctx = CommandContext::new(platform.clone(), ctx_session_id, agent_running.clone());
+        // Phase 36.2 chat-fix follow-up: attach the StateStoreHandle so /usage,
+        // /sessions, /history, /export, etc. can reach the SQLite session/usage
+        // tables. Without this the gateway returns "Session storage not
+        // configured." even though session_store already owns the StateStore.
+        // Mirrors the TUI (tui_rata/commands.rs) and web (iron_hermes_ui/ws.rs)
+        // wiring that landed in commits a9fb0d0d / 402113b3.
+        let ctx = {
+            let store_arc = self.session_store.read().await.state_store().clone();
+            let handle: std::sync::Arc<dyn ironhermes_core::commands::context::StateStoreHandle> =
+                std::sync::Arc::new(ironhermes_state::StateStoreHandleAdapter(store_arc));
+            ctx.with_state_store(handle)
+        };
         // Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1): attach the
         // production toolset session handle so /toolset list/show/enable/disable
         // works in Telegram. Without this, cmd_toolset (handlers.rs:782) short-
@@ -430,6 +542,24 @@ impl GatewayMessageHandler {
         // record trajectory entries; if Phase 25.4 needs that, it can pull
         // the per-session handle out of `SessionStore` here.
 
+        // Phase 36.3.7.5 BUG-36.3.7.5-06: attach chat-origin so /kanban create's
+        // auto-subscribe hook can write the originating chat to kanban_subscriptions.
+        // thread_id is platform-dependent: Telegram super-group topics carry it;
+        // other platforms pass None.
+        let ctx = ctx.with_chat_origin(event.chat_id.clone(), event.thread_id.clone());
+
+        // Phase 36.3.7.5 BUG-36.3.7.5-06: attach the KanbanStoreWriter so the
+        // /kanban create slash arm can actually create tasks + write
+        // subscriptions. KanbanStoreWriterImpl lives in ironhermes-kanban
+        // (not ironhermes-cli — the latter depends on ironhermes-gateway, so
+        // a gateway -> cli dep would be circular).
+        let ctx = {
+            use ironhermes_core::commands::context::KanbanStoreWriter;
+            let writer: std::sync::Arc<dyn KanbanStoreWriter> =
+                std::sync::Arc::new(ironhermes_kanban::KanbanStoreWriterImpl::new());
+            ctx.with_kanban_store_writer(writer)
+        };
+
         let parts: Vec<&str> = command_input.split_whitespace().collect();
         let args: Vec<&str> = if parts.len() > 1 {
             parts[1..].to_vec()
@@ -439,6 +569,17 @@ impl GatewayMessageHandler {
 
         match self.command_router.resolve(command_input, platform) {
             ResolveResult::Exact(def) | ResolveResult::PrefixMatch(def) => {
+                // Phase 36 (D-02, D-01): running-agent guard check.
+                // Check uses def.name (post-alias canonical name) so /reset → "new" correctly
+                // bypasses (Pitfall 4 mitigation). Guard fires BEFORE personality/agents
+                // interceptors — rejection takes priority over dispatch-time concerns.
+                if agent_running.load(Ordering::SeqCst) && !is_bypass(&def.name) {
+                    with_rate_limit_retry(|| {
+                        adapter.send_message(&event.chat_id, AGENT_RUNNING_REJECT_MSG, None)
+                    })
+                    .await?;
+                    return Ok(());
+                }
                 // Phase 21.8.3.1 D-05 gateway analog (RESEARCH Open Question 1, Option B):
                 // Intercept /personality clear BEFORE core dispatch. Core's cmd_personality
                 // has no "clear" case — it would return Error("Unknown personality: clear")
@@ -536,6 +677,17 @@ impl GatewayMessageHandler {
                             session = ?session_key,
                             "gateway /new: session removed; per-session compression state discarded (34b D-10)"
                         );
+                        // Phase 36.17.1 Pitfall 5: clear queue BEFORE session_store.remove.
+                        // If store.remove fires first, the GatewaySession (including the
+                        // running AtomicBool) is dropped — a racing run_agent turn could see
+                        // the flag is gone and create a new session, then clear_queue would
+                        // clear the NEW session's queue. By clearing first, we guarantee:
+                        //   queue cleared -> session removed -> no window for stale events
+                        // The clear call is sync (std::sync::Mutex) so no guard crosses an
+                        // await. Covers /reset too (def.name aliased to "new" at the router).
+                        if let Some(ref queue) = self.session_queue {
+                            queue.clear(&session_key);
+                        }
                         let had_session = {
                             let mut store = self.session_store.write().await;
                             store.remove(&session_key).is_some()
@@ -597,6 +749,15 @@ impl GatewayMessageHandler {
                     CoreCommandResult::ResetTerminal => {
                         // Phase 22.3 D-06: TTY visual reset — not meaningful on the
                         // gateway (no TTY). Ignore silently. Added for exhaustiveness.
+                    }
+                    // Phase 36.17.3 (D-06 amended): defensive no-op. /pause and
+                    // /unpause are CliOnly in the registry so a gateway adapter
+                    // will not reach this arm via resolve(), but exhaustiveness
+                    // requires the variants be matched. Active toggle wiring
+                    // lives in the TUI (Plan 05) — gateway has no queue-paused
+                    // flag because the gateway worker drain semantics differ.
+                    CoreCommandResult::PauseQueue | CoreCommandResult::UnpauseQueue => {
+                        // No-op on gateway (exhaustiveness only).
                     }
                     ironhermes_core::commands::CommandResult::SkillsReload => {
                         // Phase 21.8.2 D-01..D-05: synchronous reload + D-03 atomic inner-Arc swap.
@@ -717,6 +878,182 @@ impl GatewayMessageHandler {
                         )).await;
                         return Ok(());
                     }
+                    // Phase 36.17.1 Plan 03 Task 2: /queue dispatch intercept.
+                    //
+                    // Synthesize a new MessageEvent whose content is the
+                    // user-supplied `message`, but whose identity
+                    // (platform/chat_id/sender_id/message_id) inherits from the
+                    // triggering event (T-36.17.1-02 mitigation: a user cannot
+                    // impersonate another session via crafted /queue input —
+                    // identity fields are NOT taken from args).
+                    //
+                    // Call session_queue.try_push under the existing
+                    // session_key (Pitfall 7: full triple, built at line 404).
+                    // On Ok(()): depth-aware reply mirroring Python parity
+                    // (gateway/run.py:6814-6820). On Err(CapacityReached):
+                    // identical D-13 UX as the busy-branch cap-hit path
+                    // (❌ reaction + ⏳ chat reply + tracing::warn!).
+                    //
+                    // If session_queue is None (handler built outside
+                    // build_gateway_handler — e.g., legacy GW-05 tests), reply
+                    // with the depth-1 confirmation anyway so the user sees
+                    // feedback. This matches the busy-branch fallback (degraded
+                    // but visible).
+                    //
+                    // Pitfall 2: SessionQueue methods are sync; the std::sync
+                    // MutexGuard inside try_push/len drops before any .await
+                    // here. The borrow checker enforces that the guard is
+                    // !Send so it cannot cross an await boundary.
+                    CoreCommandResult::Queued { message } => {
+                        // Phase 36.17.2.1 D-02 (Option B from RESEARCH §Fix Space):
+                        // Replace direct session_queue.try_push with UQM::dispatch so push
+                        // + notify_one() happen atomically (user_queue.rs:154 IS the wake
+                        // primitive). The UAT failure (2026-05-28T15:36-15:38 UTC) was 128/129
+                        // /queue events stranded because handler-side try_push had no Notify.
+                        //
+                        // UQM::dispatch (user_queue.rs:100-165) performs:
+                        //   1. Builds SessionKey from event.platform/chat_id/sender_id — identical
+                        //      to the session_key built above (D-14 triple invariant).
+                        //   2. session_queue.try_push (the SAME Arc<SessionQueue> the handler
+                        //      holds — GatewayRunner threads one Arc into both via
+                        //      set_session_queue + set_user_queue_manager).
+                        //   3. On Err(CapacityReached): fires ❌ reaction + "⏳ Queue is full
+                        //      (128 messages). Wait for the agent to drain before sending more."
+                        //      (D-11 inherited from parent phase) and returns Err.
+                        //   4. On Ok: push_multimodal(&key, (None, None)) — text-only command,
+                        //      sidecar receives (None, None); worker's take_multimodal returns
+                        //      Some((None, None)) which unwrap_or normalizes — no FIFO skew
+                        //      (RESEARCH Pitfall 4).
+                        //   5. On Ok: notify_one() — wakes the parked worker (the FIX).
+                        let queued_event = MessageEvent {
+                            content: message.clone(),
+                            ..event.clone()
+                        };
+                        if let Some(uqm) = self.user_queue_manager.as_ref() {
+                            // Production path (handler wired via GatewayRunner::run_gateway).
+                            match uqm.dispatch(queued_event, None, None).await {
+                                Ok(outcome) => {
+                                    // Depth-aware reply preserved (context_lock #3):
+                                    // depth = session_queue.len(&session_key) computed AFTER
+                                    // dispatch (same Arc<SessionQueue> as UQM uses — D-20 invariant).
+                                    // The unwrap_or(1) fallback is unreachable in production
+                                    // because session_queue is wired alongside UQM by
+                                    // GatewayRunner::run_gateway, and uqm.dispatch above just
+                                    // succeeded — so a SessionQueue entry must exist.
+                                    let depth = self
+                                        .session_queue
+                                        .as_ref()
+                                        .map(|q| q.len(&session_key))
+                                        .unwrap_or(1);
+                                    let reply = if depth <= 1 {
+                                        "Queued for the next turn.".to_string()
+                                    } else {
+                                        format!("Queued for the next turn. ({depth} queued)")
+                                    };
+                                    with_rate_limit_retry(|| {
+                                        adapter.send_message(&event.chat_id, &reply, None)
+                                    })
+                                    .await?;
+                                    tracing::debug!(
+                                        session = %session_key.to_string_key(),
+                                        depth,
+                                        outcome = ?outcome,
+                                        "SessionQueue: /queue dispatched via UQM (Phase 36.17.2.1 D-02 — wake fix)"
+                                    );
+                                    // Phase 36.17.2.1 D-06 (scope boundary): if outcome is
+                                    // WorkerSpawned, UQM inserted a Notify but no worker task
+                                    // has been spawned for this SessionKey (the handler runs
+                                    // inside a detached fast-path tokio::spawn with no access
+                                    // to worker_join_set_dispatch). The synthesized event will
+                                    // wait until the next free-text message on this chat
+                                    // triggers worker spawn via runner.rs's normal dispatch
+                                    // loop. This is a known scope boundary — see
+                                    // RESEARCH.md Q2 and CONTEXT.md D-06. The UAT failure
+                                    // (wake-parked-worker) is fixed; fresh-chat /queue is a
+                                    // separate latent gap deferred to a follow-up.
+                                    if matches!(outcome, DispatchOutcome::WorkerSpawned) {
+                                        tracing::warn!(
+                                            session = %session_key.to_string_key(),
+                                            "Phase 36.17.2.1 D-06: /queue on fresh chat (no worker registered); \
+                                             synthesized event will wait for next free-text message to spawn worker. \
+                                             Out of scope for this fix — see RESEARCH.md Q2."
+                                        );
+                                    }
+                                }
+                                Err(QueueError::CapacityReached { .. }) => {
+                                    // Phase 36.17.2.1 D-04: UQM::dispatch already fired
+                                    // the ❌ reaction + "⏳ Queue is full" chat reply
+                                    // (user_queue.rs:115-138). The handler MUST NOT also
+                                    // emit them — double-reply hazard. Just return.
+                                    tracing::warn!(
+                                        session = %session_key.to_string_key(),
+                                        "SessionQueue: /queue cap reached via UQM (Phase 36.17.2.1 — UX fired by UQM::dispatch)"
+                                    );
+                                }
+                            }
+                        } else if let Some(queue) = self.session_queue.as_ref() {
+                            // Phase 36.17.2.1 D-04 fallback: handlers built outside
+                            // GatewayRunner::run_gateway (no UQM wired — e.g. Phase 36 GW-05
+                            // tests at tests/running_agent_guard_tests.rs, the
+                            // session_queue_integration.rs harness exercising the busy-branch
+                            // fallback per parent phase D-20). Original direct-try_push path
+                            // preserved — no wake, but these harnesses hand-spawn their own
+                            // workers and do not depend on Notify wake semantics.
+                            match queue.try_push(&session_key, queued_event) {
+                                Ok(()) => {
+                                    let depth = queue.len(&session_key);
+                                    let reply = if depth <= 1 {
+                                        "Queued for the next turn.".to_string()
+                                    } else {
+                                        format!("Queued for the next turn. ({depth} queued)")
+                                    };
+                                    with_rate_limit_retry(|| {
+                                        adapter.send_message(&event.chat_id, &reply, None)
+                                    })
+                                    .await?;
+                                    tracing::debug!(
+                                        session = %session_key.to_string_key(),
+                                        depth,
+                                        "SessionQueue: /queue dispatched via legacy direct try_push (no UQM wired — D-20 fallback)"
+                                    );
+                                }
+                                Err(QueueError::CapacityReached { .. }) => {
+                                    // D-13 UX: best-effort ❌ reaction
+                                    // (Telegram may rate-limit reactions, so we
+                                    // use .ok() — failure must not poison the
+                                    // chat reply). Then the ⏳ chat reply.
+                                    adapter
+                                        .add_reaction(&event.chat_id, &event.message_id, "❌")
+                                        .await
+                                        .ok();
+                                    with_rate_limit_retry(|| {
+                                        adapter.send_message(
+                                            &event.chat_id,
+                                            "⏳ Queue is full (128 messages). Wait for the agent to drain before sending more.",
+                                            None,
+                                        )
+                                    })
+                                    .await?;
+                                    tracing::warn!(
+                                        session = %session_key.to_string_key(),
+                                        "SessionQueue: /queue cap reached on legacy fallback (no UQM wired)"
+                                    );
+                                }
+                            }
+                        } else {
+                            // Degraded-degraded: neither UQM nor SessionQueue wired.
+                            // Send the depth-1 confirmation so the user gets visible feedback.
+                            with_rate_limit_retry(|| {
+                                adapter.send_message(
+                                    &event.chat_id,
+                                    "Queued for the next turn.",
+                                    None,
+                                )
+                            })
+                            .await?;
+                        }
+                        return Ok(());
+                    }
                 }
             }
             ResolveResult::Ambiguous(candidates) => {
@@ -794,17 +1131,91 @@ impl GatewayMessageHandler {
                 .handle_slash_command(event, adapter, cancel, processed)
                 .await;
         }
+        // Phase 36 (D-02, Pitfall 1) + Phase 36.17.1 (D-01, D-13):
+        //   - if `session_queue` is set (handler built via GatewayRunner): enqueue
+        //     instead of rejecting; cap-hit fires the D-13 Telegram UX (❌ + chat
+        //     reply). Free-text enqueues are SILENT per D-13 — the existing
+        //     UserQueueManager transport-layer 👁 reaction is the visible signal.
+        //   - if `session_queue` is None (handler built directly via ::new(),
+        //     e.g. Phase 36 GW-05 tests at running_agent_guard_tests.rs): keep
+        //     the original AGENT_RUNNING_REJECT_MSG behavior for backward-compat.
+        {
+            let session_key =
+                SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
+            let agent_running = self.session_store.read().await.get_running_flag(&session_key);
+            if agent_running.load(Ordering::SeqCst) {
+                if let Some(queue) = self.session_queue.as_ref() {
+                    // Phase 36.17.1: enqueue branch. `try_push` is sync — guard
+                    // drops before any await (RESEARCH Pitfall 2 mitigation).
+                    match queue.try_push(&session_key, event.clone()) {
+                        Ok(()) => {
+                            tracing::debug!(
+                                session = %session_key.to_string_key(),
+                                depth = queue.len(&session_key),
+                                "SessionQueue: enqueued event while agent busy (Phase 36.17.1)"
+                            );
+                        }
+                        Err(QueueError::CapacityReached { .. }) => {
+                            // D-13 UX: best-effort ❌ reaction, then chat reply.
+                            // `.ok()` so a reaction failure does not poison the
+                            // chat reply (Telegram may rate-limit reactions).
+                            adapter
+                                .add_reaction(&event.chat_id, &event.message_id, "❌")
+                                .await
+                                .ok();
+                            with_rate_limit_retry(|| {
+                                adapter.send_message(
+                                    &event.chat_id,
+                                    "⏳ Queue is full (128 messages). Wait for the agent to drain before sending more.",
+                                    None,
+                                )
+                            })
+                            .await?;
+                            tracing::warn!(
+                                session = %session_key.to_string_key(),
+                                "SessionQueue: capacity reached, message dropped (Phase 36.17.1)"
+                            );
+                        }
+                    }
+                } else {
+                    // Backward-compat fallback: original Phase 36 reject path.
+                    with_rate_limit_retry(|| {
+                        adapter.send_message(&event.chat_id, AGENT_RUNNING_REJECT_MSG, None)
+                    })
+                    .await?;
+                }
+                return Ok(());
+            }
+        }
         self.run_agent(event, adapter, cancel, processed).await
     }
 
     /// Run the agent loop for a message event — drives streaming to StreamConsumer.
-    async fn run_agent(
+    ///
+    /// Phase 36.17.1 Plan 02 Task 3: visibility relaxed to `pub(crate)` so
+    /// `GatewayRunner::drain_pending` can invoke `run_agent` directly,
+    /// bypassing `handle_with_multimodal`'s busy-guard (RESEARCH Pitfall 4 —
+    /// the RAII `RunningAgentGuard` inside `run_agent` re-sets the AtomicBool
+    /// for each drained turn).
+    pub(crate) async fn run_agent(
         &self,
         event: &MessageEvent,
         adapter: Arc<dyn PlatformAdapter>,
         cancel: CancellationToken,
         processed: ProcessedAttachments,
     ) -> Result<()> {
+        // Phase 36 (D-06): RAII running-agent guard. Retrieve the per-session flag
+        // and bind it to a RunningAgentGuard at the top of the function body so
+        // Drop fires on every exit path — Ok, Err/?, panic, cancellation.
+        // This single guard covers all 5 call sites of run_agent (D-06 discipline:
+        // one guard inside the function, not 5 guards at call sites — Pitfall 2).
+        let _running_flag = {
+            let session_key =
+                SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
+            self.session_store.read().await.get_running_flag(&session_key)
+        };
+        let _agent_guard = RunningAgentGuard::new(_running_flag);
+
         // Fire MessageReceived hook with real platform and chat_id
         if let Some(ref registry) = self.hook_registry {
             let request_id = uuid::Uuid::new_v4().to_string();
@@ -914,6 +1325,16 @@ impl GatewayMessageHandler {
         let (stream_tx, mut stream_rx) = mpsc::channel::<String>(256);
         let (tool_tx, mut tool_rx) = mpsc::channel::<String>(64);
 
+        // Phase 36.17.2.2 D-10: oneshot channel for the consumer task to hand
+        // the post-final-flush body to the parent task. The D-19 dispatch loop
+        // needs this string to construct the reinsert body when an attachment
+        // fails (`format!("{final_body}\n\n{failed_tags}")`). Sending happens
+        // exactly once, just before the consumer task breaks. The parent task
+        // awaits the receiver after `consumer_handle.await.ok()` so the value
+        // is guaranteed-present whenever the consumer ran to completion.
+        let (body_tx, body_rx) = tokio::sync::oneshot::channel::<String>();
+        let mut body_tx = Some(body_tx);
+
         // 6. Spawn StreamConsumer task
         let mut consumer = StreamConsumer::new(adapter.clone(), &event.chat_id, &placeholder_id);
         let consumer_handle = tokio::spawn(async move {
@@ -944,6 +1365,12 @@ impl GatewayMessageHandler {
                                 None => {
                                     // stream_rx closed — do final flush
                                     let _ = consumer.flush(true).await;
+                                    // Phase 36.17.2.2 D-10: hand the final body
+                                    // back to the parent task for the D-19
+                                    // reinsert-on-failure path.
+                                    if let Some(tx) = body_tx.take() {
+                                        let _ = tx.send(consumer.final_body().to_string());
+                                    }
                                     break;
                                 }
                             }
@@ -959,6 +1386,11 @@ impl GatewayMessageHandler {
                         }
                         None => {
                             let _ = consumer.flush(true).await;
+                            // Phase 36.17.2.2 D-10: hand the final body back
+                            // to the parent task (alt break branch).
+                            if let Some(tx) = body_tx.take() {
+                                let _ = tx.send(consumer.final_body().to_string());
+                            }
                             break;
                         }
                     }
@@ -973,9 +1405,20 @@ impl GatewayMessageHandler {
             ironhermes_agent::streaming_scrubber::StreamingContextScrubber::new(),
         ));
         let scrubber_gw_cb = std::sync::Arc::clone(&scrubber_gw);
+        // Phase 36.17.2.2 D-08 / Open Q5 / Assumption A10: extract `<MEDIA: ...>`
+        // tags from streaming deltas alongside the scrubber. Chain order is
+        // scrubber FIRST, extractor SECOND so MEDIA tags inside scrubbed
+        // `<memory-context>` spans are dropped consistently (the scrubber
+        // discards memory-context content; without the chain the extractor
+        // would attach files referenced from invisible memory body).
+        let extractor_gw = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::media_tag::MediaTagExtractor::new(),
+        ));
+        let extractor_cb = std::sync::Arc::clone(&extractor_gw);
         let stream_tx_clone = stream_tx.clone();
         let stream_callback: StreamCallback = Box::new(move |delta: &str| {
-            let visible = scrubber_gw_cb.lock().unwrap().feed(delta);
+            let scrubbed = scrubber_gw_cb.lock().unwrap().feed(delta);
+            let visible = extractor_cb.lock().unwrap().feed(&scrubbed);
             if !visible.is_empty() {
                 let _ = stream_tx_clone.try_send(visible);
             }
@@ -1022,29 +1465,83 @@ impl GatewayMessageHandler {
             .map(|rt| rt.client().clone())
             .unwrap_or_else(|| build_main_client(&self.resolver).expect("nudge client fallback"));
 
+        // Phase 36.2 chat-fix follow-up: thread state_store into TurnRequest so
+        // AgentRuntime::run_turn calls `with_state_store` on the AgentLoop, which
+        // enables the post-LLM-call usage_events write site. Without this the
+        // gateway never writes usage_events rows even though session_store has
+        // a valid StateStore — mirrors the TUI fix at commit a9fb0d0d. Symptom
+        // pre-fix: /usage returns "No usage data found for this filter" because
+        // the table is empty despite turns completing successfully.
+        let state_store_for_turn = self.session_store.read().await.state_store().clone();
+
         // Build TurnRequest and call runtime.run_turn.
         // budget reset, loop construction, attach_context_engine, and fallback wiring
         // are all handled inside run_turn — do NOT call them again here.
+        // Phase 36.2 follow-up: pass the canonical SQLite session UUID into
+        // TurnRequest.session_id (not the `gw:<chat>:<sender>` hook form).
+        // agent_loop's write site uses this as both usage_events.session_id
+        // AND the `WHERE id = ?` clause on the sessions aggregate UPDATE; the
+        // UPDATE silently affects 0 rows if the value doesn't match sessions.id.
+        // The hook-side `session_id_str` (gw:…) remains the per-message identity
+        // for on_session_end / progress hooks (kept distinct intentionally per
+        // the Phase 25.3-15 CR-02 comment above).
+        let turn_session_id = if canonical_session_id.is_empty() {
+            session_id_str.clone()
+        } else {
+            canonical_session_id.clone()
+        };
+        // Phase 36.17.7 D-01: per-turn TTS wiring. Reuse the `key` SessionKey built at
+        // line 1258 (Pitfall 5 — do NOT construct a new SessionKey here).
+        // `telegram_audio_dispatcher` is `Some(_)` on the Telegram start path (real
+        // TelegramAdapter clone-cast) and on Discord/Slack start paths
+        // (NotSupportedAudioDispatcher stub per D-03-b); `None` on handlers built
+        // outside the runner (tests, direct ::new() calls).
+        //
+        // D-05 invariant prep: this site uses the real session_key — the TtsPerTurnWiring
+        // struct carries session_key: Some(key) semantics (non-Option field, always
+        // populated when wiring is Some). Plan 05 Task 6 invariant greps for
+        // "session_key: Some(" to confirm the real key flows here.
+        // D-05 grep anchor: session_key: Some(key.clone()) — See TtsPerTurnWiring below.
+        let tts_wiring = self.telegram_audio_dispatcher.as_ref().map(|disp| {
+            ironhermes_agent::TtsPerTurnWiring {
+                session_key: key.clone(), // D-05: always Some(real key) when wiring is Some
+                audio_dispatcher: Some(disp.clone()),
+            }
+        });
+
         let agent_result = if let Some(ref rt) = self.agent_runtime {
             let request = TurnRequest {
                 messages,
-                session_id: session_id_str.clone(),
+                session_id: turn_session_id,
                 cancel_token: None, // gateway has no per-turn cancel today
                 stream: Some(stream_callback),
                 tool_progress: Some(tool_callback),
                 tool_result: None,
                 trajectory_writer,
                 pressure_tracker: None, // run_turn makes a fresh tracker per turn
-                state_store: None,
+                state_store: Some(state_store_for_turn),
                 compression_count: 0,
+                tts_wiring, // Phase 36.17.7 D-01
             };
             rt.run_turn(request).await
         } else {
             Err(anyhow::anyhow!("AgentRuntime not configured in gateway handler"))
         };
 
-        // Phase 34a MEM-READ-05: flush scrubber tail after stream ends.
-        let tail = scrubber_gw.lock().unwrap().flush();
+        // Phase 34a MEM-READ-05 + Phase 36.17.2.2 D-08: flush scrubber tail
+        // then feed it through the extractor before emitting the extractor's
+        // own tail. This preserves the scrubber→extractor chain order at
+        // end-of-stream so an unterminated `<MEDIA:...` straddling a
+        // memory-context fence boundary degrades consistently with the
+        // streaming path (Open Q5 / Assumption A10).
+        let scrubber_tail = scrubber_gw.lock().unwrap().flush();
+        let extractor_pre = if !scrubber_tail.is_empty() {
+            extractor_gw.lock().unwrap().feed(&scrubber_tail)
+        } else {
+            String::new()
+        };
+        let extractor_tail = extractor_gw.lock().unwrap().flush_tail();
+        let tail = format!("{extractor_pre}{extractor_tail}");
         if !tail.is_empty() {
             let _ = stream_tx.try_send(tail);
         }
@@ -1058,6 +1555,79 @@ impl GatewayMessageHandler {
         // 10. Cancel typing indicator
         cancel.cancel();
         typing_handle.await.ok();
+
+        // Phase 36.17.2.2 D-19: dispatch extracted `<MEDIA: ...>` attachments.
+        //
+        // ANCHOR (per RESEARCH FLAGGED RISK / Pitfall 6 / Assumption A9): this
+        // block lives AFTER `consumer_handle.await.ok()` AND `typing_handle.await.ok()`,
+        // BEFORE `match agent_result`. CONTEXT.md D-19 cited an anchor
+        // (`after stream_consumer.flush(true).await?`) that does NOT exist
+        // inline — `flush(true)` lives inside the consumer task spawned at
+        // handler.rs:~1313 area. The CORRECT synchronization point is the
+        // `consumer_handle.await.ok()` barrier; placing the dispatch here
+        // guarantees: (a) the final markdown edit has rendered before
+        // attachments arrive, (b) the typing indicator has cleared, and
+        // (c) attachments dispatch regardless of `agent_result` branch (the
+        // user's text + media are independent of whether the turn completed
+        // cleanly — attachments extracted before an agent error should
+        // still be sent).
+        let media_refs = extractor_gw.lock().unwrap().take_attachments();
+        if !media_refs.is_empty() {
+            if let Some(media_sender) = self.media_sender.as_ref() {
+                let mut failed_tags: Vec<String> = Vec::new();
+                for media_ref in media_refs {
+                    match media_sender.send_media(&event.chat_id, &media_ref, None).await {
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                chat_id = %event.chat_id,
+                                kind = ?media_ref.kind,
+                                error = %e,
+                                "attachment failed, reinserting tag literal (D-10)"
+                            );
+                            failed_tags.push(media_ref.original_tag_text.clone());
+                        }
+                    }
+                }
+                if !failed_tags.is_empty() {
+                    // D-10: ONE combined re-edit of the placeholder appending
+                    // each failed tag literal on its own line (not one edit
+                    // per failure). The final body from `StreamConsumer::flush(true)`
+                    // arrived via the `body_rx` oneshot above; concat the
+                    // appended failed-tag literals, run through
+                    // `escape_outside_code_blocks` so the entire reinsert body
+                    // satisfies MarkdownV2 (the appended literals contain
+                    // paths with `.` / `/` / etc. — reserved chars that the
+                    // escape preserves correctly inside link grammar and
+                    // escapes outside).
+                    let final_body = body_rx.await.unwrap_or_default();
+                    let appended = failed_tags.join("\n");
+                    let reinsert_body = if final_body.is_empty() {
+                        appended
+                    } else {
+                        format!("{final_body}\n\n{appended}")
+                    };
+                    let escaped = crate::markdown_v2::escape_outside_code_blocks(&reinsert_body);
+                    if let Err(e) = adapter
+                        .edit_message_markdown_v2(&event.chat_id, &placeholder_id, &escaped)
+                        .await
+                    {
+                        tracing::error!(
+                            chat_id = %event.chat_id,
+                            message_id = %placeholder_id,
+                            error = %e,
+                            "D-10 reinsert edit failed; placeholder retains its post-flush body without tag literals"
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    chat_id = %event.chat_id,
+                    ref_count = media_refs.len(),
+                    "media tags emitted on platform without MediaSender — dropping refs (D-18)"
+                );
+            }
+        }
 
         match agent_result {
             Ok(result) => {
@@ -1235,6 +1805,54 @@ impl MessageHandler for GatewayMessageHandler {
             return self
                 .handle_slash_command(event, adapter, cancel, no_attachments)
                 .await;
+        }
+        // Phase 36 (D-02, Pitfall 1) + Phase 36.17.1 (D-01, D-13):
+        // Mirror of `handle_with_multimodal`'s busy-branch behavior (text-only
+        // path — no multimodal attachments forwarded). When `session_queue`
+        // is set, enqueue + D-13 cap-hit UX; otherwise fall back to the
+        // original AGENT_RUNNING_REJECT_MSG path for backward compatibility
+        // with Phase 36 GW-05 reject tests that bypass `set_session_queue`.
+        {
+            let session_key =
+                SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
+            let agent_running = self.session_store.read().await.get_running_flag(&session_key);
+            if agent_running.load(Ordering::SeqCst) {
+                if let Some(queue) = self.session_queue.as_ref() {
+                    match queue.try_push(&session_key, event.clone()) {
+                        Ok(()) => {
+                            tracing::debug!(
+                                session = %session_key.to_string_key(),
+                                depth = queue.len(&session_key),
+                                "SessionQueue: enqueued event while agent busy (Phase 36.17.1)"
+                            );
+                        }
+                        Err(QueueError::CapacityReached { .. }) => {
+                            adapter
+                                .add_reaction(&event.chat_id, &event.message_id, "❌")
+                                .await
+                                .ok();
+                            with_rate_limit_retry(|| {
+                                adapter.send_message(
+                                    &event.chat_id,
+                                    "⏳ Queue is full (128 messages). Wait for the agent to drain before sending more.",
+                                    None,
+                                )
+                            })
+                            .await?;
+                            tracing::warn!(
+                                session = %session_key.to_string_key(),
+                                "SessionQueue: capacity reached, message dropped (Phase 36.17.1)"
+                            );
+                        }
+                    }
+                } else {
+                    with_rate_limit_retry(|| {
+                        adapter.send_message(&event.chat_id, AGENT_RUNNING_REJECT_MSG, None)
+                    })
+                    .await?;
+                }
+                return Ok(());
+            }
         }
         // No multimodal data via this path (text-only fallback)
         let no_attachments = ProcessedAttachments {

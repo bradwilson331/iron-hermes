@@ -86,6 +86,20 @@ pub struct AgentRuntimeInput {
     pub subagent_cancel_token: Option<CancellationToken>,
 }
 
+/// Phase 36.17.7 D-01: lightweight per-turn TTS session descriptor.
+///
+/// Built by each surface handler (gateway, ws.rs, event_loop.rs) and threaded
+/// into `TurnRequest` so `AgentRuntime::run_turn` can call
+/// `ToolRegistry::register_tts_tools` on the durable `bundle.registry` before
+/// the agent loop is constructed.
+///
+/// `audio_dispatcher` is `None` for `Platform::Local` (TUI) — `SendAudioTool`'s
+/// Local arm handles `rodio` playback directly without a dispatcher Arc.
+pub struct TtsPerTurnWiring {
+    pub session_key: ironhermes_core::SessionKey,
+    pub audio_dispatcher: Option<Arc<dyn ironhermes_tools::AudioDispatcher>>,
+}
+
 /// Everything that legitimately varies turn-to-turn. The channel builds the
 /// message vector (session stores differ per channel) and supplies the per-turn
 /// callbacks + identifiers.
@@ -107,6 +121,10 @@ pub struct TurnRequest {
     pub state_store: Option<Arc<std::sync::Mutex<StateStore>>>,
     /// Compression-count carry-over for multi-turn sessions (default 0).
     pub compression_count: usize,
+    /// Phase 36.17.7 D-01: per-turn TTS wiring. `None` skips TTS registration.
+    /// `Some(...)` causes `run_turn` to call `register_tts_tools` on
+    /// `bundle.registry` at the top of the turn, before the agent loop runs.
+    pub tts_wiring: Option<TtsPerTurnWiring>,
 }
 
 /// Durable, channel-agnostic agent unit. Build once via [`from_config`], then
@@ -126,6 +144,20 @@ pub struct AgentRuntime {
     /// Working directory for `@`-ref expansion (D-05: fixed to cwd at startup,
     /// used as both `cwd` and `allowed_root` in `preprocess_context_references_async`).
     cwd: PathBuf,
+    /// Phase 36.2 CR-04: model name from the immediately previous turn. Used
+    /// to fire the cache-break warning when an operator swaps models mid-
+    /// session. `None` on the first turn since runtime construction.
+    previous_model: std::sync::Mutex<Option<String>>,
+    /// Phase 36.2 CR-04: count of turns this runtime has executed. The
+    /// model-swap cache-break warning suppresses on turn 0 (the first turn
+    /// PICKS a model rather than swapping it). Atomic so per-turn updates
+    /// don't need a Mutex acquire.
+    session_turn_count: std::sync::atomic::AtomicUsize,
+    /// Phase 36.2 CR-04: paths the PressureTracker mtime-snapshots so a
+    /// SOUL.md / AGENTS.md / CLAUDE.md edit fires the cache-break warning.
+    /// Resolved once at runtime construction (cwd-derived candidates + the
+    /// $HERMES_HOME identity files). Empty list = no context-file tracking.
+    context_file_paths: Vec<PathBuf>,
 }
 
 impl AgentRuntime {
@@ -151,7 +183,16 @@ impl AgentRuntime {
         let max_iterations = config.agent.max_iterations;
         let budget = BudgetHandle::new(max_iterations);
 
-        let client = build_main_client(&resolver)?;
+        let mut client = build_main_client(&resolver)?;
+        // Phase 36.2 CR-09: enable OpenRouter Claude cache_control routing on
+        // the streaming send path. No-op for non-OpenRouter providers and
+        // non-Claude models (the inner check in `chat_completion_stream`
+        // guards via `is_openrouter_claude`). For Anthropic-native this is
+        // also a no-op — the AnthropicMessages arm has its own cache wiring.
+        client.enable_openrouter_caching(
+            resolver.main_provider().to_string(),
+            config.prompt_caching.clone(),
+        );
 
         // Build the subagent runner, passing the budget clone for storage (field-kept
         // per Plan 35-02 field-disposition). Children no longer clone this stored
@@ -172,6 +213,12 @@ impl AgentRuntime {
             .map(|m| m as SharedMemoryManager);
 
         let cwd_stored = cwd.clone();
+        // Phase 36.17.7 Plan 01 (BLOCKER 1 fix for D-05): the startup bundle has no
+        // TTS — per-turn TTS now lives in `TurnRequest::tts_wiring` and is registered
+        // by `run_turn` via the per-turn block below. Using `..Default::default()` for
+        // the residual `Option`-typed fields eliminates the previous deferral literal
+        // from this source file so the D-05 negative-assert in Plan 05 Task 6
+        // (`invariants_36_17_7.rs`) GREENs.
         let bundle = build_app_runtime_bundle(AppRuntimeFactoryInput {
             config: config.clone(),
             resolver: resolver.clone(),
@@ -187,8 +234,21 @@ impl AgentRuntime {
             }),
             hooks_config,
             emit_mcp_startup_logs,
+            ..Default::default()
         })
         .await?;
+
+        // Phase 36.2 CR-04: resolve the context files PressureTracker will
+        // mtime-snapshot. Mirrors PromptBuilder's load order: HERMES_HOME
+        // identity files + every CONTEXT_CANDIDATES filename under cwd. Paths
+        // need not exist at startup — agent_loop tolerates missing files.
+        let mut context_file_paths: Vec<PathBuf> = Vec::new();
+        let hermes_home = ironhermes_core::get_hermes_home();
+        context_file_paths.push(hermes_home.join("SOUL.md"));
+        context_file_paths.push(hermes_home.join("AGENTS.md"));
+        for filename in crate::context_loader::CONTEXT_CANDIDATES {
+            context_file_paths.push(cwd_stored.join(filename));
+        }
 
         Ok(Self {
             config,
@@ -200,6 +260,9 @@ impl AgentRuntime {
             subagent_registry,
             max_iterations,
             cwd: cwd_stored,
+            previous_model: std::sync::Mutex::new(None),
+            session_turn_count: std::sync::atomic::AtomicUsize::new(0),
+            context_file_paths,
         })
     }
 
@@ -212,7 +275,38 @@ impl AgentRuntime {
         // ── budget lifecycle: refill before the turn ──────────────────────
         self.budget.reset();
 
+        // Phase 36.17.7 D-01: register TTS tools for this turn's session.
+        // `ToolRegistry::register` uses `HashMap::insert` (upsert by name — verified
+        // in registry.rs:137) so repeated turns idempotently replace the previous
+        // SendAudioTool instance with the current session's SessionKey + dispatcher.
+        // No `unregister` call needed.
+        if let Some(ref wiring) = req.tts_wiring {
+            let mut reg = self.bundle.registry.write().await;
+            reg.register_tts_tools(
+                wiring.session_key.clone(),
+                wiring.audio_dispatcher.clone(),
+                self.config.clone(),
+            );
+            drop(reg);
+        }
+
         let context_length = self.resolver.resolve_for_main().context_length();
+
+        // ── Phase 36.15 Plan 04 (PROV-11): per-turn extras resolution ─────
+        // D-10: resolve (provider, model) → merged HashMap on every turn so a
+        // mid-session /model switch picks up the new per-model override immediately.
+        // resolver.main_provider() is the providers: map key; resolve_for_main()
+        // .default_model is the wire model string LlmClient uses when None is passed.
+        let resolved_extras_for_turn: Option<std::collections::HashMap<String, serde_json::Value>> = {
+            let provider_name = self.resolver.main_provider();
+            let model_name = self.resolver.resolve_for_main().default_model.clone();
+            let merged = ironhermes_core::config_extras::resolve_extras(
+                &self.config.providers,
+                provider_name,
+                &model_name,
+            );
+            if merged.is_empty() { None } else { Some(merged) }
+        };
 
         // ── Phase 34b D-09/D-11: centralized @-ref preprocessing ─────────
         // Runs ONCE here, BEFORE attach_context_engine/agent.run, over the
@@ -334,7 +428,79 @@ impl AgentRuntime {
             agent = agent.with_trajectory_writer(tw);
         }
         if let Some(store) = req.state_store {
-            agent = agent.with_intercepts(None, Some(store), None, None, None);
+            // Phase 36.2 Plan 07 fix: `with_intercepts` only registers the
+            // `session_search` tool intercept — it does NOT set
+            // `AgentLoop::state_store`. Without this `with_state_store` call,
+            // the post-LLM-call write site at agent_loop.rs:1018 (gated by
+            // `if let Some(store) = &self.state_store`) silently skips on EVERY
+            // turn that runs through the runtime — usage_events stays empty
+            // and `sessions.input_tokens` / `output_tokens` / cost columns
+            // never increment, breaking /usage and the Plan 10 status pills.
+            agent = agent.with_state_store(store);
+            // NOTE: `with_intercepts(None, Some(store), None, None, None)` was
+            // also called here previously, which registered `session_search`
+            // as a new tool the model could call. That tool was never wired on
+            // the gateway pre-Phase 36.2; re-registering it on every turn (now
+            // that all surfaces enable state_store) introduces a tool the
+            // model didn't expect and can confuse multi-iteration tool flows.
+            // The write site only needs `state_store`, not the intercept, so
+            // it is intentionally omitted here. If a future surface needs
+            // session_search exposed as a model tool, register it once on
+            // AgentRuntime construction — not per-turn in run_turn.
+        }
+
+        // Phase 36.2 code-review fix CR-02: wire provider name + api-key hash
+        // source onto the AgentLoop so the post-LLM-call write site records
+        // non-empty `usage_events.provider` and a per-key-derived
+        // `api_key_hash`. Without this, every production row was written with
+        // provider="" and a constant SHA-256-of-empty-string hash bucket —
+        // making /usage --provider filters useless and (worse) collapsing
+        // multi-tenant rate-limit tracking into a single shared bucket.
+        agent = agent.with_provider_name(self.resolver.main_provider());
+        // Phase 36.15 Plan 04 (PROV-11): wire per-turn merged extras resolved above.
+        agent = agent.with_resolved_extras(resolved_extras_for_turn);
+        if let Some(ref key) = self.resolver.resolve_for_main().api_key {
+            agent = agent.with_api_key_for_usage_tracking(key.clone());
+        }
+
+        // Phase 36.2 follow-up: load the disk-resident pricing cache and merge
+        // it into the per-turn `PricingRegistry`. Without this, every turn's
+        // write_usage_success used the default `PricingRegistry::new()` which
+        // reads ONLY the bundled `pricing.toml` — the entries operators add
+        // via `hermes pricing refresh [--source openrouter]` were silently
+        // ignored and `usage_events.cost_usd_micros` stayed at 0 for any model
+        // not in the bundled table (notably every OpenRouter slug like
+        // `google/gemini-3.5-flash`). Loading per-turn keeps the cache hot —
+        // operators can refresh mid-session and the very next turn picks it
+        // up without a restart. The load is a small synchronous JSON read
+        // (file may not exist → returns default()).
+        {
+            let mut pricing = ironhermes_core::PricingRegistry::new();
+            let cache = ironhermes_core::pricing_cache::PricingCache::load();
+            pricing.merge_cache(cache.into_pricing_map());
+            agent = agent.with_pricing_registry(std::sync::Arc::new(pricing));
+        }
+
+        // Phase 36.2 CR-04: wire the cache-break advisory state. The model-
+        // swap warning needs the previous-turn model name plus a
+        // "session-has-prior-turns" flag; the context-file-edit warning
+        // needs the list of paths to snapshot. Without these, both triggers
+        // are dead code — defined and tested but unreachable from any
+        // production surface.
+        let prior_turns = self
+            .session_turn_count
+            .load(std::sync::atomic::Ordering::Acquire);
+        agent = agent.with_session_has_prior_turns(prior_turns > 0);
+        if let Some(prev) = self
+            .previous_model
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+        {
+            agent = agent.with_previous_model(prev);
+        }
+        if !self.context_file_paths.is_empty() {
+            agent = agent.with_context_file_paths(self.context_file_paths.clone());
         }
 
         agent = attach_context_engine(
@@ -379,6 +545,20 @@ impl AgentRuntime {
         }
 
         out.context_warnings = context_warnings;
+
+        // Phase 36.2 CR-04: snapshot the just-run model name + bump the turn
+        // counter so the NEXT turn can compare and fire the model-swap cache-
+        // break warning if the operator swapped models. Uses the resolver's
+        // currently-resolved main model — that is what `agent.client.model()`
+        // exposed to the LLM. Stored unconditionally so a fast model-swap →
+        // single-call → swap-back pattern still gets the prior name on the
+        // intermediate turn.
+        if let Ok(mut prev) = self.previous_model.lock() {
+            *prev = Some(self.resolver.resolve_for_main().default_model.clone());
+        }
+        self.session_turn_count
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+
         Ok(out)
     }
 
@@ -503,7 +683,29 @@ impl AgentRuntime {
             subagent_registry,
             max_iterations,
             cwd: std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+            previous_model: std::sync::Mutex::new(None),
+            session_turn_count: std::sync::atomic::AtomicUsize::new(0),
+            context_file_paths: Vec::new(),
         }
+    }
+
+    /// Phase 36.15 Plan 04 (PROV-11): test-only helper that re-derives
+    /// `(provider, model) → merged extras` using the same logic as `run_turn`.
+    ///
+    /// Allows unit tests to assert on the extras resolution result without
+    /// running a full async `run_turn` (which requires a live LLM endpoint).
+    #[cfg(test)]
+    pub(crate) fn resolved_extras_for_test_turn(
+        &self,
+    ) -> Option<std::collections::HashMap<String, serde_json::Value>> {
+        let provider_name = self.resolver.main_provider();
+        let model_name = self.resolver.resolve_for_main().default_model.clone();
+        let merged = ironhermes_core::config_extras::resolve_extras(
+            &self.config.providers,
+            provider_name,
+            &model_name,
+        );
+        if merged.is_empty() { None } else { Some(merged) }
     }
 }
 
@@ -630,6 +832,268 @@ mod tests {
             !runner_src.contains("agent = agent.with_budget(budget.clone())"),
             "subagent_runner.rs run_child must NOT clone the parent budget into children \
              (PROV-10 retired, D-04) — source guard failed"
+        );
+    }
+
+    /// INV-36.2-07-RUNTIME: Phase 36.2 Plan 07 regression net.
+    /// When `req.state_store` is `Some(...)`, `run_turn` MUST call
+    /// `with_state_store(...)` on the per-turn `AgentLoop` (not just
+    /// `with_intercepts(...)`). `with_intercepts` only registers the
+    /// `session_search` tool intercept; it does NOT set `AgentLoop.state_store`.
+    /// Without `with_state_store`, the post-LLM-call write site in
+    /// `agent_loop.rs` (`if let Some(store) = &self.state_store`) silently
+    /// skips on every turn that runs through the runtime — `usage_events`
+    /// stays empty, `sessions.input_tokens`/`output_tokens`/cost columns
+    /// never increment, /usage shows "no data", and the Plan 10 status pills
+    /// never render.
+    #[test]
+    fn inv_36_2_07_runtime_calls_with_state_store_before_with_intercepts() {
+        let non_comment: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let with_state_store_pos = non_comment.find("agent.with_state_store(");
+
+        assert!(
+            with_state_store_pos.is_some(),
+            "Phase 36.2 Plan 07: run_turn MUST call `agent.with_state_store(store)` so \
+             the post-LLM-call write site receives the state store. Otherwise \
+             usage_events writes silently skip on every turn."
+        );
+
+        // Phase 36.2 follow-up: the `with_intercepts(None, Some(store), ...)`
+        // call was REMOVED from run_turn because registering session_search
+        // as a per-turn tool intercept confused multi-iteration tool flows
+        // (chat truncation observed on gateway after enabling state_store).
+        // The write site only needs state_store, not the intercept. This
+        // assertion locks the removal — if anyone re-adds it, debug carefully.
+        let intercept_needle = concat!(".with_intercepts(None, Some(", "store)");
+        assert!(
+            !non_comment.contains(intercept_needle),
+            "Phase 36.2 follow-up: run_turn must NOT call with_intercepts to register \
+             session_search per-turn. Tool registration must happen once on AgentRuntime \
+             construction — not in run_turn. See agent_runtime.rs comment for context."
+        );
+    }
+
+    /// INV-36.2-CR-09: Phase 36.2 code-review CR-09 regression net.
+    /// `AgentRuntime::from_config` MUST call `enable_openrouter_caching` on
+    /// the freshly-built `AnyClient` so the streaming send path can route
+    /// OpenRouter Claude requests through the `cache_control`-attaching
+    /// builder. Pre-fix the Plan 11 OpenRouter Claude wiring was defined
+    /// and unit-tested but never invoked from any production code — Claude
+    /// via OpenRouter never received cache_control markers, so the cache
+    /// hits Plan 11 was designed to deliver never fired.
+    #[test]
+    fn inv_36_2_cr_09_from_config_enables_openrouter_caching() {
+        let non_comment: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            non_comment.contains("client.enable_openrouter_caching("),
+            "Phase 36.2 CR-09: from_config MUST call `client.enable_openrouter_caching(...)` \
+             so the streaming send path routes OpenRouter Claude requests through the \
+             cache_control-attaching builder (build_openrouter_chat_request_full)."
+        );
+    }
+
+    /// INV-36.2-CR-04: Phase 36.2 code-review CR-04 regression net.
+    /// `run_turn` MUST chain the Plan 08 cache-break advisory builders so
+    /// the model-swap and context-file-edit triggers can actually fire in
+    /// production. Pre-fix these builders were defined and unit-tested but
+    /// never called from any production entry point — the warnings were
+    /// dead code on every surface.
+    #[test]
+    fn inv_36_2_cr_04_runtime_wires_cache_break_builders() {
+        let non_comment: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            non_comment.contains("agent.with_session_has_prior_turns("),
+            "Phase 36.2 CR-04: run_turn MUST call agent.with_session_has_prior_turns(...) \
+             so trigger 1 (model-swap cache break) can suppress on session zero."
+        );
+        assert!(
+            non_comment.contains("agent.with_previous_model("),
+            "Phase 36.2 CR-04: run_turn MUST call agent.with_previous_model(...) \
+             so trigger 1 (model-swap cache break) can compare the new model \
+             against the prior turn's model name."
+        );
+        assert!(
+            non_comment.contains("agent.with_context_file_paths("),
+            "Phase 36.2 CR-04: run_turn MUST call agent.with_context_file_paths(...) \
+             so trigger 3 (context-file-edit cache break) can mtime-snapshot \
+             SOUL.md / AGENTS.md / CLAUDE.md."
+        );
+
+        // Post-turn state update must also be present so the next turn has
+        // the prior model name to compare against.
+        assert!(
+            non_comment.contains("self.previous_model.lock()"),
+            "Phase 36.2 CR-04: run_turn MUST store the just-run model name \
+             into self.previous_model after agent.run completes."
+        );
+        assert!(
+            non_comment.contains("self.session_turn_count.fetch_add(1"),
+            "Phase 36.2 CR-04: run_turn MUST increment self.session_turn_count \
+             after agent.run completes so the next turn's `has_prior_turns` flag \
+             becomes true."
+        );
+    }
+
+    /// INV-36.2-CR-02: Phase 36.2 code-review CR-02 regression net.
+    /// `run_turn` MUST call `with_provider_name(...)` and
+    /// `with_api_key_for_usage_tracking(...)` on the per-turn `AgentLoop`.
+    /// Without these, `usage_events.provider` is empty on every production
+    /// row, the `/usage --provider X` filter is useless, and the
+    /// `RateLimitTracker` keys all sessions into a single shared bucket
+    /// (sha256 of empty key) — a cross-tenant data-leak in any multi-tenant
+    /// deployment. The test `inv_36_2_07_runtime_calls_with_state_store_before_with_intercepts`
+    /// covers the related state_store wiring; this complements it.
+    #[test]
+    fn inv_36_2_cr_02_runtime_calls_with_provider_name_and_api_key() {
+        let non_comment: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            non_comment.contains("agent.with_provider_name("),
+            "Phase 36.2 CR-02: run_turn MUST call `agent.with_provider_name(...)` so the \
+             post-LLM-call write site stamps a non-empty provider column on every \
+             usage_events row. Without it, /usage --provider filters are useless."
+        );
+        assert!(
+            non_comment.contains("agent.with_api_key_for_usage_tracking("),
+            "Phase 36.2 CR-02: run_turn MUST call `agent.with_api_key_for_usage_tracking(...)` \
+             so the SHA-256 hash bucket on usage_events is per-key, not a constant \
+             empty-string hash that collapses every session into one bucket."
+        );
+    }
+
+    // ── Phase 36.15 Plan 04 (PROV-11): extras resolution wiring ──────────
+
+    /// Verify that run_turn calls config_extras::resolve_extras (source guard).
+    #[test]
+    fn run_turn_calls_resolve_extras() {
+        assert!(
+            SOURCE.contains("ironhermes_core::config_extras::resolve_extras"),
+            "Phase 36.15 (PROV-11): run_turn must call \
+             ironhermes_core::config_extras::resolve_extras to resolve per-turn extras."
+        );
+    }
+
+    /// Verify that run_turn wires extras into AgentLoop via with_resolved_extras (source guard).
+    #[test]
+    fn run_turn_wires_with_resolved_extras() {
+        assert!(
+            SOURCE.contains("with_resolved_extras("),
+            "Phase 36.15 (PROV-11): run_turn must call agent.with_resolved_extras(...) \
+             to pass resolved extras into AgentLoop."
+        );
+    }
+
+    /// Behavioral test: resolved_extras_for_test_turn returns Some(map) with
+    /// num_ctx=4096 when Config has providers.test_provider.extra_request_options
+    /// set accordingly. Validates the D-10 per-turn resolution path.
+    #[test]
+    fn resolved_extras_for_test_turn_returns_provider_extras() {
+        use ironhermes_core::{Config, ProviderResolver};
+        use std::collections::HashMap;
+
+        // Build a Config with a single provider that has num_ctx=4096 as an extra.
+        let mut config = Config::default();
+        let mut extras: HashMap<String, serde_json::Value> = HashMap::new();
+        extras.insert("num_ctx".to_string(), serde_json::json!(4096u32));
+
+        let mut provider_cfg = ironhermes_core::config::ProviderConfig::default();
+        provider_cfg.extra_request_options = extras;
+        // Give the provider a base_url so the resolver can build successfully.
+        provider_cfg.base_url = Some("http://localhost:11434".to_string());
+
+        config.providers.insert("test_provider".to_string(), provider_cfg);
+
+        // Make test_provider the main provider.
+        config.model.provider = "test_provider".to_string();
+        config.model.default = "llama3.1:8b".to_string();
+
+        let config = std::sync::Arc::new(config);
+        let resolver = std::sync::Arc::new(
+            ProviderResolver::build(&config)
+                .expect("ProviderResolver::build must succeed with test config"),
+        );
+
+        // Build a minimal AgentRuntime with the test config + resolver.
+        let client = crate::AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost:0",
+            "test-key",
+            "llama3.1:8b",
+        ));
+        let max_iterations = config.agent.max_iterations;
+        let budget = crate::budget::BudgetHandle::new(max_iterations);
+        let registry = std::sync::Arc::new(tokio::sync::RwLock::new(
+            ironhermes_tools::ToolRegistry::new(),
+        ));
+        let hook_registry = std::sync::Arc::new(ironhermes_hooks::HookRegistry::new(
+            ironhermes_hooks::HooksConfig::default(),
+        ));
+        let skill_registry = std::sync::Arc::new(
+            ironhermes_core::SkillRegistry::load_with_paths(&[]),
+        );
+        let active_skills = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cron_dir = std::env::temp_dir()
+            .join(format!("ironhermes_test_cron_extras_{}", std::process::id()));
+        let job_store = std::sync::Arc::new(std::sync::Mutex::new(
+            ironhermes_cron::JobStore::open(cron_dir)
+                .expect("temp-dir JobStore must succeed"),
+        ));
+        let browser_session = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let bundle = crate::app_runtime_factory::AppRuntimeBundle {
+            registry,
+            hook_registry,
+            skill_registry,
+            active_skills,
+            job_store,
+            browser_session,
+            mcp_manager: None,
+            merged_tools: ironhermes_core::config::ToolsConfig::default(),
+        };
+        let subagent_registry = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::subagent_registry::SubagentRegistry::new(),
+        ));
+
+        let runtime = AgentRuntime {
+            config,
+            resolver,
+            client,
+            bundle,
+            budget,
+            memory_manager: None,
+            subagent_registry,
+            max_iterations,
+            cwd: std::path::PathBuf::from("."),
+            previous_model: std::sync::Mutex::new(None),
+            session_turn_count: std::sync::atomic::AtomicUsize::new(0),
+            context_file_paths: Vec::new(),
+        };
+
+        let result = runtime.resolved_extras_for_test_turn();
+        let map = result.expect(
+            "resolved_extras_for_test_turn must return Some when provider has extras",
+        );
+        assert_eq!(
+            map.get("num_ctx"),
+            Some(&serde_json::json!(4096u32)),
+            "num_ctx=4096 set in provider config must appear in resolved extras"
         );
     }
 }

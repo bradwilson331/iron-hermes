@@ -1,6 +1,6 @@
 //! Pure frame-render function for the tui_rata REPL (Phase 22.4).
 //!
-//! Template: /Users/twilson/code/tmon/src/main.rs `ui()` fn (lines 564–624).
+//! Template: /Users/you/code/tmon/src/main.rs `ui()` fn (lines 564–624).
 //! 4-chunk vertical layout per CONTEXT §specifics:
 //! - Min(5) transcript (Paragraph — per RESEARCH Open Question §4)
 //! - Length(1) knight-rider row (rendered only when in-flight)
@@ -94,7 +94,16 @@ fn render_knight_rider(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_status(frame: &mut Frame, app: &App, area: Rect) {
-    let line = render_status_line_ratatui(&app.status);
+    // Phase 36.17.3 (D-09 / RESEARCH Pitfall 5): read queue depth + paused
+    // state LIVE per render pass — never cached in `app.status` because the
+    // cached value would drift by one tick. The clone is cheap (StatusLineState
+    // is Clone) and isolates the per-frame override from the persistent
+    // app.status fields owned by the rest of the system.
+    let mut state = app.status.clone();
+    let queue_paused_now = app.queue_paused.load(std::sync::atomic::Ordering::Relaxed);
+    state.queue_depth = app.queue.len(&app.queue_key);
+    state.queue_paused = queue_paused_now;
+    let line = render_status_line_ratatui(&state);
     frame.render_widget(Paragraph::new(line), area);
 }
 
@@ -166,6 +175,83 @@ mod tests {
             "expected scrollbar thumb in column 78 rows 1..17 (transcript content area) when \
              content overflows; got all-space. Buffer dump for col 78 rows 1..17: {:?}",
             (1u16..17).map(|r| buf.cell((78, r)).map(|c| c.symbol().to_string())).collect::<Vec<_>>()
+        );
+    }
+
+    /// D-03 — end-to-end auto-scroll integration test.
+    ///
+    /// Proves that after `StreamEvent::Finished` (simulated via `scroll_to_bottom`)
+    /// + `reconcile_scroll`, the transcript scrolls to the true visual bottom and
+    /// the last in-viewport content row is non-blank when rendered to an 80x24
+    /// TestBackend.
+    #[test]
+    fn auto_scroll_lands_at_true_bottom_after_stream_finished() {
+        use crate::tui_rata::app::App;
+        use crate::tui_rata::event_loop::compute_transcript_area;
+
+        // Build a body long enough that max_scroll > 0 in a 24-row terminal.
+        // 25 lines each ~50 chars — creates ~25 wrapped rows; viewport = 22 (24 - 2 border).
+        let long_body: &'static str = Box::leak(
+            (1..=25)
+                .map(|i| format!("Line {:02}: some assistant content here.", i))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into_boxed_str(),
+        );
+        let mut app = App::new_test_with_messages(vec![("assistant", long_body)]);
+
+        let size = ratatui::prelude::Size { width: 80, height: 24 };
+        let transcript_area = compute_transcript_area(size);
+
+        // Simulate StreamEvent::Finished: mirrors handle_stream_event's scroll_to_bottom call
+        // (sets auto_follow = true, transcript_scroll = 0).
+        app.scroll_to_bottom();
+
+        // reconcile_scroll sets transcript_scroll = transcript_max_scroll(area) when auto_follow.
+        app.reconcile_scroll(transcript_area);
+
+        let max = app.transcript_max_scroll(transcript_area);
+        assert!(
+            max > 0,
+            "test setup: expected max_scroll > 0, got 0 — adjust body length or terminal height"
+        );
+        assert_eq!(
+            app.transcript_scroll,
+            max,
+            "auto-scroll must land at true bottom: scroll={}, max={}",
+            app.transcript_scroll,
+            max
+        );
+
+        // Visual assertion: render at scroll=max and confirm the last content row is non-blank.
+        //
+        // Layout for 80x24 terminal with [Min(5), Length(1), Length(1), Length(3)]:
+        //   chunks[0] (transcript block) = 24 - 1 - 1 - 3 = 19 rows  (y=0..18 in buffer)
+        //   chunks[1] (knight-rider)     = 1 row  (y=19)
+        //   chunks[2] (status)           = 1 row  (y=20)
+        //   chunks[3] (input)            = 3 rows (y=21..23)
+        //
+        // Transcript block border: top border at y=0, bottom border at y=18.
+        // Content rows: y=1..17 (inner height = 19 - 2 = 17 rows).
+        // Last content row = y=17.
+        //
+        // Col 78 is the scrollbar track; col 79 is the right border. Test cols 1..78.
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        // transcript_area.height = 19; last content row = 19 - 2 = 17 (0-indexed in buffer)
+        let last_visible_row = (transcript_area.height - 2) as u16; // = 17
+        let last_row_non_blank = (1u16..78u16).any(|col| {
+            buf.cell((col, last_visible_row))
+                .map(|c| c.symbol() != " ")
+                .unwrap_or(false)
+        });
+        assert!(
+            last_row_non_blank,
+            "last visible row (row {}) must be non-blank after auto-scroll to bottom — \
+             got all blanks, content is below viewport. transcript_area={:?}, scroll={}, max={}",
+            last_visible_row, transcript_area, app.transcript_scroll, max
         );
     }
 }

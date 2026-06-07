@@ -60,6 +60,8 @@ fn block_text_for_copy(entry: &BlockEntry) -> String {
         BlockData::Ok { message, .. } => message.clone(),
         BlockData::Err { message, .. } => message.clone(),
         BlockData::Tool { call } => format!("{} {}", call.name, call.args_summary),
+        // Phase 36.17.7 D-02-a: Audio blocks only rendered in HermesApp/ScreenChat.
+        BlockData::Audio { uuid, .. } => format!("[audio: {uuid}]"),
     }
 }
 

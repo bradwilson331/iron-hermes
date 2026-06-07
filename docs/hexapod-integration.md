@@ -126,7 +126,7 @@ gate is `is_available()`, which walks the tool's `prerequisites()` list:
 - If `HEXAPOD_IP` **is set**: both tools are included in the tool definitions sent to the LLM
   and become callable.
 
-This means starting IronHermes with `HEXAPOD_IP=192.168.1.42` is the only configuration
+This means starting IronHermes with `HEXAPOD_IP=127.0.0.1` is the only configuration
 change needed to activate the full hexapod tool surface. No config file edits are required.
 
 ### Session Lifecycle
@@ -141,7 +141,7 @@ uses the default no-op implementation (no shutdown behavior needed for the video
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `HEXAPOD_IP` | Yes (to activate) | IP address of the robot on the local network (e.g., `192.168.1.42`). Absent = tools hidden from LLM. |
+| `HEXAPOD_IP` | Yes (to activate) | IP address of the robot on the local network (e.g., `127.0.0.1`). Absent = tools hidden from LLM. |
 
 No other configuration is needed. Port numbers are hardcoded to match the Freenove server:
 `5002` for commands, `8002` for video.

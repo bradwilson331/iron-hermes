@@ -46,6 +46,38 @@ pub struct ConfigSummary {
     pub memory_enabled: bool,
 }
 
+// TODO Phase 36.2 Plan 10 (D-USAGE-03) — web UI cost surface:
+//
+// The TUI's `tui_rata::status_line::StatusLineState` gained two new
+// fields this plan — `cost_usd_micros: i64` and `session_total_tokens:
+// usize` — and the `/usage` slash command is wired across every
+// platform via `CommandRouter::resolve` + `dispatch` (so the web UI
+// gets `/usage` text rendering for free, today).
+//
+// The PARALLEL sidebar pill surface (the cost + token pills next to
+// the existing `provider` / `model` pills in `components/shell_legacy/
+// status_bar.rs`) is intentionally deferred from Plan 10 because:
+//
+// 1. The web UI status bar uses Dioxus `ReadSignal<TokenBudget>`
+//    signals, NOT the TUI's `StatusLineState` struct — wiring the
+//    cost fields end-to-end requires extending the `TokenBudget`
+//    signal AND threading a new `CostBudget` signal through the
+//    WebSocket payload and the `state.rs` AppState (cross-cutting
+//    Dioxus refactor).
+//
+// 2. The hermes-agent → ironhermes web UI parity scope (iron-
+//    hermes-planning §2.1) treats this as a TUI-first feature; the
+//    web pill surface follows once Phase 26.7 (web wiring) is fully
+//    UAT'd and the live AgentRuntime is broadcasting per-turn usage
+//    over the websocket.
+//
+// When the deferral closes, the canonical shape is `cost_usd_micros:
+// i64` + `session_total_tokens: usize` on `ConfigSummary` (or a
+// sibling `UsageSummary`), wired through `state.rs::record_usage` to
+// the websocket. The TUI render formula (display-only f64 conversion,
+// `${:.3}` + `{:.1}K tok`) is the canonical formatting contract — see
+// `crates/ironhermes-cli/src/tui_rata/status_line.rs::build_pills`.
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ToolInfo {
     pub name: String,
@@ -101,7 +133,13 @@ pub async fn list_sessions() -> Result<Vec<SessionInfo>> {
     // per Phase 34 Plan 02 session-store unification requirement.
     let platform_filter = Platform::Web.to_string();
     let sessions = {
-        let store = state.state_store.lock().unwrap();
+        // CR-06: map lock-poison to a structured error instead of panicking the
+        // request handler. A poisoned mutex (from a prior thread panic) used to
+        // surface as opaque HTTP 500 with no body; now operators see the cause.
+        let store = state
+            .state_store
+            .lock()
+            .map_err(|_| ServerFnError::new("State store mutex poisoned"))?;
         store.list_sessions(Some(&platform_filter), 100)
             .map_err(|e| ServerFnError::new(format!("StateStore list sessions failed: {e}")))?
     };
@@ -122,9 +160,15 @@ pub async fn list_sessions() -> Result<Vec<SessionInfo>> {
             // MutexGuard is scoped to the inner block and drops before SessionInfo is constructed,
             // so session.id can be moved into the struct literal without a borrow conflict.
             let last_message = {
-                let store = state.state_store.lock().unwrap();
-                store.get_messages(&session.id).ok().and_then(|msgs| {
-                    extract_last_message_preview(&msgs)
+                // CR-06: don't panic the whole list_sessions request if the
+                // mutex is poisoned mid-iteration. Falling back to None here
+                // is acceptable because last_message is a decorative preview
+                // — better to render the row without a preview than 500 the
+                // entire sessions list.
+                state.state_store.lock().ok().and_then(|store| {
+                    store.get_messages(&session.id).ok().and_then(|msgs| {
+                        extract_last_message_preview(&msgs)
+                    })
                 })
             };
             SessionInfo {
@@ -454,10 +498,11 @@ const HISTORY_LIMIT: usize = 50;
 #[server]
 pub async fn get_session_messages(id: String) -> Result<Vec<ChatMessage>> {
     let state = crate::server::state::global_app_state();
+    // CR-06: surface lock-poisoning as a structured error instead of panicking.
     let all_msgs = state
         .state_store
         .lock()
-        .unwrap()
+        .map_err(|_| ServerFnError::new("State store mutex poisoned"))?
         .get_messages(&id)
         .map_err(|e| ServerFnError::new(format!("get_messages failed: {e}")))?;
 

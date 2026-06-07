@@ -75,6 +75,18 @@ pub enum SkillsAction {
     /// Prints a diff summary (added/removed/unchanged) and reports any SKILL.md
     /// directories that were skipped due to validation errors.
     Reload,
+    /// Reset (clear or restore) a bundled skill by name.
+    ///
+    /// Without `--restore`: deletes the skill file from the profile's skills root.
+    /// With `--restore`: force-overwrites the skill file with bundled content,
+    /// discarding any user edits.  Only supported for bundled kanban skills
+    /// (`kanban-worker`, `kanban-orchestrator`).
+    Reset {
+        name: String,
+        /// Overwrite the skill with the bundled (factory-default) content.
+        #[arg(long)]
+        restore: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -616,6 +628,38 @@ pub async fn cmd_update(cfg: &Config, name: Option<&str>, skip_audit: bool) -> a
         }
     }
 
+    // D-30 (Plan 07): sync bundled kanban skills after hub-side update.
+    // force=false — preserve any user edits made to the kanban skills.
+    let skills_root = ironhermes_core::get_hermes_home().join("skills");
+    match ironhermes_kanban::sync_bundled_kanban_skills(&skills_root, false) {
+        Ok(report) => {
+            match report.worker_action {
+                ironhermes_kanban::SyncAction::Wrote => {
+                    println!("Synced bundled skill: kanban-worker (created)");
+                }
+                ironhermes_kanban::SyncAction::Restored => {
+                    println!("Restored bundled skill: kanban-worker");
+                }
+                ironhermes_kanban::SyncAction::Skipped => {} // silent — user-edited
+            }
+            match report.orchestrator_action {
+                ironhermes_kanban::SyncAction::Wrote => {
+                    println!("Synced bundled skill: kanban-orchestrator (created)");
+                }
+                ironhermes_kanban::SyncAction::Restored => {
+                    println!("Restored bundled skill: kanban-orchestrator");
+                }
+                ironhermes_kanban::SyncAction::Skipped => {} // silent — user-edited
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "warning: failed to sync bundled kanban skills: {}",
+                strip_terminal_escapes(&e.to_string())
+            );
+        }
+    }
+
     Ok(exit_code)
 }
 
@@ -856,6 +900,55 @@ pub fn cmd_reload(cfg: &Config) -> anyhow::Result<i32> {
     Ok(0)
 }
 
+/// Reset (clear or restore) a bundled kanban skill.
+///
+/// - `restore=false`: delete the skill's SKILL.md from the profile's skills root.
+///   (clears any user customisation; the next `skills update` or first-run will
+///   re-create the default version.)
+/// - `restore=true`: force-overwrite with bundled factory content.  Only
+///   `kanban-worker` and `kanban-orchestrator` are supported; any other name
+///   returns an error.
+///
+/// The skills root is `get_hermes_home().join("skills")`, which honours the
+/// `--profile` pivot already applied by `resolve_and_set_profile()` before this
+/// function is called.
+async fn cmd_reset(_cfg: &Config, name: &str, restore: bool) -> anyhow::Result<i32> {
+    let skills_root = ironhermes_core::get_hermes_home().join("skills");
+    if restore {
+        match ironhermes_kanban::restore_bundled_kanban_skill(&skills_root, name) {
+            Ok(()) => {
+                println!("Restored bundled skill '{}' to factory defaults.", name);
+                Ok(0)
+            }
+            Err(ironhermes_kanban::KanbanError::UnknownSkill(_)) => {
+                eprintln!(
+                    "error: restore only supported for bundled skills (kanban-worker, kanban-orchestrator); '{}' is not a bundled skill",
+                    strip_terminal_escapes(name)
+                );
+                Ok(1)
+            }
+            Err(e) => {
+                eprintln!("error: {}", strip_terminal_escapes(&e.to_string()));
+                Ok(1)
+            }
+        }
+    } else {
+        // Clear: delete the SKILL.md file (non-bundled reset behaviour).
+        let dest = skills_root.join(name).join("SKILL.md");
+        if !dest.exists() {
+            eprintln!(
+                "error: skill '{}' not found at {}",
+                strip_terminal_escapes(name),
+                strip_terminal_escapes(&dest.display().to_string()),
+            );
+            return Ok(1);
+        }
+        std::fs::remove_file(&dest)?;
+        println!("Cleared skill '{}'.", name);
+        Ok(0)
+    }
+}
+
 pub async fn dispatch(config_path: &std::path::Path, action: SkillsAction) -> anyhow::Result<i32> {
     let mut cfg = load_config(config_path)?;
     match action {
@@ -879,6 +972,7 @@ pub async fn dispatch(config_path: &std::path::Path, action: SkillsAction) -> an
         }
         SkillsAction::List { format } => cmd_list(&cfg, format),
         SkillsAction::Reload => cmd_reload(&cfg),
+        SkillsAction::Reset { name, restore } => cmd_reset(&cfg, &name, restore).await,
         SkillsAction::Trust { action } => match action {
             TrustAction::Add { repo } => {
                 cmd_trust_add_impl(&mut cfg, config_path, &repo)?;

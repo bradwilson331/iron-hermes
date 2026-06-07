@@ -8,6 +8,7 @@
 //! genuinely need. Do NOT `pub use` internals that shouldn't become
 //! API.
 
+pub mod kanban;
 pub mod memory_cmd;
 pub mod setup;
 pub mod skills_cmd;
@@ -49,6 +50,12 @@ pub mod yolo;
 // can poll for user input from a `tokio::select!` arm alongside the
 // in-flight agent turn future (mid-turn `/agents list|kill|logs` dispatch).
 pub mod repl_input;
+
+// Phase 36.2 Plan 09: `hermes pricing list|refresh` subcommand. Exported
+// from lib.rs so the integration test (tests/pricing_cli.rs) can drive
+// `cmd_list_to_string` + `cmd_refresh_from_url_with_path` without spawning
+// the binary — matches the toolset_cmd / session_cmd / status_cmd pattern.
+pub mod pricing_cmd;
 
 pub use io_gate::{can_prompt, is_terminal_stdin};
 pub use repl_input::{ExternalPrinterHandle, PromptRequest, ReplInputChannel, ReplLine};

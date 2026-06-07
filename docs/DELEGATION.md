@@ -2,6 +2,8 @@
 
 The `delegate_task` tool spawns child `AgentLoop` instances with isolated context, a restricted toolset, and their own temp directory. Each child gets a fresh conversation and works independently — only its final structured summary enters the parent's context.
 
+As of Phase 35, each child is also issued its **own** `BudgetHandle` (a fresh `max_iterations` quota). The old PROV-10 shared parent↔child counter is retired: a child draining its budget no longer decrements the parent, and a cron-spawned subagent no longer charges iterations against the interactive runtime's budget. DoS containment moves to a structural bound (`max_spawn_depth × max_concurrent_children × max_iterations`) — see [Budget Model](#budget-model) below.
+
 ---
 
 ## Single Task
@@ -138,7 +140,7 @@ delegate_task(
 
 ### `max_iterations` — per-call override
 
-Override the number of LLM iterations allowed for this specific call. Falls back to `delegation.max_iterations` from config (default 50).
+Override the number of LLM iterations allowed for this specific call. Falls back to `delegation.max_iterations` from config (default 20; lowered from 50 to bound runaway-delegation cost — supersedes D-08).
 
 ```
 delegate_task(
@@ -156,6 +158,8 @@ delegate_task(tasks=[
     {"goal": "Longer task", "max_iterations": 30, "toolsets": ["terminal", "file"]}
 ])
 ```
+
+**Clamp-to-ceiling (Phase 35 / D-03).** `delegation.max_iterations` is a hard **ceiling** on the per-child budget. A per-call value ≤ ceiling is honored verbatim; a value > ceiling is silently clamped down to the ceiling and a `tracing::warn!` records the clamp. This preserves the shrinking-budget feature while capping DoS exposure from runaway delegation.
 
 ### `stale_warn_seconds` — per-call soft-warn threshold
 
@@ -558,8 +562,9 @@ delegation:
   # Maximum concurrent children per batch (default: 3)
   max_concurrent_children: 3
 
-  # Maximum LLM iterations per child agent (default: 50)
-  max_iterations: 50
+  # Maximum LLM iterations per child agent (default: 20; lowered from 50 to
+  # bound runaway-delegation cost — supersedes D-08)
+  max_iterations: 20
 
   # Maximum spawn depth for orchestrator children (default: 1 = flat)
   # 1 → only root agents can delegate (orchestrator children are downgraded to leaf)
@@ -598,6 +603,34 @@ The semaphore emits a `tracing::warn!` at target `ironhermes_tools::delegate_tas
 
 ---
 
+## Budget Model
+
+Resolved in Phase 35 (supersedes the historical PROV-10 shared parent↔child counter).
+
+**Each subagent owns an independent budget.** `AgentSubagentRunner::run_child` constructs a fresh `BudgetHandle::new(effective_max_iterations)` for every child loop instead of cloning the parent's `Arc<AtomicUsize>`. Consequences:
+
+- A child draining its budget to exhaustion **does not** decrement the parent — interactive parents that delegate keep their full remaining headroom.
+- Cron-spawned subagents draw on a cron-scoped per-child budget, never on the interactive runtime's counter. The shared `ToolRegistry` delegate runner is no longer a cross-channel contamination vector (the original T-28.1-16 acceptance criterion).
+- This matches the hermes-agent reference implementation. Total parent + child iterations can exceed any single agent's cap by design.
+
+**DoS containment is structural, not summative.** With PROV-10 retired, the safety bound is:
+
+> **Maximum tree-wide iterations = `max_spawn_depth` × `max_concurrent_children` × `max_iterations`**
+>
+> = 1 × 3 × 20 = **60** at default config (was 150 before the runaway-delegation guard lowered `max_iterations` 50 → 20).
+
+Both depth and concurrency guards (Phase 32.2) remain in effect; raising `max_spawn_depth` or `max_concurrent_children` raises this ceiling multiplicatively. No separate tree-wide aggregate counter exists — the depth × concurrency × per-subagent product is the security boundary.
+
+**Per-call `max_iterations` clamp.** See [`max_iterations` — per-call override](#max_iterations--per-call-override). The config value is a ceiling; oversize per-call values are clamped down with a `tracing::warn!`.
+
+Regression tests locking this model:
+
+- `test_independent_budget_child_drain_does_not_affect_parent` (`crates/ironhermes-agent/src/agent_loop.rs`)
+- `cron_subagent_budget_independence_from_interactive` (`crates/ironhermes-cron-runner/src/runner.rs`)
+- clamp-to-ceiling test (`crates/ironhermes-tools/src/delegate_task.rs`)
+
+---
+
 ## Migration from `subagent:` to `delegation:`
 
 Phase 32.2 (D-07) renamed the config key and several fields. If your `~/.ironhermes/config.yaml` still uses the old `subagent:` key, IronHermes will refuse to start with a clear error:
@@ -621,7 +654,7 @@ subagent:
 delegation:
   child_timeout_seconds: 300
   max_concurrent_children: 3
-  max_iterations: 50
+  max_iterations: 20
   max_spawn_depth: 1
   orchestrator_enabled: true
   default_toolsets: ["terminal", "file", "web"]
@@ -633,7 +666,7 @@ Field rename summary:
 |-----------|-----------|-------|
 | `timeout_secs` | `child_timeout_seconds` | Same semantics |
 | `max_subagents` | `max_concurrent_children` | Same semantics |
-| `max_iterations` | `max_iterations` | Default changed: 10 → 50 |
+| `max_iterations` | `max_iterations` | Default history: 10 → 50 (D-08) → 20 (runaway-delegation guard, current). |
 | _(new)_ | `max_spawn_depth` | Default: 1 (flat) |
 | _(new)_ | `orchestrator_enabled` | Default: true |
 | _(new — Phase 32.3)_ | `stale_warn_seconds` | Default: 120. Soft-warn threshold; absent in pre-32.3 configs is treated as 120 via serde default. Per-call override on `delegate_task`. |

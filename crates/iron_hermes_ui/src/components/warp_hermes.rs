@@ -365,6 +365,16 @@ pub fn WarpHermes() -> Element {
                                 // render the Agents page — this arm is a silent no-op
                                 // for exhaustive-match compliance only.
                             }
+                            crate::protocol::ChatStreamEvent::QueueUpdated { .. } => {
+                                // Phase 36.17.4 (D-03): legacy WarpHermes shell does not
+                                // render the queue pill — that lives in HermesApp's
+                                // AppFooter. Silent no-op for exhaustive-match compliance.
+                            }
+                            crate::protocol::ChatStreamEvent::AudioOut { .. } => {
+                                // Phase 36.17.7 D-02-a: legacy WarpHermes shell does not
+                                // render inline audio controls — that lives in HermesApp's
+                                // ScreenChat. Silent no-op for exhaustive-match compliance.
+                            }
                         }
                     }
                     Err(err) => {

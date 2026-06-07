@@ -49,7 +49,9 @@ ironhermes/
 | `ToolCall` / `FunctionCall` | structs | Wire-format tool call and function invocation |
 | `ToolSchema` / `FunctionSchema` | structs | OpenAI-compatible tool definition |
 | `Config` | struct | Top-level config with ~20 sub-structs covering models, memory, cron, exec, browser, security, hub, subagents, and batch |
-| `ProviderConfig` / `CustomProviderConfig` | structs | Per-provider API endpoint and key configuration |
+| `ProviderConfig` / `CustomProviderConfig` | structs | Per-provider API endpoint and key configuration; `extra_request_options` + `models` map (Phase 36.15) flow into `ChatRequest.extra` at LLM call time |
+| `ProviderModelConfig` | struct | Per-model override block under `providers.<name>.models.<model>` — typically holds `extra_request_options` (Phase 36.15) |
+| `resolve_extras` | fn (config_extras) | Merges provider-level + per-model `extra_request_options` per-turn into the `HashMap` passed to `AgentLoop::with_resolved_extras` (Phase 36.15) |
 | `ProviderResolver` / `ResolvedEndpoint` | structs | Runtime provider selection and endpoint resolution |
 | `ModelRegistry` / `ModelMetadata` / `ModelCapabilities` | structs | Cached model capability metadata |
 | `ModelsCache` / `fetch_all` | struct + fn | Fetches and normalizes model lists from OpenRouter and models.dev |
@@ -57,6 +59,9 @@ ironhermes/
 | `MemoryProvider` / `MemoryStore` / `MemoryTarget` | trait + structs | Memory backend abstraction and store wrapper |
 | `CommandContext` | struct | Per-command execution context threaded through slash commands |
 | `CommandRouter` / `CommandDef` / `CommandCategory` | structs | Slash-command registration and routing |
+| `MessageQueue<K>` | trait | Cross-consumer FIFO abstraction: `try_push` / `pop` / `len` / `clear`. Implemented by `ironhermes-gateway::SessionQueue` and consumed by the TUI for `/queue`. Generic key bound `Hash + Eq + Clone + Send + Sync + 'static` so downstream channels (web UI, Discord, Slack) can pick their own keying scheme (Phase 36.17.3, D-01) |
+| `QueueError` / `MAX_QUEUE_DEPTH` / `WARN_QUEUE_DEPTH` | enum + consts | `CapacityReached { session_key, max }` plus the cap=128 / warn=96 constants enforced at the `try_push` source (Phase 36.17.3, T-01 mitigation) |
+| `SessionKey` | struct | Per-session FIFO key: `Platform` + chat id + optional user id. Lives in core so every queue consumer references the same key shape; re-exported from `ironhermes-gateway::session` for back-compat (Phase 36.17.3, D-03) |
 | `TokenEstimator` / `init_global_estimator` | struct + fn | tiktoken-rs token counting with singleton warm-up |
 | `HermesError` / `Result` | type aliases | Unified error type |
 | `Workspace` / `resolve_workspace_from_cwd` | struct + fn | Walk-up cwd resolver for workspace root detection |
@@ -340,7 +345,9 @@ Tool modules (each exports one or more `Tool` implementations):
 
 | Item | Kind | Description |
 |------|------|-------------|
-| `AgentLoop` | struct | Core turn loop: calls LLM, parses tool calls, executes tools, repeats |
+| `AgentRuntime` | struct | Durable, channel-agnostic agent unit. Built once per logical agent via `from_config`; owns client, registry, budget, skills, hooks, browser, memory. `run_turn(TurnRequest)` is the single per-turn API used by every channel (Phase 28.1) |
+| `TurnRequest` | struct | Per-turn input channels assemble: messages, session id, cancel token, stream + tool callbacks |
+| `AgentLoop` | struct | Core turn loop: calls LLM, parses tool calls, executes tools, repeats. Assembled per-turn inside `AgentRuntime::run_turn`. `with_resolved_extras` carries per-turn extras (Phase 36.15) into `call_llm` / `call_llm_streaming` and onto `ChatRequest.extra` |
 | `AgentResult` | struct | Loop output: `messages`, `appended`, `turns_used`, `finished_naturally`, `final_response`, `total_usage`, `compression_count_after`, `stop_reason` |
 | `AggregatedUsage` | struct | Accumulated input/output token counts |
 | `StopReason` | enum | `Natural` / `MaxIterations` / `BudgetExhausted` / `Cancelled` |
@@ -355,9 +362,9 @@ Tool modules (each exports one or more `Tool` implementations):
 | `PersonalityRegistry` | struct | Named personality presets (concise, technical, noir, hype, catgirl, default) |
 | `MemoryManager` / `SharedProvider` | struct + type | Multi-backend memory abstraction |
 | `PressureTracker` | struct | Context-window pressure monitoring with tiered warnings |
-| `BudgetHandle` | struct | Shared turn budget with hard-stop enforcement |
-| `AgentSubagentRunner` | struct | Spawns and supervises sub-agent loops |
-| `AppRuntimeBundle` / `build_app_runtime_bundle` | struct + fn | Assembled runtime dependencies for a full agent session |
+| `BudgetHandle` | struct | Per-turn iteration budget with hard-stop enforcement. Reset at the top-level turn boundary by `AgentRuntime::run_turn`; each subagent gets its own fresh handle (Phase 35 — PROV-10 retired) |
+| `AgentSubagentRunner` | struct | Spawns and supervises sub-agent loops; issues each child a fresh `BudgetHandle::new(effective_max_iterations)` |
+| `AppRuntimeBundle` / `build_app_runtime_bundle` | struct + fn | Internal assembly used by `AgentRuntime::from_config`; not called directly by channels post-Phase 28.1 |
 
 **Cargo features:**
 - `memory-sqlite` — enables the SQLite memory provider
@@ -371,7 +378,9 @@ Tool modules (each exports one or more `Tool` implementations):
 - `AgentResult.appended` contains only the messages produced by the current run (not the full history), making it safe to persist without re-filtering for role pairing — critical for correct OpenAI assistant↔tool ordering across turns.
 - `BudgetHandle::consume()` returning `None` triggers a clean `BudgetExhausted` result rather than a panic or `process::exit`. This path cannot be bypassed by yolo mode.
 - Context compression fires `ContextPreCompress` hook events and awaits async listeners (e.g., memory flush) before pruning.
-- `build_app_runtime_bundle` is the single assembly point for all session dependencies; CLI, gateway, and UI all call it (or its equivalent) at session start.
+- `AgentRuntime::run_turn` resets the runtime's `BudgetHandle` at every top-level turn boundary, fixing the gateway latch class of bug where a multi-turn channel would exhaust its budget once and then return `turns_used=0` for every subsequent message (Phase 28.1).
+- Each subagent receives an independent `BudgetHandle`; the PROV-10 shared parent↔child counter invariant is retired (Phase 35). DoS containment is structural — `max_spawn_depth × max_concurrent_children × max_iterations`. See [DELEGATION.md § Budget Model](DELEGATION.md#budget-model).
+- `build_app_runtime_bundle` is now an internal detail of `AgentRuntime::from_config`. CLI, gateway, web, TUI, and cron channels all go through `AgentRuntime` rather than calling the bundle factory directly.
 
 ---
 
@@ -385,13 +394,14 @@ Tool modules (each exports one or more `Tool` implementations):
 |------|------|-------------|
 | `GatewayRunner` | struct | Top-level orchestrator: long-polling loop, JoinSet supervision, Semaphore concurrency, CancellationToken shutdown |
 | `dispatch_delivery` | fn | Route a completed agent response to the platform |
-| `GatewayMessageHandler` | struct | Per-message handler: assembles `AgentLoop`, executes turn, persists messages |
+| `GatewayMessageHandler` | struct | Per-message platform adapter: builds a `TurnRequest`, calls `AgentRuntime::run_turn`, persists messages. Slash commands, attachments, and Telegram-specific behavior stay here (Phase 28.1) |
 | `PlatformAdapter` / `MessageHandler` | traits | Adapter interface for adding new messaging platforms |
 | `TelegramAdapter` | struct | Telegram Bot API long-polling implementation |
 | `TgMessage` / `TgUpdate` / `TgUser` / `TgChat` / `TgDocument` / `TgPhotoSize` / `TgFile` / `TgSendApi` / `TgBotCommand` | structs | Telegram API type wrappers |
 | `GatewaySession` | struct | Per-user session state and message history |
 | `StreamConsumer` | struct | Consumes streaming LLM responses and accumulates text |
 | `UserQueueManager` | struct | Per-user message queues with backpressure |
+| `SessionQueue` | struct | Per-session FIFO buffer keyed by `SessionKey`. Implements `ironhermes_core::queue::MessageQueue<SessionKey>` via a `String`→`MessageEvent` adapter so the TUI (and future web/Discord/Slack queues) share one trait surface; the concrete `try_push(&SessionKey, MessageEvent)` API stays unchanged for gateway call sites (Phase 36.17.3, D-02) |
 | `BackoffState` | struct | Exponential backoff for long-polling errors |
 | `GatewayPidRecord` / `PidLockGuard` / `acquire_pid_lock` / `read_gateway_pid` / `write_gateway_pid` / `is_pid_alive` / `PidLiveness` | struct + fns | PID file management for single-instance enforcement |
 

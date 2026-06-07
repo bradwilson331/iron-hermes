@@ -126,6 +126,50 @@ pub struct PromptBuilder {
     skill_creation_guidance: bool,
 }
 
+/// Phase 36.2 (D-CACHE-04): assert layers 1-8 (the cached prefix) are free of
+/// timestamps, session IDs, or per-turn data. ANY occurrence of these patterns
+/// indicates a silent cache-break bug — dynamic content leaking into a slot
+/// that is supposed to be stable across turns.
+///
+/// - **Debug builds:** `panic!` with the offending substring so the bug is
+///   caught at the source, before reaching production.
+/// - **Release builds:** `tracing::warn!` and continue, so production sessions
+///   aren't killed by a benign false positive on a substring that happens to
+///   match the heuristic.
+///
+/// The pattern list is deliberately narrow: false positives on legitimate
+/// cached text are acceptable (the cached prefix is bounded), but false
+/// negatives (missing real violations) are not.
+pub(crate) fn cached_layers_must_be_stable(cached_text: &str) {
+    /// Patterns that indicate per-turn / per-session data leaked into a cached
+    /// layer. Sourced from PROJECT.md "Cache-awareness is load-bearing"
+    /// principle + the three known cache-break triggers (D-CACHE-03):
+    /// `session_id`, `turn_id`, and timestamp-shaped markers.
+    const FORBIDDEN: &[&str] = &[
+        "session_id=",
+        "session_id:",
+        "turn_id=",
+        "turn_id:",
+        // ISO-8601-shaped timestamp marker — "T20" matches "T20:..", "T2026-..".
+        // Conservative heuristic catches the Timestamp slot leaking into a
+        // cached layer; chosen over a regex to avoid a new dep.
+        "T2",
+    ];
+    for needle in FORBIDDEN {
+        if cached_text.contains(needle) {
+            let msg = format!(
+                "Phase 36.2 cache stability violation: cached layer contains '{needle}'. \
+                 This will break Anthropic prompt caching. Move dynamic content to ephemeral layers 9-10."
+            );
+            if cfg!(debug_assertions) {
+                panic!("{msg}");
+            } else {
+                tracing::warn!(violation = needle, "{msg}");
+            }
+        }
+    }
+}
+
 impl PromptBuilder {
     pub fn new(model: impl Into<String>, platform: impl Into<String>) -> Self {
         Self {
@@ -653,7 +697,14 @@ impl PromptBuilder {
             }
         }
 
-        (durable.join("\n\n"), ephemeral.join("\n\n"))
+        let durable_str = durable.join("\n\n");
+        // Phase 36.2 (D-CACHE-04): assert layers 1-8 (the cached prefix) are
+        // free of timestamps, session IDs, and per-turn data. Debug builds
+        // panic; release builds emit `tracing::warn!` and continue. The
+        // assertion runs ONLY on the durable portion — ephemeral layers 9-10
+        // are SUPPOSED to contain dynamic content.
+        cached_layers_must_be_stable(&durable_str);
+        (durable_str, ephemeral.join("\n\n"))
     }
 
     /// Build the complete system prompt as a single string.
@@ -720,7 +771,7 @@ impl PromptBuilder {
     fn platform_hint(&self) -> String {
         match self.platform.as_str() {
             "cli" => "You are running in an interactive CLI terminal. The user can see your responses in real-time. Use markdown formatting for readability.".to_string(),
-            "telegram" => "You are running as a Telegram bot. Keep responses concise. Use Telegram-compatible markdown (MarkdownV2). Avoid very long messages.".to_string(),
+            "telegram" => "You are running as a Telegram bot. Keep responses concise. Use Telegram-compatible markdown (MarkdownV2). Avoid very long messages. To send a file or media attachment, emit a literal tag on its own line in your reply, in the form: <MEDIA: /absolute/path/to/file.ext> or <MEDIA: https://host.example/path/file.ext>. The gateway extracts the tag and sends it as a native Telegram attachment; supported extensions include .png .jpg .jpeg .webp .gif (photo), .ogg .opus (voice note), .mp3 .m4a .flac .wav (audio), .mp4 .mov .webm (video), and anything else as a document. Place the tag inside a fenced code block to show the literal text instead of sending an attachment.".to_string(),
             "discord" => "You are running as a Discord bot. Use Discord markdown formatting. Keep messages under 2000 characters when possible.".to_string(),
             "slack" => "You are running as a Slack bot. Use Slack mrkdwn formatting. Use threads for long conversations.".to_string(),
             _ => String::new(),
@@ -1816,5 +1867,31 @@ mod tests {
         let pb = PromptBuilder::new("test-model", "cli");
         let serialized = format!("{:?}", pb.build_system_message());
         assert!(!serialized.contains("Activated Skill"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 36.2 (D-CACHE-04): cached_layers_must_be_stable assertion
+    // -------------------------------------------------------------------------
+
+    #[test]
+    #[should_panic(expected = "Phase 36.2 cache stability violation")]
+    fn cached_layers_must_be_stable_panics_on_session_id_marker() {
+        cached_layers_must_be_stable("legitimate cached text\nsession_id=abc123 leaked\nmore text");
+    }
+
+    #[test]
+    #[should_panic(expected = "Phase 36.2 cache stability violation")]
+    fn cached_layers_must_be_stable_panics_on_turn_id_marker() {
+        cached_layers_must_be_stable("foo\nturn_id: 42\nbar");
+    }
+
+    #[test]
+    fn cached_layers_must_be_stable_passes_on_clean_text() {
+        // Must not panic on legitimate cached system prompt content.
+        cached_layers_must_be_stable(
+            "## Available Skills\n\nweb-extract — extract clean text from URLs\n\nUse the skills tool.",
+        );
+        cached_layers_must_be_stable("");
+        cached_layers_must_be_stable("Model: claude-opus-4-7\nProvider: anthropic");
     }
 }

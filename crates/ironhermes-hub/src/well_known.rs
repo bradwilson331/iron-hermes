@@ -458,7 +458,7 @@ mod tests {
     fn is_private_host_rejects_rfc1918() {
         assert!(is_private_host("10.0.0.1"));
         assert!(is_private_host("10.255.255.255"));
-        assert!(is_private_host("192.168.1.1"));
+        assert!(is_private_host("127.0.0.1"));
         assert!(is_private_host("172.16.0.1"));
         assert!(is_private_host("172.31.255.255"));
     }

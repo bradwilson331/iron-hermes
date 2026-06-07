@@ -11,6 +11,7 @@ pub mod context_engine;
 pub mod context_loader;
 pub mod context_refs;
 pub mod engine_factory;
+pub mod error_classifier;
 pub mod memory;
 pub mod memory_context;
 pub mod memory_flush_handler;
@@ -18,6 +19,7 @@ pub mod nudge;
 pub mod personality;
 pub mod pressure_warning;
 pub mod prompt_builder;
+pub mod rate_limit_tracker;
 pub mod session_search;
 pub mod shrike;
 pub mod streaming_scrubber;
@@ -29,7 +31,7 @@ pub mod tool_pair;
 pub mod transcript;
 
 pub use agent_loop::{AgentLoop, AgentResult, AggregatedUsage};
-pub use agent_runtime::{AgentRuntime, AgentRuntimeInput, TurnRequest};
+pub use agent_runtime::{AgentRuntime, AgentRuntimeInput, TtsPerTurnWiring, TurnRequest};
 pub use agent_wiring::attach_context_engine;
 pub use anthropic_client::AnthropicClient;
 pub use any_client::{
@@ -41,10 +43,15 @@ pub use app_runtime_factory::{
 };
 pub use client::LlmClient;
 pub use context_compressor::ContextCompressor;
+pub use error_classifier::{ProviderError, classify_llm_error_typed};
 pub use ironhermes_core::{CONTEXT_FILE_MAX_CHARS, scan_context_content, truncate_content};
 pub use memory::{MemoryManager, SharedProvider};
 pub use personality::PersonalityRegistry;
 pub use pressure_warning::PressureTracker;
 pub use prompt_builder::{PromptBuilder, PromptSlot};
+pub use rate_limit_tracker::{
+    RateLimitEvent, RateLimitKey, RateLimitSeverity, RateLimitSource, RateLimitTracker,
+    TrackerState, hash_api_key,
+};
 pub use shrike::{KillResult, ShrikeService};
 pub use subagent_runner::AgentSubagentRunner;

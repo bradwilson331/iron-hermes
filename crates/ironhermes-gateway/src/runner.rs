@@ -11,6 +11,7 @@ use ironhermes_cron::JobStore;
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_mcp::McpManager;
 use ironhermes_tools::ToolRegistry;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Mutex as TokioMutex, RwLock, Semaphore, mpsc};
 use tokio::task::JoinSet;
@@ -21,10 +22,12 @@ use crate::adapter::PlatformAdapter;
 use crate::backoff::BackoffState;
 use crate::handler::GatewayMessageHandler;
 use crate::multimodal;
-use crate::session::SessionStore;
+use crate::session::{SessionKey, SessionStore};
+use crate::session_queue::{QueueError, SessionQueue};
 use crate::telegram::{TelegramAdapter, TgBotCommand, tg_message_to_event};
 use ironhermes_cron::TgSendApi;
-use crate::user_queue::UserQueueManager;
+use crate::user_queue::{DispatchOutcome, UserQueueManager};
+use ironhermes_core::MessageEvent;
 
 /// Runs the Telegram gateway: long polling, per-user dispatch, JoinSet supervision,
 /// Semaphore concurrency control, and CancellationToken-based graceful shutdown.
@@ -91,6 +94,25 @@ pub struct GatewayRunner {
     /// Populated by `set_skills_config` (called from run_gateway after `set_skill_registry`).
     /// `build_gateway_handler` passes it to the handler via `set_skills_config`.
     skills_config: Option<ironhermes_core::config::SkillsConfig>,
+    /// Phase 36.17.1: per-session FIFO queue (D-06, D-14). Always initialized.
+    /// Wrapped in Arc so `build_gateway_handler` can thread a clone to
+    /// `GatewayMessageHandler` (D-15, RESEARCH Open Q3 — Arc<SessionQueue>,
+    /// NOT Arc<GatewayRunner>, to avoid a circular reference). The raw
+    /// `SessionQueue` type is intentionally not exported in lib.rs — adapters
+    /// reach it only via the thin public API methods on this struct.
+    session_queue: Arc<SessionQueue>,
+    /// Phase 36.17.1 D-03 (Plan 04): drain-mode flag — set true BEFORE
+    /// `cancel.cancel()` during shutdown so late-arriving messages stay in
+    /// the queue and reach the next agent turn (in-process only). The flag
+    /// is a SIGNAL, not a gate — `SessionQueue::try_push` does NOT consult
+    /// it. Python parity: `_queue_during_drain_enabled` (gateway/run.py:2298-2302).
+    ///
+    /// Closes T-36.17.1-03 (lost-update during drain-mode transition) by
+    /// pairing the flag flip with the cancel call in `drain_for_restart`:
+    /// any concurrent `try_push` observing `is_draining=true` is guaranteed
+    /// to see `cancel` not-yet-fired AND the queue continues to accept the
+    /// push (D-03 preserve-AND-accept).
+    is_draining: Arc<AtomicBool>,
     cancel: CancellationToken,
 }
 
@@ -126,6 +148,14 @@ impl GatewayRunner {
             workspace: None,       // Phase 25.3 D-W-2: wired by run_gateway before start()
             trajectory_root: None, // Phase 25.3-15 CR-02: wired by run_gateway before start()
             skills_config: None,   // Phase 21.8.2 D-02: wired by run_gateway before start()
+            // Phase 36.17.1 (D-06, D-14): always-initialized per-session FIFO queue.
+            // No `set_session_queue` method — the queue is owned by the runner from
+            // construction; `build_gateway_handler` clones the Arc into the handler.
+            session_queue: Arc::new(SessionQueue::new()),
+            // Phase 36.17.1 Plan 04 (D-03): drain-mode flag starts false.
+            // `drain_for_restart()` flips it to true BEFORE cancelling the
+            // cancel token — preserve-AND-accept semantics live there.
+            is_draining: Arc::new(AtomicBool::new(false)),
             cancel: CancellationToken::new(),
         }
     }
@@ -278,6 +308,181 @@ impl GatewayRunner {
         self.browser_session = Some(session);
     }
 
+    // ---------------------------------------------------------------------
+    // Phase 36.17.1: SessionQueue public API (D-15)
+    //
+    // Thin delegation layer over `Arc<SessionQueue>`. The raw `SessionQueue`
+    // type is intentionally not re-exported from lib.rs — adapters and other
+    // call sites reach the queue only through these methods. All methods are
+    // synchronous (D-17); the underlying `std::sync::Mutex` guard is dropped
+    // before any await on the caller's side.
+    // ---------------------------------------------------------------------
+
+    /// Push an event onto the per-session FIFO queue.
+    ///
+    /// Returns `Err(QueueError::CapacityReached)` when the session's queue
+    /// holds `MAX_QUEUE_DEPTH` events (D-09). Delegates to
+    /// `SessionQueue::try_push` (Python parity: `_enqueue_fifo`).
+    pub fn try_enqueue(
+        &self,
+        key: &SessionKey,
+        event: MessageEvent,
+    ) -> Result<(), QueueError> {
+        self.session_queue.try_push(key, event)
+    }
+
+    /// Pop the oldest queued event for the session, or `None` if empty.
+    ///
+    /// Delegates to `SessionQueue::pop` (Python parity: `_dequeue_pending_event`).
+    pub fn dequeue(&self, key: &SessionKey) -> Option<MessageEvent> {
+        self.session_queue.pop(key)
+    }
+
+    /// Current queue depth for the session (0 if no queue allocated).
+    ///
+    /// Delegates to `SessionQueue::len` (Python parity: `_queue_depth`).
+    pub fn queue_len(&self, key: &SessionKey) -> usize {
+        self.session_queue.len(key)
+    }
+
+    /// Drop every queued event for the session.
+    ///
+    /// Delegates to `SessionQueue::clear`. Called by `/new` and `/reset`
+    /// handlers BEFORE `SessionStore::remove` (RESEARCH Pitfall 5).
+    pub fn clear_queue(&self, key: &SessionKey) {
+        self.session_queue.clear(key);
+    }
+
+    /// Retain only events matching `predicate`, in arrival order.
+    ///
+    /// Delegates to `SessionQueue::retain`. The goal-continuation predicate
+    /// is deferred per D-04 — this method is the general mechanism.
+    pub fn retain_queue<F: Fn(&MessageEvent) -> bool>(
+        &self,
+        key: &SessionKey,
+        predicate: F,
+    ) {
+        self.session_queue.retain(key, predicate);
+    }
+
+    /// Phase 36.17.1: crate-private accessor for threading `Arc<SessionQueue>`
+    /// into the handler from `build_gateway_handler`. Plan 04 will reuse the
+    /// same accessor for drain-mode wiring.
+    pub(crate) fn session_queue(&self) -> Arc<SessionQueue> {
+        self.session_queue.clone()
+    }
+
+    /// Phase 36.17.1 Plan 04 (D-03): true once the runner has entered
+    /// drain-mode (graceful shutdown). The queue continues to accept pushes
+    /// while this flag is set — drain mode is a SIGNAL, not a gate
+    /// (`SessionQueue::try_push` does not consult this flag). Python parity:
+    /// `_queue_during_drain_enabled` (gateway/run.py:2298-2302).
+    pub fn is_draining(&self) -> bool {
+        self.is_draining.load(Ordering::SeqCst)
+    }
+
+    /// Phase 36.17.1 Plan 04 (D-03): enter drain-mode.
+    ///
+    /// Sets `is_draining` to `true` BEFORE cancelling the cancel token. The
+    /// ordering is the T-36.17.1-03 mitigation: any concurrent `try_push`
+    /// that observes `is_draining=true` is guaranteed to also see the cancel
+    /// token NOT YET fired, AND `SessionQueue::try_push` continues to accept
+    /// the push (D-03 preserve-AND-accept). The brief in-process window
+    /// between flag-flip and process exit preserves arrival order without
+    /// losing user input.
+    ///
+    /// Called from the graceful-shutdown path in `start()` in place of the
+    /// previous bare `self.cancel.cancel()`. Forced-abort paths may still
+    /// call `cancel.cancel()` directly when drain semantics are explicitly
+    /// undesired — that is acceptable per the locked decision contract.
+    ///
+    /// Python parity: equivalent transition to `_restart_requested = True`
+    /// + the existing busy-mode being `queue`/`steer` (gateway/run.py:2298-2302).
+    pub fn drain_for_restart(&self) {
+        // ORDERING is load-bearing — do NOT reorder. T-36.17.1-03 mitigation.
+        self.is_draining.store(true, Ordering::SeqCst);
+        self.cancel.cancel();
+    }
+
+    /// Phase 36.17.1 Plan 02 Task 3: post-turn FIFO drain (D-01 part (b)).
+    ///
+    /// Pops events from the session queue and re-invokes `handler.run_agent`
+    /// in arrival order until the queue is empty. Called by the per-chat
+    /// worker after each `handle_with_multimodal` turn returns.
+    ///
+    /// Bypasses `handle_with_multimodal` per RESEARCH Pitfall 4 — the
+    /// RAII `RunningAgentGuard` inside `run_agent` re-sets the per-session
+    /// AtomicBool true for the duration of each drained turn, so a push
+    /// arriving mid-drain enqueues onto the same key and is picked up on
+    /// the next pop iteration. Order is preserved by `VecDeque` FIFO.
+    ///
+    /// Exposed as `pub` so the Plan 02 Task 3 integration test
+    /// (`tests/session_queue_integration.rs` — an external test binary that
+    /// can only see `pub` items, not `pub(crate)`) can invoke the real drain
+    /// loop directly. NOT a substitute pop-sequence unit test — the test
+    /// must exercise this code path.
+    ///
+    /// [Rule 3 - Blocking] The plan acceptance criterion says
+    /// `pub(crate) async fn drain_pending` but integration tests cannot reach
+    /// crate-private items. We widen to `pub` so the required integration
+    /// test in `tests/session_queue_integration.rs` can call
+    /// `runner.drain_pending(...)`. Documented in the plan SUMMARY.
+    pub async fn drain_pending(
+        &self,
+        key: &SessionKey,
+        handler: &GatewayMessageHandler,
+        adapter: Arc<dyn PlatformAdapter>,
+        cancel: CancellationToken,
+    ) -> Result<()> {
+        // Replayed events go through the agent loop without their original
+        // multimodal envelope (which was consumed at the original
+        // `handle_with_multimodal` call). The `MessageEvent.content` field
+        // already carries any text-only payload the agent needs.
+        //
+        // Phase 36.17.1 Plan 02 Task 3 [Rule 2 - critical functionality
+        // refinement]: drain continues on individual `run_agent` errors
+        // (logs and proceeds to next event) rather than propagating the
+        // first `?` — a single bad event must not poison the rest of the
+        // queue. This matches the Python reference's per-iteration
+        // resilience in `_promote_queued_event`. Cancellation still
+        // short-circuits the drain via the `cancel` token; the loop
+        // is broken explicitly when the token is fired between pops.
+        while let Some(next_event) = self.session_queue.pop(key) {
+            if cancel.is_cancelled() {
+                tracing::info!(
+                    session = %key.to_string_key(),
+                    "SessionQueue: drain cancelled (Phase 36.17.1)"
+                );
+                break;
+            }
+            tracing::debug!(
+                session = %key.to_string_key(),
+                remaining = self.session_queue.len(key),
+                "SessionQueue: draining next queued event (Phase 36.17.1)"
+            );
+            let no_attachments = crate::multimodal::ProcessedAttachments {
+                text_prefix: None,
+                image_data_uri: None,
+            };
+            if let Err(e) = handler
+                .run_agent(
+                    &next_event,
+                    adapter.clone(),
+                    cancel.clone(),
+                    no_attachments,
+                )
+                .await
+            {
+                tracing::error!(
+                    session = %key.to_string_key(),
+                    error = %e,
+                    "SessionQueue: drained event run_agent failed; continuing (Phase 36.17.1)"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Plan 03 (Phase 22.4.2.1): returns a clone of the runner's CancellationToken.
     /// Used by gateway integration tests (tests/gateway_shutdown.rs) to fire
     /// shutdown without going through the OS signal layer.
@@ -348,6 +553,12 @@ impl GatewayRunner {
         if let Some(ref ws) = self.workspace {
             handler.set_workspace(ws.clone());
         }
+
+        // Phase 36.17.1 (D-14, D-15, RESEARCH Open Q3): thread the per-session
+        // FIFO queue Arc. Without this call the handler.session_queue stays
+        // None and `handle_with_multimodal` falls back to the Phase 36 reject
+        // path. With it, the busy-branch enqueues and cap-hit fires D-13 UX.
+        handler.set_session_queue(self.session_queue.clone());
         // Phase 25.3-15 CR-02 close-out: trajectory writers are no longer
         // process-wide; per-session writers are owned (and lazily opened) by
         // `SessionStore` keyed by the canonical SQLite session UUID. The
@@ -395,7 +606,13 @@ impl GatewayRunner {
     }
 
     /// Start the gateway. Blocks until ctrl+c or fatal error.
-    pub async fn start(&self) -> Result<()> {
+    ///
+    /// Phase 36.17.1 Plan 02 Task 3: takes `self: Arc<Self>` so the per-chat
+    /// worker spawn closure can capture an `Arc<GatewayRunner>` clone and
+    /// call `runner.drain_pending(...)` after each handler turn. The
+    /// `'static` requirement of `JoinSet::spawn` forces this — a borrow of
+    /// `&self` cannot escape into the spawned task.
+    pub async fn start(self: Arc<Self>) -> Result<()> {
         // --- 0. Acquire PID lock (Phase 24 D-09/D-12) ---
         // Refuses startup if another live gateway is already running under
         // the same HERMES_HOME (profile-scoped after Phase 24's --profile
@@ -473,12 +690,49 @@ impl GatewayRunner {
         let whitelist = tg_config.whitelist.clone();
 
         // --- 6. Create handler (with gateway hygiene engine wired) and queue manager ---
-        let handler = self.build_gateway_handler();
-        let handler = Arc::new(handler);
+        //
+        // Phase 36.17.2.1 D-01/D-03: order matters — UQM must be constructed BEFORE
+        // the handler is Arc-wrapped so we can call handler.set_user_queue_manager(...)
+        // on the still-mutable owned `mut handler`. This wires the UQM into the
+        // handler's CoreCommandResult::Queued arm (handler.rs) so /queue events
+        // dispatch via UQM::dispatch (which calls notify_one() — user_queue.rs:154)
+        // instead of the direct session_queue.try_push path that has no wake protocol.
+        //
+        // Phase 36.17.2 Plan 01: UQM constructor signature — Arc<SessionQueue> arg
+        // (D-03: UQM holds Arc<SessionQueue>, not capacity).
         let user_queue = Arc::new(UserQueueManager::new(
             adapter.clone() as Arc<dyn crate::adapter::PlatformAdapter>,
-            16,
+            self.session_queue.clone(), // Arc<SessionQueue> already on GatewayRunner per 36.17.1-02
         ));
+        let mut handler = self.build_gateway_handler();
+        // Phase 36.17.2.1 D-01/D-03: install the same UQM Arc the dispatch loop uses
+        // (user_queue_dispatch downstream is a clone of this same Arc — both
+        // reference identical workers + pending_multimodal + session_queue state).
+        handler.set_user_queue_manager(user_queue.clone());
+        // Phase 36.17.2.2 D-18: install the MediaSender impl (Telegram only).
+        //
+        // Construct as `Arc<TelegramAdapter>` (already done at line 645 above),
+        // then clone-cast SEPARATELY for each trait. Do NOT upcast
+        // `Arc<dyn PlatformAdapter>` -> `Arc<dyn MediaSender>` — that was
+        // unstable on stable Rust at the time of writing (RESEARCH Open Q4 /
+        // Assumption A7). The concrete `Arc<TelegramAdapter>` at `adapter`
+        // is already used independently as `Arc<dyn PlatformAdapter>` at
+        // runner.rs:704 (`adapter.clone() as Arc<dyn crate::adapter::PlatformAdapter>`),
+        // so the second clone-cast to `Arc<dyn MediaSender>` here mirrors
+        // that pattern. Discord / Slack / web start paths do NOT call
+        // `set_media_sender` — `media_sender` stays `None` on those handlers
+        // and the D-19 dispatch loop in `run_agent` warns + drops any
+        // extracted `<MEDIA: ...>` refs (D-18 contract).
+        handler.set_media_sender(adapter.clone() as Arc<dyn crate::adapter::MediaSender>);
+        // Phase 36.17.7 D-01 (Site 1 — Telegram, real dispatcher):
+        // TelegramAdapter doubles as AudioDispatcher for per-turn TTS wiring.
+        // Mirror set_media_sender pattern exactly: clone-cast the concrete
+        // Arc<TelegramAdapter>. Do NOT upcast Arc<dyn PlatformAdapter> — that
+        // was unstable on stable Rust (RESEARCH Assumption A7).
+        handler.set_telegram_audio_dispatcher(
+            adapter.clone() as Arc<dyn ironhermes_tools::AudioDispatcher>,
+        );
+        let handler = Arc::new(handler);
 
         let mut join_set: JoinSet<()> = JoinSet::new();
 
@@ -564,7 +818,21 @@ impl GatewayRunner {
             .cloned()
             .unwrap_or_default();
         if let Some(discord_token) = resolve_token_with_env(&discord_config.token, "DISCORD_BOT_TOKEN") {
-            let handler_d = handler.clone();
+            // Phase 36.17.7 D-03-b (Site 2 — Discord, stub dispatcher):
+            // Build a separate handler for the Discord adapter so it gets its own
+            // AudioDispatcher slot independent of the Telegram handler. Discord
+            // lacks audio delivery; NotSupportedAudioDispatcher ensures tools still
+            // register for LLM schema but send_audio returns a clean Err.
+            // Deletion target when Discord gets a real AudioDispatcher impl.
+            // Also wire UQM so the Discord handler uses the same wake-notify path
+            // as Telegram (mirrors the Telegram set_user_queue_manager call above).
+            let mut handler_discord = self.build_gateway_handler();
+            handler_discord.set_user_queue_manager(user_queue.clone());
+            handler_discord.set_telegram_audio_dispatcher(
+                std::sync::Arc::new(ironhermes_tools::NotSupportedAudioDispatcher::new("discord"))
+                    as std::sync::Arc<dyn ironhermes_tools::AudioDispatcher>,
+            );
+            let handler_d = std::sync::Arc::new(handler_discord);
             let cancel_d = self.cancel.clone();
             let whitelist_d: Vec<u64> = discord_config
                 .whitelist
@@ -604,7 +872,21 @@ impl GatewayRunner {
             resolve_token_with_env(&slack_config.app_token, "SLACK_APP_TOKEN"),
             resolve_token_with_env(&slack_config.token, "SLACK_BOT_TOKEN"),
         ) {
-            let handler_s = handler.clone();
+            // Phase 36.17.7 D-03-b (Site 3 — Slack, stub dispatcher):
+            // Build a separate handler for the Slack adapter so it gets its own
+            // AudioDispatcher slot independent of the Telegram handler. Slack
+            // lacks audio delivery; NotSupportedAudioDispatcher ensures tools still
+            // register for LLM schema but send_audio returns a clean Err.
+            // Deletion target when Slack gets a real AudioDispatcher impl.
+            // Also wire UQM so the Slack handler uses the same wake-notify path
+            // as Telegram (mirrors the Telegram set_user_queue_manager call above).
+            let mut handler_slack = self.build_gateway_handler();
+            handler_slack.set_user_queue_manager(user_queue.clone());
+            handler_slack.set_telegram_audio_dispatcher(
+                std::sync::Arc::new(ironhermes_tools::NotSupportedAudioDispatcher::new("slack"))
+                    as std::sync::Arc<dyn ironhermes_tools::AudioDispatcher>,
+            );
+            let handler_s = std::sync::Arc::new(handler_slack);
             let cancel_s = self.cancel.clone();
             let whitelist_s: Vec<String> = slack_config
                 .whitelist
@@ -644,6 +926,11 @@ impl GatewayRunner {
         let cancel_dispatch = self.cancel.clone();
         let mut msg_rx = msg_rx;
         let bot_username_str = bot_username.clone();
+        // Phase 36.17.1 Plan 02 Task 3: clone Arc<GatewayRunner> for the per-chat
+        // worker spawn closure so it can call `runner.drain_pending(...)` after
+        // each handler turn returns. The Arc<Self> threading is what motivates
+        // the `start(self: Arc<Self>)` signature change introduced in this plan.
+        let runner_dispatch: Arc<Self> = self.clone();
 
         // Plan 03: clone Arc so dispatch_future (async move) can spawn into worker_join_set
         let worker_join_set_dispatch = worker_join_set.clone();
@@ -700,6 +987,52 @@ impl GatewayRunner {
 
                         info!(chat_id = %event.chat_id, "Message passed all filters, dispatching");
 
+                        // Phase 36.17.2 Plan 05 (D-23, D-24, D-27): slash-command fast-path.
+                        // Commands bypass UserQueueManager entirely so they don't serialize behind
+                        // an in-flight free-text turn in the per-chat worker. The same handler entry
+                        // (handle_with_multimodal) is used — only the routing differs.
+                        //
+                        // D-24: strict prefix match, no whitespace trim — matches handler.rs:411 command parser.
+                        // D-26: state-mutation safety covered by SessionQueue mutex + SessionStore RwLock + AtomicBool.
+                        // T-36.17.2-06 mitigation: sem_dispatch permit acquired BEFORE handle call (TG-06 bound preserved).
+                        if event.content.starts_with('/') {
+                            let handler_cmd = handler_dispatch.clone();
+                            let adapter_cmd = adapter_dispatch.clone();
+                            let sem_cmd = semaphore_dispatch.clone();
+                            let cancel_cmd = cancel_dispatch.clone();
+                            let event_cmd = event.clone();
+                            // Detached spawn — commands are short-lived (D-27). Graceful shutdown
+                            // observes cancel_token via cancel.is_cancelled() inside the handler.
+                            tokio::spawn(async move {
+                                let permit = match sem_cmd.acquire().await {
+                                    Ok(p) => p,
+                                    Err(_) => return, // semaphore closed → shutdown in progress
+                                };
+                                // Commands are text-only by contract (D-27) — skip multimodal processing.
+                                let processed = crate::multimodal::ProcessedAttachments {
+                                    text_prefix: None,
+                                    image_data_uri: None,
+                                };
+                                if let Err(e) = handler_cmd
+                                    .handle_with_multimodal(
+                                        &event_cmd,
+                                        adapter_cmd,
+                                        cancel_cmd.child_token(),
+                                        processed,
+                                    )
+                                    .await
+                                {
+                                    error!(
+                                        chat_id = %event_cmd.chat_id,
+                                        error = %e,
+                                        "Slash-command fast-path handler error (Phase 36.17.2 Plan 05)"
+                                    );
+                                }
+                                drop(permit);
+                            });
+                            continue; // Skip the multimodal + UQM.dispatch path for this event
+                        }
+
                         // Process multimodal attachments (D-05 through D-08)
                         let (text_prefix, image_data_uri) = if !event.attachments.is_empty() {
                             match multimodal::process_attachments(&adapter_dispatch_mm, &msg).await {
@@ -716,60 +1049,148 @@ impl GatewayRunner {
                             (None, None)
                         };
 
-                        // Dispatch via per-user queue
-                        let maybe_rx = user_queue_dispatch.dispatch(event, text_prefix, image_data_uri).await;
-                        if let Some(mut chat_rx) = maybe_rx {
-                            // New worker needed for this chat
-                            let handler_task = handler_dispatch.clone();
-                            let adapter_task = adapter_dispatch.clone();
-                            let sem_task = semaphore_dispatch.clone();
-                            let cancel_task = cancel_dispatch.clone();
-                            let queue_task = user_queue_dispatch.clone();
-                            let chat_id_task = msg.chat.id.to_string();
+                        // Phase 36.17.2 Plan 01: capture session key fields BEFORE moving event
+                        // into dispatch (event is consumed by UQM::dispatch; D-14 triple).
+                        let event_platform = event.platform.clone();
+                        let event_chat_id = event.chat_id.clone();
+                        let event_sender_id = event.sender_id.clone();
 
-                            // Plan 03 (Phase 22.4.2.1): spawn into worker_join_set so
-                            // per-chat workers are tracked and drained on shutdown (D-10/D-11).
-                            // Previously a bare tokio::spawn (detached) — replaced with tracked spawn.
-                            worker_join_set_dispatch.lock().await.spawn(async move {
-                                while let Some(queued_msg) = chat_rx.recv().await {
-                                    // Acquire semaphore permit (bounded concurrency per TG-06)
-                                    let permit = match sem_task.acquire().await {
-                                        Ok(p) => p,
-                                        Err(_) => break, // semaphore closed
-                                    };
+                        // Phase 36.17.2 Plan 02: full match on Result<DispatchOutcome, QueueError> (D-15).
+                        // Cap-hit UX (❌ + chat reply) fires inside UQM::dispatch on Err — no
+                        // additional handling needed here for the error path.
+                        let dispatch_result = user_queue_dispatch.dispatch(event, text_prefix, image_data_uri).await;
 
-                                    let processed = crate::multimodal::ProcessedAttachments {
-                                        text_prefix: queued_msg.text_prefix,
-                                        image_data_uri: queued_msg.image_data_uri,
-                                    };
+                        // SessionKey built from fields captured before event was moved into dispatch (D-14).
+                        let session_key_task = SessionKey::new(event_platform, &event_chat_id)
+                            .with_user(&event_sender_id);
 
-                                    let result = handler_task
-                                        .handle_with_multimodal(
-                                            &queued_msg.event,
-                                            adapter_task.clone(),
-                                            cancel_task.child_token(),
-                                            processed,
-                                        )
-                                        .await;
+                        match dispatch_result {
+                            Ok(DispatchOutcome::Accepted) => {
+                                // Existing worker picked up the message via Notify wake.
+                                // 👀 fires when the worker pops (D-08). Nothing to do here.
+                                debug!(
+                                    chat_id = %event_chat_id,
+                                    "Dispatch: message accepted by existing worker (Phase 36.17.2 D-08)"
+                                );
+                            }
+                            Ok(DispatchOutcome::WorkerSpawned) => {
+                                // New worker needed for this chat. Spawn the full Notify-based
+                                // pop-loop worker (D-04, D-05, D-06, D-08, D-09, D-16).
+                                let handler_task = handler_dispatch.clone();
+                                let adapter_task = adapter_dispatch.clone();
+                                let sem_task = semaphore_dispatch.clone();
+                                let cancel_task = cancel_dispatch.clone();
+                                let queue_task = user_queue_dispatch.clone();
+                                // Capture Arc<SessionQueue> via the session_queue field accessor
+                                // (runner_dispatch stays alive; Arc<SessionQueue> clone is cheap).
+                                let session_queue_task = runner_dispatch.session_queue.clone();
+                                let session_key_for_worker = session_key_task.clone();
 
-                                    drop(permit);
+                                // D-19 (M4 locked): notify_for is pub async fn; workers map uses
+                                // tokio::sync::Mutex. WorkerSpawned invariant guarantees Some here.
+                                let notify_task: std::sync::Arc<tokio::sync::Notify> = queue_task
+                                    .notify_for(&session_key_for_worker)
+                                    .await
+                                    .expect("notify_for must return Some immediately after WorkerSpawned (Plan 01 invariant)");
 
-                                    if let Err(e) = result {
-                                        error!(
-                                            chat_id = %queued_msg.event.chat_id,
-                                            error = %e,
-                                            "Handler error for message"
-                                        );
+                                // Plan 03 (Phase 22.4.2.1): spawn into worker_join_set so
+                                // per-chat workers are tracked and drained on shutdown.
+                                worker_join_set_dispatch.lock().await.spawn(async move {
+                                    // Full Notify-based pop-loop (D-04, D-05, D-06).
+                                    loop {
+                                        // D-06 step 1+2: pop or wait for Notify wake / cancellation.
+                                        let next_event = match session_queue_task.pop(&session_key_for_worker) {
+                                            Some(ev) => ev,
+                                            None => {
+                                                // Queue empty — park until dispatch signals or cancel fires.
+                                                tokio::select! {
+                                                    _ = cancel_task.cancelled() => break,
+                                                    _ = notify_task.notified() => continue, // re-poll the queue
+                                                }
+                                            }
+                                        };
+
+                                        // Cancellation check after pop (cancel may have fired between
+                                        // pop and this point — T-36.17.2-03 acknowledged, window is μs).
+                                        if cancel_task.is_cancelled() { break; }
+
+                                        // Acquire semaphore permit (TG-06 — bounded concurrency).
+                                        let permit = match sem_task.acquire().await {
+                                            Ok(p) => p,
+                                            Err(_) => break, // semaphore closed on shutdown
+                                        };
+
+                                        // D-06 step 3 + D-08: emit 👀 reaction inline before
+                                        // handle_with_multimodal. Inline await means "👀 reaches
+                                        // Telegram before the placeholder █ send" — strict ordering
+                                        // preferred over fire-and-forget (see CONTEXT.md Claude's Discretion).
+                                        // D-09: warn-and-ignore on failure; must not block the turn.
+                                        if let Err(e) = adapter_task
+                                            .add_reaction(&next_event.chat_id, &next_event.message_id, "👀")
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                chat_id = %next_event.chat_id,
+                                                message_id = %next_event.message_id,
+                                                error = %e,
+                                                "Worker: 👀 reaction emission failed; continuing (Phase 36.17.2 D-09)"
+                                            );
+                                        }
+
+                                        // Reconstruct multimodal payload from UQM sidecar (M1 locked by Plan 01).
+                                        // FIFO lockstep with SessionQueue::pop — one take_multimodal per pop.
+                                        // None means plain-text message with no multimodal payload.
+                                        let (text_prefix, image_data_uri) = queue_task
+                                            .take_multimodal(&session_key_for_worker)
+                                            .await
+                                            .unwrap_or((None, None));
+                                        let processed = crate::multimodal::ProcessedAttachments {
+                                            text_prefix,
+                                            image_data_uri,
+                                        };
+
+                                        let result = handler_task
+                                            .handle_with_multimodal(
+                                                &next_event,
+                                                adapter_task.clone(),
+                                                cancel_task.child_token(),
+                                                processed,
+                                            )
+                                            .await;
+
+                                        if let Err(e) = result {
+                                            error!(
+                                                chat_id = %next_event.chat_id,
+                                                error = %e,
+                                                "Handler error for message (Phase 36.17.2 worker pop-loop)"
+                                            );
+                                        }
+
+                                        // D-07: post-turn drain_pending call removed.
+                                        // The next loop iteration pops the next event from
+                                        // session_queue_task if any arrived during the turn —
+                                        // that is the natural drain.
+
+                                        drop(permit);
+
+                                        // D-05: cancellation check between iterations.
+                                        if cancel_task.is_cancelled() { break; }
                                     }
 
-                                    // Check if we should stop
-                                    if cancel_task.is_cancelled() {
-                                        break;
-                                    }
-                                }
-                                // Worker done — remove from queue manager
-                                queue_task.remove(&chat_id_task).await;
-                            });
+                                    // D-16: worker exits — clean up UQM map entry
+                                    // (workers + pending_multimodal both purged by remove).
+                                    queue_task.remove(&session_key_for_worker).await;
+                                });
+                            }
+                            Err(QueueError::CapacityReached { .. }) => {
+                                // Cap-hit UX (❌ + chat reply) already fired inside UQM::dispatch (D-11).
+                                // Dispatch loop's only job here is to log and continue.
+                                // Telegram offset already advanced (Pitfall 6) — no re-delivery risk.
+                                tracing::warn!(
+                                    chat_id = %event_chat_id,
+                                    "Dispatch: queue full, message dropped (Phase 36.17.2 D-11)"
+                                );
+                            }
                         }
                     }
                 }
@@ -869,7 +1290,158 @@ impl GatewayRunner {
             info!("Cron tick task started (60s interval, delegating to ironhermes-cron-runner)");
         }
 
-        // --- 11. Run dispatch loop concurrently with shutdown signal ---
+        // --- Step 11 (Phase 36.3.7 D-09): kanban dispatcher ---
+        //
+        // Deserialize the raw `config.kanban` serde_yaml::Value into
+        // KanbanConfig. Uses all-defaults if the field is absent/null (pre-36.3.7
+        // configs). The gateway's `ironhermes-core` Config stores it as
+        // serde_yaml::Value to avoid a circular crate dependency (ironhermes-kanban
+        // already depends on ironhermes-core).
+        let kanban_config: ironhermes_kanban::KanbanConfig =
+            if self.config.kanban.is_null() {
+                ironhermes_kanban::KanbanConfig::default()
+            } else {
+                match serde_yaml::from_value::<ironhermes_kanban::KanbanConfig>(
+                    self.config.kanban.clone(),
+                ) {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        warn!("Failed to parse kanban config; using defaults: {e}");
+                        ironhermes_kanban::KanbanConfig::default()
+                    }
+                }
+            };
+        let dispatch_in_gw_env = std::env::var("HERMES_KANBAN_DISPATCH_IN_GATEWAY")
+            .map(|v| v != "0")
+            .unwrap_or(true);
+
+        // -----------------------------------------------------------------------
+        // Phase 36.3.7.5 BUG-36.3.7.5-04: store-arc lift.
+        //
+        // Both the dispatcher (Phase 36.3.7) AND the notifier (Phase 36.3.7.5)
+        // need an Arc<TokioMutex<KanbanStore>>. The dispatcher's previous block
+        // opened the store INSIDE its own gating check; the notifier needs the
+        // SAME Arc. Hoist `KanbanStore::open_default()` to a single site above
+        // both spawns so each branch can call `.clone()` on the shared Arc.
+        //
+        // This is a SEMANTICS-PRESERVING refactor for the dispatcher: the runtime
+        // behavior of `run_dispatch_loop(...)` is unchanged. Only the construction
+        // site of the Arc moves. The dispatcher's `dispatch_in_gateway` gate +
+        // env-flag gate + interval-seconds log line are preserved verbatim.
+        // -----------------------------------------------------------------------
+        // Phase 36.3.7.13 D-A1: env-bridged open closes F-01 on the gateway
+        // background dispatcher loop. Workers spawned from here read
+        // HERMES_KANBAN_DB to resolve the same DB path.
+        match ironhermes_kanban::KanbanStore::open_from_env() {
+            Ok(store) => {
+                let kanban_store_arc =
+                    std::sync::Arc::new(tokio::sync::Mutex::new(store));
+
+                // --- 11a. Kanban dispatcher (Phase 36.3.7 D-09) ---
+                if kanban_config.dispatch_in_gateway && dispatch_in_gw_env {
+                    let kanban_cancel = self.cancel.clone();
+                    let interval_secs = kanban_config.dispatch_interval_seconds;
+                    let dispatcher_ctx =
+                        std::sync::Arc::new(ironhermes_kanban::DispatcherContext::new(
+                            kanban_store_arc.clone(),
+                            kanban_config.clone(),
+                        ));
+                    join_set.spawn(async move {
+                        ironhermes_kanban::run_dispatch_loop(dispatcher_ctx, kanban_cancel).await;
+                    });
+                    info!("Kanban dispatch task started ({}s interval)", interval_secs);
+                } else if !dispatch_in_gw_env {
+                    info!("Kanban dispatcher disabled via HERMES_KANBAN_DISPATCH_IN_GATEWAY=0");
+                } else {
+                    // dispatch_in_gateway = false in config
+                    debug!("Kanban dispatcher disabled via config (dispatch_in_gateway = false)");
+                }
+
+                // -----------------------------------------------------------------------
+                // Phase 36.3.7.5 BUG-36.3.7.5-04: Gateway notifier spawn (gated on config).
+                //
+                // Mirrors the dispatcher spawn shape above (canonical).
+                // - Gate: notification_sources = Some(non_empty) AND at least one
+                //   platform in that list intersects with the enabled gateway
+                //   platforms set (case-insensitive). Default-off preserved.
+                // - On gate-fail: log ONE info line + skip; gateway continues
+                //   without the notifier loop.
+                // - On gate-pass: spawn run_notifier_loop into join_set with a
+                //   send_fn closure wrapping the enabled adapters by platform.
+                //
+                // The send_fn is the kanban->gateway boundary closure — keeps the
+                // ironhermes-kanban crate free of any compile-time dep on
+                // ironhermes-gateway. See Plan 02 SUMMARY crate-isolation audit.
+                // -----------------------------------------------------------------------
+                let enabled_platforms: Vec<String> =
+                    collect_enabled_platform_names(&self.config, &adapter);
+                let gate = crate::notifier_gating::compute_notifier_gate(
+                    kanban_config.notification_sources.as_deref(),
+                    &enabled_platforms,
+                );
+                match gate {
+                    crate::notifier_gating::NotifierGate::DisabledNoSources => {
+                        info!(
+                            "kanban notifier disabled (notification_sources not configured)"
+                        );
+                    }
+                    crate::notifier_gating::NotifierGate::DisabledNoOverlap {
+                        wanted,
+                        enabled,
+                    } => {
+                        info!(
+                            wanted = ?wanted,
+                            enabled = ?enabled,
+                            "kanban notifier disabled (no enabled platform overlap)"
+                        );
+                    }
+                    crate::notifier_gating::NotifierGate::Enabled { sources } => {
+                        // Build the send_fn closure: take an owned snapshot of the
+                        // gateway's adapter handles at spawn time. The notifier
+                        // loop's lifetime can outlive `start()`'s stack frame, so
+                        // capturing references would not work — Arcs only.
+                        let adapter_snapshot: Vec<(
+                            String,
+                            std::sync::Arc<dyn crate::adapter::PlatformAdapter>,
+                        )> = build_adapter_snapshot(&adapter);
+                        let send_fn = build_notifier_send_fn(adapter_snapshot);
+                        let poll_seconds = kanban_config.notifier_poll_seconds;
+                        let notifier_ctx = std::sync::Arc::new(
+                            ironhermes_kanban::NotifierContext::new(
+                                kanban_store_arc.clone(),
+                                poll_seconds,
+                                send_fn,
+                            ),
+                        );
+                        let notifier_cancel = self.cancel.clone();
+                        join_set.spawn(async move {
+                            ironhermes_kanban::run_notifier_loop(
+                                notifier_ctx,
+                                notifier_cancel,
+                            )
+                            .await;
+                        });
+                        info!(
+                            sources = ?sources,
+                            poll_seconds = poll_seconds,
+                            "kanban notifier loop started"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                // Preserves INV-36.3.7-08-05 (tests/kanban_dispatcher_spawned.rs:159) —
+                // the substring "kanban dispatcher will NOT start" must remain present
+                // so the non-fatal path is greppable. Notifier shares the same store
+                // and is also skipped here (Phase 36.3.7.5 BUG-36.3.7.5-04 store-arc lift).
+                warn!(
+                    error = %e,
+                    "Failed to open kanban.db; kanban dispatcher will NOT start (gateway continues; notifier also skipped)"
+                );
+            }
+        }
+
+        // --- 12. Run dispatch loop concurrently with shutdown signal ---
         // dispatch_future processes messages; ctrl+c or cancel token stops everything.
         tokio::select! {
             _ = dispatch_future => {
@@ -899,7 +1471,10 @@ impl GatewayRunner {
         }
 
         // Propagate cancellation to all subtasks
-        self.cancel.cancel();
+        // Phase 36.17.1 Plan 04 (D-03): set is_draining BEFORE cancel so the
+        // queue keeps accepting late arrivals (preserve-AND-accept). Closes
+        // T-36.17.1-03 (lost-update during drain-mode transition).
+        self.drain_for_restart();
 
         // Plan 03 (Phase 22.4.2.1): drain per-chat worker tasks with bounded 5s timeout (D-11).
         // Workers observe cancel_task.is_cancelled() after each agent turn; the 5s timeout covers
@@ -1066,6 +1641,117 @@ fn resolve_token_with_env(token: &Option<String>, env_var: &str) -> Option<Strin
         }
     }
     std::env::var(env_var).ok()
+}
+
+// -------------------------------------------------------------------------
+// Phase 36.3.7.5 BUG-36.3.7.5-04: notifier-spawn support helpers.
+//
+// `collect_enabled_platform_names` reads the gateway's `Config` + the live
+// Telegram adapter Arc to compute the set of enabled-platform names used by
+// the spawn-gating check (`compute_notifier_gate`).
+//
+// `build_adapter_snapshot` produces an owned `Vec<(String, Arc<dyn PlatformAdapter>)>`
+// for the `SendFn` closure — captured by value so the closure can outlive
+// `start()`'s stack frame. Currently includes ONLY the Telegram adapter
+// (Discord/Slack adapters are constructed inside their own spawned tasks and
+// are not retained as runner-scope Arcs in this iteration; subscriptions
+// naming those platforms will hit the "platform not enabled in gateway" arm
+// of the send_fn closure and the notifier will log + drop per locked policy).
+//
+// `build_notifier_send_fn` constructs the `ironhermes_kanban::SendFn`
+// trait-object closure: case-insensitive string match on `platform`, route
+// to the matching `PlatformAdapter::send_message`, or return `Err` so the
+// notifier's log-and-drop policy applies.
+// -------------------------------------------------------------------------
+
+/// Enumerate the gateway's enabled platform names from the parsed `Config`.
+///
+/// "Enabled" = the platform appears in `config.gateway.platforms`. The Telegram
+/// adapter is ALWAYS enabled (constructed at `start()` entry); Discord/Slack
+/// are enabled iff their config sections AND token environments resolve at
+/// startup. Conservative semantics: include any platform key present in the
+/// platforms map so the gate check sees the operator's intent.
+fn collect_enabled_platform_names(
+    config: &ironhermes_core::Config,
+    _telegram_adapter: &std::sync::Arc<crate::telegram::TelegramAdapter>,
+) -> Vec<String> {
+    // Start from the configured platforms map. Telegram is the canonical
+    // entry — if the operator wrote `platforms.telegram`, the platform is
+    // enabled by the time we reach this point (start() would have failed
+    // earlier if the token were unresolvable). Discord/Slack are enabled
+    // when their config sections exist.
+    let mut names: Vec<String> = config
+        .gateway
+        .platforms
+        .keys()
+        .map(|k| k.to_string())
+        .collect();
+    // Always include "telegram" — start() unconditionally builds the
+    // TelegramAdapter, so it is the always-on adapter even if the config
+    // platforms map is missing the explicit `telegram:` key (the
+    // tg_config default-clone above tolerates absence).
+    if !names.iter().any(|n| n.eq_ignore_ascii_case("telegram")) {
+        names.push("telegram".to_string());
+    }
+    names
+}
+
+/// Build an owned snapshot of platform-name → `Arc<dyn PlatformAdapter>` pairs
+/// for the `SendFn` closure. Currently only the Telegram adapter is reachable
+/// as a runner-scope Arc; Discord/Slack adapters live inside their own tokio
+/// tasks (constructed after socket connect). Subscriptions that name a
+/// platform NOT in this snapshot will receive `Err("platform X not enabled
+/// in gateway")` from the closure and the notifier will log+drop the message
+/// per locked policy D-log-and-drop-on-fail.
+fn build_adapter_snapshot(
+    telegram_adapter: &std::sync::Arc<crate::telegram::TelegramAdapter>,
+) -> Vec<(String, std::sync::Arc<dyn crate::adapter::PlatformAdapter>)> {
+    vec![(
+        "telegram".to_string(),
+        telegram_adapter.clone() as std::sync::Arc<dyn crate::adapter::PlatformAdapter>,
+    )]
+}
+
+/// Construct the `ironhermes_kanban::SendFn` trait-object closure.
+///
+/// The closure captures the adapter snapshot by value (owned `Arc<Vec<...>>`).
+/// On each call, performs a case-insensitive linear search for the platform
+/// name; if a match is found, awaits `send_message`; otherwise returns
+/// `Err("platform {p} not enabled in gateway")` which the notifier loop logs
+/// and drops per locked policy.
+fn build_notifier_send_fn(
+    adapters: Vec<(String, std::sync::Arc<dyn crate::adapter::PlatformAdapter>)>,
+) -> ironhermes_kanban::SendFn {
+    let adapters = std::sync::Arc::new(adapters);
+    std::sync::Arc::new(
+        move |platform: &str,
+              chat_id: &str,
+              thread_id_opt: Option<&str>,
+              message: &str| {
+            let adapters = adapters.clone();
+            let platform = platform.to_string();
+            let chat_id = chat_id.to_string();
+            let thread_id_opt = thread_id_opt.map(|s| s.to_string());
+            let message = message.to_string();
+            Box::pin(async move {
+                let adapter = adapters
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(&platform))
+                    .map(|(_, a)| a.clone());
+                match adapter {
+                    Some(a) => a
+                        .send_message(&chat_id, &message, thread_id_opt.as_deref())
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| anyhow::anyhow!(e)),
+                    None => Err(anyhow::anyhow!(
+                        "platform {} not enabled in gateway",
+                        platform
+                    )),
+                }
+            })
+        },
+    )
 }
 
 #[cfg(test)]
@@ -2050,5 +2736,237 @@ mod tests {
             "no 'Available Skills' section must be injected for an empty registry: {}",
             durable
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 36.17.1 Plan 04: drain-mode flag (D-03)
+    //
+    // is_draining: Arc<AtomicBool> on GatewayRunner; drain_for_restart() flips
+    // it to true THEN cancels the cancel token. SessionQueue.try_push has NO
+    // is_draining gate — drain mode is preserve-AND-accept per D-03 and
+    // T-36.17.1-03 closure. The drain helper consolidates the ordering
+    // invariant so source-order audits prove store-before-cancel.
+    // -------------------------------------------------------------------------
+
+    mod drain_mode_tests {
+        use super::*;
+        use ironhermes_core::{MessageEvent, Platform};
+
+        fn make_runner() -> GatewayRunner {
+            let config = Config::default();
+            let resolver = ProviderResolver::build(&config).expect("resolver ok");
+            let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
+            GatewayRunner::new(config, resolver, tool_registry)
+        }
+
+        fn fixture_event(content: &str) -> MessageEvent {
+            MessageEvent {
+                platform: Platform::Telegram,
+                message_id: format!("msg-{content}"),
+                chat_id: "chat-0".to_string(),
+                sender_id: "user-0".to_string(),
+                content: content.to_string(),
+                attachments: Vec::new(),
+                thread_id: None,
+                chat_type: "dm".to_string(),
+                chat_name: None,
+                sender_name: None,
+                replied_to_id: None,
+            }
+        }
+
+        fn drain_key() -> SessionKey {
+            SessionKey::new(Platform::Telegram, "chat-0").with_user("user-0")
+        }
+
+        /// is_draining() defaults to false on a fresh runner — drain mode is
+        /// not entered until drain_for_restart() flips the flag explicitly.
+        #[test]
+        fn test_is_draining_starts_false() {
+            let runner = make_runner();
+            assert!(
+                !runner.is_draining(),
+                "fresh runner must have is_draining() == false"
+            );
+        }
+
+        /// drain_for_restart() flips is_draining to true AND cancels the cancel
+        /// token, in that order. The ordering is the T-36.17.1-03 mitigation:
+        /// any concurrent try_push observing is_draining=true is guaranteed to
+        /// see cancel NOT YET fired (and the queue still accepts the push
+        /// per D-03 preserve-AND-accept).
+        #[test]
+        fn test_drain_for_restart_flips_flag() {
+            let runner = make_runner();
+            // Snapshot the cancel token clone BEFORE drain — cancellation
+            // observable on this clone proves drain_for_restart cancelled the
+            // underlying token.
+            let cancel_clone = runner.cancel.clone();
+            assert!(
+                !cancel_clone.is_cancelled(),
+                "cancel must not be fired before drain_for_restart()"
+            );
+
+            runner.drain_for_restart();
+
+            assert!(
+                runner.is_draining(),
+                "drain_for_restart() must flip is_draining to true"
+            );
+            assert!(
+                cancel_clone.is_cancelled(),
+                "drain_for_restart() must cancel the cancel token"
+            );
+        }
+
+        /// Drain mode preserves existing queue contents — flipping is_draining
+        /// to true does NOT clear the per-session queue. Closes T-36.17.1-03
+        /// (lost-update during drain-mode transition).
+        #[test]
+        fn test_drain_mode_preserves_queue() {
+            let runner = make_runner();
+            let key = drain_key();
+
+            runner.try_enqueue(&key, fixture_event("a")).unwrap();
+            runner.try_enqueue(&key, fixture_event("b")).unwrap();
+            runner.try_enqueue(&key, fixture_event("c")).unwrap();
+            assert_eq!(runner.queue_len(&key), 3);
+
+            runner.drain_for_restart();
+
+            assert!(runner.is_draining(), "drain mode must be entered");
+            assert_eq!(
+                runner.queue_len(&key),
+                3,
+                "drain_for_restart must NOT clear the queue (D-03 preserve)"
+            );
+        }
+
+        /// Drain mode continues to accept new pushes (D-03 preserve-AND-accept).
+        /// SessionQueue.try_push has NO is_draining gate, so a fresh enqueue
+        /// after drain_for_restart() succeeds and grows the queue. This is the
+        /// preserve-AND-accept contract: dropping the new push would lose user
+        /// input arriving in the brief window between drain entry and process
+        /// exit.
+        #[test]
+        fn test_drain_mode_accepts_new_pushes() {
+            let runner = make_runner();
+            let key = drain_key();
+
+            runner.try_enqueue(&key, fixture_event("before-drain")).unwrap();
+            assert_eq!(runner.queue_len(&key), 1);
+
+            runner.drain_for_restart();
+            assert!(runner.is_draining(), "drain mode must be entered");
+
+            // Push in drain mode must succeed (D-03 preserve-AND-accept).
+            let result = runner.try_enqueue(&key, fixture_event("during-drain"));
+            assert!(
+                result.is_ok(),
+                "try_enqueue during drain must return Ok (D-03 preserve-AND-accept), got {result:?}"
+            );
+            assert_eq!(
+                runner.queue_len(&key),
+                2,
+                "queue must grow when push accepted during drain"
+            );
+
+            // FIFO order preserved across the drain transition.
+            assert_eq!(
+                runner.dequeue(&key).unwrap().content,
+                "before-drain",
+                "FIFO order must preserve arrival order across drain entry"
+            );
+            assert_eq!(
+                runner.dequeue(&key).unwrap().content,
+                "during-drain",
+                "FIFO order must preserve arrival order across drain entry"
+            );
+        }
+
+        /// Source-order audit: in `drain_for_restart`, `is_draining.store(true,
+        /// ...)` MUST precede `self.cancel.cancel()`. This is the canonical
+        /// T-36.17.1-03 mitigation. Locking it with a source grep guards
+        /// against future refactors that silently reverse the order.
+        #[test]
+        fn drain_for_restart_stores_flag_before_cancel() {
+            let src = include_str!("runner.rs");
+
+            // Find the drain_for_restart function body by locating its sig.
+            let sig = "pub fn drain_for_restart";
+            let start = src
+                .find(sig)
+                .expect("drain_for_restart must exist on GatewayRunner");
+            // The function is short — first ~10 lines after the signature
+            // suffice. Capture the body span.
+            let body_window = &src[start..start + 1024.min(src.len() - start)];
+
+            let store_idx = body_window
+                .find("is_draining.store(true")
+                .expect("drain_for_restart body must contain is_draining.store(true, …)");
+            let cancel_idx = body_window
+                .find("cancel.cancel()")
+                .expect("drain_for_restart body must contain cancel.cancel()");
+
+            assert!(
+                store_idx < cancel_idx,
+                "T-36.17.1-03: is_draining.store(true) must PRECEDE cancel.cancel() \
+                 in drain_for_restart body (store_idx={store_idx}, cancel_idx={cancel_idx})"
+            );
+        }
+
+        /// Source-order audit: the shutdown sequence calls
+        /// `self.drain_for_restart()` (not the bare `self.cancel.cancel()`),
+        /// so the flag-flip-then-cancel ordering is enforced at the only
+        /// graceful shutdown call site (~runner.rs:1105). Bare cancel.cancel()
+        /// is still allowed in test code and forced-abort paths.
+        #[test]
+        fn shutdown_sequence_uses_drain_for_restart() {
+            let src = include_str!("runner.rs");
+            // The graceful shutdown call must use drain_for_restart, not the
+            // bare cancel.cancel(). The exact anchor: the "Propagate cancellation
+            // to all subtasks" comment is the marker for the shutdown injection
+            // point per the Phase 21.2 Plan 11 invariant. We scan a window
+            // generous enough to span the comment block + the actual call line
+            // (up to ~1KB) but small enough that an unrelated
+            // `drain_for_restart` token far away cannot satisfy the assertion.
+            let anchor = "// Propagate cancellation to all subtasks";
+            let anchor_idx = src
+                .find(anchor)
+                .expect("shutdown anchor comment must exist");
+            let end = (anchor_idx + 1024).min(src.len());
+            let window = &src[anchor_idx..end];
+            // First, the bare `self.cancel.cancel();` MUST NOT be the next call.
+            // (Comments mentioning `self.cancel.cancel()` are fine — only the
+            // statement form is forbidden.)
+            assert!(
+                !window.contains("self.cancel.cancel();"),
+                "Phase 36.17.1 D-03: the bare self.cancel.cancel(); call must NOT \
+                 appear after the 'Propagate cancellation' anchor (use \
+                 self.drain_for_restart(); instead). Window: {window}"
+            );
+            // Second, drain_for_restart must be the chosen call.
+            assert!(
+                window.contains("self.drain_for_restart();"),
+                "Phase 36.17.1 D-03: graceful shutdown after the 'Propagate cancellation' \
+                 anchor must call self.drain_for_restart(); — got window: {window}"
+            );
+        }
+
+        /// Contract guard: SessionQueue.try_push must NOT consult is_draining.
+        /// The preserve-AND-accept invariant (D-03) is enforced by the absence
+        /// of an `is_draining` gate inside the queue itself. Locked by
+        /// source-grep so a future refactor that adds `if is_draining` inside
+        /// try_push trips this test.
+        #[test]
+        fn session_queue_try_push_has_no_is_draining_gate() {
+            let src = include_str!("session_queue.rs");
+            assert!(
+                !src.contains("is_draining"),
+                "T-36.17.1-03 contract violation: SessionQueue must NOT reference \
+                 is_draining (preserve-AND-accept per D-03). Found 'is_draining' \
+                 in session_queue.rs."
+            );
+        }
     }
 }

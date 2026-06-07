@@ -270,7 +270,7 @@ Primary implementation files audited:
 
 **ADV-03 (execute_code TCP bypass): Raw TCP possible from within execute_code sandbox**
 - The RPC sub-registry correctly excludes `hexapod_tcp`.
-- However, Python code running inside `execute_code` can open raw TCP sockets (e.g., `import socket; s.connect(("192.168.1.42", 5002))`).
+- However, Python code running inside `execute_code` can open raw TCP sockets (e.g., `import socket; s.connect(("127.0.0.1", 5002))`).
 - This bypasses the allowlist entirely. Mitigation requires network namespace isolation or a seccomp profile on the execute_code sandbox — out of scope for Phase 1.
 
 ---

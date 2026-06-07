@@ -14,6 +14,16 @@ pub struct ToolsetRow {
     pub available_count: usize,
     /// Human-readable member summary, e.g. "web_search ✓, web_read ✗ FIRECRAWL_API_KEY"
     pub member_summary: String,
+    /// Phase 36.17.7 D-06 (REVISION BLOCKER 2 — Path B): registration state
+    /// for the `voice` toolset's TTS tools. One of:
+    ///   - `"Live"` — a real per-session SessionKey has registered TTS tools.
+    ///   - `"Inspection"` — the CLI inspection sentinel
+    ///     `(Platform::Local, "inspect")` registered TTS tools (no live session).
+    ///   - `"—"` — not applicable (non-voice rows) or not registered.
+    ///
+    /// Builder helpers compute this from `CommandContext.tts_registration_status`
+    /// (or default to `Inspection` on the CLI inspection path).
+    pub registered: &'static str,
 }
 
 /// Render the aligned-columns table for `hermes toolset list` / `/toolset list`.
@@ -29,8 +39,11 @@ pub struct ToolsetRow {
 /// the slash `/toolset list` arm (handlers.rs) call this for a single
 /// source-of-truth rendered table.
 pub fn render_toolset_list(rows: Vec<ToolsetRow>) -> String {
+    // Phase 36.17.7 D-06: Registered column appended after AVAILABLE.
+    // Header widths kept stable for legacy renderers; new column has its own
+    // fixed width.
     let header = format!(
-        "{:<10} {:<10} {:<7} {}\n",
+        "{:<10} {:<10} {:<7} {:<11} REGISTERED\n",
         "TOOLSET", "STATUS", "TOOLS", "AVAILABLE"
     );
 
@@ -43,9 +56,12 @@ pub fn render_toolset_list(rows: Vec<ToolsetRow>) -> String {
         } else {
             format!(" ({})", row.member_summary)
         };
+        // Render: NAME STATUS TOOLS  AVAILABLE-COL[detail trailing]  REGISTERED
+        // The detail (member summary) trails AVAILABLE to preserve legacy
+        // wrapping; REGISTERED is appended after the wrapping detail.
         out.push_str(&format!(
-            "{:<10} {:<10} {:<7} {}{}\n",
-            row.name, status, row.member_count, avail, detail
+            "{:<10} {:<10} {:<7} {}{}  {}\n",
+            row.name, status, row.member_count, avail, detail, row.registered
         ));
     }
     out
@@ -56,9 +72,10 @@ pub fn render_toolset_list(rows: Vec<ToolsetRow>) -> String {
 /// `members` is a list of `(tool_name, is_available, prereq_description)` triples.
 pub fn render_toolset_show(row: &ToolsetRow, members: &[(String, bool, String)]) -> String {
     let status = if row.enabled { "enabled" } else { "disabled" };
+    // Phase 36.17.7 D-06: surface the Registered state in the detail view too.
     let mut out = format!(
-        "Toolset: {}\nStatus:  {}\nTools:   {}/{} available\n\nMembers:\n",
-        row.name, status, row.available_count, row.member_count
+        "Toolset:    {}\nStatus:     {}\nRegistered: {}\nTools:      {}/{} available\n\nMembers:\n",
+        row.name, status, row.registered, row.available_count, row.member_count
     );
     for (name, avail, prereq) in members {
         let mark = if *avail { "\u{2713}" } else { "\u{2717}" };
@@ -92,6 +109,9 @@ mod tests {
             member_count: total,
             available_count: avail,
             member_summary: summary.to_string(),
+            // Phase 36.17.7 D-06: default test rows render the "—" sentinel —
+            // the per-test setup overrides this for Voice rows.
+            registered: "\u{2014}",
         }
     }
 

@@ -1,42 +1,23 @@
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::AtomicBool;
 
 use chrono::{DateTime, Utc};
-use ironhermes_core::{ChatMessage, Platform};
+use ironhermes_core::ChatMessage;
 use ironhermes_state::StateStore;
 use std::collections::HashMap;
 use tracing::{debug, warn};
 
-/// Unique key for a gateway session (platform + chat_id + optional user_id).
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct SessionKey {
-    pub platform: Platform,
-    pub chat_id: String,
-    pub user_id: Option<String>,
-}
-
-impl SessionKey {
-    pub fn new(platform: Platform, chat_id: impl Into<String>) -> Self {
-        Self {
-            platform,
-            chat_id: chat_id.into(),
-            user_id: None,
-        }
-    }
-
-    pub fn with_user(mut self, user_id: impl Into<String>) -> Self {
-        self.user_id = Some(user_id.into());
-        self
-    }
-
-    pub fn to_string_key(&self) -> String {
-        match &self.user_id {
-            Some(uid) => format!("{}:{}:{}", self.platform, self.chat_id, uid),
-            None => format!("{}:{}", self.platform, self.chat_id),
-        }
-    }
-}
+// Phase 36.17.3 (Resolution 3 / D-01): `SessionKey` was relocated into
+// `ironhermes-core::session` so every `MessageQueue<K>` consumer (gateway,
+// TUI, future web/Discord/Slack/REST) shares the same canonical key. The
+// re-export below preserves backward compatibility for the gateway-internal
+// `use crate::session::SessionKey;` call sites in `session_queue.rs` and
+// `user_queue.rs`, and for any downstream `use ironhermes_gateway::session::SessionKey;`.
+pub use ironhermes_core::session::SessionKey;
 
 /// An active gateway conversation session.
+///
+/// Phase 36: `running` flag drives per-session agent guard (D-03/D-05/D-06).
 #[derive(Debug, Clone)]
 pub struct GatewaySession {
     pub key: SessionKey,
@@ -45,6 +26,10 @@ pub struct GatewaySession {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub model: String,
+    /// Per-session running flag (D-03/D-05, Phase 36).
+    /// `RunningAgentGuard` sets this true on construction and false on Drop (D-06).
+    /// Never set/cleared directly — RAII-only contract prevents "forgot a branch" bugs.
+    pub running: Arc<AtomicBool>,
 }
 
 impl GatewaySession {
@@ -57,6 +42,7 @@ impl GatewaySession {
             created_at: now,
             updated_at: now,
             model: model.into(),
+            running: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -235,6 +221,21 @@ impl SessionStore {
 
     pub fn get(&self, key: &SessionKey) -> Option<&GatewaySession> {
         self.sessions.get(&key.to_string_key())
+    }
+
+    /// Phase 36 (D-03/D-05/D-06): return the per-session running flag Arc.
+    ///
+    /// If the session exists, returns a clone of its `running` field.
+    /// If the session does not yet exist (first message of a chat), returns a fresh
+    /// `Arc::new(AtomicBool::new(false))` — no agent turn is in-flight yet, so
+    /// false is the correct value. The caller can hand this to `CommandContext`;
+    /// subsequent messages will find the real session entry once `run_agent`
+    /// calls `get_or_create`.
+    pub fn get_running_flag(&self, key: &SessionKey) -> Arc<AtomicBool> {
+        self.sessions
+            .get(&key.to_string_key())
+            .map(|s| s.running.clone())
+            .unwrap_or_else(|| Arc::new(AtomicBool::new(false)))
     }
 
     pub fn get_mut(&mut self, key: &SessionKey) -> Option<&mut GatewaySession> {

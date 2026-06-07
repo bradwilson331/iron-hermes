@@ -319,22 +319,27 @@ fn btw_no_args_returns_usage() {
 
 // ── /queue smoke tests ────────────────────────────────────────────────────────
 
-/// INV-22.4-59 behavioral: /queue with no agent_loop context returns informational text.
+/// INV-22.4-59 behavioral (Phase 36.17.1 D-01.c / D-08 amended): the agent_loop
+/// gate was removed from `cmd_queue` because `agent_loop` is never set in the
+/// gateway `CommandContext` — the real gate is `try_push` at the gateway
+/// boundary. The handler now returns `CommandResult::Queued { message }` for
+/// any non-empty args; the gateway / tui_rata layer intercepts that variant
+/// and performs the actual queue push side-effect.
 #[test]
-fn queue_no_agent_loop_returns_informational() {
+fn queue_with_args_returns_queued_variant() {
     let ctx = make_ctx(false);
     let router = make_router();
     let cmd = find_cmd("queue");
     let result =
         ironhermes_core::commands::handlers::dispatch(&cmd, &["later task"], &ctx, &router);
     match result {
-        CommandResult::Output(s) => {
-            assert!(
-                s.contains("not configured") || s.contains("Agent loop"),
-                "Expected not-configured message, got: {s}"
+        CommandResult::Queued { message } => {
+            assert_eq!(
+                message, "later task",
+                "queued message joins args verbatim"
             );
         }
-        other => panic!("Expected Output from /queue, got {:?}", other),
+        other => panic!("Expected Queued {{ message }} from /queue, got {:?}", other),
     }
 }
 

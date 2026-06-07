@@ -30,6 +30,9 @@ pub enum ChatBubbleKind {
     Error,
     // Phase 26.7.2 D-02: history/live boundary marker — renders as a section-label rule, no avatar, no bubble body
     Divider,
+    // Phase 36.17.7 D-02-a/b/f: inline audio control bubble. `audio_src` holds the
+    // Blob URL created from the binary WS frame; `audio_mime` is typically "audio/mpeg".
+    Audio,
 }
 
 /// One tool-call progress row inside an assistant bubble.
@@ -56,6 +59,10 @@ pub struct ChatBubble {
     pub kind: ChatBubbleKind,
     pub text: String,
     pub tool_rows: Vec<ToolRow>,
+    // Phase 36.17.7 D-02-a: Blob URL produced by the WS Binary recv arm
+    // (from create_object_url_with_blob) plus MIME type for the <audio> tag.
+    pub audio_src: Option<String>,
+    pub audio_mime: Option<String>,
 }
 
 impl ChatBubble {
@@ -65,6 +72,8 @@ impl ChatBubble {
             kind: ChatBubbleKind::User,
             text,
             tool_rows: vec![],
+            audio_src: None,
+            audio_mime: None,
         }
     }
     pub fn assistant(id: u64, text: String) -> Self {
@@ -73,6 +82,8 @@ impl ChatBubble {
             kind: ChatBubbleKind::Assistant,
             text,
             tool_rows: vec![],
+            audio_src: None,
+            audio_mime: None,
         }
     }
     pub fn error(id: u64, text: String) -> Self {
@@ -81,6 +92,21 @@ impl ChatBubble {
             kind: ChatBubbleKind::Error,
             text,
             tool_rows: vec![],
+            audio_src: None,
+            audio_mime: None,
+        }
+    }
+    /// Phase 36.17.7 D-02-a/b: audio bubble carrying a Blob URL and MIME.
+    /// Constructed by HermesApp's Binary recv arm after deserializing
+    /// `ChatStreamEvent::AudioOut` and calling `create_object_url_with_blob`.
+    pub fn audio(id: u64, src: String, mime: String) -> Self {
+        Self {
+            id,
+            kind: ChatBubbleKind::Audio,
+            text: String::new(),
+            tool_rows: vec![],
+            audio_src: Some(src),
+            audio_mime: Some(mime),
         }
     }
 }
@@ -207,6 +233,9 @@ pub fn ScreenChat(is_active: bool) -> Element {
                         kind: ChatBubbleKind::Divider,
                         text: String::new(),
                         tool_rows: vec![],
+                        // Phase 36.17.7 D-02-a/b/f: dividers don't carry audio.
+                        audio_src: None,
+                        audio_mime: None,
                     });
                     id_val += 1;
 
@@ -282,6 +311,7 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                     ChatBubbleKind::Assistant => "chat-msg assistant",
                                     ChatBubbleKind::Error     => "chat-msg error",
                                     ChatBubbleKind::Divider   => "chat-divider",
+                                    ChatBubbleKind::Audio     => "chat-msg assistant audio",
                                 },
 
                                 // Avatar — the shield-caduceus PNG for the
@@ -300,6 +330,11 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                         div { class: "avatar error", "!" }
                                     },
                                     ChatBubbleKind::Divider => rsx! {},
+                                    ChatBubbleKind::Audio => rsx! {
+                                        div { class: "avatar logo",
+                                            img { src: AVATAR_LOGO, alt: "" }
+                                        }
+                                    },
                                 }
 
                                 // Bubble body + embedded tool-call progress
@@ -314,7 +349,21 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                                 ChatBubbleKind::Assistant => "chat-bubble is-assistant",
                                                 ChatBubbleKind::Error     => "chat-bubble is-error",
                                                 ChatBubbleKind::Divider   => "chat-bubble is-divider",
+                                                ChatBubbleKind::Audio     => "chat-bubble is-assistant is-audio",
                                             },
+                                            // Phase 36.17.7 D-02-a/b/f: render inline <audio controls>
+                                            // when this bubble carries a Blob URL. In Dioxus RSX, the
+                                            // {audio_src} expression is RSX interpolation of the local
+                                            // `audio_src` String — NOT a literal "{audio_src}" string.
+                                            // Equivalent in non-RSX code: format!("{}", audio_src).
+                                            // RSX BRACE INTERPOLATION note (MED 10).
+                                            if let (Some(audio_src), Some(audio_mime)) = (b.audio_src.clone(), b.audio_mime.clone()) {
+                                                audio {
+                                                    controls: true,
+                                                    src: "{audio_src}",
+                                                    "type": "{audio_mime}",
+                                                }
+                                            }
                                             // `{b.text}` is rendered as a plain
                                             // Dioxus text node — auto-escaped,
                                             // no `dangerous_inner_html` (T-26.2.1-19).

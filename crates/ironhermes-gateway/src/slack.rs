@@ -89,14 +89,29 @@ impl PlatformAdapter for SlackAdapter {
         Ok(())
     }
 
-    async fn edit_message_markdown(
+    async fn edit_message_markdown_v2(
         &self,
         chat_id: &str,
         message_id: &str,
         content: &str,
     ) -> Result<()> {
-        // Slack auto-formats mrkdwn natively — same code path as plain edit.
+        // Phase 36.17.2.2-04: renamed from `edit_message_markdown` per D-01.
+        // Slack uses its own `mrkdwn` dialect — same code path as the plain
+        // edit. The MarkdownV2-escaped body passes through unchanged; per
+        // CONTEXT.md scope, Slack media routing and final-text escape
+        // application are out of scope.
         self.edit_message(chat_id, message_id, content).await
+    }
+
+    async fn send_message_markdown_v2(
+        &self,
+        chat_id: &str,
+        content: &str,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse> {
+        // Phase 36.17.2.2-05: Slack uses its own `mrkdwn` dialect — no
+        // MarkdownV2 concept. Delegate to plain `send_message`.
+        self.send_message(chat_id, content, thread_id).await
     }
 
     async fn delete_message(&self, chat_id: &str, message_id: &str) -> Result<()> {

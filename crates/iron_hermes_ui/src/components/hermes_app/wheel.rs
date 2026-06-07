@@ -2,11 +2,14 @@
 //!
 //! Ports `crates/iron_hermes_ui/filestoimport/ironhermes-design-system/project/wheel-v2.js`
 //! into a self-contained Dioxus 0.7 component. Renders a draggable, resizable
-//! 10-wedge SVG wheel with hover/click navigation. Geometry constants match
-//! `wheel-v2.js` lines 26-37 byte-for-byte.
+//! 11-wedge SVG wheel with hover/click navigation. Geometry constants match
+//! `wheel-v2.js` lines 26-37 byte-for-byte for the original 10 wedges; the
+//! 11th wedge (`Kanban`) was added in Phase 36.3.7.11 Plan 04 per D-02.
 //!
-//! Canonical 10-wedge order from `wheel-v2.js` DEFAULT_SECTIONS (CONTEXT D-10):
-//!   chat, agents, models, tools, skills, memory, sessions, providers, gateway, settings
+//! Canonical 11-wedge order — 10 from `wheel-v2.js` DEFAULT_SECTIONS
+//! (CONTEXT D-10) + `Kanban` (Phase 36.3.7.11 D-02):
+//!   chat, agents, models, tools, skills, memory, sessions, providers,
+//!   gateway, settings, kanban
 //!
 //! Interactions (CONTEXT D-11 / wheel-v2.js parity):
 //! - Hover wedge → set `WheelState.active_wedge`
@@ -53,9 +56,10 @@ pub const RING_W: f64 = 4.0;
 pub const PAD: f64 = 22.0;
 /// Total viewBox extent — `SIZE + PAD * 2`.
 pub const VB: f64 = SIZE + PAD * 2.0;
-/// Number of wedges (CONTEXT D-10 / wheel-v2.js DEFAULT_SECTIONS — 10 wedges:
-/// chat, agents, models, tools, skills, memory, sessions, providers, gateway, settings).
-pub const N: usize = 10;
+/// Number of wedges — 10 canonical (CONTEXT D-10 / wheel-v2.js DEFAULT_SECTIONS:
+/// chat, agents, models, tools, skills, memory, sessions, providers, gateway, settings)
+/// plus `kanban` (Phase 36.3.7.11 D-02 wheel-nav addition).
+pub const N: usize = 11;
 /// Per-wedge angular step — `360 / N`.
 pub const STEP: f64 = 360.0 / N as f64;
 /// Minimum allowed wheel size in CSS px (wheel-v2.js line 426 + Pitfall 4).
@@ -135,7 +139,7 @@ struct ResizeState {
 // Wheel component — the SVG primitive itself.
 // ---------------------------------------------------------------------------
 
-/// The wheel SVG primitive — 10 wedges + 60 ticks + hub + resize ring +
+/// The wheel SVG primitive — 11 wedges + 60 ticks + hub + resize ring +
 /// floating tooltip. Reads/writes `Signal<WheelState>` and `Signal<Screen>`
 /// from context (Plan 03 root provides both).
 #[component]
@@ -435,7 +439,7 @@ pub fn Wheel() -> Element {
                     }
                 }
 
-                // ── Wedges (N=10) — reactive is-active class ──
+                // ── Wedges (N=11) — reactive is-active class ──
                 g { id: "wheel-wedges",
                     for i in 0..N {
                         {
@@ -474,7 +478,7 @@ pub fn Wheel() -> Element {
                     }
                 }
 
-                // ── Separators (N=10 lines, non-interactive) ──
+                // ── Separators (N=11 lines, non-interactive) ──
                 g { id: "wheel-seps", "pointer-events": "none",
                     for i in 0..N {
                         {
@@ -494,7 +498,7 @@ pub fn Wheel() -> Element {
                     }
                 }
 
-                // ── Glyph + label texts (20 nodes: 10 wedges × 2 text per wedge) ──
+                // ── Glyph + label texts (22 nodes: 11 wedges × 2 text per wedge) ──
                 g { id: "wheel-text", "pointer-events": "none",
                     for i in 0..N {
                         {
@@ -762,9 +766,14 @@ mod tests {
         assert_eq!(RING_W, 4.0);
         assert_eq!(PAD, 22.0);
         assert_eq!(VB, 424.0);
-        // CONTEXT D-10: 10 wedges per wheel-v2.js DEFAULT_SECTIONS.
-        assert_eq!(N, 10);
-        assert_eq!(STEP, 36.0);
+        // CONTEXT D-10 + Phase 36.3.7.11 D-02: 11 wedges total (10 from
+        // wheel-v2.js DEFAULT_SECTIONS + Kanban).
+        assert_eq!(N, 11);
+        let expected_step = 360.0_f64 / 11.0;
+        assert!(
+            (STEP - expected_step).abs() < 1e-9,
+            "STEP={STEP} expected={expected_step} (11 wedges)"
+        );
         // wheel-v2.js lines 426-427 + Pitfall 4 floor.
         assert_eq!(MIN_SIZE, 240.0);
         assert_eq!(MAX_SIZE, 640.0);
@@ -800,8 +809,9 @@ mod tests {
     }
 
     #[test]
-    fn wedge_path_renders_all_ten_wedges() {
-        // Smoke: every wedge index produces a non-empty path.
+    fn wedge_path_renders_all_wedges() {
+        // Smoke: every wedge index produces a non-empty path. N=11 after
+        // Phase 36.3.7.11 D-02 added the Kanban wedge.
         for i in 0..N {
             let ang_a = (i as f64) * STEP - STEP / 2.0;
             let ang_b = ((i + 1) as f64) * STEP - STEP / 2.0;
@@ -841,12 +851,18 @@ mod tests {
     }
 
     #[test]
-    fn step_is_thirty_six_degrees() {
-        // CONTEXT D-10: 10 wedges exactly tile the circle, so STEP = 360 / N = 36°.
-        assert_eq!(STEP, 36.0);
+    fn step_tiles_full_circle() {
+        // CONTEXT D-10 + Phase 36.3.7.11 D-02: 11 wedges exactly tile the
+        // circle, so STEP = 360 / N ≈ 32.727°. The float STEP must equal
+        // 360.0 / 11.0 to within 1e-9.
+        let expected = 360.0_f64 / 11.0;
+        assert!(
+            (STEP - expected).abs() < 1e-9,
+            "STEP={STEP} expected={expected}"
+        );
         assert!(
             (STEP * N as f64 - 360.0).abs() < 1e-9,
-            "10 wedges × STEP must exactly tile 360°"
+            "11 wedges × STEP must exactly tile 360°"
         );
     }
 
@@ -858,5 +874,7 @@ mod tests {
     }
 }
 
-// Canonical 10-wedge order documented for grep lock-down (CONTEXT D-10):
-// chat, agents, models, tools, skills, memory, sessions, providers, gateway, settings
+// Canonical 11-wedge order documented for grep lock-down (CONTEXT D-10 +
+// Phase 36.3.7.11 D-02):
+// chat, agents, models, tools, skills, memory, sessions, providers, gateway,
+// settings, kanban

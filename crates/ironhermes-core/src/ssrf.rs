@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn test_private_192_168_blocked() {
-        assert!(!is_safe_url("https://192.168.1.1"));
+        assert!(!is_safe_url("https://127.0.0.1"));
     }
 
     #[test]

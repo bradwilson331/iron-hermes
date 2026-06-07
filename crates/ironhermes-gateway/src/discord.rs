@@ -74,14 +74,32 @@ impl PlatformAdapter for DiscordAdapter {
         Ok(())
     }
 
-    async fn edit_message_markdown(
+    async fn edit_message_markdown_v2(
         &self,
         chat_id: &str,
         message_id: &str,
         content: &str,
     ) -> Result<()> {
-        // Discord renders Markdown natively — no separate code path needed.
+        // Phase 36.17.2.2-04: renamed from `edit_message_markdown` per D-01.
+        // Discord renders Markdown natively and does NOT use Telegram's
+        // MarkdownV2 escape grammar, but the trait surface is unified. The
+        // already-MarkdownV2-escaped body still renders adequately as
+        // CommonMark; per CONTEXT.md scope, Discord media routing is out of
+        // scope (no MediaSender impl) and Discord finals don't pass through
+        // `escape_outside_code_blocks`.
         self.edit_message(chat_id, message_id, content).await
+    }
+
+    async fn send_message_markdown_v2(
+        &self,
+        chat_id: &str,
+        content: &str,
+        thread_id: Option<&str>,
+    ) -> Result<MessageResponse> {
+        // Phase 36.17.2.2-05: Discord has no MarkdownV2 distinction —
+        // delegate to plain `send_message`. The already-escaped body
+        // renders adequately as CommonMark (Discord's native dialect).
+        self.send_message(chat_id, content, thread_id).await
     }
 
     async fn delete_message(&self, chat_id: &str, message_id: &str) -> Result<()> {

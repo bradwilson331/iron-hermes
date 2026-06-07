@@ -1,7 +1,7 @@
 [package]
 name = "iron_hermes_ui"
-version = "0.1.0"
-authors = ["Brad Wilson <bradwilson331@gmail.com>"]
+version = "0.2.0"
+authors = ["Brad Wilson <bradwilson331@users.noreply.github.com>"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -35,9 +35,24 @@ web-sys = { version = "0.3", features = [
     "CssStyleDeclaration",
     "DomRect",
     "PointerEvent",
+    # Phase 36.3.7.11 Plan 01 (Risk 3): explicit drag-and-drop bindings.
+    # Transitive today but must be explicit before Plan 02 needs them.
+    "DragEvent",
+    "DataTransfer",
+    # Phase 36.17.7 D-02-a/b (HIGH 4 fix): Blob URL first-play for AudioOut.
+    # Client receives Message::Binary, deserializes ChatStreamEvent::AudioOut,
+    # wraps bytes in a Blob, creates an object URL, attaches to <audio controls>.
+    "Blob",
+    "BlobPropertyBag",
+    "Url",
+    "HtmlAudioElement",
 ] }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
+# Phase 36.3.7.11 Plan 03 (D-21): used by ScreenKanban's WS handler to
+# spawn the 200ms debounce timer on WASM for the per-task event counter
+# refresh (UI-SPEC §8.4).
+wasm-bindgen-futures = "0.4"
 
 # Server-only deps — optional, activated by `server` feature
 axum = { version = "=0.8.4", optional = true }
@@ -50,11 +65,32 @@ ironhermes-exec = { path = "../ironhermes-exec" }
 ironhermes-hooks = { path = "../ironhermes-hooks" }
 ironhermes-state = { path = "../ironhermes-state" }
 ironhermes-tools = { path = "../ironhermes-tools" }
+# Phase 36.17.4 Plan 03 (D-01): need SessionQueue from gateway — the concrete
+# MessageQueue<SessionKey> implementor instantiated in AppState::init.
+ironhermes-gateway = { path = "../ironhermes-gateway" }
+# Phase 36.3.7.11 Plan 01: dashboard `#[server]` fns + tail consumer read
+# directly from the per-board KanbanStore. Behind the cfg gate so the WASM
+# client build stays unaffected (D-05 / Pattern A in PATTERNS.md).
+ironhermes-kanban = { path = "../ironhermes-kanban" }
+# Phase 36.3.7.11 Plan 01: CancellationToken for the dashboard tail loop
+# shutdown signal in AppState::init.
+tokio-util = { workspace = true }
+# Phase 36.3.7.11 Plan 01: kanban_api fetches join task_links / task_runs /
+# task_comments using prepared statements on the KanbanStore's pub Connection
+# (the show.rs analog at lines 144-216). The kanban crate re-exports
+# `KanbanStore.conn: Connection` so this dep is required to call query_map.
+rusqlite = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+tracing-appender = { workspace = true }
+tower-http = { workspace = true, features = ["trace"] }
 dotenvy = { workspace = true }
+# Phase 36.17.7 D-02-a: WebAudioDispatcher implements ironhermes_tools::AudioDispatcher
+# which uses #[async_trait] on its methods. The impl in server/web_audio_dispatcher.rs
+# requires async-trait for the impl-side macro.
+async-trait = { workspace = true }
 
 [dev-dependencies]
 # Test-only features for `#[tokio::test]` (macros + rt).

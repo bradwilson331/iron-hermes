@@ -1,0 +1,35 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-05-03T16:16:46.172Z",
+  "phase": "04",
+  "phase_name": "data-layer-interactions",
+  "phase_dir": ".planning/phases/04-data-layer-interactions",
+  "plan": "04-03",
+  "task": "complete",
+  "total_tasks": 6,
+  "status": "paused",
+  "completed_tasks": [
+    {"id": "04-01", "name": "Cargo + cfg foundation", "status": "done", "wave": 1, "summary": "deps added, cfg-gated platform::timer::sleep, three-platform compile gate green"},
+    {"id": "04-02", "name": "state.rs Phase 4 type vocabulary", "status": "done", "wave": 2, "summary": "Personality, BlockEntry, PaletteState, ShellSettings, now_time; demo_blocks → demo_block_entries rename"},
+    {"id": "04-03", "name": "Mocks module tree", "status": "done", "wave": 3, "summary": "src/mocks/{personalities,shell_outputs,agent_steps,mod}.rs; warp_hermes.rs transient shim; borrow-then-await discipline"}
+  ],
+  "remaining_tasks": [
+    {"id": "04-04a", "name": "BlockEntry-id propagation half", "status": "not_started", "wave": 4, "files": ["src/components/shell/markdown.rs", "src/components/shell/mod.rs", "src/components/shell/block.rs", "src/components/shell/block_stream.rs", "src/components/warp_hermes.rs"], "autonomous": true},
+    {"id": "04-04b", "name": "Prop-shape refactor for shell primitives", "status": "not_started", "wave": 4, "files": ["src/components/shell/input_box.rs", "src/components/shell/command_palette.rs", "src/components/shell/status_bar.rs", "src/components/shell/agent_panel.rs", "src/components/warp_hermes.rs"], "autonomous": true, "must_serialize_with": "04-04a", "reason": "both modify src/components/warp_hermes.rs"},
+    {"id": "04-05", "name": "WarpHermes integration (replaces Wave 3 shim)", "status": "not_started", "wave": 5, "files": ["src/components/warp_hermes.rs"], "autonomous": false, "checkpoints": true}
+  ],
+  "blockers": [],
+  "human_actions_pending": [
+    {"action": "Phase 2 manual UAT (Plan 02-04, checkpoint:human-verify)", "context": "Pre-existing blocker from prior session — does not block Phase 4 execution but blocks Phase 2 closure", "blocking": false},
+    {"action": "Plan 04-05 contains a checkpoint task (autonomous=false)", "context": "Wave 5 will pause for user interaction at the checkpoint task — ensure user is available when Wave 5 runs", "blocking": false}
+  ],
+  "decisions": [
+    {"decision": "Wave 4 plans 04-04a and 04-04b serialize despite same wave number", "rationale": "Both plans modify src/components/warp_hermes.rs — files_modified intra-wave overlap forces sequential execution per execute-phase workflow safety net", "phase": "04"},
+    {"decision": "Worktree isolation disabled (workflow.use_worktrees=false)", "rationale": "Project config — all plans run sequentially on main working tree; the executor agent itself updates STATE.md/ROADMAP.md", "phase": "04"},
+    {"decision": "Module-level #![allow(dead_code)] in src/mocks/* + scoped allows on Wave-1 carry-forward symbols (Personality::label/ALL, PaletteState, ShellSettings)", "rationale": "Wave 3 introduced clippy -D warnings; without these allows the gate fails because Wave 4 hasn't wired the symbols yet. Allows are documented with consuming-wave references", "phase": "04"},
+    {"decision": "warp_hermes.rs Wave 3 shim retained (imports demo_block_entries, collects Vec<BlockEntry> into Vec<Block>)", "rationale": "Bridge that keeps Wave 2/3 builds green without forcing Wave 4 work to land here. Wave 4 (04-04a/b) replaces this with the full Signal<Vec<BlockEntry>> prop-shape refactor", "phase": "04"}
+  ],
+  "uncommitted_files": [],
+  "next_action": "Run /gsd-execute-phase 4 to resume — orchestrator will discover the remaining 3 plans (04-04a, 04-04b, 04-05) and execute Wave 4 then Wave 5. Wave 4 must serialize (overlap on warp_hermes.rs). Wave 5 has a checkpoint that requires user interaction.",
+  "context_notes": "Three of six Phase 4 plans complete. Wave 3 wrap-up commits landed (Task 5 + SUMMARY + tracking). Cargo deps, cfg-gated timer, state.rs vocabulary, and mocks module tree are all in place. Wave 4 is the prop-shape refactor that retires the warp_hermes.rs shim — split into 04-04a (BlockEntry-id propagation through markdown/block/block_stream) and 04-04b (input_box/command_palette/status_bar/agent_panel prop changes); they share warp_hermes.rs so they must run sequentially. Wave 5 is the final WarpHermes() integration with a checkpoint task. Three-platform compile gate (cargo check --no-default-features --features {web|desktop|mobile}) is the canonical mid-phase verification cadence inherited from Phase 1. Borrow-then-await discipline (D-06, clippy.toml-enforced) is now binding — every Signal::write() must drop before any .await."
+}

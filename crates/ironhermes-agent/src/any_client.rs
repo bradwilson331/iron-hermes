@@ -1,9 +1,11 @@
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use ironhermes_core::config::PromptCachingConfig;
 use ironhermes_core::types::{ContentPart, ImageUrl, MessageContent, Role};
 use ironhermes_core::{
     ApiMode, ChatMessage, ChatResponse, ProviderResolver, ResolvedEndpoint, ToolSchema,
 };
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -106,6 +108,24 @@ impl AnyClient {
         match self {
             Self::ChatCompletions(c) => c.model(),
             Self::AnthropicMessages(c) => c.model(),
+        }
+    }
+
+    /// Phase 36.2 CR-09: enable OpenRouter Claude `cache_control` routing on
+    /// the ChatCompletions arm by stamping the provider name and prompt-
+    /// caching config onto the inner `LlmClient`. No-op on the
+    /// `AnthropicMessages` arm (its own builder already handles caching).
+    /// Operators wire this from `AgentRuntime::from_config` right after
+    /// `build_main_client` so every turn sends with cache_control attached
+    /// when the (provider, model) pair qualifies.
+    pub fn enable_openrouter_caching(
+        &mut self,
+        provider_name: impl Into<String>,
+        prompt_caching: PromptCachingConfig,
+    ) {
+        if let AnyClient::ChatCompletions(c) = self {
+            c.set_provider_name(provider_name);
+            c.set_prompt_caching(prompt_caching);
         }
     }
 
@@ -363,6 +383,320 @@ impl ironhermes_core::SummarizationClientHandle for AnyClientSummarizationHandle
             .unwrap_or_else(|| "(no summarization response)".to_string());
         Ok(text)
     }
+}
+
+// =============================================================================
+// Phase 36.2 Plan 11 (OPTIONAL STRETCH per D-CACHE-01):
+// OpenRouter Claude cache_control attachment on the ChatCompletions arm.
+// =============================================================================
+//
+// Wave 1/2 Plan 05 invariant: `grep -c 'cache_control' any_client.rs == 0`.
+// Wave 3 (THIS plan): relaxed to `>= 1`, gated by `is_openrouter_claude`.
+//
+// Non-Claude OpenRouter models and non-OpenRouter providers continue to
+// receive ZERO markers from the ChatCompletions arm — preserves D-CACHE-01
+// cut-line semantics so the Anthropic-side PARITY from Plan 05 is intact.
+//
+// Assumption A1 (verified against OpenRouter docs 2026-05-25 §"Anthropic
+// Claude" §"TTL Options"): OpenRouter accepts the SAME `cache_control`
+// envelope as native Anthropic: `{ "type": "ephemeral" }` or
+// `{ "type": "ephemeral", "ttl": "1h" }`. Source:
+//   https://openrouter.ai/docs/guides/best-practices/prompt-caching.mdx
+
+/// Phase 36.2 Plan 11: provider+model gating predicate for OpenRouter Claude
+/// routing on the ChatCompletions arm.
+///
+/// Returns `true` ONLY when `provider` is exactly `"openrouter"` AND `model`
+/// is in the Claude family (prefixed `"anthropic/claude"` OR bare `"claude-"`
+/// — OpenRouter sometimes routes without the provider prefix).
+///
+/// All other (provider, model) pairs return `false`. Non-OpenRouter providers
+/// (OpenAI, Nous, custom endpoints) and non-Claude OpenRouter models continue
+/// to receive ZERO `cache_control` markers from the ChatCompletions arm — the
+/// AnthropicMessages arm (Plan 05) handles native Anthropic separately.
+pub fn is_openrouter_claude(provider: &str, model: &str) -> bool {
+    provider == "openrouter"
+        && (model.starts_with("anthropic/claude") || model.starts_with("claude-"))
+}
+
+/// Phase 36.2 Plan 11: OpenRouter Claude `cache_control` envelope.
+///
+/// Serializes as `{"type":"ephemeral","ttl":"5m"|"1h"}` — identical to native
+/// Anthropic per Assumption A1. Attached to OpenAI-compat content blocks
+/// (NOT messages themselves) to mark cache breakpoints. Per the
+/// `system_and_3` strategy, exactly 4 markers max per request: 1 system + last
+/// 3 non-system messages.
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenRouterCacheControl {
+    #[serde(rename = "type")]
+    ty: String,
+    ttl: String,
+}
+
+impl OpenRouterCacheControl {
+    fn ephemeral(ttl: &'static str) -> Self {
+        Self {
+            ty: "ephemeral".to_string(),
+            ttl: ttl.to_string(),
+        }
+    }
+}
+
+/// Phase 36.2 Plan 11: OpenAI-compat content block with optional
+/// `cache_control` for OpenRouter Claude routing.
+///
+/// Maps to the OpenAI Chat Completions content-block shape:
+/// `{ "type": "text", "text": "..." }` with an optional `cache_control`
+/// field — accepted by OpenRouter when routed to Claude.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OpenRouterContentBlock {
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<OpenRouterCacheControl>,
+    },
+}
+
+/// Phase 36.2 Plan 11: OpenAI-compat message used on the OpenRouter Claude
+/// path. Identical wire-shape to a normal Chat Completions message except
+/// `content` is always an array (required for `cache_control` to attach to a
+/// block).
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenRouterMessage {
+    pub role: String,
+    pub content: Vec<OpenRouterContentBlock>,
+}
+
+/// Phase 36.2 Plan 11: OpenAI-compat ChatCompletions request body used for
+/// OpenRouter Claude routing when `prompt_caching.enabled` is true.
+///
+/// Serializes to the same JSON shape OpenRouter's Chat Completions endpoint
+/// accepts, with `cache_control` markers attached per system_and_3 strategy.
+/// Non-Claude OpenRouter models and non-OpenRouter providers MUST NOT use
+/// this builder (use the regular `LlmClient::chat_completion` path instead).
+#[derive(Debug, Clone, Serialize)]
+pub struct OpenRouterChatRequest {
+    pub model: String,
+    pub messages: Vec<OpenRouterMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream: Option<bool>,
+    /// Phase 36.2 CR-09: tool schemas — OpenRouter's Chat Completions accepts
+    /// these alongside cache_control'd messages. Required so the agent's
+    /// tool-use loop continues to work on the OpenRouter Claude path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<ironhermes_core::ToolSchema>>,
+    /// Phase 36.2 CR-09: passthrough for extension fields (e.g.,
+    /// `stream_options: { include_usage: true }`). Same role as the
+    /// `extra` flatten on `ChatRequest`.
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
+}
+
+/// Phase 36.2 Plan 11: build an [`OpenRouterChatRequest`] with optional
+/// `cache_control` markers attached per the `system_and_3` strategy.
+///
+/// **Gating** (Plan 11 D-CACHE-01 cut-line invariant):
+/// - Markers attach ONLY when ALL three conditions hold:
+///   1. `is_openrouter_claude(provider, model)` returns true
+///   2. `prompt_caching.enabled` is true
+///   3. The conversation has at least one message
+/// - Otherwise the request body is byte-identical to a plain OpenAI-compat
+///   ChatCompletions request with zero `cache_control` fields anywhere.
+///
+/// **Attachment strategy** (`system_and_3`, mirrors Plan 05 anthropic_client):
+/// - 1 marker on the system block (if present) — only the LAST system message
+///   gets the marker if multiple are present.
+/// - 1 marker each on the LAST `min(3, n)` non-system messages, attached to
+///   each message's last content block (`saturating_sub(3)..n`).
+/// - 4 markers max per request — matches Anthropic's documented breakpoint
+///   cap (which OpenRouter inherits per Assumption A1).
+pub fn build_openrouter_chat_request(
+    provider: &str,
+    model: &str,
+    messages: &[ChatMessage],
+    max_tokens: Option<usize>,
+    temperature: Option<f64>,
+    stream: Option<bool>,
+    prompt_caching: &PromptCachingConfig,
+) -> OpenRouterChatRequest {
+    build_openrouter_chat_request_full(
+        provider,
+        model,
+        messages,
+        None,
+        max_tokens,
+        temperature,
+        stream,
+        prompt_caching,
+        std::collections::HashMap::new(),
+    )
+}
+
+/// Phase 36.2 CR-09: full-arg variant used by the production send path so
+/// tool schemas and extension fields (e.g. `stream_options`) survive the
+/// OpenRouter Claude routing. Kept separate from the 7-arg
+/// `build_openrouter_chat_request` so the Plan 11 tests don't need to
+/// pass `None`/`HashMap::new` boilerplate.
+#[allow(clippy::too_many_arguments)]
+pub fn build_openrouter_chat_request_full(
+    provider: &str,
+    model: &str,
+    messages: &[ChatMessage],
+    tools: Option<&[ironhermes_core::ToolSchema]>,
+    max_tokens: Option<usize>,
+    temperature: Option<f64>,
+    stream: Option<bool>,
+    prompt_caching: &PromptCachingConfig,
+    extra: std::collections::HashMap<String, serde_json::Value>,
+) -> OpenRouterChatRequest {
+    let mut adapted: Vec<OpenRouterMessage> = messages
+        .iter()
+        .map(adapt_chat_message_to_openrouter)
+        .collect();
+
+    let attach = prompt_caching.enabled && is_openrouter_claude(provider, model);
+
+    if attach {
+        let ttl = prompt_caching.ttl.as_anthropic_ttl();
+        attach_cache_control_to_chat_completions(&mut adapted, ttl);
+    }
+
+    OpenRouterChatRequest {
+        model: model.to_string(),
+        messages: adapted,
+        max_tokens,
+        temperature,
+        stream,
+        tools: tools.map(|t| t.to_vec()),
+        extra,
+    }
+}
+
+/// Adapt an OpenAI-compat `ChatMessage` to an OpenRouter `OpenRouterMessage`
+/// whose `content` is always a `Vec<OpenRouterContentBlock>` (array form,
+/// required so `cache_control` can attach to a block per Anthropic's API
+/// which OpenRouter passes through).
+fn adapt_chat_message_to_openrouter(msg: &ChatMessage) -> OpenRouterMessage {
+    let role = match msg.role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
+    }
+    .to_string();
+
+    let blocks: Vec<OpenRouterContentBlock> = match &msg.content {
+        Some(MessageContent::Text(s)) => vec![OpenRouterContentBlock::Text {
+            text: s.clone(),
+            cache_control: None,
+        }],
+        Some(MessageContent::Parts(parts)) => parts
+            .iter()
+            .map(|p| match p {
+                ContentPart::Text { text } => OpenRouterContentBlock::Text {
+                    text: text.clone(),
+                    cache_control: None,
+                },
+                // Phase 36.2 Plan 11: image_url parts are passed through as
+                // their text URL on this path (cached-layer-stability D-CACHE-04
+                // forbids dynamic image data in cached prefix; non-cached
+                // tails use the normal LlmClient path, not this builder).
+                ContentPart::ImageUrl { image_url } => OpenRouterContentBlock::Text {
+                    text: format!("[image: {}]", image_url.url),
+                    cache_control: None,
+                },
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+
+    OpenRouterMessage {
+        role,
+        content: blocks,
+    }
+}
+
+/// Phase 36.2 Plan 11: attach `cache_control` markers using the `system_and_3`
+/// strategy on an OpenAI-compat (OpenRouter Claude) message list.
+///
+/// **Marker count rules** (max 4 per request — Anthropic API constraint
+/// passed through OpenRouter):
+/// - 1 marker on the LAST system message's last content block (if any
+///   system message exists).
+/// - 1 marker each on the LAST `min(3, non_system_count)` non-system
+///   messages, attached to each message's last content block.
+///
+/// Mirrors `anthropic_client::attach_cache_control_markers` semantics but
+/// operates on the OpenAI-compat content-block shape.
+fn attach_cache_control_to_chat_completions(messages: &mut [OpenRouterMessage], ttl: &'static str) {
+    // Mark the LAST system message's last content block.
+    if let Some(last_system) = messages.iter_mut().rev().find(|m| m.role == "system")
+        && let Some(last_block) = last_system.content.last_mut()
+    {
+        match last_block {
+            OpenRouterContentBlock::Text { cache_control, .. } => {
+                *cache_control = Some(OpenRouterCacheControl::ephemeral(ttl));
+            }
+        }
+    }
+
+    // Collect indices of non-system messages, then mark the last min(3, n).
+    let non_system_indices: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.role != "system")
+        .map(|(i, _)| i)
+        .collect();
+    let n = non_system_indices.len();
+    let start = n.saturating_sub(3);
+    for &idx in &non_system_indices[start..n] {
+        if let Some(last_block) = messages[idx].content.last_mut() {
+            match last_block {
+                OpenRouterContentBlock::Text { cache_control, .. } => {
+                    *cache_control = Some(OpenRouterCacheControl::ephemeral(ttl));
+                }
+            }
+        }
+    }
+}
+
+/// Phase 36.2 Plan 11 test helper: thin re-export of
+/// [`build_openrouter_chat_request`] for the integration tests in
+/// `tests/openrouter_cache_control.rs`.
+///
+/// Identical gating semantics to the production builder so tests exercise
+/// the exact code path. Mirrors the pattern from
+/// `anthropic_client::build_anthropic_request_for_test` (Plan 05).
+#[doc(hidden)]
+pub fn build_openrouter_chat_request_for_test(
+    provider: &str,
+    model: &str,
+    messages: &[ChatMessage],
+    prompt_caching: &PromptCachingConfig,
+) -> OpenRouterChatRequest {
+    build_openrouter_chat_request(
+        provider,
+        model,
+        messages,
+        Some(4096),
+        None,
+        Some(false),
+        prompt_caching,
+    )
+}
+
+/// Phase 36.2 Plan 11 test helper: serialize an [`OpenRouterChatRequest`] to
+/// JSON for marker-count substring assertions in integration tests.
+///
+/// Mirrors `anthropic_client::serialize_request_for_test` (Plan 05).
+#[doc(hidden)]
+pub fn serialize_openrouter_request_for_test(req: &OpenRouterChatRequest) -> Result<String> {
+    serde_json::to_string(req).map_err(|e| anyhow!("serialize OpenRouterChatRequest: {e}"))
 }
 
 // =============================================================================

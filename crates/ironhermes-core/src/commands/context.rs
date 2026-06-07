@@ -201,6 +201,133 @@ pub trait CronJobReader: Send + Sync {
 }
 
 // =============================================================================
+// KanbanStoreReader trait — Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02)
+// =============================================================================
+
+/// Trait for reading kanban board state from the `/kanban` slash command handler.
+///
+/// Mirrors CronJobReader (Phase 22.4.2.1 Plan 01) for cycle-break — declared here
+/// in ironhermes-core so CommandContext can hold a kanban store handle without core
+/// depending on ironhermes-kanban (which depends on ironhermes-core, creating a cycle).
+///
+/// The concrete implementation `KanbanStoreReaderImpl` lives in `ironhermes-cli`
+/// (the leaf crate) and wraps `Arc<Mutex<KanbanStore>>`.
+pub trait KanbanStoreReader: Send + Sync {
+    /// Returns the CLI table format for all tasks (columns: ID STATUS ASSIGNEE PRI TITLE).
+    fn list_text(&self) -> String;
+    /// Returns the multi-line detail view for a specific task ID.
+    /// Returns None if the task does not exist.
+    fn show_text(&self, id: &str) -> Option<String>;
+    /// Returns the scratch-workspace discoverability tip text.
+    fn tip_text(&self) -> String;
+    /// Returns a message directing the user to use the CLI for a deferred subverb.
+    /// Format: "/kanban {name}: use 'ironhermes kanban {name}' from the CLI for v1."
+    fn deferred_subverb_message(&self, name: &str) -> String;
+}
+
+// =============================================================================
+// KanbanStoreWriter trait — Phase 36.3.7.5 BUG-36.3.7.5-06
+// =============================================================================
+//
+// Writer-side sibling of `KanbanStoreReader`. Closes the `/kanban create` slash
+// arm + auto-subscribe hook by giving `cmd_kanban` the minimum write surface it
+// needs (create_task_simple + append_subscription) without dragging the full
+// `ironhermes_kanban::KanbanStore` type into `ironhermes-core`.
+//
+// Returns `Result<_, String>` at the boundary so the trait stays free of any
+// kanban-crate error type — preserves the leaf-crate status of ironhermes-core.
+// The concrete impl `KanbanStoreWriterImpl` lives in `ironhermes-cli` (sibling
+// of `store_reader_impl.rs`).
+
+/// Flat boundary view of a `kanban_subscriptions` row.
+///
+/// Lives in ironhermes-core so `KanbanStoreWriter::list_*` can return rows
+/// without forcing the caller to import `ironhermes_kanban::Subscription`.
+/// Field-compatible with `ironhermes_kanban::Subscription` (D-17 plain-string
+/// boundary). Phase 36.3.7.5 BUG-36.3.7.5-06.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SubscriptionView {
+    pub id: i64,
+    pub task_id: String,
+    pub platform: String,
+    pub chat_id: String,
+    pub thread_id: String,
+    pub source: String,
+    pub created_at: f64,
+}
+
+/// Trait for writing kanban tasks + subscriptions from the `/kanban` slash
+/// command handler (`cmd_kanban` Create arm + auto-subscribe hook).
+///
+/// Phase 36.3.7.5 BUG-36.3.7.5-06 — writer-side sibling of KanbanStoreReader.
+/// Concrete impl `KanbanStoreWriterImpl` lives in `ironhermes-cli`.
+pub trait KanbanStoreWriter: Send + Sync {
+    /// Create a task with the simplest possible field set (title + assignee).
+    /// Returns the new task_id on success, or a human-readable error string.
+    /// The `json` flag is a hint — the writer impl typically ignores it (the
+    /// `--json` output is handled by the dispatcher arm above), but it's passed
+    /// through for any writer that wants to vary behavior.
+    fn create_task_simple(&self, title: &str, assignee: &str, json: bool) -> Result<String, String>;
+
+    /// Append a subscription row. Mirrors the underlying KanbanStore method but
+    /// returns a string error so the trait stays free of any kanban-crate error
+    /// type (preserves the leaf-crate status of ironhermes-core).
+    fn append_subscription(
+        &self,
+        task_id: &str,
+        platform: &str,
+        chat_id: &str,
+        thread_id: Option<&str>,
+        source: &str,
+    ) -> Result<i64, String>;
+
+    /// List subscriptions for a task — used by `cmd_notify_list` and tests.
+    fn list_subscriptions_for_task(&self, task_id: &str) -> Result<Vec<SubscriptionView>, String>;
+
+    /// List ALL subscriptions (no task filter) — used by `cmd_notify_list` with no id arg.
+    fn list_all_subscriptions(&self) -> Result<Vec<SubscriptionView>, String>;
+
+    /// Remove subscriptions — mirrors the underlying remove_subscriptions API.
+    fn remove_subscriptions(
+        &self,
+        task_id: &str,
+        platform: Option<&str>,
+        chat_id: Option<&str>,
+    ) -> Result<usize, String>;
+}
+
+// =============================================================================
+// TtsRegistrationStatus — Phase 36.17.7 D-06 (REVISION BLOCKER 2)
+// =============================================================================
+
+/// Phase 36.17.7 D-06 (Path B — REVISION BLOCKER 2): registration state for
+/// the `voice` toolset's two tools (`text_to_speech`, `send_audio`).
+///
+/// Surfaced by `ToolRegistry::tts_registration_status` in `ironhermes-tools`
+/// and carried on [`CommandContext::tts_registration_status`] so the in-session
+/// `/toolset list` slash dispatch can render `Live` vs `Inspection` vs `—` in
+/// the new `Registered` display column. The CLI inspection path (no live
+/// session) leaves the field as `None` and the renderer defaults to
+/// `Inspection`.
+///
+/// `Live` and `Inspection` are kept distinct because they correspond to two
+/// different code paths (real per-session `SessionKey` vs the sentinel
+/// `(Platform::Local, "inspect")` from `register_tts_for_inspection`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TtsRegistrationStatus {
+    /// Real per-turn session_key (Web, Telegram, TUI Local non-sentinel)
+    /// registered TTS tools for this session — the agent has them in its
+    /// schema list right now.
+    Live,
+    /// CLI inspection path — sentinel `(Platform::Local, "inspect")` registered
+    /// the tools for availability checks. Not actually exposed to any live
+    /// agent loop.
+    Inspection,
+    /// `register_tts_tools` was never called on this registry.
+    NotRegistered,
+}
+
+// =============================================================================
 // ToolsetSessionHandle trait — Phase 25 Plan 04 (D-06)
 // =============================================================================
 
@@ -309,6 +436,37 @@ pub trait StateStoreHandle: Send + Sync {
     fn update_title(&self, session_id: &str, title: &str) -> Result<(), String>;
     /// Get a session by name or id. Returns `Some(session_id)` when found.
     fn get_session_id(&self, name_or_id: &str) -> Option<String>;
+    /// Phase 36.2 Plan 10 (D-USAGE-03): render the `/usage` table for the
+    /// given filter parameters.
+    ///
+    /// Parameters mirror the four user-visible flat-flags on `/usage`:
+    /// `session_id` (bare invocation — current session), `today_only`
+    /// (`--today` cross-session), `provider` (`--provider X`), `model`
+    /// (`--model X`), and `since_seconds` (`--since Nd` already parsed via
+    /// `handlers::parse_since`). The trait method is intentionally primitive-
+    /// typed so the trait stays in `ironhermes-core` without back-depending
+    /// on `ironhermes-state` (where `UsageFilter` and `UsageRollup` live).
+    ///
+    /// **T-36.2-10-INJ:** every value passed to this method MUST flow into
+    /// `rusqlite::params!` bindings inside the production implementation —
+    /// never `format!`-interpolated into SQL. The b1 / b12 integration tests
+    /// in `crates/ironhermes-cli/tests/usage_command.rs` enforce this both
+    /// dynamically (SQL-injection-shaped provider value) and structurally
+    /// (no `format!(...SELECT` lines in `ironhermes-state/src/lib.rs`).
+    ///
+    /// Default impl returns the "not configured" guard string so existing
+    /// test fakes and the gateway path that doesn't wire a StateStore today
+    /// continue to compile without churn.
+    fn usage_text(
+        &self,
+        _session_id: Option<&str>,
+        _today_only: bool,
+        _provider: Option<&str>,
+        _model: Option<&str>,
+        _since_seconds: Option<i64>,
+    ) -> String {
+        "Session storage not configured.".to_string()
+    }
 }
 
 /// Handle for ProviderResolver status and model information (D-04).
@@ -416,6 +574,25 @@ pub struct CommandContext {
     /// Option<Arc<dyn>> to avoid circular dep with ironhermes-cron.
     pub cron_store: Option<Arc<dyn CronJobReader>>,
 
+    /// Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02): KanbanStoreReader handle for `/kanban` slash UI.
+    /// Option<Arc<dyn>> to avoid circular dep with ironhermes-kanban.
+    pub kanban_store: Option<Arc<dyn KanbanStoreReader>>,
+
+    /// Phase 36.3.7.5 BUG-36.3.7.5-06: write-capable kanban handle for the
+    /// `/kanban create` slash arm + the 3 `notify-*` CLI verbs' future
+    /// gateway-side wiring.
+    pub kanban_store_writer: Option<Arc<dyn KanbanStoreWriter>>,
+
+    /// Phase 36.3.7.5 BUG-36.3.7.5-06: originating chat id when CommandContext
+    /// is built by the gateway's `handle_slash_command`. None when the context
+    /// is built by the CLI / TUI (which don't have a chat origin).
+    pub chat_id: Option<String>,
+
+    /// Phase 36.3.7.5 BUG-36.3.7.5-06: originating thread id for platforms that
+    /// support threads (Telegram super-group topic, Discord thread). None when
+    /// the chat has no thread or the platform doesn't support them.
+    pub thread_id: Option<String>,
+
     /// Phase 25 Plan 04 (D-06): ToolsetSessionHandle for `/toolset` session-only mutations.
     /// Option<Arc<dyn>> to avoid circular dep with ironhermes-tools.
     /// Slash command enable/disable mutate ONLY the session's live toolset config; they do
@@ -436,6 +613,18 @@ pub struct CommandContext {
     /// Mirrors the ToolsetSessionHandle / MemoryManagerHandle / SummarizationClientHandle
     /// cycle-break pattern.
     pub trajectory_writer: Option<Arc<dyn TrajectoryWriterHandle>>,
+
+    /// Phase 36.17.7 D-06 (REVISION BLOCKER 2 — Path B): TTS registration
+    /// status observed at slash-dispatch time, populated by the per-platform
+    /// `/toolset` dispatcher (gateway handler.rs / iron_hermes_ui ws.rs /
+    /// tui event_loop.rs) by calling
+    /// `runtime.bundle.registry.tts_registration_status()` BEFORE delegating
+    /// to `cmd_toolset` / `ToolsetSessionHandle::render_list`.
+    ///
+    /// `None` here means the slash dispatcher did not attach a runtime view
+    /// — the CLI inspection path uses this as a signal to default to
+    /// `TtsRegistrationStatus::Inspection` in the display.
+    pub tts_registration_status: Option<TtsRegistrationStatus>,
 }
 
 impl CommandContext {
@@ -463,12 +652,21 @@ impl CommandContext {
             agent_loop: None,
             // Phase 22.4.2.1 Plan 01: CronJobReader for /cron slash UI.
             cron_store: None,
+            // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02): KanbanStoreReader for /kanban slash UI.
+            kanban_store: None,
+            // Phase 36.3.7.5 BUG-36.3.7.5-06.
+            kanban_store_writer: None,
+            chat_id: None,
+            thread_id: None,
             // Phase 25 Plan 04 (D-06): ToolsetSessionHandle for /toolset slash UI.
             toolset_session: None,
             // Phase 25.3 D-W-2: Workspace newtype for /sessions filter + Curator output destination.
             workspace: None,
             // Phase 25.3 D-T-3: TrajectoryWriter for per-tool-call JSONL ledger.
             trajectory_writer: None,
+            // Phase 36.17.7 D-06 (Path B / REVISION BLOCKER 2): TTS registration
+            // status populated by the per-platform /toolset slash dispatcher.
+            tts_registration_status: None,
         }
     }
 
@@ -574,6 +772,13 @@ impl CommandContext {
         self
     }
 
+    /// Builder: attach a KanbanStoreReader handle for `/kanban` slash UI
+    /// (Phase 36.3.7.0 Plan 02 — BUG-36.3.7-02). Mirrors `with_cron_store` cycle-break pattern.
+    pub fn with_kanban_store(mut self, store: Arc<dyn KanbanStoreReader>) -> Self {
+        self.kanban_store = Some(store);
+        self
+    }
+
     /// Builder: attach a ToolsetSessionHandle for `/toolset` session-only mutations (Phase 25 D-06).
     pub fn with_toolset_session(mut self, handle: Arc<dyn ToolsetSessionHandle>) -> Self {
         self.toolset_session = Some(handle);
@@ -599,6 +804,36 @@ impl CommandContext {
     /// CommandContext-construction sites.
     pub fn with_trajectory_writer(mut self, handle: Arc<dyn TrajectoryWriterHandle>) -> Self {
         self.trajectory_writer = Some(handle);
+        self
+    }
+
+    /// Phase 36.17.7 D-06 (REVISION BLOCKER 2 — Path B): attach the TTS
+    /// registration status observed from the per-platform `/toolset` slash
+    /// dispatcher's runtime registry. Consumed by the `Registered` column in
+    /// the toolset list / show renderer.
+    pub fn with_tts_registration_status(mut self, status: TtsRegistrationStatus) -> Self {
+        self.tts_registration_status = Some(status);
+        self
+    }
+
+    /// Builder: attach a KanbanStoreWriter trait-object handle
+    /// (Phase 36.3.7.5 BUG-36.3.7.5-06).
+    pub fn with_kanban_store_writer(mut self, writer: Arc<dyn KanbanStoreWriter>) -> Self {
+        self.kanban_store_writer = Some(writer);
+        self
+    }
+
+    /// Builder: attach the originating chat-origin tuple
+    /// (Phase 36.3.7.5 BUG-36.3.7.5-06). `chat_id` is always present at the
+    /// gateway boundary; `thread_id` is `None` unless the platform-event
+    /// carried one.
+    pub fn with_chat_origin(
+        mut self,
+        chat_id: impl Into<String>,
+        thread_id: Option<impl Into<String>>,
+    ) -> Self {
+        self.chat_id = Some(chat_id.into());
+        self.thread_id = thread_id.map(|t| t.into());
         self
     }
 }

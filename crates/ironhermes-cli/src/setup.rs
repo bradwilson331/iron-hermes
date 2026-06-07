@@ -11,8 +11,8 @@ use ironhermes_core::config::Config;
 use ironhermes_core::constants::get_hermes_home;
 use ironhermes_core::wizard::{
     LEARNING_LOOP_FRAMING, WizardMode, apply_api_key_answer, apply_auxiliary_answer,
-    apply_learning_loop_answer, apply_memory_provider_answer, apply_model_answer,
-    apply_provider_answer,
+    apply_kanban_section_answer, apply_learning_loop_answer, apply_memory_provider_answer,
+    apply_model_answer, apply_provider_answer, default_block_for, write_defaults_if_absent,
 };
 use std::path::Path;
 
@@ -353,6 +353,64 @@ async fn run_minimum_viable_flow(
             other => serde_yaml::to_string(other)?.trim().to_string(),
         };
         config_setter::config_set(hermes_home, &dotted, &value_str)?;
+    }
+
+    // 6. D-10: Additive-merge commented-default blocks for the 13 missing sections
+    // plus kanban (via apply_kanban_section_answer) and gateway/tools stubs.
+    // Uses write_defaults_if_absent so a section is written ONLY when absent —
+    // preserving any value the user already set (D-11 never-clobber rule).
+    // This runs on EVERY invocation (fresh install + update/reinstall) — idempotent.
+    {
+        let config_path = hermes_home.join("config.yaml");
+        let raw_yaml_str = std::fs::read_to_string(&config_path).unwrap_or_default();
+        let mut yaml: serde_yaml::Value =
+            serde_yaml::from_str(&raw_yaml_str).unwrap_or(serde_yaml::Value::Mapping(
+                serde_yaml::Mapping::new(),
+            ));
+
+        // 13 missing sections + gateway + tools stubs.
+        let sections = &[
+            "agent",
+            "terminal",
+            "web",
+            "exec",
+            "cron",
+            "compression",
+            "skills",
+            "delegation",
+            "rate_limit",
+            "batch",
+            "security",
+            "custom_providers",
+            "gateway",
+            "tools",
+        ];
+        for &section in sections {
+            if let Some(block) = default_block_for(section) {
+                write_defaults_if_absent(&mut yaml, section, block);
+            }
+        }
+
+        // kanban: use apply_kanban_section_answer to get the canonical 17-field Mapping,
+        // then insert as a serde_yaml::Value::Mapping under "kanban" if absent.
+        {
+            let kanban_key = serde_yaml::Value::String("kanban".to_string());
+            let kanban_absent = yaml
+                .as_mapping()
+                .map(|m| !m.contains_key(&kanban_key))
+                .unwrap_or(true);
+            if kanban_absent {
+                let kanban_block = apply_kanban_section_answer(config, "");
+                if let serde_yaml::Value::Mapping(m) = &mut yaml {
+                    m.insert(kanban_key, serde_yaml::Value::Mapping(kanban_block));
+                }
+            }
+        }
+
+        // Write back preserving all existing and new keys.
+        if let Ok(out) = serde_yaml::to_string(&yaml) {
+            std::fs::write(&config_path, out).ok();
+        }
     }
 
     println!(

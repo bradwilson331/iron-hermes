@@ -23,8 +23,10 @@ use ironhermes_core::commands::context::{
     AgentLoopHandle, CommandContext, ContextCompressorHandle, McpManagerHandle,
     MemoryManagerHandle, PersonalityHandle, ProviderResolverHandle, StateStoreHandle,
 };
+use ironhermes_core::commands::running_agent::{is_bypass, AGENT_RUNNING_REJECT_MSG};
 use ironhermes_core::commands::typo::suggest_typo;
 use ironhermes_core::commands::{CommandCategory, CommandResult, CommandRouter, ResolveResult};
+use ironhermes_core::queue::QueueError;
 use ironhermes_core::types::Platform;
 
 use crate::tui_rata::app::App;
@@ -237,6 +239,38 @@ impl StateStoreHandle for StateStoreAdapter {
             .flatten()
             .map(|s| s.id)
     }
+
+    /// Phase 36.2 Plan 10: `/usage` table renderer (production impl).
+    ///
+    /// Builds a `UsageFilter` from the primitive arguments and dispatches
+    /// to `StateStore::query_usage_events` (which is the single SQL-bound
+    /// access site, T-36.2-10-INJ). Output is built by the canonical
+    /// `format_usage_rollups` helper in `ironhermes-state` so every
+    /// platform (CLI, TUI, gateway, web UI) emits byte-identical text.
+    fn usage_text(
+        &self,
+        session_id: Option<&str>,
+        today_only: bool,
+        provider: Option<&str>,
+        model: Option<&str>,
+        since_seconds: Option<i64>,
+    ) -> String {
+        let filter = ironhermes_state::UsageFilter {
+            session_id: session_id.map(|s| s.to_string()),
+            today_only,
+            provider: provider.map(|s| s.to_string()),
+            model: model.map(|s| s.to_string()),
+            since_seconds,
+        };
+        let guard = match self.0.lock() {
+            Ok(g) => g,
+            Err(_) => return "StateStore lock poisoned.".to_string(),
+        };
+        match guard.query_usage_events(&filter) {
+            Ok(rows) => ironhermes_state::format_usage_rollups(&rows, &filter),
+            Err(e) => format!("Usage query failed: {e}"),
+        }
+    }
 }
 
 /// Adapter: ContextEngine → ContextCompressorHandle for `/compress`.
@@ -330,6 +364,12 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
                 args_str.split_whitespace().collect()
             };
             let ctx = build_command_context(app);
+            // Phase 36.1 (D-10, Pitfall 4): bypass check on POST-resolution canonical def.name —
+            // never raw user input. /reset resolves to "new" via the CommandRouter and correctly
+            // bypasses. Reject non-bypass commands when a turn is in flight.
+            if app.agent_running.load(Ordering::SeqCst) && !is_bypass(def.name) {
+                return SlashOutcome::Handled(AGENT_RUNNING_REJECT_MSG.to_string());
+            }
             match invoke_handler(def.name, &ctx, &app.command_router, &args_vec).await {
                 Ok(result) => {
                     // D-02 post-router App-side hook (Plan 03: FULL multi-name expansion).
@@ -347,6 +387,35 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
                         }
                         // Tier D session control: stub for Plan 04 to replace
                         "stop" | "retry" | "undo" | "rollback" | "background" | "btw" | "queue" => {
+                            handle_session_control(app, def.name, &args_vec, &result).await
+                        }
+                        // Phase 36.17.3 (D-06 amended): `/pause` toggles queue
+                        // drain; `/unpause` (alias) explicitly sets paused=false.
+                        // Since the registry resolves the `/unpause` alias to
+                        // canonical name "pause", detect the typed alias from
+                        // the original input and route to the correct arm name.
+                        // These run BEFORE map_core_to_slash_outcome so the
+                        // defensive Silent fallback arms (Plan 02) never fire.
+                        "pause" => {
+                            let typed = input
+                                .trim_start()
+                                .split_whitespace()
+                                .next()
+                                .and_then(|s| s.strip_prefix('/'))
+                                .unwrap_or("pause");
+                            let route_name = if typed == "unpause" {
+                                "unpause"
+                            } else {
+                                "pause"
+                            };
+                            handle_session_control(app, route_name, &args_vec, &result).await
+                        }
+                        // Phase 36.17.3 (D-07 + T-02 mitigation): /new (and the
+                        // /reset alias which resolves to canonical name "new")
+                        // must clear the queue and reset paused BEFORE the
+                        // session-clear path forwards to the ClearSession /
+                        // NewSession mapping in map_core_to_slash_outcome.
+                        "new" => {
                             handle_session_control(app, def.name, &args_vec, &result).await
                         }
                         // Subsystem mutators: model/fast (AnyClient rebuild) + personality/compress
@@ -534,7 +603,8 @@ impl CronJobReader for CronJobReaderImpl {
 /// pattern: each field is Option so handlers gracefully return "not configured"
 /// when the handle is None).
 fn build_command_context(app: &App) -> CommandContext {
-    let agent_running = Arc::new(AtomicBool::new(app.pending_rx.is_some()));
+    // Phase 36.1 (D-08, Pitfall 4): live handle replaces the pending_rx.is_some() snapshot.
+    let agent_running = app.agent_running.clone();
     let mut ctx = CommandContext::new(Platform::Local, app.session_id.clone(), agent_running);
     if let Some(mgr) = &app.mcp_manager {
         ctx = ctx.with_mcp_reloader(mgr.clone());
@@ -791,6 +861,17 @@ async fn handle_session_control(
 ) -> SlashOutcome {
     match name {
         "stop" => {
+            // Phase 36.17.3 (D-08 + RESEARCH Pitfall 1): clear-then-cancel
+            // ordering is non-negotiable. The queue must be empty BEFORE
+            // `cancel_child.cancel()` fires so the eventual `StreamEvent::Cancelled`
+            // arm finds an empty queue (belt-and-suspenders alongside Plan 04 Task 2
+            // which already skips drain on Cancelled). Order: clear -> reset paused
+            // -> cancel in-flight turn -> forward to core (ProcessRegistry drain).
+            app.queue.clear(&app.queue_key);
+            app.queue_paused.store(false, std::sync::atomic::Ordering::SeqCst);
+            if let Some(tok) = app.cancel_child.take() {
+                tok.cancel();
+            }
             // /stop: ProcessRegistry is now threaded into ctx via build_command_context.
             // Core cmd_stop handles the drain-and-kill; trust core result.
             map_core_to_slash_outcome(core_result.clone())
@@ -936,26 +1017,78 @@ async fn handle_session_control(
             SlashOutcome::Handled(format!("Aside added: \"{message}\" (active next turn)"))
         }
         "queue" => {
-            // Queue a message for submission after the current turn.
+            // Phase 36.17.3 (D-09 + D-10): real push into the shared MessageQueue.
+            // Replaces the prior textarea-prepopulate placeholder. D-12 negative
+            // control precondition: the old TextArea-prepopulate mutation has
+            // been removed from this arm. Bell is OMITTED per Resolution 7.
             if args.is_empty() {
-                return SlashOutcome::Handled(
-                    "Usage: /queue <message> — add a message to the input queue.".to_string(),
-                );
+                return SlashOutcome::Handled("Usage: /queue <message>".to_string());
             }
             let message = args.join(" ");
-            // Pre-populate the textarea with the queued message; user can review/submit.
-            let mut ta = tui_textarea::TextArea::default();
-            ta.set_cursor_line_style(ratatui::style::Style::default());
-            ta.set_block(
-                ratatui::widgets::Block::default()
-                    .borders(ratatui::widgets::Borders::ALL)
-                    .title("Prompt"),
-            );
-            for c in message.chars() {
-                ta.insert_char(c);
+            match app.queue.try_push(&app.queue_key, message.clone()) {
+                Ok(()) => {
+                    let depth = app.queue.len(&app.queue_key);
+                    SlashOutcome::Handled(format!(
+                        "Queued: \"{}\" ({} in queue)",
+                        message, depth
+                    ))
+                }
+                Err(QueueError::CapacityReached { max, .. }) => {
+                    // D-10: cap-hit error rendered inline. T-01 mitigation = cap
+                    // enforced at SessionQueue source (Plan 01).
+                    SlashOutcome::Handled(format!(
+                        "Queue is full ({max}/{max}). /stop or /flush to drain."
+                    ))
+                }
             }
-            app.textarea = ta;
-            SlashOutcome::Handled(format!("Queued: \"{message}\" (press Enter to submit)"))
+        }
+        // Phase 36.17.3 (D-06 amended): /pause toggles `app.queue_paused`.
+        // `/unpause` is an alias of `/pause` in the registry (canonical name
+        // resolved to "pause"), so the dispatch layer above detects the typed
+        // alias from the original input and routes here with name = "unpause".
+        // These arms run BEFORE the catch-all _ => map_core_to_slash_outcome
+        // forwarder so the defensive Silent fallback (Plan 02) never fires.
+        "pause" => {
+            let was_paused = app.queue_paused.fetch_xor(true, std::sync::atomic::Ordering::SeqCst);
+            let new_state = !was_paused;
+            let depth = app.queue.len(&app.queue_key);
+            SlashOutcome::Handled(format!(
+                "Queue drain: {}. ({} queued)",
+                if new_state { "paused" } else { "resumed" },
+                depth
+            ))
+        }
+        // Phase 36.17.3 (D-06 amended): /unpause explicit set-to-false; no-op
+        // (with informational message) when not currently paused.
+        "unpause" => {
+            let was_paused = app.queue_paused.swap(false, std::sync::atomic::Ordering::SeqCst);
+            let depth = app.queue.len(&app.queue_key);
+            if was_paused {
+                SlashOutcome::Handled(format!("Queue resumed. ({} queued)", depth))
+            } else {
+                SlashOutcome::Handled("Queue was not paused.".to_string())
+            }
+        }
+        // Phase 36.17.3 (D-07 + T-02 mitigation): clear the queue and reset
+        // pause BEFORE forwarding to the session-clear path so the user never
+        // observes stale queued items firing against a fresh session.
+        // RESEARCH Pitfall 1 ordering: queue.clear -> queue_paused.store(false)
+        // -> session clear forwarding.
+        "new" => {
+            app.queue.clear(&app.queue_key);
+            app.queue_paused.store(false, std::sync::atomic::Ordering::SeqCst);
+            map_core_to_slash_outcome(core_result.clone())
+        }
+        // Phase 36.17.3 (D-07 + T-02 mitigation): /reset is registered as an
+        // alias of /new in the core registry (resolves to canonical name "new"
+        // at dispatch time), so this arm is unreachable at runtime. It is
+        // retained as a defensive marker so any future refactor that distinguishes
+        // /reset from /new at the dispatch layer still clears the queue. The
+        // ordering matches the /new arm: clear -> reset paused -> forward.
+        "reset" => {
+            app.queue.clear(&app.queue_key);
+            app.queue_paused.store(false, std::sync::atomic::Ordering::SeqCst);
+            map_core_to_slash_outcome(core_result.clone())
         }
         _ => map_core_to_slash_outcome(core_result.clone()),
     }
@@ -1080,5 +1213,19 @@ fn map_core_to_slash_outcome(result: CommandResult) -> SlashOutcome {
         ),
         CommandResult::SkillActivated { name, body } => SlashOutcome::SkillActivated { name, body },
         CommandResult::PersonalityApplied(text) => SlashOutcome::Handled(text),
+        // Phase 36.17.3: closed via handle_session_control's "queue" arm above;
+        // this fallback remains for non-TUI consumers (gateway adapters, the
+        // classic CLI REPL) which also emit `CommandResult::Queued` but do not
+        // route through `handle_session_control`.
+        CommandResult::Queued { message } => {
+            SlashOutcome::Handled(format!("Queued: {message}"))
+        }
+        // Phase 36.17.3 (D-06 amended): defensive no-op; active toggle lives in
+        // handle_session_control (Plan 05) BEFORE map_core_to_slash_outcome is
+        // called, so this arm is the fallback for any path that routes through
+        // here without interception (e.g., gateway shimming through the TUI
+        // mapper, or future surfaces without a queue-paused AtomicBool).
+        CommandResult::PauseQueue => SlashOutcome::Silent,
+        CommandResult::UnpauseQueue => SlashOutcome::Silent,
     }
 }

@@ -19,10 +19,14 @@ pub mod hexapod_tcp; // Phase 27.1.1 — registration in Plan 04 register_defaul
 pub mod hexapod_video; // Phase 27.1.4 — stateless single-frame JPEG capture via port 8002
 pub mod memory_manager_handle;
 pub mod memory_tool;
+pub mod not_supported_dispatcher; // Phase 36.17.7 D-03-b — zero-impl AudioDispatcher stub for Discord/Slack
 pub mod registry;
+pub mod send_audio_tool; // Phase 36.17.5 D-14/D-15 — SendAudioTool + AudioDispatcher
 pub mod skill_manage; // Phase 33 — learning toolset (LEARN-04, LEARN-05)
 pub mod skills_tool;
 pub mod terminal;
+pub mod tts; // Phase 36.17.5 — TTS provider impls (edge, elevenlabs)
+pub mod tts_tool; // Phase 36.17.5 D-05/D-06/D-07 — TextToSpeechTool LLM tool
 pub mod toolset_session; // Phase 25.2 Plan 15 — production ToolsetSessionHandle impl (UAT Issue 2)
 pub mod web_extract; // Phase 25.2
 pub mod web_local; // Phase 25.2 — shared HTML→Markdown helpers (extract_content_local target)
@@ -33,7 +37,10 @@ pub use memory_manager_handle::MemoryManagerHandle;
 pub use registry::{
     InterceptHandler, Prerequisite, Tool, ToolRegistry, todo_read_schema, todo_write_schema,
 };
+pub use not_supported_dispatcher::NotSupportedAudioDispatcher;
+pub use send_audio_tool::{AudioDispatcher, SendAudioTool};
 pub use toolset_session::RegistryToolsetSession;
+pub use tts_tool::TextToSpeechTool;
 pub use web_extract::WebExtractTool;
 
 // ---------------------------------------------------------------------------

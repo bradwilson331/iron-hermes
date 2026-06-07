@@ -28,9 +28,10 @@ const COMPONENTS_CSS: Asset = asset!("/assets/components.css");
 const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
 #[cfg(feature = "legacy-shell")]
 const MAIN_CSS: Asset = asset!("/assets/main.css");
-#[cfg(feature = "legacy-shell")]
+// Always-loaded — moved out of the legacy-shell gate so HermesApp can
+// resolve --w-bg-*, --accent-primary, --w-border, --w-radius-*, and
+// --w-shadow-* tokens (BUG-2 fix from 36.3.7.11 UAT).
 const DESIGN_TOKENS_CSS: Asset = asset!("/assets/design-tokens.css");
-#[cfg(feature = "legacy-shell")]
 const WARP_IH_CSS: Asset = asset!("/assets/warp-ih.css");
 #[cfg(feature = "legacy-shell")]
 const SCANNER_ANIM_CSS: Asset = asset!("/assets/scanner-anim.css");
@@ -52,7 +53,16 @@ pub fn App() -> Element {
         }
 
         // New bundle CSS — load order is significant (tokens first).
+        // DESIGN_TOKENS_CSS + WARP_IH_CSS hold the canonical --w-bg-*,
+        // --accent-primary, --w-border, --w-radius-*, and --w-shadow-*
+        // tokens that the kanban dashboard (and any future shared module)
+        // consume via var(). Loaded unconditionally so non-legacy shells
+        // resolve those tokens correctly (BUG-2 fix from 36.3.7.11 UAT —
+        // see .planning/HANDOFF.json: token-resolution gap caused
+        // color-mix() to fall back to transparent in the drawer + modals).
         document::Link { rel: "stylesheet", href: TOKENS_CSS }
+        document::Link { rel: "stylesheet", href: DESIGN_TOKENS_CSS }
+        document::Link { rel: "stylesheet", href: WARP_IH_CSS }
         document::Link { rel: "stylesheet", href: SITE_CSS }
         document::Link { rel: "stylesheet", href: WHEEL_CSS }
         document::Link { rel: "stylesheet", href: SCREENS_CSS }
@@ -75,11 +85,13 @@ pub fn App() -> Element {
 
 #[cfg(feature = "legacy-shell")]
 fn legacy_links() -> Element {
+    // DESIGN_TOKENS_CSS + WARP_IH_CSS moved to the always-loaded block
+    // above so non-legacy shells resolve --w-* / --accent-primary tokens
+    // (BUG-2 fix from 36.3.7.11 UAT). The remaining legacy-only sheets
+    // stay gated here.
     rsx! {
         document::Link { rel: "stylesheet", href: TAILWIND_CSS }
         document::Link { rel: "stylesheet", href: MAIN_CSS }
-        document::Link { rel: "stylesheet", href: DESIGN_TOKENS_CSS }
-        document::Link { rel: "stylesheet", href: WARP_IH_CSS }
         document::Link { rel: "stylesheet", href: SCANNER_ANIM_CSS }
     }
 }

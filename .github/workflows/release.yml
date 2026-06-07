@@ -3,91 +3,95 @@ name: Release
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
 
 env:
   CARGO_TERM_COLOR: always
-  BINARY: ironhermes
-  PACKAGE: ironhermes-cli
+  # Release builds intentionally omit -D warnings so compiler warnings never fail a release.
+
+# Least-privilege token (T-37.1-04-03): only the scope needed to create/upload releases.
+permissions:
+  contents: write
 
 jobs:
   build:
     name: Build ${{ matrix.artifact }}
-    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            artifact: ironhermes-linux-x86_64
-            use_cross: false
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-            artifact: ironhermes-linux-aarch64
-            use_cross: true
-          - os: macos-13
-            target: x86_64-apple-darwin
-            artifact: ironhermes-macos-x86_64
-            use_cross: false
-          - os: macos-latest
+          - os: macos-15            # ARM64 Apple Silicon
             target: aarch64-apple-darwin
             artifact: ironhermes-macos-aarch64
-            use_cross: false
+          - os: macos-15-intel      # Intel x86_64 — must be explicit; macos-15 alone = ARM64 only
+            target: x86_64-apple-darwin
+            artifact: ironhermes-macos-x86_64
+          - os: ubuntu-24.04        # Linux x86_64 (native)
+            target: x86_64-unknown-linux-gnu
+            artifact: ironhermes-linux-x86_64
+          - os: ubuntu-24.04-arm    # Linux aarch64 (native — no cross-compile needed)
+            target: aarch64-unknown-linux-gnu
+            artifact: ironhermes-linux-aarch64
+          # Windows (x86_64-pc-windows-msvc) is intentionally NOT built here: the
+          # codebase is not yet Windows-portable (~56 Unix-only API sites —
+          # UnixListener/UnixStream, setpgid/killpg/SIGKILL, pre_exec). Re-add this
+          # leg once the Windows-portability follow-on phase lands. install.ps1
+          # surfaces a "not yet available" notice until then.
+
+    runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      # T-37.1-04-01: actions pinned to commit SHAs (mutable tags don't satisfy
+      # supply-chain integrity); trailing comment records the human-readable version.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: release-${{ matrix.target }}
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - name: Install cross
-        if: matrix.use_cross
-        run: cargo install cross --locked
-
-      - name: Build
+      # Linux-only system deps: rodio -> cpal -> alsa-sys needs ALSA dev headers
+      # (alsa.pc) to build. macOS uses CoreAudio and Windows uses WASAPI — no
+      # system package required there. Both Linux legs are native (no cross), so
+      # apt installs the correct arch automatically.
+      - name: Install Linux audio system deps (ALSA)
+        if: runner.os == 'Linux'
         run: |
-          if [ "${{ matrix.use_cross }}" = "true" ]; then
-            cross build --release --target ${{ matrix.target }} --package ${{ env.PACKAGE }} --bin ${{ env.BINARY }}
-          else
-            cargo build --release --target ${{ matrix.target }} --package ${{ env.PACKAGE }} --bin ${{ env.BINARY }}
-          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
 
-      - name: Package
+      - name: Build release binary
+        run: cargo build --release --bin ironhermes
+
+      - name: Sign binary (macOS only)
+        if: runner.os == 'macOS'
         run: |
-          cp target/${{ matrix.target }}/release/${{ env.BINARY }} ${{ env.BINARY }}
-          tar -czf ${{ matrix.artifact }}.tar.gz ${{ env.BINARY }}
+          # Phase 37.1: ad-hoc sign (no Apple Developer account yet — D-07 deferred)
+          # Future notarization slot-in: when Apple Developer account is provisioned,
+          # replace the codesign line below with:
+          #
+          #   codesign --sign "Developer ID Application: <Name> (<TeamID>)" \
+          #     --timestamp --options runtime target/release/ironhermes
+          #
+          #   xcrun notarytool submit ${{ matrix.artifact }}.tar.gz \
+          #     --apple-id "${{ secrets.APPLE_ID }}" \
+          #     --team-id "${{ secrets.APPLE_TEAM_ID }}" \
+          #     --password "${{ secrets.NOTARYTOOL_PASSWORD }}" \
+          #     --wait
+          #
+          #   xcrun stapler staple ${{ matrix.artifact }}.tar.gz
+          #
+          # The quarantine-strip in install.sh (xattr -d com.apple.quarantine) can
+          # remain as a no-op safety net once notarization is active.
+          codesign -s - target/release/ironhermes
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Package tarball
+        run: |
+          cp target/release/ironhermes ironhermes
+          tar czf ${{ matrix.artifact }}.tar.gz ironhermes
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.tar.gz
-          retention-days: 1
-
-  release:
-    name: Publish GitHub Release
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/**/*.tar.gz
-          generate_release_notes: true
+          files: ${{ matrix.artifact }}.tar.gz

@@ -58,7 +58,7 @@ jobs:
   # Full workspace test — catches regressions across every crate.
   # ---------------------------------------------------------------------------
   workspace-tests:
-    name: cargo test --workspace
+    name: cargo nextest run --workspace
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -69,8 +69,15 @@ jobs:
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2
 
-      - name: cargo test --workspace
-        run: cargo test --workspace --all-features
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: cargo nextest run --workspace
+        run: cargo nextest run --profile ci --workspace --all-features
+
+      # nextest does not run doctests — keep them covered separately.
+      - name: cargo test --doc
+        run: cargo test --workspace --all-features --doc
 
   # ---------------------------------------------------------------------------
   # Lint + format — workspace hygiene; regression gates outside the phase

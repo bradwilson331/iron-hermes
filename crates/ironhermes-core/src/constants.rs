@@ -12,7 +12,9 @@ pub const NOUS_API_CHAT_URL: &str = "https://inference-api.nousresearch.com/v1/c
 pub const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 
 pub const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
-pub const DEFAULT_MAX_ITERATIONS: usize = 90;
+// Lowered from 90 to bound the worst case when a small parent model loops on
+// failed tool calls / delegations (see runaway-delegation guard in AgentLoop).
+pub const DEFAULT_MAX_ITERATIONS: usize = 50;
 pub const DEFAULT_CONTEXT_LENGTH: usize = 128_000;
 pub const DEFAULT_TOOL_DELAY_SECS: f64 = 1.0;
 
@@ -55,6 +57,7 @@ pub const DEFAULT_TOOLSETS: &[&str] =
 /// as they have no external prerequisites.
 pub const ALL_TOOLSETS: &[&str] = &[
     "memory", "session", "agent", "skills", "robotics", "learning", "web", "code", "browser",
+    "voice",   // Phase 36.17.5 D-15
 ];
 
 /// Get the IronHermes home directory (default: ~/.ironhermes).

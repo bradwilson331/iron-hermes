@@ -105,7 +105,7 @@ impl Tool for HexapodVideoTool {
         vec![Prerequisite {
             kind: "env_var".to_string(),
             name: "HEXAPOD_IP".to_string(),
-            description: "IP address of the Freenove hexapod robot (e.g., 192.168.1.42). \
+            description: "IP address of the Freenove hexapod robot (e.g., 127.0.0.1). \
                           Required for hexapod_video to connect to the robot's video stream."
                 .to_string(),
             required: true,

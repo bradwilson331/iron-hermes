@@ -3,6 +3,37 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+
+/// Retry wrapper for Telegram API calls that may hit 429 rate limits (D-19).
+///
+/// Relocated from `handler.rs` as `pub(crate)` per Phase 36.17.2 Plan 01 checker M2 —
+/// `user_queue.rs` needs this helper and both modules can share it via `rate_limiter`.
+pub(crate) async fn with_rate_limit_retry<F, Fut, T>(f: F) -> anyhow::Result<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
+{
+    for attempt in 0..3u64 {
+        match f().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("429") || err_str.contains("Too Many Requests") {
+                    let wait = (attempt + 1) * 2; // 2s, 4s, 6s
+                    tracing::warn!(
+                        "Telegram rate limit hit, retrying in {}s (attempt {})",
+                        wait,
+                        attempt + 1
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+    anyhow::bail!("Bot is being rate limited, please wait")
+}
 use std::time::Instant;
 
 #[derive(Clone)]
