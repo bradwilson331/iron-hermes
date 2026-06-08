@@ -20,16 +20,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15            # ARM64 Apple Silicon
+          - os: macos-15 # ARM64 Apple Silicon
             target: aarch64-apple-darwin
             artifact: ironhermes-macos-aarch64
-          - os: macos-15-intel      # Intel x86_64 — must be explicit; macos-15 alone = ARM64 only
+          - os: macos-15-intel # Intel x86_64 — must be explicit; macos-15 alone = ARM64 only
             target: x86_64-apple-darwin
             artifact: ironhermes-macos-x86_64
-          - os: ubuntu-24.04        # Linux x86_64 (native)
+          - os: ubuntu-24.04 # Linux x86_64 (native)
             target: x86_64-unknown-linux-gnu
             artifact: ironhermes-linux-x86_64
-          - os: ubuntu-24.04-arm    # Linux aarch64 (native — no cross-compile needed)
+          - os: ubuntu-24.04-arm # Linux aarch64 (native — no cross-compile needed)
             target: aarch64-unknown-linux-gnu
             artifact: ironhermes-linux-aarch64
           # Windows (x86_64-pc-windows-msvc) is intentionally NOT built here: the
@@ -48,9 +48,6 @@ jobs:
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
-      - name: Cache cargo registry + build
-        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-
       # Linux-only system deps: rodio -> cpal -> alsa-sys needs ALSA dev headers
       # (alsa.pc) to build. macOS uses CoreAudio and Windows uses WASAPI — no
       # system package required there. Both Linux legs are native (no cross), so
@@ -60,6 +57,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       - name: Build release binary
         run: cargo build --release --bin ironhermes
