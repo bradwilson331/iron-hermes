@@ -16,9 +16,7 @@ pub use store_reader_impl::KanbanStoreReaderImpl;
 // Phase 36.3.7.5 BUG-36.3.7.5-06: KanbanStoreWriterImpl is published from
 // ironhermes-kanban (gateway needs it; gateway has no dep on ironhermes-cli;
 // reverse dep is circular). Re-export here for ergonomic discoverability.
-pub use ironhermes_kanban::KanbanStoreWriterImpl;
 
-use anyhow::Result;
 use clap::Subcommand;
 
 use boards::BoardsCommands;
@@ -433,7 +431,6 @@ pub enum KanbanCommands {
     // ---------------------------------------------------------------------------
     // Operator-recovery verbs (D-33)
     // ---------------------------------------------------------------------------
-
     /// Force-release a task's claim (operator emergency)
     #[command(name = "reclaim")]
     Reclaim {
@@ -478,7 +475,6 @@ pub enum KanbanCommands {
     // ---------------------------------------------------------------------------
     // Phase 36.3.7.5 — notifier subscriptions (BUG-36.3.7.5-05)
     // ---------------------------------------------------------------------------
-
     /// Subscribe a chat to a task's terminal events (gateway bridge hook)
     #[command(name = "notify-subscribe")]
     NotifySubscribe {
@@ -527,7 +523,6 @@ pub enum KanbanCommands {
     // ---------------------------------------------------------------------------
     // Phase 36.3.7.10 — LLM-driven decomposer / specifier CLI verbs
     // ---------------------------------------------------------------------------
-
     /// LLM-driven decomposer: fan a triage task into a child swarm (Phase 36.3.7.10).
     #[command(name = "decompose")]
     Decompose {
@@ -584,7 +579,10 @@ pub enum KanbanCommands {
 /// `board` — boards verbs operate on slugs passed as positional args.
 ///
 /// Returns an exit code (0 = success, 1 = error, 2 = D-34 bulk refusal).
-pub async fn handle_kanban_command(cmd: KanbanCommands, board: Option<String>) -> anyhow::Result<i32> {
+pub async fn handle_kanban_command(
+    cmd: KanbanCommands,
+    board: Option<String>,
+) -> anyhow::Result<i32> {
     match cmd {
         KanbanCommands::Init => commands::cmd_init(board.as_deref()).await,
         KanbanCommands::Create {
@@ -608,10 +606,25 @@ pub async fn handle_kanban_command(cmd: KanbanCommands, board: Option<String>) -
             json,
         } => {
             commands::cmd_create(
-                title, assignee, body, parents, tenant, workspace, skills,
-                priority, triage, goal, goal_max_turns, goal_toolset,
-                idempotency_key, max_runtime, max_retries, scheduled_at,
-                branch, json, board.as_deref(),
+                title,
+                assignee,
+                body,
+                parents,
+                tenant,
+                workspace,
+                skills,
+                priority,
+                triage,
+                goal,
+                goal_max_turns,
+                goal_toolset,
+                idempotency_key,
+                max_runtime,
+                max_retries,
+                scheduled_at,
+                branch,
+                json,
+                board.as_deref(),
             )
             .await
         }
@@ -622,9 +635,22 @@ pub async fn handle_kanban_command(cmd: KanbanCommands, board: Option<String>) -
             tenant,
             archived,
             json,
-        } => commands::cmd_list(mine, assignee, status, tenant, archived, json, board.as_deref()).await,
+        } => {
+            commands::cmd_list(
+                mine,
+                assignee,
+                status,
+                tenant,
+                archived,
+                json,
+                board.as_deref(),
+            )
+            .await
+        }
         KanbanCommands::Show { id, json } => commands::cmd_show(id, json, board.as_deref()).await,
-        KanbanCommands::Assign { id, profile } => commands::cmd_assign(id, profile, board.as_deref()).await,
+        KanbanCommands::Assign { id, profile } => {
+            commands::cmd_assign(id, profile, board.as_deref()).await
+        }
         KanbanCommands::Link {
             parent_id,
             child_id,
@@ -648,9 +674,13 @@ pub async fn handle_kanban_command(cmd: KanbanCommands, board: Option<String>) -
             reason,
             extra_ids,
         } => commands::cmd_block(id, reason, extra_ids, board.as_deref()).await,
-        KanbanCommands::Unblock { ids, json } => commands::cmd_unblock(ids, json, board.as_deref()).await,
+        KanbanCommands::Unblock { ids, json } => {
+            commands::cmd_unblock(ids, json, board.as_deref()).await
+        }
         // Phase 36.3.7.6 D-cli-heartbeat-parity — closes reference.md:583 doc-vs-impl gap.
-        KanbanCommands::Heartbeat { id, note } => commands::cmd_heartbeat(id, note, board.as_deref()).await,
+        KanbanCommands::Heartbeat { id, note } => {
+            commands::cmd_heartbeat(id, note, board.as_deref()).await
+        }
         // Phase 36.3.7.7 BUG-36.3.7.7-01 — kanban swarm (D-topology-shapes).
         KanbanCommands::Swarm {
             goal,
@@ -712,9 +742,13 @@ pub async fn handle_kanban_command(cmd: KanbanCommands, board: Option<String>) -
         // operate on slugs passed as positional args, not on the parent --board flag.
         KanbanCommands::Boards { cmd } => match cmd {
             BoardsCommands::List { json } => boards::cmd_boards_list(json).await,
-            BoardsCommands::Create { slug, name, description, switch, json } => {
-                boards::cmd_boards_create(slug, name, description, switch, json).await
-            }
+            BoardsCommands::Create {
+                slug,
+                name,
+                description,
+                switch,
+                json,
+            } => boards::cmd_boards_create(slug, name, description, switch, json).await,
             BoardsCommands::Switch { slug } => boards::cmd_boards_switch(slug).await,
             BoardsCommands::Show { json } => boards::cmd_boards_show(json).await,
             BoardsCommands::Rename { slug, new_name } => {
@@ -722,7 +756,9 @@ pub async fn handle_kanban_command(cmd: KanbanCommands, board: Option<String>) -
             }
             BoardsCommands::Rm { slug, delete } => boards::cmd_boards_rm(slug, delete).await,
         },
-        KanbanCommands::Archive { ids, json } => commands::cmd_archive(ids, json, board.as_deref()).await,
+        KanbanCommands::Archive { ids, json } => {
+            commands::cmd_archive(ids, json, board.as_deref()).await
+        }
         KanbanCommands::Tail { id } => commands::cmd_tail(id, board.as_deref()).await,
         KanbanCommands::Watch {
             assignee,
@@ -751,7 +787,9 @@ pub async fn handle_kanban_command(cmd: KanbanCommands, board: Option<String>) -
             new_profile,
             reclaim,
         } => commands::cmd_reassign(id, new_profile, reclaim, board.as_deref()).await,
-        KanbanCommands::Diagnostics { json } => commands::cmd_diagnostics(json, board.as_deref()).await,
+        KanbanCommands::Diagnostics { json } => {
+            commands::cmd_diagnostics(json, board.as_deref()).await
+        }
         KanbanCommands::Daemon {
             force: _,
             failure_limit,
@@ -766,7 +804,10 @@ pub async fn handle_kanban_command(cmd: KanbanCommands, board: Option<String>) -
             chat_id,
             thread_id,
             user_id: _,
-        } => commands::cmd_notify_subscribe(task_id, platform, chat_id, thread_id, board.as_deref()).await,
+        } => {
+            commands::cmd_notify_subscribe(task_id, platform, chat_id, thread_id, board.as_deref())
+                .await
+        }
         KanbanCommands::NotifyList { task_id, json } => {
             commands::cmd_notify_list(task_id, json, board.as_deref()).await
         }
@@ -777,12 +818,40 @@ pub async fn handle_kanban_command(cmd: KanbanCommands, board: Option<String>) -
             thread_id: _,
         } => commands::cmd_notify_unsubscribe(task_id, platform, chat_id, board.as_deref()).await,
         // Phase 36.3.7.10 — hermes kanban decompose.
-        KanbanCommands::Decompose { id, all, tenant, json, board: cmd_board } => {
-            commands::cmd_decompose(id, all, tenant, json, cmd_board.as_deref().or(board.as_deref())).await
+        KanbanCommands::Decompose {
+            id,
+            all,
+            tenant,
+            json,
+            board: cmd_board,
+        } => {
+            commands::cmd_decompose(
+                id,
+                all,
+                tenant,
+                json,
+                cmd_board.as_deref().or(board.as_deref()),
+            )
+            .await
         }
         // Phase 36.3.7.10 — hermes kanban specify.
-        KanbanCommands::Specify { id, all, tenant, author, json, board: cmd_board } => {
-            commands::cmd_specify(id, all, tenant, author, json, cmd_board.as_deref().or(board.as_deref())).await
+        KanbanCommands::Specify {
+            id,
+            all,
+            tenant,
+            author,
+            json,
+            board: cmd_board,
+        } => {
+            commands::cmd_specify(
+                id,
+                all,
+                tenant,
+                author,
+                json,
+                cmd_board.as_deref().or(board.as_deref()),
+            )
+            .await
         }
     }
 }

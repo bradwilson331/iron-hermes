@@ -19,9 +19,8 @@ pub mod telegram;
 pub mod user_queue;
 
 pub use adapter::{MessageHandler, PlatformAdapter};
-pub use discord::{DiscordAdapter, run_discord_adapter};
-pub use slack::{SlackAdapter, run_slack_adapter};
 pub use backoff::BackoffState;
+pub use discord::{DiscordAdapter, run_discord_adapter};
 pub use handler::GatewayMessageHandler;
 pub use ironhermes_core::commands::running_agent::RunningAgentGuard;
 pub use pid::{
@@ -29,11 +28,12 @@ pub use pid::{
     write_gateway_pid,
 };
 pub use runner::GatewayRunner;
+pub use slack::{SlackAdapter, run_slack_adapter};
 // Note: dispatch_delivery (Plan 22.4.2.1) was removed in Plan 32.1-07.
 // Delivery dispatch is now handled by ironhermes_cron_runner::dispatch_all_targets.
+pub use ironhermes_cron::TgSendApi;
 pub use session::GatewaySession;
 pub use stream_consumer::StreamConsumer;
-pub use ironhermes_cron::TgSendApi;
 pub use telegram::{
     TelegramAdapter, TgBotCommand, TgChat, TgDocument, TgFile, TgMessage, TgPhotoSize, TgUpdate,
     TgUser,

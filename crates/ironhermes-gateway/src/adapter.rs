@@ -205,7 +205,8 @@ pub trait MediaSender: Send + Sync {
             MediaKind::Audio => self.send_audio(chat_id, &media_ref.source, thread_id).await,
             MediaKind::Video => self.send_video(chat_id, &media_ref.source, thread_id).await,
             MediaKind::Document => {
-                self.send_document(chat_id, &media_ref.source, thread_id).await
+                self.send_document(chat_id, &media_ref.source, thread_id)
+                    .await
             }
         }
     }

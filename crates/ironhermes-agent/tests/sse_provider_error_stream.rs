@@ -81,7 +81,9 @@ async fn sse_error_400_produces_provider_error_event() {
         msg
     );
     assert!(
-        events.iter().all(|ev| !matches!(ev, StreamEvent::ContentDelta(_))),
+        events
+            .iter()
+            .all(|ev| !matches!(ev, StreamEvent::ContentDelta(_))),
         "phase 36.14 (PROV-07): no ContentDelta should be emitted when SSE error is the first event"
     );
 }
@@ -105,10 +107,7 @@ async fn sse_error_string_code_400_produces_provider_error_event() {
 
 #[tokio::test]
 async fn sse_error_429_produces_provider_error_event() {
-    let events = run_and_drain(
-        r#"{"error":{"message":"rate limit exceeded","code":429}}"#,
-    )
-    .await;
+    let events = run_and_drain(r#"{"error":{"message":"rate limit exceeded","code":429}}"#).await;
     let msg = extract_provider_error(&events).expect(
         "phase 36.14 (PROV-07): chat_completion_stream must emit StreamEvent::ProviderError for SSE error envelope",
     );
@@ -121,10 +120,7 @@ async fn sse_error_429_produces_provider_error_event() {
 
 #[tokio::test]
 async fn sse_error_500_produces_provider_error_event() {
-    let events = run_and_drain(
-        r#"{"error":{"message":"internal server error","code":500}}"#,
-    )
-    .await;
+    let events = run_and_drain(r#"{"error":{"message":"internal server error","code":500}}"#).await;
     let msg = extract_provider_error(&events).expect(
         "phase 36.14 (PROV-07): chat_completion_stream must emit StreamEvent::ProviderError for SSE error envelope",
     );
@@ -137,10 +133,7 @@ async fn sse_error_500_produces_provider_error_event() {
 
 #[tokio::test]
 async fn sse_error_502_produces_provider_error_event() {
-    let events = run_and_drain(
-        r#"{"error":{"message":"bad gateway","code":502}}"#,
-    )
-    .await;
+    let events = run_and_drain(r#"{"error":{"message":"bad gateway","code":502}}"#).await;
     let msg = extract_provider_error(&events).expect(
         "phase 36.14 (PROV-07): chat_completion_stream must emit StreamEvent::ProviderError for SSE error envelope",
     );
@@ -153,10 +146,7 @@ async fn sse_error_502_produces_provider_error_event() {
 
 #[tokio::test]
 async fn sse_error_503_produces_provider_error_event() {
-    let events = run_and_drain(
-        r#"{"error":{"message":"service unavailable","code":503}}"#,
-    )
-    .await;
+    let events = run_and_drain(r#"{"error":{"message":"service unavailable","code":503}}"#).await;
     let msg = extract_provider_error(&events).expect(
         "phase 36.14 (PROV-07): chat_completion_stream must emit StreamEvent::ProviderError for SSE error envelope",
     );
@@ -169,10 +159,7 @@ async fn sse_error_503_produces_provider_error_event() {
 
 #[tokio::test]
 async fn sse_error_unknown_code_produces_provider_error_event() {
-    let events = run_and_drain(
-        r#"{"error":{"message":"upstream failure"}}"#,
-    )
-    .await;
+    let events = run_and_drain(r#"{"error":{"message":"upstream failure"}}"#).await;
     let msg = extract_provider_error(&events).expect(
         "phase 36.14 (PROV-07): chat_completion_stream must emit StreamEvent::ProviderError even for unknown-code SSE error envelopes",
     );

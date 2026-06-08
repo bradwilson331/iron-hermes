@@ -40,7 +40,10 @@ fn kanban_dispatcher_spawn_predicate_default_true() {
     // (as it would be in a fresh gateway startup without the env override).
     // We use a helper that mirrors the runner logic without mutating the env.
     let env_ok = dispatch_in_gw_env_predicate(None);
-    assert!(env_ok, "dispatch_in_gw_env must be true when env var is absent");
+    assert!(
+        env_ok,
+        "dispatch_in_gw_env must be true when env var is absent"
+    );
 
     assert!(
         cfg.dispatch_in_gateway && env_ok,

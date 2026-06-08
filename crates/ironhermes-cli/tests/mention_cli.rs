@@ -39,20 +39,18 @@ enum TestSub {
 /// REQ-14 test 1: positional task_id parses correctly; fallback_policy defaults to "skip".
 #[test]
 fn mention_verb_parses_minimal() {
-    let parsed = TestCli::try_parse_from([
-        "hermes", "kanban", "mention", "t_abc123",
-    ])
-    .ok()
-    .expect("parse should succeed for `kanban mention t_abc123`");
+    let parsed = TestCli::try_parse_from(["hermes", "kanban", "mention", "t_abc123"])
+        .expect("parse should succeed for `kanban mention t_abc123`");
     match parsed.cmd {
         TestSub::Kanban {
-            sub: KanbanCommands::Mention {
-                task_id,
-                fallback_policy,
-                idempotency_key,
-                body_override,
-                json,
-            },
+            sub:
+                KanbanCommands::Mention {
+                    task_id,
+                    fallback_policy,
+                    idempotency_key,
+                    body_override,
+                    json,
+                },
         } => {
             assert_eq!(task_id.as_deref(), Some("t_abc123"));
             assert_eq!(fallback_policy, "skip"); // default_value
@@ -75,11 +73,12 @@ fn mention_verb_parses_fallback_policy_flag() {
         "--fallback-policy",
         "pending",
     ])
-    .ok()
     .expect("parse should succeed for `kanban mention t_abc --fallback-policy pending`");
     match parsed.cmd {
         TestSub::Kanban {
-            sub: KanbanCommands::Mention { fallback_policy, .. },
+            sub: KanbanCommands::Mention {
+                fallback_policy, ..
+            },
         } => {
             assert_eq!(fallback_policy, "pending");
         }
@@ -98,11 +97,12 @@ fn mention_verb_parses_idempotency_key_flag() {
         "--idempotency-key",
         "my-key",
     ])
-    .ok()
     .expect("parse should succeed for `kanban mention t_abc --idempotency-key my-key`");
     match parsed.cmd {
         TestSub::Kanban {
-            sub: KanbanCommands::Mention { idempotency_key, .. },
+            sub: KanbanCommands::Mention {
+                idempotency_key, ..
+            },
         } => {
             assert_eq!(idempotency_key.as_deref(), Some("my-key"));
         }
@@ -127,17 +127,17 @@ fn mention_verb_parses_dispatch_happy_path() {
         "@reviewer please",
         "--json",
     ])
-    .ok()
     .expect("parse should succeed with all flags present");
     match parsed.cmd {
         TestSub::Kanban {
-            sub: KanbanCommands::Mention {
-                task_id,
-                fallback_policy,
-                idempotency_key,
-                body_override,
-                json,
-            },
+            sub:
+                KanbanCommands::Mention {
+                    task_id,
+                    fallback_policy,
+                    idempotency_key,
+                    body_override,
+                    json,
+                },
         } => {
             assert_eq!(task_id.as_deref(), Some("t_abc"));
             assert_eq!(fallback_policy, "error");

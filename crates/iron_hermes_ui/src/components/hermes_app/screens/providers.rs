@@ -20,7 +20,10 @@ use crate::mocks::stub_data::{providers, ProviderStub};
 pub fn ScreenProviders(is_active: bool) -> Element {
     let provider_list = providers();
     let provider_count = provider_list.len();
-    let active_count = provider_list.iter().filter(|p| p.status == "ACTIVE").count();
+    let active_count = provider_list
+        .iter()
+        .filter(|p| p.status == "ACTIVE")
+        .count();
 
     rsx! {
         section {

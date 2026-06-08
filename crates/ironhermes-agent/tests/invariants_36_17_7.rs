@@ -108,6 +108,7 @@ fn tui_event_loop_wires_session_key_some() {
 /// honest, count the union of:
 ///   - `register_tts_tools(` invocations in the runtime/factory.
 ///   - `TtsPerTurnWiring` references at the three handler surfaces.
+///
 /// Combined total must be ≥ 4 to prove the wiring exists at every surface.
 #[test]
 fn register_tts_tools_called_at_minimum_four_sites() {
@@ -133,6 +134,11 @@ fn register_tts_tools_called_at_minimum_four_sites() {
          gateway TtsPerTurnWiring = {}, ws TtsPerTurnWiring = {}, \
          tui TtsPerTurnWiring = {}). A comment-out regression at any handler \
          surface would drop this count.",
-        total, factory_calls, agent_calls, gateway_wiring, ws_wiring, tui_wiring
+        total,
+        factory_calls,
+        agent_calls,
+        gateway_wiring,
+        ws_wiring,
+        tui_wiring
     );
 }

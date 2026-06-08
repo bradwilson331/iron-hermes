@@ -176,9 +176,8 @@ async fn cmd_fetch() -> Result<()> {
     // Check for total failure
     if fetch_result.models_dev_count.is_none() && fetch_result.openrouter_count.is_none() {
         eprintln!(
-            "{} {}",
-            "Error:".red().bold(),
-            "Fetch failed: both sources returned errors. Check network and OPENROUTER_API_KEY."
+            "{} Fetch failed: both sources returned errors. Check network and OPENROUTER_API_KEY.",
+            "Error:".red().bold()
         );
         return Err(anyhow::anyhow!("All fetch sources failed"));
     }
@@ -201,8 +200,7 @@ async fn cmd_fetch() -> Result<()> {
 
     // Save to disk
     let entry_count = entries.len();
-    let mut cache = ModelsCache::default();
-    cache.entries = entries;
+    let cache = ModelsCache { entries };
     cache.save()?;
 
     println!("{}", "Fetch Complete".bold().cyan());
@@ -262,20 +260,18 @@ async fn cmd_info(model: &str) -> Result<()> {
             // Build alias list from the static alias map
             let alias_registry = ModelRegistry::new();
             let alias_models = alias_registry.all_models();
-            let mut aliases: Vec<&str> = Vec::new();
+            let aliases: Vec<&str> = Vec::new();
             // Check all_models for entries that resolve to the same metadata
             // by looking up each alias candidate
             for (id, _) in &alias_models {
-                if *id != canonical {
-                    if let Some(m) = registry.lookup(id) {
-                        if m.context_length == metadata.context_length
-                            && m.tokenizer == metadata.tokenizer
-                            && m.max_output_tokens == metadata.max_output_tokens
-                        {
-                            // This could be an alias -- but we only want actual aliases
-                            // not different models with the same specs
-                        }
-                    }
+                if *id != canonical
+                    && let Some(m) = registry.lookup(id)
+                    && m.context_length == metadata.context_length
+                    && m.tokenizer == metadata.tokenizer
+                    && m.max_output_tokens == metadata.max_output_tokens
+                {
+                    // This could be an alias -- but we only want actual aliases
+                    // not different models with the same specs
                 }
             }
             // For now, aliases are not easily extractable from the registry

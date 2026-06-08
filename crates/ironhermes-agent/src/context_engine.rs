@@ -281,7 +281,7 @@ impl ContextEngine for LocalPruningEngine {
             );
         }
 
-        let mut cc = crate::context_compressor::ContextCompressor::new(
+        let cc = crate::context_compressor::ContextCompressor::new(
             self.context_length,
             self.threshold as f64,
         )
@@ -390,7 +390,7 @@ mod tests {
             .await
             .expect("engine compress ok");
 
-        let mut cc = crate::context_compressor::ContextCompressor::new(1000, 0.5);
+        let cc = crate::context_compressor::ContextCompressor::new(1000, 0.5);
         let _ = cc.compress(&mut via_compressor);
 
         assert_eq!(via_engine.len(), via_compressor.len());
@@ -408,6 +408,8 @@ mod tests {
             .await
             .expect("ok");
         // First 3 should still be the original user messages.
+        #[allow(clippy::needless_range_loop)]
+        // i is used as messages[i] index; enumerate() would not provide the index format
         for i in 0..3 {
             let text = messages[i].content_text().unwrap_or("");
             assert!(
@@ -444,8 +446,9 @@ mod tests {
             ChatMessage::assistant("done"),
         ];
         let engine = LocalPruningEngine::new(1000, 0.5);
-        let out = engine.compress(&mut msgs, make_stats(0)).await.expect("ok");
-        assert!(!out.compressed || out.compressed); // just exercise
+        // .expect("ok") is the success assertion; this test exercises compress
+        // and then verifies the orphan invariant below.
+        engine.compress(&mut msgs, make_stats(0)).await.expect("ok");
         assert!(crate::tool_pair::check_orphan_invariant(&msgs).is_ok());
     }
 
@@ -556,8 +559,9 @@ mod tests {
         // No hook registry attached → compress should proceed without error.
         let engine = LocalPruningEngine::new(1000, 0.5);
         let mut msgs = build_large_message_vec(30);
-        let out = engine.compress(&mut msgs, make_stats(0)).await.expect("ok");
-        assert!(out.compressed || !out.compressed); // just assert Ok was returned
+        // No hook registry attached → compress should proceed without error;
+        // .expect("ok") is the assertion that Ok was returned.
+        engine.compress(&mut msgs, make_stats(0)).await.expect("ok");
     }
 
     /// Phase 18 atomic-rollback fix: when `check_orphan_invariant` rejects the

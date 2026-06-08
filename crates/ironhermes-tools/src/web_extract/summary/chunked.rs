@@ -171,8 +171,10 @@ mod tests {
     #[tokio::test]
     async fn summarize_chunked_call_count_matches_chunks_plus_synthesis() {
         let content = "a".repeat(600_000);
-        let mut cfg = ExtractConfig::default();
-        cfg.summary_chunk_chars = 100_000;
+        let cfg = ExtractConfig {
+            summary_chunk_chars: 100_000,
+            ..Default::default()
+        };
 
         let counting = Arc::new(CountingHandle {
             calls: std::sync::Mutex::new(0),
@@ -212,8 +214,10 @@ mod tests {
             }
         }
         let content = "x".repeat(250_000); // 3 chunks at 100K
-        let mut cfg = ExtractConfig::default();
-        cfg.summary_chunk_chars = 100_000;
+        let cfg = ExtractConfig {
+            summary_chunk_chars: 100_000,
+            ..Default::default()
+        };
         let cap = Arc::new(CapturingHandle {
             calls: std::sync::Mutex::new(Vec::new()),
         });

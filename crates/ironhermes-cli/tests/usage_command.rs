@@ -47,11 +47,7 @@ impl StateStoreHandle for TestStateStoreAdapter {
     fn list_sessions_text(&self, _limit: usize) -> String {
         unreachable!("not exercised by Plan 10 usage tests")
     }
-    fn list_sessions_text_filtered(
-        &self,
-        _limit: usize,
-        _workspace_root: Option<&str>,
-    ) -> String {
+    fn list_sessions_text_filtered(&self, _limit: usize, _workspace_root: Option<&str>) -> String {
         unreachable!("not exercised by Plan 10 usage tests")
     }
     fn history_text(&self, _session_id: &str) -> String {
@@ -102,10 +98,7 @@ fn fresh_store() -> (Arc<Mutex<StateStore>>, NamedTempFile) {
     (Arc::new(Mutex::new(store)), f)
 }
 
-fn make_ctx_with_session(
-    session_id: &str,
-    store: Arc<Mutex<StateStore>>,
-) -> CommandContext {
+fn make_ctx_with_session(session_id: &str, store: Arc<Mutex<StateStore>>) -> CommandContext {
     let mut ctx = CommandContext::new(
         Platform::Local,
         session_id.to_string(),
@@ -126,6 +119,7 @@ fn find_cmd(name: &'static str) -> CommandDef {
         .unwrap_or_else(|| panic!("Command '{}' not found in registry", name))
 }
 
+#[allow(clippy::too_many_arguments)] // test helper: all args are distinct event fields; params-struct would add noise with no clarity gain
 fn insert_event(
     store: &Arc<Mutex<StateStore>>,
     session_id: &str,
@@ -219,7 +213,10 @@ fn b2_bare_usage_filters_to_current_session() {
         CommandResult::Output(s) => s,
         other => panic!("expected Output, got {other:?}"),
     };
-    assert!(text.contains("$0.0010"), "expected s1 cost in output: {text}");
+    assert!(
+        text.contains("$0.0010"),
+        "expected s1 cost in output: {text}"
+    );
     assert!(
         !text.contains("$0.0099") && !text.contains("$0.0100"),
         "s2 cost MUST be filtered out of current-session output: {text}"
@@ -238,7 +235,16 @@ fn b3_today_flag_aggregates_across_sessions_today_only() {
 
     insert_event(&store, "s_a", today_ms, "anthropic", "m", 100, 50, 1_000);
     insert_event(&store, "s_b", today_ms, "anthropic", "m", 100, 50, 1_000);
-    insert_event(&store, "s_y", yesterday_ms, "anthropic", "m", 999, 999, 9_999);
+    insert_event(
+        &store,
+        "s_y",
+        yesterday_ms,
+        "anthropic",
+        "m",
+        999,
+        999,
+        9_999,
+    );
 
     let ctx = make_ctx_with_session("s_a", store);
     let router = make_router();
@@ -248,7 +254,10 @@ fn b3_today_flag_aggregates_across_sessions_today_only() {
         CommandResult::Output(s) => s,
         other => panic!("expected Output, got {other:?}"),
     };
-    assert!(text.contains("$0.0020"), "expected $0.0020 in output: {text}");
+    assert!(
+        text.contains("$0.0020"),
+        "expected $0.0020 in output: {text}"
+    );
     assert!(
         !text.contains("$0.0099") && !text.contains("$0.0100"),
         "yesterday's row must be filtered out: {text}"
@@ -290,7 +299,16 @@ fn b5_model_filter_isolates_model_rows() {
     let (store, _f) = fresh_store();
     let now = now_ms();
     insert_event(&store, "s1", now, "anthropic", "opus-4-7", 100, 50, 1_000);
-    insert_event(&store, "s2", now, "anthropic", "sonnet-4-6", 999, 999, 9_999);
+    insert_event(
+        &store,
+        "s2",
+        now,
+        "anthropic",
+        "sonnet-4-6",
+        999,
+        999,
+        9_999,
+    );
 
     let ctx = make_ctx_with_session("s1", store);
     let router = make_router();
@@ -318,7 +336,16 @@ fn b6_since_7d_filters_to_rolling_window() {
     let three_days = now - 3 * 24 * 60 * 60 * 1000;
     let ten_days = now - 10 * 24 * 60 * 60 * 1000;
 
-    insert_event(&store, "s_recent", three_days, "anthropic", "m", 100, 50, 1_000);
+    insert_event(
+        &store,
+        "s_recent",
+        three_days,
+        "anthropic",
+        "m",
+        100,
+        50,
+        1_000,
+    );
     insert_event(&store, "s_old", ten_days, "anthropic", "m", 999, 999, 9_999);
 
     let ctx = make_ctx_with_session("s_recent", store);
@@ -329,7 +356,10 @@ fn b6_since_7d_filters_to_rolling_window() {
         CommandResult::Output(s) => s,
         other => panic!("expected Output, got {other:?}"),
     };
-    assert!(text.contains("$0.0010"), "expected $0.0010 in output: {text}");
+    assert!(
+        text.contains("$0.0010"),
+        "expected $0.0010 in output: {text}"
+    );
     assert!(
         !text.contains("$0.0099") && !text.contains("$0.0100"),
         "10-day-old row must be filtered out: {text}"
@@ -453,10 +483,10 @@ fn b12_state_lib_has_no_format_select_lines() {
     let bad: Vec<&str> = src
         .lines()
         .filter(|l| {
-            if let Some(fmt_idx) = l.find("format!") {
-                if l[fmt_idx..].contains("SELECT") {
-                    return true;
-                }
+            if let Some(fmt_idx) = l.find("format!")
+                && l[fmt_idx..].contains("SELECT")
+            {
+                return true;
             }
             false
         })

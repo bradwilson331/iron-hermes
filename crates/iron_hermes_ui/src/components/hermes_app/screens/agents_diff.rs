@@ -25,6 +25,7 @@ use std::collections::HashSet;
 /// An id present in BOTH `live_prev` AND `live_next` is NOT returned, even if
 /// its status changed. Re-running id wins: the caller must also remove any
 /// existing `recently_terminated` entry for that id.
+#[allow(dead_code)] // Phase 32.3 agent diff helper; wired when recently_terminated display lands
 pub fn diff_terminations(
     live_prev: &[crate::server::api::AgentInfo],
     live_next: &[crate::server::api::AgentInfo],
@@ -71,7 +72,10 @@ mod tests {
         assert_eq!(result[0].id, "agent-b");
         // D-11: uptime_secs is frozen at the prev snapshot value (42), not the
         // incremented value that the live list would show.
-        assert_eq!(result[0].uptime_secs, 42, "uptime_secs must be frozen at prev snapshot");
+        assert_eq!(
+            result[0].uptime_secs, 42,
+            "uptime_secs must be frozen at prev snapshot"
+        );
     }
 
     /// Same set in prev and next → empty result.
@@ -93,7 +97,10 @@ mod tests {
 
         let result = diff_terminations(&prev, &next);
 
-        assert!(result.is_empty(), "empty prev should produce no terminations");
+        assert!(
+            result.is_empty(),
+            "empty prev should produce no terminations"
+        );
     }
 
     /// D-13 invariant — re-running id wins: an id present in BOTH prev AND
@@ -102,10 +109,7 @@ mod tests {
     /// "terminated-then-restarted-with-same-id" edge case.
     #[test]
     fn test_diff_terminations_rerunning_id_is_not_a_termination() {
-        let prev = vec![
-            make_agent("agent-rerun", 100),
-            make_agent("agent-gone", 50),
-        ];
+        let prev = vec![make_agent("agent-rerun", 100), make_agent("agent-gone", 50)];
         // agent-rerun reappears in next (e.g. restarted with same id).
         // agent-gone is absent.
         let next = vec![make_agent("agent-rerun", 101)];

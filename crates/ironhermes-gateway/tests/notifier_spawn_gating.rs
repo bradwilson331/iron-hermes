@@ -57,10 +57,7 @@ fn gate_returns_disabled_no_sources_when_none() {
 #[test]
 fn gate_returns_disabled_no_overlap_when_no_intersection() {
     // discord is wanted but telegram is the only enabled platform.
-    let gate = compute_notifier_gate(
-        Some(&["discord".to_string()]),
-        &["telegram".to_string()],
-    );
+    let gate = compute_notifier_gate(Some(&["discord".to_string()]), &["telegram".to_string()]);
     assert_eq!(
         gate,
         NotifierGate::DisabledNoOverlap {
@@ -73,10 +70,8 @@ fn gate_returns_disabled_no_overlap_when_no_intersection() {
 
     // Case-insensitive lookup MUST still reject when names truly do not match:
     // "Discord" (capitalized) still does not intersect with ["telegram"].
-    let gate_case = compute_notifier_gate(
-        Some(&["Discord".to_string()]),
-        &["telegram".to_string()],
-    );
+    let gate_case =
+        compute_notifier_gate(Some(&["Discord".to_string()]), &["telegram".to_string()]);
     assert_eq!(
         gate_case,
         NotifierGate::DisabledNoOverlap {
@@ -118,10 +113,7 @@ fn gate_returns_enabled_with_overlap_when_intersection_exists() {
     // `telegram` (enabled set's casing). The returned `sources` preserves the
     // caller's `TELEGRAM` casing so the operator's notification_sources value
     // round-trips into the startup log.
-    let gate_b = compute_notifier_gate(
-        Some(&["TELEGRAM".to_string()]),
-        &["telegram".to_string()],
-    );
+    let gate_b = compute_notifier_gate(Some(&["TELEGRAM".to_string()]), &["telegram".to_string()]);
     assert_eq!(
         gate_b,
         NotifierGate::Enabled {

@@ -149,8 +149,7 @@ mod storage {
 
     pub(super) fn get_item(key: &str) -> Option<String> {
         let ls = ls()?;
-        let get_item =
-            js_sys::Reflect::get(&ls, &JsValue::from_str("getItem")).ok()?;
+        let get_item = js_sys::Reflect::get(&ls, &JsValue::from_str("getItem")).ok()?;
         let f: js_sys::Function = get_item.dyn_into().ok()?;
         let result = f.call1(&ls, &JsValue::from_str(key)).ok()?;
         if result.is_null() || result.is_undefined() {
@@ -251,8 +250,7 @@ mod tests {
         // grep-locked by VALIDATION.md line 64.
         let original = UiPrefs::default();
         let json = serde_json::to_string(&original).expect("serialize UiPrefs::default()");
-        let parsed: UiPrefs =
-            serde_json::from_str(&json).expect("deserialize UiPrefs JSON blob");
+        let parsed: UiPrefs = serde_json::from_str(&json).expect("deserialize UiPrefs JSON blob");
         assert_eq!(parsed, original);
     }
 

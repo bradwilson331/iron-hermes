@@ -37,6 +37,10 @@ pub fn Breadcrumb() -> Element {
 /// `<interfaces>` block in the plan: 4-7 char uppercase labels, with
 /// the off-wheel screens (`Soul`, `Schedules`, `Office`) defined locally
 /// since they are NOT `WheelWedge` variants (D-10).
+// Called only by Breadcrumb (HermesApp subtree); dead under `--all-features`
+// when `legacy-shell` mounts WarpHermes instead of HermesApp (bin crates do not
+// keep unreferenced `pub fn` alive). Live in the default build.
+#[allow(dead_code)]
 fn screen_short_name(s: Screen) -> &'static str {
     match s {
         Screen::Chat => "CHAT",

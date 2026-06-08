@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use wiremock::matchers::{method, path, path_regex, query_param};
+use wiremock::matchers::{method, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -392,7 +392,7 @@ fn cmd_install_local_tilde_expands() {
     let identifier = "local:~/my-local-skill";
 
     let out = std::process::Command::new(binary_path())
-        .env("HOME", fake_home.path())   // controls dirs::home_dir() on unix
+        .env("HOME", fake_home.path()) // controls dirs::home_dir() on unix
         .env("HERMES_HOME", hermes_home.path())
         .args(["skills", "install", identifier, "--skip-audit"])
         .output()
@@ -409,7 +409,10 @@ fn cmd_install_local_tilde_expands() {
         "SKILL.md must be installed after tilde-path install"
     );
     // source dir must survive untouched
-    assert!(skill_src.is_dir(), "source dir must still exist after install");
+    assert!(
+        skill_src.is_dir(),
+        "source dir must still exist after install"
+    );
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -511,7 +514,8 @@ fn cmd_update_local_dir_recopies_from_source() {
     );
 
     // Step 2: modify the SKILL.md in the source dir
-    let updated_md = "---\nname: my-local-skill\ncategory: test\ndescription: updated\n---\n# Updated.\n";
+    let updated_md =
+        "---\nname: my-local-skill\ncategory: test\ndescription: updated\n---\n# Updated.\n";
     std::fs::write(skill_src.join("SKILL.md"), updated_md).unwrap();
 
     // Step 3: update
@@ -573,8 +577,7 @@ fn cmd_update_local_dir_missing_source_isolates_failure() {
     // Skill B source dir
     let skill_b_src = source_tmp_b.path().join("skill-b");
     std::fs::create_dir_all(&skill_b_src).unwrap();
-    let skill_b_md_initial =
-        "---\nname: skill-b\ncategory: test\ndescription: b\n---\n# B\n";
+    let skill_b_md_initial = "---\nname: skill-b\ncategory: test\ndescription: b\n---\n# B\n";
     std::fs::write(skill_b_src.join("SKILL.md"), skill_b_md_initial).unwrap();
 
     // Install both skills
@@ -633,7 +636,9 @@ fn cmd_update_local_dir_missing_source_isolates_failure() {
 
     // stderr mentions skill-a's failure
     assert!(
-        update_stderr.contains("skill-a") || update_stderr.contains("no longer exists") || update_stderr.contains("LocalSourceMissing"),
+        update_stderr.contains("skill-a")
+            || update_stderr.contains("no longer exists")
+            || update_stderr.contains("LocalSourceMissing"),
         "stderr must report skill-a failure; stderr={update_stderr}"
     );
 
@@ -826,11 +831,7 @@ fn cmd_remove_does_not_touch_source_dir() {
     )
     .unwrap();
     std::fs::create_dir(skill_dir.join("references")).unwrap();
-    std::fs::write(
-        skill_dir.join("references").join("note.md"),
-        b"# Notes\n",
-    )
-    .unwrap();
+    std::fs::write(skill_dir.join("references").join("note.md"), b"# Notes\n").unwrap();
 
     // Snapshot the source dir BEFORE install
     let before_install = snapshot_dir(&skill_dir);
@@ -909,7 +910,11 @@ fn uat_replay_bradwilson_download_ascii_art_with_local_prefix() {
     let workspace = tempfile::tempdir().unwrap();
 
     // Set up the directory tree mirroring the user's filesystem at UAT time
-    let skill_dir = workspace.path().join("bradwilson").join("download").join("ascii-art");
+    let skill_dir = workspace
+        .path()
+        .join("bradwilson")
+        .join("download")
+        .join("ascii-art");
     std::fs::create_dir_all(&skill_dir).unwrap();
     std::fs::write(
         skill_dir.join("SKILL.md"),
@@ -1072,7 +1077,8 @@ fn installed_local_dir_skill_appears_in_skill_registry_catalog() {
     );
 
     // Construct a fresh registry — bypass cwd resolution; hermetic single-path test
-    let registry = ironhermes_core::SkillRegistry::load_with_paths(&[skills_root.clone()]);
+    let registry =
+        ironhermes_core::SkillRegistry::load_with_paths(std::slice::from_ref(&skills_root));
 
     // Gap-01 closure proof: the skill must be visible to the registry
     assert!(
@@ -1160,6 +1166,12 @@ fn legacy_one_level_skill_still_loads_alongside_new_two_level_skills() {
         "backward-compat: both one-level and two-level skills must load; found: {:?}",
         registry.list().iter().map(|s| &s.name).collect::<Vec<_>>()
     );
-    assert!(registry.find("legacy-skill").is_some(), "one-level legacy skill must be findable");
-    assert!(registry.find("new-skill").is_some(), "two-level new skill must be findable");
+    assert!(
+        registry.find("legacy-skill").is_some(),
+        "one-level legacy skill must be findable"
+    );
+    assert!(
+        registry.find("new-skill").is_some(),
+        "two-level new skill must be findable"
+    );
 }

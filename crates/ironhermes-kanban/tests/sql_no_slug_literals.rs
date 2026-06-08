@@ -58,11 +58,7 @@ fn no_sql_string_contains_a_slug_literal_in_kanban_crate() {
     // -E  = extended regex
     // -n  = include line numbers (for human-readable failure messages)
     let output = Command::new("grep")
-        .args([
-            "-rEn",
-            r"format!\([^)]*WHERE",
-            &src_dir,
-        ])
+        .args(["-rEn", r"format!\([^)]*WHERE", &src_dir])
         .output()
         .expect("grep command must be available (T-2 audit requires grep)");
 

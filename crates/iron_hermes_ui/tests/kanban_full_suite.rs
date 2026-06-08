@@ -346,7 +346,12 @@ fn plan_03_d20_drawer_section_labels_in_order() {
 #[test]
 fn plan_03_d20_modal_headers_verbatim() {
     let modals = read("src/components/hermes_app/screens/kanban/modals.rs");
-    for header in &["Complete task", "Block task", "Archive task?", "Create task"] {
+    for header in &[
+        "Complete task",
+        "Block task",
+        "Archive task?",
+        "Create task",
+    ] {
         assert!(
             modals.contains(header),
             "D-20 (Plan 03): modals.rs must carry the UI-SPEC §7.2 verbatim \

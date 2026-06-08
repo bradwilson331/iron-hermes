@@ -284,7 +284,8 @@ impl PromptBuilder {
     /// the REPL loop / gateway / TUI when a slash command resolves to a skill
     /// rather than a registered command.
     pub fn activate_skill(&mut self, name: &str, body: &str) {
-        self.skill_overlays.push((name.to_string(), body.to_string()));
+        self.skill_overlays
+            .push((name.to_string(), body.to_string()));
     }
 
     /// Phase 21.8.2: clear all activated-skill overlays.
@@ -467,10 +468,10 @@ impl PromptBuilder {
             }
 
             // Check stop condition: don't walk past stop_dir
-            if let Some(ref stop) = stop_dir {
-                if dir == *stop {
-                    break;
-                }
+            if let Some(ref stop) = stop_dir
+                && dir == *stop
+            {
+                break;
             }
 
             match dir.parent() {
@@ -506,31 +507,30 @@ impl PromptBuilder {
         // D-19: .cursor/rules/*.mdc as final fallback (glob expansion doesn't fit candidates array).
         // Security: scan_context_content() applied to each .mdc file. Per T-15-06.
         let mdc_dir = cwd.join(".cursor").join("rules");
-        if mdc_dir.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&mdc_dir) {
-                let mut mdc_parts: Vec<String> = Vec::new();
-                let mut entry_paths: Vec<std::path::PathBuf> = entries
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("mdc"))
-                    .collect();
-                // Sort for deterministic ordering
-                entry_paths.sort();
-                for path in entry_paths {
-                    if let Ok(content) = std::fs::read_to_string(&path) {
-                        if !content.trim().is_empty() {
-                            let fname = path.file_name().unwrap().to_string_lossy().into_owned();
-                            let scanned = scan_context_content(&content, &fname);
-                            let truncated =
-                                truncate_content(&scanned, &fname, CONTEXT_FILE_MAX_CHARS);
-                            debug!("Loaded .cursor/rules/{}", fname);
-                            mdc_parts.push(truncated);
-                        }
-                    }
+        if mdc_dir.is_dir()
+            && let Ok(entries) = std::fs::read_dir(&mdc_dir)
+        {
+            let mut mdc_parts: Vec<String> = Vec::new();
+            let mut entry_paths: Vec<std::path::PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("mdc"))
+                .collect();
+            // Sort for deterministic ordering
+            entry_paths.sort();
+            for path in entry_paths {
+                if let Ok(content) = std::fs::read_to_string(&path)
+                    && !content.trim().is_empty()
+                {
+                    let fname = path.file_name().unwrap().to_string_lossy().into_owned();
+                    let scanned = scan_context_content(&content, &fname);
+                    let truncated = truncate_content(&scanned, &fname, CONTEXT_FILE_MAX_CHARS);
+                    debug!("Loaded .cursor/rules/{}", fname);
+                    mdc_parts.push(truncated);
                 }
-                if !mdc_parts.is_empty() {
-                    return Some(format!("## .cursor/rules\n\n{}", mdc_parts.join("\n\n")));
-                }
+            }
+            if !mdc_parts.is_empty() {
+                return Some(format!("## .cursor/rules\n\n{}", mdc_parts.join("\n\n")));
             }
         }
 
@@ -639,20 +639,19 @@ impl PromptBuilder {
 
         // Slot 4: Skills — populate from registry if not already loaded via load_context().
         // This handles the case where set_skill_registry() is called without load_context().
-        if !self.skip_context_files && !slots.contains_key(&PromptSlot::Skills) {
-            if let Some(ref registry) = self.skill_registry {
-                if !registry.list().is_empty() {
-                    // D-01/D-03 catalog-render filter — honors requires_* and fallback_for_* (Phase 19 Plan 02).
-                    let catalog =
-                        registry.filtered_catalog_text(&self.active_toolsets, &self.active_tools);
-                    if !catalog.trim().is_empty() {
-                        let content = format!(
-                            "## Available Skills\n\n{}\n\nUse the skills tool to view or activate a skill before using it.",
-                            catalog
-                        );
-                        slots.insert(PromptSlot::Skills, content);
-                    }
-                }
+        if !self.skip_context_files
+            && !slots.contains_key(&PromptSlot::Skills)
+            && let Some(ref registry) = self.skill_registry
+            && !registry.list().is_empty()
+        {
+            // D-01/D-03 catalog-render filter — honors requires_* and fallback_for_* (Phase 19 Plan 02).
+            let catalog = registry.filtered_catalog_text(&self.active_toolsets, &self.active_tools);
+            if !catalog.trim().is_empty() {
+                let content = format!(
+                    "## Available Skills\n\n{}\n\nUse the skills tool to view or activate a skill before using it.",
+                    catalog
+                );
+                slots.insert(PromptSlot::Skills, content);
             }
         }
 
@@ -1848,9 +1847,7 @@ mod tests {
         assert!(serialized.contains("First body"));
         assert!(serialized.contains("Second body"));
         // Activation order preserved.
-        assert!(
-            serialized.find("First body").unwrap() < serialized.find("Second body").unwrap()
-        );
+        assert!(serialized.find("First body").unwrap() < serialized.find("Second body").unwrap());
     }
 
     #[test]

@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
 use ironhermes_agent::AgentRuntime;
+use ironhermes_agent::MemoryManager;
 use ironhermes_agent::context_engine::ContextEngine;
 use ironhermes_agent::engine_factory::build_context_engine;
 use ironhermes_agent::pressure_warning::PressureTracker;
 use ironhermes_agent::subagent_registry::SubagentRegistry;
-use ironhermes_agent::MemoryManager;
 use ironhermes_core::commands::context::ToolsetSessionHandle;
 use ironhermes_core::{Config, ProviderResolver, SkillRecord, SkillRegistry};
 use ironhermes_cron::JobStore;
@@ -25,9 +25,9 @@ use crate::multimodal;
 use crate::session::{SessionKey, SessionStore};
 use crate::session_queue::{QueueError, SessionQueue};
 use crate::telegram::{TelegramAdapter, TgBotCommand, tg_message_to_event};
-use ironhermes_cron::TgSendApi;
 use crate::user_queue::{DispatchOutcome, UserQueueManager};
 use ironhermes_core::MessageEvent;
+use ironhermes_cron::TgSendApi;
 
 /// Runs the Telegram gateway: long polling, per-user dispatch, JoinSet supervision,
 /// Semaphore concurrency control, and CancellationToken-based graceful shutdown.
@@ -323,11 +323,7 @@ impl GatewayRunner {
     /// Returns `Err(QueueError::CapacityReached)` when the session's queue
     /// holds `MAX_QUEUE_DEPTH` events (D-09). Delegates to
     /// `SessionQueue::try_push` (Python parity: `_enqueue_fifo`).
-    pub fn try_enqueue(
-        &self,
-        key: &SessionKey,
-        event: MessageEvent,
-    ) -> Result<(), QueueError> {
+    pub fn try_enqueue(&self, key: &SessionKey, event: MessageEvent) -> Result<(), QueueError> {
         self.session_queue.try_push(key, event)
     }
 
@@ -357,17 +353,14 @@ impl GatewayRunner {
     ///
     /// Delegates to `SessionQueue::retain`. The goal-continuation predicate
     /// is deferred per D-04 — this method is the general mechanism.
-    pub fn retain_queue<F: Fn(&MessageEvent) -> bool>(
-        &self,
-        key: &SessionKey,
-        predicate: F,
-    ) {
+    pub fn retain_queue<F: Fn(&MessageEvent) -> bool>(&self, key: &SessionKey, predicate: F) {
         self.session_queue.retain(key, predicate);
     }
 
     /// Phase 36.17.1: crate-private accessor for threading `Arc<SessionQueue>`
     /// into the handler from `build_gateway_handler`. Plan 04 will reuse the
     /// same accessor for drain-mode wiring.
+    #[allow(dead_code)] // planned accessor for Phase 36.17.1 Plan 04 drain-mode wiring; no caller yet
     pub(crate) fn session_queue(&self) -> Arc<SessionQueue> {
         self.session_queue.clone()
     }
@@ -465,12 +458,7 @@ impl GatewayRunner {
                 image_data_uri: None,
             };
             if let Err(e) = handler
-                .run_agent(
-                    &next_event,
-                    adapter.clone(),
-                    cancel.clone(),
-                    no_attachments,
-                )
+                .run_agent(&next_event, adapter.clone(), cancel.clone(), no_attachments)
                 .await
             {
                 tracing::error!(
@@ -487,6 +475,7 @@ impl GatewayRunner {
     /// Used by gateway integration tests (tests/gateway_shutdown.rs) to fire
     /// shutdown without going through the OS signal layer.
     /// pub(crate) so only gateway-crate tests can reach it (T-22.4.2.1-03-05).
+    #[allow(dead_code)] // gateway integration test accessor; gateway_shutdown.rs not yet exercising this path
     pub(crate) fn cancel_token(&self) -> CancellationToken {
         self.cancel.clone()
     }
@@ -730,7 +719,7 @@ impl GatewayRunner {
         // Arc<TelegramAdapter>. Do NOT upcast Arc<dyn PlatformAdapter> — that
         // was unstable on stable Rust (RESEARCH Assumption A7).
         handler.set_telegram_audio_dispatcher(
-            adapter.clone() as Arc<dyn ironhermes_tools::AudioDispatcher>,
+            adapter.clone() as Arc<dyn ironhermes_tools::AudioDispatcher>
         );
         let handler = Arc::new(handler);
 
@@ -817,7 +806,9 @@ impl GatewayRunner {
             .get("discord")
             .cloned()
             .unwrap_or_default();
-        if let Some(discord_token) = resolve_token_with_env(&discord_config.token, "DISCORD_BOT_TOKEN") {
+        if let Some(discord_token) =
+            resolve_token_with_env(&discord_config.token, "DISCORD_BOT_TOKEN")
+        {
             // Phase 36.17.7 D-03-b (Site 2 — Discord, stub dispatcher):
             // Build a separate handler for the Discord adapter so it gets its own
             // AudioDispatcher slot independent of the Telegram handler. Discord
@@ -828,20 +819,20 @@ impl GatewayRunner {
             // as Telegram (mirrors the Telegram set_user_queue_manager call above).
             let mut handler_discord = self.build_gateway_handler();
             handler_discord.set_user_queue_manager(user_queue.clone());
-            handler_discord.set_telegram_audio_dispatcher(
-                std::sync::Arc::new(ironhermes_tools::NotSupportedAudioDispatcher::new("discord"))
-                    as std::sync::Arc<dyn ironhermes_tools::AudioDispatcher>,
-            );
+            handler_discord.set_telegram_audio_dispatcher(std::sync::Arc::new(
+                ironhermes_tools::NotSupportedAudioDispatcher::new("discord"),
+            )
+                as std::sync::Arc<dyn ironhermes_tools::AudioDispatcher>);
             let handler_d = std::sync::Arc::new(handler_discord);
             let cancel_d = self.cancel.clone();
-            let whitelist_d: Vec<u64> = discord_config
-                .whitelist
-                .iter()
-                .map(|&v| v as u64)
-                .collect();
+            let whitelist_d: Vec<u64> =
+                discord_config.whitelist.iter().map(|&v| v as u64).collect();
             // Empty whitelist propagates to adapter, which enforces D-12 deny-all
             // per canonical Telegram semantics (config.rs:731 + runner.rs:601-611).
-            tracing::info!(whitelist_len = whitelist_d.len(), "Discord adapter spawning");
+            tracing::info!(
+                whitelist_len = whitelist_d.len(),
+                "Discord adapter spawning"
+            );
             join_set.spawn(async move {
                 if let Err(e) = crate::discord::run_discord_adapter(
                     &discord_token,
@@ -882,10 +873,10 @@ impl GatewayRunner {
             // as Telegram (mirrors the Telegram set_user_queue_manager call above).
             let mut handler_slack = self.build_gateway_handler();
             handler_slack.set_user_queue_manager(user_queue.clone());
-            handler_slack.set_telegram_audio_dispatcher(
-                std::sync::Arc::new(ironhermes_tools::NotSupportedAudioDispatcher::new("slack"))
-                    as std::sync::Arc<dyn ironhermes_tools::AudioDispatcher>,
-            );
+            handler_slack.set_telegram_audio_dispatcher(std::sync::Arc::new(
+                ironhermes_tools::NotSupportedAudioDispatcher::new("slack"),
+            )
+                as std::sync::Arc<dyn ironhermes_tools::AudioDispatcher>);
             let handler_s = std::sync::Arc::new(handler_slack);
             let cancel_s = self.cancel.clone();
             let whitelist_s: Vec<String> = slack_config
@@ -1209,11 +1200,10 @@ impl GatewayRunner {
                     _ = interval.tick() => {
                         let s = Arc::clone(&state_wal);
                         let _ = tokio::task::spawn_blocking(move || {
-                            if let Ok(store) = s.lock() {
-                                if let Err(e) = store.wal_checkpoint() {
+                            if let Ok(store) = s.lock()
+                                && let Err(e) = store.wal_checkpoint() {
                                     warn!("WAL checkpoint failed: {e}");
                                 }
-                            }
                         }).await;
                     }
                 }
@@ -1256,10 +1246,7 @@ impl GatewayRunner {
                 // whose next_run_at drifted into the recent past.
                 match fast_forward_backlog(&job_store_tick).await {
                     Ok(n) if n > 0 => {
-                        info!(
-                            "First-tick burst guard fast-forwarded {} job(s)",
-                            n
-                        );
+                        info!("First-tick burst guard fast-forwarded {} job(s)", n);
                     }
                     Ok(_) => {
                         debug!("First-tick burst guard: no backlog");
@@ -1297,20 +1284,19 @@ impl GatewayRunner {
         // configs). The gateway's `ironhermes-core` Config stores it as
         // serde_yaml::Value to avoid a circular crate dependency (ironhermes-kanban
         // already depends on ironhermes-core).
-        let kanban_config: ironhermes_kanban::KanbanConfig =
-            if self.config.kanban.is_null() {
-                ironhermes_kanban::KanbanConfig::default()
-            } else {
-                match serde_yaml::from_value::<ironhermes_kanban::KanbanConfig>(
-                    self.config.kanban.clone(),
-                ) {
-                    Ok(cfg) => cfg,
-                    Err(e) => {
-                        warn!("Failed to parse kanban config; using defaults: {e}");
-                        ironhermes_kanban::KanbanConfig::default()
-                    }
+        let kanban_config: ironhermes_kanban::KanbanConfig = if self.config.kanban.is_null() {
+            ironhermes_kanban::KanbanConfig::default()
+        } else {
+            match serde_yaml::from_value::<ironhermes_kanban::KanbanConfig>(
+                self.config.kanban.clone(),
+            ) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    warn!("Failed to parse kanban config; using defaults: {e}");
+                    ironhermes_kanban::KanbanConfig::default()
                 }
-            };
+            }
+        };
         let dispatch_in_gw_env = std::env::var("HERMES_KANBAN_DISPATCH_IN_GATEWAY")
             .map(|v| v != "0")
             .unwrap_or(true);
@@ -1334,8 +1320,7 @@ impl GatewayRunner {
         // HERMES_KANBAN_DB to resolve the same DB path.
         match ironhermes_kanban::KanbanStore::open_from_env() {
             Ok(store) => {
-                let kanban_store_arc =
-                    std::sync::Arc::new(tokio::sync::Mutex::new(store));
+                let kanban_store_arc = std::sync::Arc::new(tokio::sync::Mutex::new(store));
 
                 // --- 11a. Kanban dispatcher (Phase 36.3.7 D-09) ---
                 if kanban_config.dispatch_in_gateway && dispatch_in_gw_env {
@@ -1381,14 +1366,9 @@ impl GatewayRunner {
                 );
                 match gate {
                     crate::notifier_gating::NotifierGate::DisabledNoSources => {
-                        info!(
-                            "kanban notifier disabled (notification_sources not configured)"
-                        );
+                        info!("kanban notifier disabled (notification_sources not configured)");
                     }
-                    crate::notifier_gating::NotifierGate::DisabledNoOverlap {
-                        wanted,
-                        enabled,
-                    } => {
+                    crate::notifier_gating::NotifierGate::DisabledNoOverlap { wanted, enabled } => {
                         info!(
                             wanted = ?wanted,
                             enabled = ?enabled,
@@ -1406,20 +1386,16 @@ impl GatewayRunner {
                         )> = build_adapter_snapshot(&adapter);
                         let send_fn = build_notifier_send_fn(adapter_snapshot);
                         let poll_seconds = kanban_config.notifier_poll_seconds;
-                        let notifier_ctx = std::sync::Arc::new(
-                            ironhermes_kanban::NotifierContext::new(
+                        let notifier_ctx =
+                            std::sync::Arc::new(ironhermes_kanban::NotifierContext::new(
                                 kanban_store_arc.clone(),
                                 poll_seconds,
                                 send_fn,
-                            ),
-                        );
+                            ));
                         let notifier_cancel = self.cancel.clone();
                         join_set.spawn(async move {
-                            ironhermes_kanban::run_notifier_loop(
-                                notifier_ctx,
-                                notifier_cancel,
-                            )
-                            .await;
+                            ironhermes_kanban::run_notifier_loop(notifier_ctx, notifier_cancel)
+                                .await;
                         });
                         info!(
                             sources = ?sources,
@@ -1523,6 +1499,7 @@ impl GatewayRunner {
 /// Returns the combined skill context string (empty if no skills found).
 /// Per D-08: skill content appears before the task prompt.
 /// Per D-09: missing skills produce a warning and are skipped.
+#[cfg(test)] // only called from runner.rs unit tests; production cron path inlines equivalent logic
 pub(crate) fn resolve_skill_context(
     registry: &ironhermes_core::SkillRegistry,
     skill_names: &[String],
@@ -1724,10 +1701,7 @@ fn build_notifier_send_fn(
 ) -> ironhermes_kanban::SendFn {
     let adapters = std::sync::Arc::new(adapters);
     std::sync::Arc::new(
-        move |platform: &str,
-              chat_id: &str,
-              thread_id_opt: Option<&str>,
-              message: &str| {
+        move |platform: &str, chat_id: &str, thread_id_opt: Option<&str>, message: &str| {
             let adapters = adapters.clone();
             let platform = platform.to_string();
             let chat_id = chat_id.to_string();
@@ -2453,16 +2427,18 @@ mod tests {
         // 3. Build a Config pointing at an unreachable LLM (connection refused).
         //    execute_cron_job will fire MessageReceived, then agent.run() fails,
         //    then the Err arm fires ResponseSent. Total: 1 + 1 = 2 events.
-        let mut config = Config::default();
         // Port 1 is privileged and always connection-refused
-        config.model = ModelConfig {
-            default: "test-model".to_string(),
-            base_url: Some("http://127.0.0.1:1".to_string()),
-            api_key: Some("test-key".to_string()),
-            ..Default::default()
-        };
-        config.agent = AgentConfig {
-            max_turns: 1,
+        let config = Config {
+            model: ModelConfig {
+                default: "test-model".to_string(),
+                base_url: Some("http://127.0.0.1:1".to_string()),
+                api_key: Some("test-key".to_string()),
+                ..Default::default()
+            },
+            agent: AgentConfig {
+                max_turns: 1,
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -2853,7 +2829,9 @@ mod tests {
             let runner = make_runner();
             let key = drain_key();
 
-            runner.try_enqueue(&key, fixture_event("before-drain")).unwrap();
+            runner
+                .try_enqueue(&key, fixture_event("before-drain"))
+                .unwrap();
             assert_eq!(runner.queue_len(&key), 1);
 
             runner.drain_for_restart();

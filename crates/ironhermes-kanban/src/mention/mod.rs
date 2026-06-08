@@ -1,8 +1,8 @@
 pub mod parser;
 pub mod resolver;
 
-pub use parser::{parse_mentions, MentionSpan};
+pub use parser::{MentionSpan, parse_mentions};
 pub use resolver::{
-    resolve_mention, FallbackPolicy, FallbackReason, Resolution,
-    ResolverCtx, SkipReason, MAX_MENTION_CHAIN_DEPTH,
+    FallbackPolicy, FallbackReason, MAX_MENTION_CHAIN_DEPTH, Resolution, ResolverCtx, SkipReason,
+    resolve_mention,
 };

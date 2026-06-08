@@ -33,8 +33,8 @@
 //! exercise — drift in production code breaks those assertions even though
 //! the behavior tests operate on shared library types.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 // ─── Cross-check: d02_error_message() must be byte-identical to the canonical
 // constant from ironhermes-core. Any drift here will cause the assertion at
@@ -47,6 +47,7 @@ use ironhermes_core::commands::running_agent::AGENT_RUNNING_REJECT_MSG;
 // ═════════════════════════════════════════════════════════════════════════════
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // total_tokens: retained for future assertion patterns; test-recording enum
 enum TestStreamEvent {
     Delta { text: String },
     Finished { total_tokens: u32 },
@@ -55,8 +56,8 @@ enum TestStreamEvent {
 mod helpers {
     use super::TestStreamEvent;
     use std::collections::HashMap;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     // ──────────────────────────────────────────────────────────────────────
     // d02_error_message
@@ -76,8 +77,7 @@ mod helpers {
     // ──────────────────────────────────────────────────────────────────────
 
     /// Build the same Arc<Mutex<HashMap<...>>> shape as AppState.running_agents.
-    pub fn make_flag_map()
-    -> Arc<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>> {
+    pub fn make_flag_map() -> Arc<std::sync::Mutex<HashMap<String, Arc<AtomicBool>>>> {
         Arc::new(std::sync::Mutex::new(HashMap::new()))
     }
 
@@ -142,8 +142,8 @@ mod helpers {
         flag: Arc<AtomicBool>,
         message: &str,
     ) -> Vec<TestStreamEvent> {
+        use ironhermes_core::commands::running_agent::{is_bypass, AGENT_RUNNING_REJECT_MSG};
         use ironhermes_core::commands::ResolveResult;
-        use ironhermes_core::commands::running_agent::{AGENT_RUNNING_REJECT_MSG, is_bypass};
         use ironhermes_core::types::Platform;
 
         assert!(
@@ -337,14 +337,14 @@ fn test_guard_clears_on_error() {
     assert!(!flag.load(Ordering::SeqCst), "pre: flag must start false");
 
     // Simulate a function that returns Err (? propagation path).
-    let result: Result<(), &str> = (|| {
+    let result: Result<(), &str> = {
         let _guard = RunningAgentGuard::new(flag.clone());
         assert!(
             flag.load(Ordering::SeqCst),
             "flag must be true while guard is in scope"
         );
         Err("simulated error")
-    })();
+    };
 
     assert!(result.is_err(), "the closure must return Err");
     assert!(
@@ -361,8 +361,8 @@ fn test_guard_clears_on_error() {
 /// not raw input).
 #[test]
 fn test_alias_bypasses_guard() {
-    use ironhermes_core::commands::ResolveResult;
     use ironhermes_core::commands::running_agent::is_bypass;
+    use ironhermes_core::commands::ResolveResult;
     use ironhermes_core::types::Platform;
 
     assert_eq!(
@@ -468,9 +468,7 @@ fn ws_rs_contains_phase_36_1_anchors() {
     // No inline literal redefinition — the D-02 string must come from the
     // ironhermes-core constant, never hardcoded in ws.rs.
     assert!(
-        !WS_SOURCE.contains(
-            "AGENT_RUNNING_REJECT_MSG: &str = \"Agent is running."
-        ),
+        !WS_SOURCE.contains("AGENT_RUNNING_REJECT_MSG: &str = \"Agent is running."),
         "ws.rs must NOT inline the D-02 literal (T-36.1-09 mitigation)"
     );
 }

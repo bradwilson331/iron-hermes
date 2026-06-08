@@ -25,13 +25,13 @@ use tokio::sync::Mutex as TokioMutex;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use ironhermes_kanban::decomposer::{ChildSpec, DecomposeFn, DecomposeOutput};
+use ironhermes_kanban::dispatcher::DispatcherContext;
+use ironhermes_kanban::store::{CreateTaskOptions, ListFilters};
 use ironhermes_kanban::{
     KanbanConfig, KanbanStore, StrandedSeverity, diagnose_stranded, run_dispatch_tick,
     run_dispatch_tick_for_board,
 };
-use ironhermes_kanban::decomposer::{ChildSpec, DecomposeOutput, DecomposeFn};
-use ironhermes_kanban::dispatcher::DispatcherContext;
-use ironhermes_kanban::store::{CreateTaskOptions, ListFilters};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -58,10 +58,7 @@ fn make_ctx_failing_spawn(
          _ws: String,
          _board_slug: String|
          -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>>
-                    + Send,
-            >,
+            Box<dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>> + Send>,
         > {
             Box::pin(async move {
                 Err(ironhermes_kanban::error::KanbanError::Other(
@@ -84,10 +81,7 @@ fn make_ctx_ok_spawn(
               _ws: String,
               _board_slug: String|
               -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>>
-                    + Send,
-            >,
+            Box<dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>> + Send>,
         > { Box::pin(async move { Ok(fake_pid) }) },
     );
     Arc::new(DispatcherContext::with_spawn_fn(store, config, spawn_fn))
@@ -197,7 +191,10 @@ async fn tick_promotes_todo_when_parents_done() {
 
         let events = store.get_events(&child_id).unwrap();
         let has_promoted = events.iter().any(|e| e.kind == "promoted");
-        assert!(has_promoted, "promoted event must be appended to child task");
+        assert!(
+            has_promoted,
+            "promoted event must be appended to child task"
+        );
     }
     let _ = parent_id; // suppress unused warning
 }
@@ -312,7 +309,10 @@ async fn respawn_guard_blocker_auth() {
 
         let events = store.get_events(&task_id).unwrap();
         let guard_evt = events.iter().find(|e| e.kind == "respawn_guarded");
-        assert!(guard_evt.is_some(), "respawn_guarded event must be appended");
+        assert!(
+            guard_evt.is_some(),
+            "respawn_guarded event must be appended"
+        );
 
         let payload: serde_json::Value =
             serde_json::from_str(guard_evt.unwrap().payload.as_deref().unwrap_or("{}")).unwrap();
@@ -370,7 +370,10 @@ async fn respawn_guard_recent_success() {
 
         let events = store.get_events(&task_id).unwrap();
         let guard_evt = events.iter().find(|e| e.kind == "respawn_guarded");
-        assert!(guard_evt.is_some(), "respawn_guarded event must be appended");
+        assert!(
+            guard_evt.is_some(),
+            "respawn_guarded event must be appended"
+        );
 
         let payload: serde_json::Value =
             serde_json::from_str(guard_evt.unwrap().payload.as_deref().unwrap_or("{}")).unwrap();
@@ -392,11 +395,7 @@ async fn respawn_guard_active_pr() {
     let task_id = {
         let mut store = store_arc.lock().await;
         let task = store
-            .create_task(
-                "task with active PR",
-                "alice",
-                CreateTaskOptions::default(),
-            )
+            .create_task("task with active PR", "alice", CreateTaskOptions::default())
             .unwrap();
 
         // Add a comment with a GitHub PR URL (within last 7 days).
@@ -424,7 +423,10 @@ async fn respawn_guard_active_pr() {
 
         let events = store.get_events(&task_id).unwrap();
         let guard_evt = events.iter().find(|e| e.kind == "respawn_guarded");
-        assert!(guard_evt.is_some(), "respawn_guarded event must be appended");
+        assert!(
+            guard_evt.is_some(),
+            "respawn_guarded event must be appended"
+        );
 
         let payload: serde_json::Value =
             serde_json::from_str(guard_evt.unwrap().payload.as_deref().unwrap_or("{}")).unwrap();
@@ -1478,22 +1480,18 @@ async fn reclaim_stale_claims_appends_reclaimed_event_to_task_events() {
 /// Build a mock DecomposeFn that increments a counter and returns a canned
 /// DecomposeOutput. The counter is Arc<AtomicUsize> for safe access across
 /// async boundaries.
-fn make_counting_decompose_fn(
-    counter: Arc<AtomicUsize>,
-) -> DecomposeFn {
+fn make_counting_decompose_fn(counter: Arc<AtomicUsize>) -> DecomposeFn {
     Arc::new(move |_req| {
         let counter = Arc::clone(&counter);
         let output = DecomposeOutput {
             new_title: "Decomposed title".to_string(),
             new_body: "## Goal\nDecomposed body.".to_string(),
             // No children — mirrors the specify path so parent status goes to todo.
-            children: vec![
-                ChildSpec {
-                    title: "Child task A".to_string(),
-                    assignee: "alice".to_string(),
-                    body: None,
-                },
-            ],
+            children: vec![ChildSpec {
+                title: "Child task A".to_string(),
+                assignee: "alice".to_string(),
+                body: None,
+            }],
         };
         Box::pin(async move {
             counter.fetch_add(1, Ordering::SeqCst);
@@ -1515,10 +1513,7 @@ fn make_ctx_auto_decompose(
          _ws: String,
          _board_slug: String|
          -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>>
-                    + Send,
-            >,
+            Box<dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>> + Send>,
         > {
             Box::pin(async move {
                 Err(ironhermes_kanban::error::KanbanError::Other(
@@ -1799,10 +1794,7 @@ async fn goal_mode_no_dispatcher_change() {
               _ws: String,
               _board_slug: String|
               -> std::pin::Pin<
-            Box<
-                dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>>
-                    + Send,
-            >,
+            Box<dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>> + Send>,
         > {
             let invocations_for_call = Arc::clone(&invocations_inner);
             Box::pin(async move {
@@ -1814,11 +1806,13 @@ async fn goal_mode_no_dispatcher_change() {
             })
         },
     );
-    let ctx = Arc::new(ironhermes_kanban::dispatcher::DispatcherContext::with_spawn_fn(
-        store_arc.clone(),
-        KanbanConfig::default(),
-        spawn_fn,
-    ));
+    let ctx = Arc::new(
+        ironhermes_kanban::dispatcher::DispatcherContext::with_spawn_fn(
+            store_arc.clone(),
+            KanbanConfig::default(),
+            spawn_fn,
+        ),
+    );
 
     run_dispatch_tick(&ctx).await.expect("tick failed");
 
@@ -1842,10 +1836,7 @@ async fn goal_mode_no_dispatcher_change() {
     // Card A goes through with goal_mode=false; card B with goal_mode=true.
     let a_call = calls.iter().find(|(id, _)| id == &task_a_id).unwrap();
     let b_call = calls.iter().find(|(id, _)| id == &task_b_id).unwrap();
-    assert!(
-        !a_call.1,
-        "card A must reach spawn_fn with goal_mode=false"
-    );
+    assert!(!a_call.1, "card A must reach spawn_fn with goal_mode=false");
     assert!(
         b_call.1,
         "card B must reach spawn_fn with goal_mode=true (dispatcher does NOT strip the flag)"
@@ -1933,7 +1924,7 @@ async fn reclaim_resets_goal_counter() {
 
         let now = now_secs();
         let rid = format!("r_{}", uuid::Uuid::new_v4().simple());
-        let claim_lock = format!("host:999:uuid_reclaim_goal_reset");
+        let claim_lock = "host:999:uuid_reclaim_goal_reset".to_string();
 
         // Seed as running with an EXPIRED claim.
         seed_running(
@@ -2260,7 +2251,7 @@ async fn goal_mode_card_consecutive_failures_caps_reclaim() {
 
         let now = now_secs();
         let rid = format!("r_{}", uuid::Uuid::new_v4().simple());
-        let claim_lock = format!("host:777:uuid_goal_consec_fail");
+        let claim_lock = "host:777:uuid_goal_consec_fail".to_string();
 
         seed_running(
             &mut store,

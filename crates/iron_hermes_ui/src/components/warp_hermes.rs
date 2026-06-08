@@ -286,7 +286,9 @@ pub fn WarpHermes() -> Element {
                                     let mut bs = blocks.write();
                                     for entry in bs.iter_mut().rev() {
                                         if let Block::Tool { ref mut call } = entry.block {
-                                            if call.name == name && call.status == ToolStatus::Running {
+                                            if call.name == name
+                                                && call.status == ToolStatus::Running
+                                            {
                                                 call.status = new_status.clone();
                                                 break;
                                             }
@@ -298,7 +300,9 @@ pub fn WarpHermes() -> Element {
                                     let mut ms = messages.write();
                                     for msg in ms.iter_mut().rev() {
                                         if let Some(ref mut tool) = msg.tool {
-                                            if tool.name == name && tool.status == ToolStatus::Running {
+                                            if tool.name == name
+                                                && tool.status == ToolStatus::Running
+                                            {
                                                 tool.status = new_status;
                                                 break;
                                             }
@@ -325,7 +329,9 @@ pub fn WarpHermes() -> Element {
                                                 return None;
                                             }
                                             match &entry.block {
-                                                Block::Ai { markdown, .. } if !markdown.is_empty() => {
+                                                Block::Ai { markdown, .. }
+                                                    if !markdown.is_empty() =>
+                                                {
                                                     Some(markdown.clone())
                                                 }
                                                 _ => None,
@@ -403,13 +409,13 @@ pub fn WarpHermes() -> Element {
     // ── Fetch real data from server functions (Plan 03 wiring). ──
 
     // Fetch real slash commands from CommandRouter via server function.
-    let slash_commands = use_server_future(move || crate::server::api::list_slash_commands())?;
+    let slash_commands = use_server_future(crate::server::api::list_slash_commands)?;
 
     // Fetch real config (model/provider/context_length) from server.
-    let config_summary = use_server_future(move || crate::server::api::get_config_summary())?;
+    let config_summary = use_server_future(crate::server::api::get_config_summary)?;
 
     // Fetch real sessions from StateStore via server function.
-    let sessions = use_server_future(move || crate::server::api::list_sessions())?;
+    let sessions = use_server_future(crate::server::api::list_sessions)?;
 
     // ── Seed tabs from list_sessions() once when the server future resolves (D-07). ──
     use_effect(move || {
@@ -418,7 +424,13 @@ pub fn WarpHermes() -> Element {
                 let already_present = { tabs.read().iter().any(|t| t.session_id == s.id) };
                 if !already_present {
                     let label = s.title.clone().unwrap_or_else(|| s.id.clone());
-                    { tabs.write().push(Tab { label, live: true, session_id: s.id.clone() }); }
+                    {
+                        tabs.write().push(Tab {
+                            label,
+                            live: true,
+                            session_id: s.id.clone(),
+                        });
+                    }
                 }
             }
         }
@@ -439,7 +451,12 @@ pub fn WarpHermes() -> Element {
     };
 
     let (model_name, provider_name, context_length, memory_enabled) = match config_summary() {
-        Some(Ok(cfg)) => (cfg.model, cfg.provider, cfg.context_length, cfg.memory_enabled),
+        Some(Ok(cfg)) => (
+            cfg.model,
+            cfg.provider,
+            cfg.context_length,
+            cfg.memory_enabled,
+        ),
         _ => ("loading...".to_string(), "...".to_string(), 0_u32, false),
     };
 
@@ -459,8 +476,7 @@ pub fn WarpHermes() -> Element {
             .into_iter()
             .map(|tab| {
                 if tab.session_id == cur_sid {
-                    let exchange_count =
-                        msgs.iter().filter(|m| m.who == "user").count() as u32;
+                    let exchange_count = msgs.iter().filter(|m| m.who == "user").count() as u32;
                     let last_input = msgs
                         .iter()
                         .rev()
@@ -474,10 +490,8 @@ pub fn WarpHermes() -> Element {
                             }
                         })
                         .unwrap_or_default();
-                    let first_time =
-                        msgs.first().map(|m| m.time.clone()).unwrap_or_default();
-                    let last_time =
-                        msgs.last().map(|m| m.time.clone()).unwrap_or_default();
+                    let first_time = msgs.first().map(|m| m.time.clone()).unwrap_or_default();
+                    let last_time = msgs.last().map(|m| m.time.clone()).unwrap_or_default();
                     SessionMemory {
                         session_id: tab.session_id,
                         label: tab.label,
@@ -632,8 +646,13 @@ pub fn WarpHermes() -> Element {
 
     // on_tab_click: switch active session; no-op during streaming (D-02).
     let on_tab_click = move |idx: usize| {
-        if scanner_active() { return; }
-        let sid = { let ts = tabs.read(); ts.get(idx).map(|t| t.session_id.clone()) };
+        if scanner_active() {
+            return;
+        }
+        let sid = {
+            let ts = tabs.read();
+            ts.get(idx).map(|t| t.session_id.clone())
+        };
         if let Some(sid) = sid {
             active_tab.set(idx);
             session_id.set(sid);
@@ -647,7 +666,11 @@ pub fn WarpHermes() -> Element {
         spawn(async move {
             match crate::server::api::create_session().await {
                 Ok(sid) => {
-                    let new_tab = Tab { label: "New Session".to_string(), live: true, session_id: sid.clone() };
+                    let new_tab = Tab {
+                        label: "New Session".to_string(),
+                        live: true,
+                        session_id: sid.clone(),
+                    };
                     tabs.write().push(new_tab);
                     let new_idx = tabs.read().len() - 1;
                     active_tab.set(new_idx);
@@ -658,7 +681,9 @@ pub fn WarpHermes() -> Element {
                 }
                 Err(e) => {
                     #[cfg(target_arch = "wasm32")]
-                    web_sys::console::log_1(&format!("New tab session creation failed: {e}").into());
+                    web_sys::console::log_1(
+                        &format!("New tab session creation failed: {e}").into(),
+                    );
                     let _ = e;
                 }
             }
@@ -667,14 +692,20 @@ pub fn WarpHermes() -> Element {
 
     // on_tab_close: remove tab; auto-switch; guard last-tab case (D-05 + D-06).
     let on_tab_close = move |idx: usize| {
-        if idx >= tabs.read().len() { return; }
+        if idx >= tabs.read().len() {
+            return;
+        }
         tabs.write().remove(idx);
         let now_empty = tabs.read().is_empty();
         if now_empty {
             spawn(async move {
                 match crate::server::api::create_session().await {
                     Ok(sid) => {
-                        let new_tab = Tab { label: "New Session".to_string(), live: true, session_id: sid.clone() };
+                        let new_tab = Tab {
+                            label: "New Session".to_string(),
+                            live: true,
+                            session_id: sid.clone(),
+                        };
                         tabs.write().push(new_tab);
                         let new_idx = tabs.read().len() - 1;
                         active_tab.set(new_idx);
@@ -685,7 +716,9 @@ pub fn WarpHermes() -> Element {
                     }
                     Err(e) => {
                         #[cfg(target_arch = "wasm32")]
-                        web_sys::console::log_1(&format!("New tab session creation failed: {e}").into());
+                        web_sys::console::log_1(
+                            &format!("New tab session creation failed: {e}").into(),
+                        );
                         let _ = e;
                     }
                 }
@@ -693,10 +726,21 @@ pub fn WarpHermes() -> Element {
         } else {
             let cur = active_tab();
             let len = tabs.read().len();
-            let new_idx = if idx < cur { cur - 1 } else if idx == cur { cur.saturating_sub(1).min(len - 1) } else { cur.min(len - 1) };
+            let new_idx = if idx < cur {
+                cur - 1
+            } else if idx == cur {
+                cur.saturating_sub(1).min(len - 1)
+            } else {
+                cur.min(len - 1)
+            };
             active_tab.set(new_idx);
-            let sid = { let ts = tabs.read(); ts.get(new_idx).map(|t| t.session_id.clone()) };
-            if let Some(sid) = sid { session_id.set(sid); }
+            let sid = {
+                let ts = tabs.read();
+                ts.get(new_idx).map(|t| t.session_id.clone())
+            };
+            if let Some(sid) = sid {
+                session_id.set(sid);
+            }
             blocks.set(Vec::new());
             messages.write().clear();
         }

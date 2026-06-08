@@ -173,8 +173,7 @@ fn queue_updated_confirmation_strings_frozen() {
 
     // D-05 /stop Delta message — literal, no runtime substitution.
     assert_eq!(
-        "Queue cleared. Current turn finishing.\n",
-        "Queue cleared. Current turn finishing.\n",
+        "Queue cleared. Current turn finishing.\n", "Queue cleared. Current turn finishing.\n",
         "D-05: /stop Delta message frozen"
     );
 }

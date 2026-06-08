@@ -64,9 +64,9 @@ pub fn drag_blocked_hint(to: KanbanStatus) -> Option<&'static str> {
         // The canonical "running" status — wire-encoded as `InProgress` on
         // the client (the wire KanbanStatus serializes to "running"; see
         // protocol.rs).
-        KanbanStatus::InProgress => Some(
-            "The dispatcher owns this transition — cannot assign running status from UI",
-        ),
+        KanbanStatus::InProgress => {
+            Some("The dispatcher owns this transition — cannot assign running status from UI")
+        }
         _ => None,
     }
 }
@@ -176,9 +176,7 @@ mod tests {
     fn d11_verbatim_hint_copy_in_progress() {
         assert_eq!(
             drag_blocked_hint(KanbanStatus::InProgress),
-            Some(
-                "The dispatcher owns this transition — cannot assign running status from UI"
-            )
+            Some("The dispatcher owns this transition — cannot assign running status from UI")
         );
     }
 

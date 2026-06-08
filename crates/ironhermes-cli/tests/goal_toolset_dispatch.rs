@@ -95,7 +95,9 @@ fn toolset_accepted_with_goal() {
     .expect("--goal --goal-toolset restricted must parse without error");
 
     match parsed.cmd {
-        TestKanban::Create { goal_toolset, goal, .. } => {
+        TestKanban::Create {
+            goal_toolset, goal, ..
+        } => {
             assert!(goal, "--goal must be true");
             assert_eq!(
                 goal_toolset,
@@ -127,11 +129,12 @@ fn toolset_defaults_to_none_without_flag() {
     .expect("--goal without --goal-toolset must parse without error");
 
     match parsed.cmd {
-        TestKanban::Create { goal_toolset, goal, .. } => {
+        TestKanban::Create {
+            goal_toolset, goal, ..
+        } => {
             assert!(goal, "--goal must be true");
             assert_eq!(
-                goal_toolset,
-                None,
+                goal_toolset, None,
                 "goal_toolset must be None when --goal-toolset is not passed; \
                  the CLI layer must NOT inject a silent default"
             );

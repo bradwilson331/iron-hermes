@@ -13,19 +13,17 @@
 //! 4. **forward_carry** — with `IRONHERMES_WORKER_BIN` set in the parent process
 //!    env, `build_kanban_worker_env` produces a child env that includes that entry.
 
-use std::sync::Mutex;
-
-use ironhermes_kanban::worker_spawn::{
-    build_kanban_worker_env, resolve_worker_bin, SAFE_SYSTEM_VARS,
-};
 use ironhermes_kanban::types::{Task, TaskRun};
+use ironhermes_kanban::worker_spawn::{
+    SAFE_SYSTEM_VARS, build_kanban_worker_env, resolve_worker_bin,
+};
 
 // ---------------------------------------------------------------------------
 // ENV_LOCK — prevents concurrent env mutations from racing (STATE.md side-quest
 // 4208bc28). All four tests share this mutex; each holds it for their full
 // setup+execute+teardown lifetime.
 // ---------------------------------------------------------------------------
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // ---------------------------------------------------------------------------
 // Test fixtures
@@ -88,7 +86,7 @@ fn make_run() -> TaskRun {
 // ---------------------------------------------------------------------------
 #[test]
 fn env_wins() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
     let custom_path = "/path/to/my/ironhermes";
     unsafe { std::env::set_var("IRONHERMES_WORKER_BIN", custom_path) };
@@ -108,7 +106,7 @@ fn env_wins() {
 // ---------------------------------------------------------------------------
 #[test]
 fn fallback_to_ironhermes() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
     unsafe { std::env::remove_var("IRONHERMES_WORKER_BIN") };
 
@@ -125,7 +123,7 @@ fn fallback_to_ironhermes() {
 // ---------------------------------------------------------------------------
 #[test]
 fn safe_system_vars_contains_worker_bin() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
     assert!(
         SAFE_SYSTEM_VARS.contains(&"IRONHERMES_WORKER_BIN"),
@@ -138,7 +136,7 @@ fn safe_system_vars_contains_worker_bin() {
 // ---------------------------------------------------------------------------
 #[test]
 fn forward_carry_in_build_kanban_worker_env() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
     let custom_path = "/opt/ironhermes/bin/ironhermes";
     unsafe { std::env::set_var("IRONHERMES_WORKER_BIN", custom_path) };

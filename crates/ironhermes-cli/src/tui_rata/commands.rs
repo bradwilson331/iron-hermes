@@ -15,7 +15,7 @@
 
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
@@ -23,7 +23,7 @@ use ironhermes_core::commands::context::{
     AgentLoopHandle, CommandContext, ContextCompressorHandle, McpManagerHandle,
     MemoryManagerHandle, PersonalityHandle, ProviderResolverHandle, StateStoreHandle,
 };
-use ironhermes_core::commands::running_agent::{is_bypass, AGENT_RUNNING_REJECT_MSG};
+use ironhermes_core::commands::running_agent::{AGENT_RUNNING_REJECT_MSG, is_bypass};
 use ironhermes_core::commands::typo::suggest_typo;
 use ironhermes_core::commands::{CommandCategory, CommandResult, CommandRouter, ResolveResult};
 use ironhermes_core::queue::QueueError;
@@ -293,6 +293,7 @@ impl ContextCompressorHandle for ContextEngineAdapter {
 /// of a "running turn" at the handle level (the cancel_child token on App tracks
 /// that). Conservative false matches the prior AgentLoopAdapter behaviour and
 /// satisfies all existing /status consumers without requiring a live-state probe.
+#[allow(dead_code)] // field retained for future is_running() predicate wiring; current impl conservatively returns false
 struct AgentRuntimeAdapter(Arc<ironhermes_agent::AgentRuntime>);
 impl AgentLoopHandle for AgentRuntimeAdapter {
     fn is_running(&self) -> bool {
@@ -398,7 +399,6 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
                         // defensive Silent fallback arms (Plan 02) never fire.
                         "pause" => {
                             let typed = input
-                                .trim_start()
                                 .split_whitespace()
                                 .next()
                                 .and_then(|s| s.strip_prefix('/'))
@@ -415,9 +415,7 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
                         // must clear the queue and reset paused BEFORE the
                         // session-clear path forwards to the ClearSession /
                         // NewSession mapping in map_core_to_slash_outcome.
-                        "new" => {
-                            handle_session_control(app, def.name, &args_vec, &result).await
-                        }
+                        "new" => handle_session_control(app, def.name, &args_vec, &result).await,
                         // Subsystem mutators: model/fast (AnyClient rebuild) + personality/compress
                         "model" | "fast" | "personality" | "compress" => {
                             handle_subsystem_mutator(app, def.name, &args_vec, &result).await
@@ -446,15 +444,14 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
                 .split_whitespace()
                 .next()
                 .unwrap_or("");
-            if let Some(registry) = &app.skill_registry {
-                if let Some(record) = registry.find(cmd_token) {
-                    if let Some(body) = registry.read_content(&record.name) {
-                        return SlashOutcome::SkillActivated {
-                            name: record.name.clone(),
-                            body,
-                        };
-                    }
-                }
+            if let Some(registry) = &app.skill_registry
+                && let Some(record) = registry.find(cmd_token)
+                && let Some(body) = registry.read_content(&record.name)
+            {
+                return SlashOutcome::SkillActivated {
+                    name: record.name.clone(),
+                    body,
+                };
             }
             // D-18 item 8 — typo suggester integration point.
             let known = collect_known_command_names(&app.command_router);
@@ -665,7 +662,8 @@ fn build_command_context(app: &App) -> CommandContext {
     }
     {
         // Phase 28.1-05: re-pointed at the runtime (App-level AgentLoop removed).
-        let handle: Arc<dyn AgentLoopHandle> = Arc::new(AgentRuntimeAdapter(app.agent_runtime.clone()));
+        let handle: Arc<dyn AgentLoopHandle> =
+            Arc::new(AgentRuntimeAdapter(app.agent_runtime.clone()));
         ctx = ctx.with_agent_loop(handle);
     }
     // Phase 22.4.2.1 Plan 01: wire CronJobReader as 11th with_* call.
@@ -742,6 +740,7 @@ async fn invoke_handler(
 /// `crates/ironhermes-cli/src/tui/commands.rs::format_help` (RESEARCH Finding 1)
 /// minus the classic-tui-only `_extensions` and `keybinding_registry`
 /// parameters.
+#[allow(dead_code)] // retained as planned /help dispatch target; invariants_22_4.rs INV-22.4-31 asserts this fn exists
 fn render_help_router(router: &CommandRouter, platform: &Platform) -> String {
     let mut out = String::from("Available commands:\n");
     for (category, cmds) in router.commands_by_category(platform) {
@@ -868,7 +867,8 @@ async fn handle_session_control(
             // which already skips drain on Cancelled). Order: clear -> reset paused
             // -> cancel in-flight turn -> forward to core (ProcessRegistry drain).
             app.queue.clear(&app.queue_key);
-            app.queue_paused.store(false, std::sync::atomic::Ordering::SeqCst);
+            app.queue_paused
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             if let Some(tok) = app.cancel_child.take() {
                 tok.cancel();
             }
@@ -1028,10 +1028,7 @@ async fn handle_session_control(
             match app.queue.try_push(&app.queue_key, message.clone()) {
                 Ok(()) => {
                     let depth = app.queue.len(&app.queue_key);
-                    SlashOutcome::Handled(format!(
-                        "Queued: \"{}\" ({} in queue)",
-                        message, depth
-                    ))
+                    SlashOutcome::Handled(format!("Queued: \"{}\" ({} in queue)", message, depth))
                 }
                 Err(QueueError::CapacityReached { max, .. }) => {
                     // D-10: cap-hit error rendered inline. T-01 mitigation = cap
@@ -1049,7 +1046,9 @@ async fn handle_session_control(
         // These arms run BEFORE the catch-all _ => map_core_to_slash_outcome
         // forwarder so the defensive Silent fallback (Plan 02) never fires.
         "pause" => {
-            let was_paused = app.queue_paused.fetch_xor(true, std::sync::atomic::Ordering::SeqCst);
+            let was_paused = app
+                .queue_paused
+                .fetch_xor(true, std::sync::atomic::Ordering::SeqCst);
             let new_state = !was_paused;
             let depth = app.queue.len(&app.queue_key);
             SlashOutcome::Handled(format!(
@@ -1061,7 +1060,9 @@ async fn handle_session_control(
         // Phase 36.17.3 (D-06 amended): /unpause explicit set-to-false; no-op
         // (with informational message) when not currently paused.
         "unpause" => {
-            let was_paused = app.queue_paused.swap(false, std::sync::atomic::Ordering::SeqCst);
+            let was_paused = app
+                .queue_paused
+                .swap(false, std::sync::atomic::Ordering::SeqCst);
             let depth = app.queue.len(&app.queue_key);
             if was_paused {
                 SlashOutcome::Handled(format!("Queue resumed. ({} queued)", depth))
@@ -1076,7 +1077,8 @@ async fn handle_session_control(
         // -> session clear forwarding.
         "new" => {
             app.queue.clear(&app.queue_key);
-            app.queue_paused.store(false, std::sync::atomic::Ordering::SeqCst);
+            app.queue_paused
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             map_core_to_slash_outcome(core_result.clone())
         }
         // Phase 36.17.3 (D-07 + T-02 mitigation): /reset is registered as an
@@ -1087,7 +1089,8 @@ async fn handle_session_control(
         // ordering matches the /new arm: clear -> reset paused -> forward.
         "reset" => {
             app.queue.clear(&app.queue_key);
-            app.queue_paused.store(false, std::sync::atomic::Ordering::SeqCst);
+            app.queue_paused
+                .store(false, std::sync::atomic::Ordering::SeqCst);
             map_core_to_slash_outcome(core_result.clone())
         }
         _ => map_core_to_slash_outcome(core_result.clone()),
@@ -1163,25 +1166,25 @@ async fn handle_subsystem_mutator(
             }
         }
         "personality" => {
-                // Phase 21.8.3.1 D-05: "clear" is intercepted before any registry/output
-                // matching. Sets active_personality_overlay = None and returns immediately.
-                // Core handler has no "clear" case — without this pre-check, "clear" would
-                // be looked up as a preset name and return Error("Unknown personality: clear").
-                if args.first().map(|s| *s) == Some("clear") {
-                    app.active_personality_overlay = None;
-                    return SlashOutcome::Handled("Personality cleared.".to_string());
-                }
-                match core_result {
-                    CommandResult::PersonalityApplied(text) => {
-                        app.active_personality_overlay = Some(text.clone());
-                        SlashOutcome::Handled(format!(
-                            "Personality applied ({} chars). Active next turn.",
-                            text.len()
-                        ))
-                    }
-                    _ => map_core_to_slash_outcome(core_result.clone()),
-                }
+            // Phase 21.8.3.1 D-05: "clear" is intercepted before any registry/output
+            // matching. Sets active_personality_overlay = None and returns immediately.
+            // Core handler has no "clear" case — without this pre-check, "clear" would
+            // be looked up as a preset name and return Error("Unknown personality: clear").
+            if args.first().copied() == Some("clear") {
+                app.active_personality_overlay = None;
+                return SlashOutcome::Handled("Personality cleared.".to_string());
             }
+            match core_result {
+                CommandResult::PersonalityApplied(text) => {
+                    app.active_personality_overlay = Some(text.clone());
+                    SlashOutcome::Handled(format!(
+                        "Personality applied ({} chars). Active next turn.",
+                        text.len()
+                    ))
+                }
+                _ => map_core_to_slash_outcome(core_result.clone()),
+            }
+        }
         "compress" => {
             // Core returned informational text per Task 1 deferral note.
             // Future: trigger actual compression hook here on demand.
@@ -1208,18 +1211,14 @@ fn map_core_to_slash_outcome(result: CommandResult) -> SlashOutcome {
             hint: "Unknown command. Type /help for the list.".to_string(),
         },
         CommandResult::McpReload => SlashOutcome::McpReload,
-        CommandResult::SkillsReload => SlashOutcome::SkillsReload(
-            "Skills reloaded.".to_string(),
-        ),
+        CommandResult::SkillsReload => SlashOutcome::SkillsReload("Skills reloaded.".to_string()),
         CommandResult::SkillActivated { name, body } => SlashOutcome::SkillActivated { name, body },
         CommandResult::PersonalityApplied(text) => SlashOutcome::Handled(text),
         // Phase 36.17.3: closed via handle_session_control's "queue" arm above;
         // this fallback remains for non-TUI consumers (gateway adapters, the
         // classic CLI REPL) which also emit `CommandResult::Queued` but do not
         // route through `handle_session_control`.
-        CommandResult::Queued { message } => {
-            SlashOutcome::Handled(format!("Queued: {message}"))
-        }
+        CommandResult::Queued { message } => SlashOutcome::Handled(format!("Queued: {message}")),
         // Phase 36.17.3 (D-06 amended): defensive no-op; active toggle lives in
         // handle_session_control (Plan 05) BEFORE map_core_to_slash_outcome is
         // called, so this arm is the fallback for any path that routes through

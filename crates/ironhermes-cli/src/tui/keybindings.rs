@@ -179,6 +179,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)] // test stub retained for future keybinding registry tests
     struct NoOpExt;
     impl TuiExtension for NoOpExt {
         fn name(&self) -> &str {

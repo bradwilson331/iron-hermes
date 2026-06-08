@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use futures::StreamExt;
 use ironhermes_core::config::PromptCachingConfig;
 use ironhermes_core::{
-    ChatChoice, ChatMessage, ChatResponse, ContentPart, FunctionCall, ImageUrl, MessageContent,
-    Role, ToolCall, ToolSchema, Usage,
+    ChatChoice, ChatMessage, ChatResponse, ContentPart, FunctionCall, MessageContent, Role,
+    ToolCall, ToolSchema, Usage,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -98,7 +98,7 @@ impl CacheControl {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct AnthropicMessage {
+pub(crate) struct AnthropicMessage {
     role: String, // "user" or "assistant" only
     content: AnthropicContent,
 }
@@ -185,7 +185,7 @@ enum ImageSource {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct AnthropicTool {
+pub(crate) struct AnthropicTool {
     name: String,
     description: String,
     input_schema: serde_json::Value,
@@ -194,7 +194,7 @@ struct AnthropicTool {
 // --- Response types ---
 
 #[derive(Debug, Clone, Deserialize)]
-struct AnthropicResponse {
+pub(crate) struct AnthropicResponse {
     id: String,
     content: Vec<ResponseContentBlock>,
     model: String,
@@ -235,6 +235,9 @@ struct AnthropicUsage {
 // SSE types for streaming
 // =============================================================================
 
+// Fields on SSE variants exist to fully deserialize the Anthropic streaming envelope;
+// not all fields are read in match arms but serde requires them to parse the JSON correctly.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum AnthropicSseEvent {
@@ -264,6 +267,10 @@ enum AnthropicSseEvent {
     },
 }
 
+// Fields exist to fully deserialize the content-block-start envelope from Anthropic SSE;
+// name/id are used in match arms; text and input are captured for completeness but not
+// directly read (the delta stream carries incremental text/json via SseDelta).
+#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum SseContentBlock {
@@ -315,17 +322,17 @@ struct SseUsage {
 /// This is called once at startup. No expiry check, no token refresh (deferred per D-09).
 pub fn discover_anthropic_credential(config_api_key: Option<&str>) -> Option<String> {
     // 1. Config api_key
-    if let Some(key) = config_api_key {
-        if !key.is_empty() {
-            return Some(key.to_string());
-        }
+    if let Some(key) = config_api_key
+        && !key.is_empty()
+    {
+        return Some(key.to_string());
     }
 
     // 2. Environment variable
-    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
-        if !key.is_empty() {
-            return Some(key);
-        }
+    if let Ok(key) = std::env::var("ANTHROPIC_API_KEY")
+        && !key.is_empty()
+    {
+        return Some(key);
     }
 
     // 3. ~/.claude/credentials.json oauth.accessToken
@@ -359,7 +366,7 @@ pub fn discover_anthropic_credential(config_api_key: Option<&str>) -> Option<Str
 /// - `assistant` messages with tool_calls: content blocks (text first if any, then tool_use blocks)
 /// - `tool` messages: role="user" with tool_result content block
 /// - Consecutive same-role messages are merged into a single message
-pub fn adapt_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<AnthropicMessage>) {
+pub(crate) fn adapt_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<AnthropicMessage>) {
     // Extract system messages
     let system_parts: Vec<String> = messages
         .iter()
@@ -416,13 +423,13 @@ pub fn adapt_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<Anthropi
                 let mut blocks: Vec<ContentBlock> = Vec::new();
 
                 // Text content first (if any)
-                if let Some(text) = msg.content.as_ref().and_then(|c| c.as_text()) {
-                    if !text.is_empty() {
-                        blocks.push(ContentBlock::Text {
-                            text: text.to_string(),
-                            cache_control: None,
-                        });
-                    }
+                if let Some(text) = msg.content.as_ref().and_then(|c| c.as_text())
+                    && !text.is_empty()
+                {
+                    blocks.push(ContentBlock::Text {
+                        text: text.to_string(),
+                        cache_control: None,
+                    });
                 }
 
                 // Tool use blocks
@@ -565,7 +572,7 @@ fn content_to_blocks(content: AnthropicContent) -> Vec<ContentBlock> {
 }
 
 /// Convert OpenAI tool schemas to Anthropic tool format.
-pub fn adapt_tools(tools: &[ToolSchema]) -> Vec<AnthropicTool> {
+pub(crate) fn adapt_tools(tools: &[ToolSchema]) -> Vec<AnthropicTool> {
     tools
         .iter()
         .map(|t| AnthropicTool {
@@ -677,16 +684,16 @@ fn attach_marker_to_last_block(content: &mut AnthropicContent, ttl: &'static str
             cache_control: None,
         }]);
     }
-    if let AnthropicContent::Blocks(blocks) = content {
-        if let Some(last) = blocks.last_mut() {
-            let marker = Some(CacheControl::ephemeral(ttl));
-            match last {
-                ContentBlock::Text { cache_control, .. }
-                | ContentBlock::Image { cache_control, .. }
-                | ContentBlock::ToolUse { cache_control, .. }
-                | ContentBlock::ToolResult { cache_control, .. } => {
-                    *cache_control = marker;
-                }
+    if let AnthropicContent::Blocks(blocks) = content
+        && let Some(last) = blocks.last_mut()
+    {
+        let marker = Some(CacheControl::ephemeral(ttl));
+        match last {
+            ContentBlock::Text { cache_control, .. }
+            | ContentBlock::Image { cache_control, .. }
+            | ContentBlock::ToolUse { cache_control, .. }
+            | ContentBlock::ToolResult { cache_control, .. } => {
+                *cache_control = marker;
             }
         }
     }
@@ -714,7 +721,9 @@ pub fn serialize_request_for_test(req: &AnthropicRequest) -> Result<String> {
 }
 
 /// Convert an Anthropic response to OpenAI-compatible ChatResponse.
-pub fn parse_anthropic_response(response: &AnthropicResponse) -> (ChatResponse, Option<Usage>) {
+pub(crate) fn parse_anthropic_response(
+    response: &AnthropicResponse,
+) -> (ChatResponse, Option<Usage>) {
     let mut text_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
 
@@ -1061,10 +1070,7 @@ impl AnthropicClient {
                             continue;
                         }
                     };
-                    obj.insert(
-                        "type".to_string(),
-                        serde_json::Value::String(etype.clone()),
-                    );
+                    obj.insert("type".to_string(), serde_json::Value::String(etype.clone()));
                     let parsed: AnthropicSseEvent =
                         match serde_json::from_value(serde_json::Value::Object(obj)) {
                             Ok(e) => e,

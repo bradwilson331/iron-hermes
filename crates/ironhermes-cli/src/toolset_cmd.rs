@@ -15,8 +15,7 @@ use std::path::Path;
 /// learning added in Phase 33 (autonomous skill creation, LEARN-03..05).
 /// voice added in Phase 36.17.6 (TTS toolset — text_to_speech + send_audio).
 const KNOWN_TOOLSETS: &[&str] = &[
-    "web", "code", "memory", "agent", "skills", "session", "browser", "learning",
-    "voice",
+    "web", "code", "memory", "agent", "skills", "session", "browser", "learning", "voice",
 ];
 
 #[derive(Subcommand)]

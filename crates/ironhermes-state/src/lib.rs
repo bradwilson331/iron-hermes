@@ -969,6 +969,8 @@ impl StateStore {
         // Collect all rows first so we can release the SELECT statement
         // before issuing UPDATEs (rusqlite borrows the connection mutably
         // for the duration of a prepared statement iter).
+        #[allow(clippy::type_complexity)]
+        // DB row tuple: one-off local; type alias would only exist here, inline is clearer
         let rows: Vec<(i64, String, String, i64, i64, i64, i64, i64)> = {
             let mut stmt = tx.prepare(
                 "SELECT rowid, session_id, model, in_tok, out_tok, cache_read, cache_create, cost_usd_micros \
@@ -1004,8 +1006,7 @@ impl StateStore {
             }
         }
 
-        for (rowid, session_id, model, in_tok, out_tok, cache_read, cache_create, old_cost) in
-            &rows
+        for (rowid, session_id, model, in_tok, out_tok, cache_read, cache_create, old_cost) in &rows
         {
             if !session_ids_present.contains(session_id) {
                 stats.orphan_rows += 1;
@@ -1013,8 +1014,9 @@ impl StateStore {
             let new_cost = recompute(model, *in_tok, *out_tok, *cache_read, *cache_create);
             if new_cost != *old_cost {
                 stats.rows_updated += 1;
-                stats.total_cost_delta_micros =
-                    stats.total_cost_delta_micros.saturating_add(new_cost - old_cost);
+                stats.total_cost_delta_micros = stats
+                    .total_cost_delta_micros
+                    .saturating_add(new_cost - old_cost);
                 tx.execute(
                     "UPDATE usage_events SET cost_usd_micros = ?1 WHERE rowid = ?2",
                     rusqlite::params![new_cost, rowid],
@@ -1250,13 +1252,7 @@ pub fn format_usage_rollups(rollups: &[UsageRollup], filter: &UsageFilter) -> St
         let cost_usd = r.cost_usd_micros as f64 / 1_000_000.0;
         out.push_str(&format!(
             "{:<10} {:<24} {:>8} {:>8} {:>8} {:>8} ${:>10.4}\n",
-            r.provider,
-            r.model,
-            r.in_tok,
-            r.out_tok,
-            r.cache_read,
-            r.cache_create,
-            cost_usd
+            r.provider, r.model, r.in_tok, r.out_tok, r.cache_read, r.cache_create, cost_usd
         ));
         total_cost += r.cost_usd_micros;
     }
@@ -1428,8 +1424,7 @@ impl CoreStateStoreHandle for StateStoreHandleAdapter {
                 None => "No sessions found.".to_string(),
             },
             Ok(sessions) => {
-                let lines: Vec<String> =
-                    sessions.iter().map(|s| format!("  {}", s.id)).collect();
+                let lines: Vec<String> = sessions.iter().map(|s| format!("  {}", s.id)).collect();
                 let header = match workspace_root {
                     Some(ws) => format!("Recent sessions (workspace={ws}):"),
                     None => "Recent sessions:".to_string(),
@@ -1450,9 +1445,7 @@ impl CoreStateStoreHandle for StateStoreHandleAdapter {
             Ok(msgs) => {
                 let lines: Vec<String> = msgs
                     .iter()
-                    .map(|m| {
-                        format!("  [{}] {}", m.role, m.content.as_deref().unwrap_or(""))
-                    })
+                    .map(|m| format!("  [{}] {}", m.role, m.content.as_deref().unwrap_or("")))
                     .collect();
                 format!("History ({} messages):\n{}", msgs.len(), lines.join("\n"))
             }
@@ -1678,7 +1671,10 @@ mod schema_migration_v8_tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(exists, 1, "usage_events table must exist after v9 migration");
+        assert_eq!(
+            exists, 1,
+            "usage_events table must exist after v9 migration"
+        );
     }
 
     #[test]
@@ -1749,27 +1745,27 @@ mod schema_migration_v8_tests {
         .unwrap();
 
         // Recompute closure: stub pricing — every row gets new_cost = in_tok * 2.
-        let recompute = |_model: &str, in_tok: i64, _out: i64, _cr: i64, _cc: i64| -> i64 {
-            in_tok * 2
-        };
+        let recompute =
+            |_model: &str, in_tok: i64, _out: i64, _cr: i64, _cc: i64| -> i64 { in_tok * 2 };
 
         // Dry-run: report what would change without persisting.
         let stats = store.backfill_usage_costs(recompute, true, false).unwrap();
         assert_eq!(stats.rows_examined, 3);
         assert_eq!(stats.rows_updated, 3);
         assert_eq!(stats.orphan_rows, 1);
-        assert_eq!(stats.orphans_deleted, 0, "dry-run without clean-orphans deletes nothing");
+        assert_eq!(
+            stats.orphans_deleted, 0,
+            "dry-run without clean-orphans deletes nothing"
+        );
         // Cost delta = (2000 + 4000 + 200) - 0 = 6200
         assert_eq!(stats.total_cost_delta_micros, 6200);
 
         // Verify dry-run did NOT commit — rows still at cost=0.
         let conn = store.conn_for_test();
         let cost_after_dry_run: i64 = conn
-            .query_row(
-                "SELECT SUM(cost_usd_micros) FROM usage_events",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT SUM(cost_usd_micros) FROM usage_events", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(cost_after_dry_run, 0, "dry-run must not commit");
 
@@ -1782,11 +1778,9 @@ mod schema_migration_v8_tests {
         // Verify rows now have new cost.
         let conn = store.conn_for_test();
         let cost_after_apply: i64 = conn
-            .query_row(
-                "SELECT SUM(cost_usd_micros) FROM usage_events",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT SUM(cost_usd_micros) FROM usage_events", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(cost_after_apply, 6200);
 

@@ -374,8 +374,10 @@ mod tests {
     #[tokio::test]
     async fn test_execute_code_tool_timeout_format() {
         let rpc_registry = Arc::new(ToolRegistry::new());
-        let mut config = ExecConfig::default();
-        config.timeout_secs = 2;
+        let config = ExecConfig {
+            timeout_secs: 2,
+            ..Default::default()
+        };
         let tool = ExecuteCodeTool::new(rpc_registry, config, None);
 
         let result = tokio::time::timeout(

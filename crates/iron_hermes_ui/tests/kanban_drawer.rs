@@ -64,9 +64,9 @@ fn drawer_source_renders_d20_sections_in_order() {
     ];
     let mut last_pos: Option<usize> = None;
     for name in order {
-        let pos = src.find(name).unwrap_or_else(|| {
-            panic!("D-20: drawer.rs missing sub-component call `{}`", name)
-        });
+        let pos = src
+            .find(name)
+            .unwrap_or_else(|| panic!("D-20: drawer.rs missing sub-component call `{}`", name));
         if let Some(prev) = last_pos {
             assert!(
                 pos > prev,
@@ -413,13 +413,11 @@ fn screen_source_has_200ms_debounce_for_per_task_counter() {
 fn comments_resource_reads_per_task_event_counter_for_d21() {
     let src = read("src/components/hermes_app/screens/kanban/drawer.rs");
 
-    let comments_decl_offset = src
-        .find("let comments = use_resource")
-        .expect(
-            "drawer.rs must declare a `let comments = use_resource(...)` \
+    let comments_decl_offset = src.find("let comments = use_resource").expect(
+        "drawer.rs must declare a `let comments = use_resource(...)` \
              resource — the COMMENTS section of the D-20 drawer depends on \
              it; see .planning/quick/260602-nd7-fix-u9-drawer-comments-auto-refresh/",
-        );
+    );
     let fetch_comments_offset = src
         .find("fetch_comments")
         .expect(

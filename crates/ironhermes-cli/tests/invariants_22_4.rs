@@ -15,6 +15,7 @@ const TUI_RATA_UI: &str = include_str!("../src/tui_rata/ui.rs");
 const TUI_RATA_STATUS: &str = include_str!("../src/tui_rata/status_line.rs");
 const TUI_RATA_HISTORY: &str = include_str!("../src/tui_rata/history.rs");
 const TUI_RATA_STREAM: &str = include_str!("../src/tui_rata/stream_events.rs");
+#[allow(dead_code)] // retained for future keybinding invariant tests; no assertion yet
 const TUI_RATA_KB: &str = include_str!("../src/tui_rata/keybindings.rs");
 const TUI_RATA_COMMANDS: &str = include_str!("../src/tui_rata/commands.rs");
 const CORE_REGISTRY: &str = include_str!("../../ironhermes-core/src/commands/registry.rs");

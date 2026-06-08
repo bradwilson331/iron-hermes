@@ -126,7 +126,10 @@ fn dispatch_kanban_list_returns_table_format() {
                 s
             );
         }
-        other => panic!("expected CommandResult::Output for /kanban list, got {:?}", other),
+        other => panic!(
+            "expected CommandResult::Output for /kanban list, got {:?}",
+            other
+        ),
     }
 }
 

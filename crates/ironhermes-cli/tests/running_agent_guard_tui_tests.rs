@@ -123,8 +123,8 @@ async fn test_guard_clears_on_turn_end() {
 /// The rejection message must be AGENT_RUNNING_REJECT_MSG verbatim (T-36.1-14).
 #[test]
 fn test_model_rejected_when_running() {
-    use ironhermes_core::commands::running_agent::{is_bypass, AGENT_RUNNING_REJECT_MSG};
     use ironhermes_core::commands::registry::build_registry;
+    use ironhermes_core::commands::running_agent::{AGENT_RUNNING_REJECT_MSG, is_bypass};
     use ironhermes_core::commands::{CommandRouter, ResolveResult};
     use ironhermes_core::types::Platform;
 
@@ -148,9 +148,14 @@ fn test_model_rejected_when_running() {
                 );
                 return; // Test passed
             }
-            panic!("/model should have triggered the rejection path (agent_running=true, not bypass)");
+            panic!(
+                "/model should have triggered the rejection path (agent_running=true, not bypass)"
+            );
         }
-        other => panic!("/model gpt-4 must resolve to a known command, got: {:?}", other),
+        other => panic!(
+            "/model gpt-4 must resolve to a known command, got: {:?}",
+            other
+        ),
     }
 }
 
@@ -161,8 +166,8 @@ fn test_model_rejected_when_running() {
 /// a running turn.
 #[test]
 fn test_stop_bypasses_guard() {
-    use ironhermes_core::commands::running_agent::is_bypass;
     use ironhermes_core::commands::registry::build_registry;
+    use ironhermes_core::commands::running_agent::is_bypass;
     use ironhermes_core::commands::{CommandRouter, ResolveResult};
     use ironhermes_core::types::Platform;
 
@@ -201,8 +206,8 @@ fn test_stop_bypasses_guard() {
 /// and reject /reset during an active turn — this test would catch that bug.
 #[test]
 fn test_alias_reset_bypasses_guard() {
-    use ironhermes_core::commands::running_agent::is_bypass;
     use ironhermes_core::commands::registry::build_registry;
+    use ironhermes_core::commands::running_agent::is_bypass;
     use ironhermes_core::commands::{CommandRouter, ResolveResult};
     use ironhermes_core::types::Platform;
 

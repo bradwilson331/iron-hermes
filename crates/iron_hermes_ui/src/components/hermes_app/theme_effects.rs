@@ -83,8 +83,7 @@ pub fn ThemeEffects() -> Element {
                     "density-dense",
                     p.density == crate::ui_prefs::Density::Dense,
                 );
-                let _ = list
-                    .toggle_with_force("on-chat", screen == crate::state::Screen::Chat);
+                let _ = list.toggle_with_force("on-chat", screen == crate::state::Screen::Chat);
             }
         }
         // Silence "unused on non-WASM" — the borrows are already dropped.

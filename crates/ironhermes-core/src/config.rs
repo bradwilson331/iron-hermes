@@ -56,8 +56,8 @@ pub const RESERVED_ROLE_NAMES: &[&str] = &[
     "session_search",
     "skills_hub",
     "mcp_helper",
-    "summarization",     // Phase 25.2 D-13 — second resolve_role consumer (web_extract)
-    "curator",           // Phase 25.3 D-P0-1 — Phase 25.4 Curator cascade prerequisite
+    "summarization", // Phase 25.2 D-13 — second resolve_role consumer (web_extract)
+    "curator",       // Phase 25.3 D-P0-1 — Phase 25.4 Curator cascade prerequisite
     "kanban_decomposer", // Phase 36.3.7.10 — bridges to auxiliary.kanban_decomposer config key (reference.md §449-451)
     "kanban_judge",      // Phase 36.3.7.12 D-05 — auxiliary judge for the goal-mode worker loop
 ];
@@ -71,7 +71,7 @@ pub const RESERVED_ROLE_NAMES: &[&str] = &[
 /// # Errors
 /// Returns an error if `name` is not in `RESERVED_ROLE_NAMES`.
 pub fn validate_role_name(name: &str) -> anyhow::Result<()> {
-    if RESERVED_ROLE_NAMES.iter().any(|r| *r == name) {
+    if RESERVED_ROLE_NAMES.contains(&name) {
         Ok(())
     } else {
         anyhow::bail!(
@@ -197,6 +197,7 @@ pub enum ApiMode {
 /// resolver build time (handled in `provider.rs`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct ProviderConfig {
     pub base_url: Option<String>,
     /// DEPRECATED (D-01, Phase 26): use `api_key_env` instead.
@@ -223,22 +224,6 @@ pub struct ProviderConfig {
     /// `#[serde(default)]` ensures pre-36.15 configs parse cleanly with an empty map.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub models: HashMap<String, ProviderModelConfig>,
-}
-
-impl Default for ProviderConfig {
-    fn default() -> Self {
-        Self {
-            base_url: None,
-            api_key: None,
-            api_key_env: None,
-            api_mode: None,
-            default_model: None,
-            fallback_providers: vec![],
-            disabled: None,
-            extra_request_options: HashMap::new(),
-            models: HashMap::new(),
-        }
-    }
 }
 
 /// Custom (user-defined) provider configuration (used in `custom_providers:` list).
@@ -274,20 +259,12 @@ pub struct ModelRoleConfig {
 /// All fields are plain `String` per Phase 22.4.2.2 / Phase 26 D-18 cross-crate convention.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct AuxiliaryConfig {
     /// Provider name (must be a key in `providers:`). Empty string = unset.
     pub provider: String,
     /// Model identifier served by this provider. Empty string = use provider default.
     pub model: String,
-}
-
-impl Default for AuxiliaryConfig {
-    fn default() -> Self {
-        Self {
-            provider: String::new(),
-            model: String::new(),
-        }
-    }
 }
 
 impl AuxiliaryConfig {
@@ -579,9 +556,9 @@ pub struct ElevenLabsConfig {
 impl Default for ElevenLabsConfig {
     fn default() -> Self {
         Self {
-            voice_id: "pNInz6obpgDQGcFmaJgB".to_string(),     // Adam
+            voice_id: "pNInz6obpgDQGcFmaJgB".to_string(), // Adam
             model_id: "eleven_multilingual_v2".to_string(),
-            output_format: "mp3".to_string(),                  // Opus opt-in deferred (RESEARCH Open Q #2)
+            output_format: "mp3".to_string(), // Opus opt-in deferred (RESEARCH Open Q #2)
         }
     }
 }
@@ -1749,10 +1726,19 @@ model:
         );
         assert!(default.api_key.is_none(), "api_key should default to None");
         // D-32.2 new fields
-        assert_eq!(default.max_spawn_depth, 1, "max_spawn_depth must default to 1");
-        assert!(default.orchestrator_enabled, "orchestrator_enabled must default to true");
+        assert_eq!(
+            default.max_spawn_depth, 1,
+            "max_spawn_depth must default to 1"
+        );
+        assert!(
+            default.orchestrator_enabled,
+            "orchestrator_enabled must default to true"
+        );
         // Lowered from 50 to 20 to bound runaway-delegation cost (supersedes D-08).
-        assert_eq!(default.max_iterations, 20, "max_iterations must default to 20 (runaway-delegation guard)");
+        assert_eq!(
+            default.max_iterations, 20,
+            "max_iterations must default to 20 (runaway-delegation guard)"
+        );
         // Phase 32.3 Plan 01 (D-05): new soft-stale warn threshold field.
         assert_eq!(
             default.stale_warn_seconds, 120,
@@ -1817,16 +1803,28 @@ delegation:
         let result = detect_legacy_subagent_key(yaml);
         assert!(result.is_some(), "legacy subagent: key must be detected");
         let msg = result.unwrap();
-        assert!(msg.contains("subagent:"), "message must mention the old key");
-        assert!(msg.contains("delegation:"), "message must mention the new key");
-        assert!(msg.contains("config.yaml"), "message must mention the config file");
+        assert!(
+            msg.contains("subagent:"),
+            "message must mention the old key"
+        );
+        assert!(
+            msg.contains("delegation:"),
+            "message must mention the new key"
+        );
+        assert!(
+            msg.contains("config.yaml"),
+            "message must mention the config file"
+        );
     }
 
     #[test]
     fn test_delegation_key_not_flagged() {
         let yaml = "delegation:\n  max_concurrent_children: 3\n";
         let result = detect_legacy_subagent_key(yaml);
-        assert!(result.is_none(), "delegation: key must NOT trigger the legacy detector");
+        assert!(
+            result.is_none(),
+            "delegation: key must NOT trigger the legacy detector"
+        );
     }
 
     #[test]
@@ -2017,8 +2015,10 @@ skills:
 
     #[test]
     fn skills_config_disabled_field_round_trip() {
-        let mut cfg = SkillsConfig::default();
-        cfg.disabled = vec!["foo".to_string(), "bar".to_string()];
+        let cfg = SkillsConfig {
+            disabled: vec!["foo".to_string(), "bar".to_string()],
+            ..Default::default()
+        };
         let ser = serde_yaml::to_string(&cfg).expect("serialize");
         let de: SkillsConfig = serde_yaml::from_str(&ser).expect("deserialize");
         assert_eq!(
@@ -2026,7 +2026,10 @@ skills:
             vec!["foo".to_string(), "bar".to_string()],
             "disabled list must round-trip through YAML serde"
         );
-        assert!(de.enabled, "other fields must be preserved after round-trip");
+        assert!(
+            de.enabled,
+            "other fields must be preserved after round-trip"
+        );
     }
 
     #[test]
@@ -2034,7 +2037,8 @@ skills:
         // Pre-phase config.yaml files have no `disabled:` key.
         // #[serde(default)] must produce Vec::new() — not an error.
         let yaml = "enabled: true\nextra_paths: []\n";
-        let cfg: SkillsConfig = serde_yaml::from_str(yaml).expect("must parse without disabled key");
+        let cfg: SkillsConfig =
+            serde_yaml::from_str(yaml).expect("must parse without disabled key");
         assert!(
             cfg.disabled.is_empty(),
             "missing disabled key must deserialize to empty Vec via #[serde(default)]"
@@ -2853,7 +2857,11 @@ custom_providers:
         );
         // robotics (absent) is enabled.
         assert!(
-            merged.toolsets.get("robotics").map(|e| e.enabled).unwrap_or(false),
+            merged
+                .toolsets
+                .get("robotics")
+                .map(|e| e.enabled)
+                .unwrap_or(false),
             "absent robotics entry must default to enabled=true after merge"
         );
     }
@@ -2889,7 +2897,10 @@ custom_providers:
         let names = cfg.enabled_toolset_names();
         assert!(names.contains("web"), "web must be in enabled set");
         assert!(names.contains("memory"), "memory must be in enabled set");
-        assert!(!names.contains("code"), "code (disabled) must NOT be in enabled set");
+        assert!(
+            !names.contains("code"),
+            "code (disabled) must NOT be in enabled set"
+        );
         assert_eq!(names.len(), 2, "enabled set must have exactly 2 entries");
     }
 
@@ -2906,7 +2917,9 @@ custom_providers:
         };
         // Apply merge twice.
         let once = cfg.clone().with_default_toolsets_merged();
-        let twice = cfg.with_default_toolsets_merged().with_default_toolsets_merged();
+        let twice = cfg
+            .with_default_toolsets_merged()
+            .with_default_toolsets_merged();
         // Both must agree on every ALL_TOOLSETS entry.
         for &name in ALL_TOOLSETS {
             let once_val = once.toolsets.get(name).map(|e| e.enabled);
@@ -3095,7 +3108,8 @@ providers:
         extra_request_options:
           num_ctx: 4096
 "#;
-        let config: Config = serde_yaml::from_str(yaml).expect("Config must parse with colon-bearing keys");
+        let config: Config =
+            serde_yaml::from_str(yaml).expect("Config must parse with colon-bearing keys");
         let provider = config
             .providers
             .get("ollama")

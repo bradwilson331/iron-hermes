@@ -177,8 +177,10 @@ mod tests {
 
     #[test]
     fn test_blocklist_from_config() {
-        let mut config = HooksConfig::default();
-        config.blocked_tools = vec!["terminal".to_string(), "write_file".to_string()];
+        let config = HooksConfig {
+            blocked_tools: vec!["terminal".to_string(), "write_file".to_string()],
+            ..HooksConfig::default()
+        };
         let guardrail = BlocklistGuardrail::from_config(&config);
         assert!(matches!(
             guardrail.check("terminal", &json_null()),

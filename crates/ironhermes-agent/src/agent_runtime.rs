@@ -47,14 +47,14 @@ use ironhermes_tools::browser_session::BrowserSession;
 use ironhermes_tools::delegate_task::SubagentProgressCallback;
 use ironhermes_tools::memory_tool::SharedMemoryManager;
 
+use crate::agent_loop::{StreamCallback, ToolProgressCallback, ToolResultCallback};
 use crate::agent_wiring::attach_context_engine;
 use crate::any_client::{build_main_client, wire_fallback_if_configured};
-use crate::context_refs::preprocess_context_references_async;
 use crate::app_runtime_factory::{
     AppRuntimeBundle, AppRuntimeFactoryInput, DelegateTaskWiring, build_app_runtime_bundle,
 };
-use crate::agent_loop::{StreamCallback, ToolProgressCallback, ToolResultCallback};
 use crate::budget::BudgetHandle;
+use crate::context_refs::preprocess_context_references_async;
 use crate::memory::MemoryManager;
 use crate::pressure_warning::PressureTracker;
 use crate::subagent_registry::SubagentRegistry;
@@ -208,9 +208,8 @@ impl AgentRuntime {
             config.delegation.max_concurrent_children,
         ));
 
-        let shared_memory: Option<SharedMemoryManager> = memory_manager
-            .clone()
-            .map(|m| m as SharedMemoryManager);
+        let shared_memory: Option<SharedMemoryManager> =
+            memory_manager.clone().map(|m| m as SharedMemoryManager);
 
         let cwd_stored = cwd.clone();
         // Phase 36.17.7 Plan 01 (BLOCKER 1 fix for D-05): the startup bundle has no
@@ -305,7 +304,11 @@ impl AgentRuntime {
                 provider_name,
                 &model_name,
             );
-            if merged.is_empty() { None } else { Some(merged) }
+            if merged.is_empty() {
+                None
+            } else {
+                Some(merged)
+            }
         };
 
         // ── Phase 34b D-09/D-11: centralized @-ref preprocessing ─────────
@@ -340,17 +343,23 @@ impl AgentRuntime {
                                 match reg.execute_tool("web_extract", args).await {
                                     Ok(result_str) => {
                                         // Parse ExtractionResult array from web_extract output.
-                                        if let Ok(results) = serde_json::from_str::<Vec<serde_json::Value>>(&result_str) {
-                                            if let Some(first) = results.first() {
-                                                if let Some(content) = first.get("content").and_then(|v| v.as_str()) {
-                                                    if !content.is_empty() {
-                                                        return Ok(content.to_string());
-                                                    }
-                                                }
-                                                // D-02: fall back to raw content on LLM-processing failure.
-                                                if let Some(err) = first.get("error").and_then(|v| v.as_str()) {
-                                                    return Err(format!("web_extract error: {}", err));
-                                                }
+                                        if let Ok(results) =
+                                            serde_json::from_str::<Vec<serde_json::Value>>(
+                                                &result_str,
+                                            )
+                                            && let Some(first) = results.first()
+                                        {
+                                            if let Some(content) =
+                                                first.get("content").and_then(|v| v.as_str())
+                                                && !content.is_empty()
+                                            {
+                                                return Ok(content.to_string());
+                                            }
+                                            // D-02: fall back to raw content on LLM-processing failure.
+                                            if let Some(err) =
+                                                first.get("error").and_then(|v| v.as_str())
+                                            {
+                                                return Err(format!("web_extract error: {}", err));
                                             }
                                         }
                                         Err("web_extract returned no content".to_string())
@@ -371,12 +380,12 @@ impl AgentRuntime {
                     .await;
 
                     // Replace the latest user message text with the expanded version.
-                    if ctx_result.expanded || ctx_result.blocked {
-                        if let Some(msg) = req.messages.get_mut(idx) {
-                            msg.content = Some(ironhermes_core::MessageContent::Text(
-                                ctx_result.message.clone(),
-                            ));
-                        }
+                    if (ctx_result.expanded || ctx_result.blocked)
+                        && let Some(msg) = req.messages.get_mut(idx)
+                    {
+                        msg.content = Some(ironhermes_core::MessageContent::Text(
+                            ctx_result.message.clone(),
+                        ));
                     }
 
                     // Log warnings centrally (D-11 carrier).
@@ -491,12 +500,7 @@ impl AgentRuntime {
             .session_turn_count
             .load(std::sync::atomic::Ordering::Acquire);
         agent = agent.with_session_has_prior_turns(prior_turns > 0);
-        if let Some(prev) = self
-            .previous_model
-            .lock()
-            .ok()
-            .and_then(|g| g.clone())
-        {
+        if let Some(prev) = self.previous_model.lock().ok().and_then(|g| g.clone()) {
             agent = agent.with_previous_model(prev);
         }
         if !self.context_file_paths.is_empty() {
@@ -621,12 +625,12 @@ impl AgentRuntime {
     /// the process so parallel test runs don't collide.
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_tests() -> Self {
-        use std::sync::Arc;
+        use crate::app_runtime_factory::AppRuntimeBundle;
         use ironhermes_core::{Config, ProviderResolver, SkillRegistry};
         use ironhermes_hooks::HookRegistry;
         use ironhermes_tools::ToolRegistry;
+        use std::sync::Arc;
         use tokio::sync::RwLock;
-        use crate::app_runtime_factory::AppRuntimeBundle;
 
         let config = Arc::new(Config::default());
         let resolver = Arc::new(
@@ -650,8 +654,8 @@ impl AgentRuntime {
         // load_with_paths(&[]) produces an empty SkillRegistry without touching disk.
         let skill_registry = Arc::new(SkillRegistry::load_with_paths(&[]));
         let active_skills = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let cron_dir = std::env::temp_dir()
-            .join(format!("ironhermes_test_cron_{}", std::process::id()));
+        let cron_dir =
+            std::env::temp_dir().join(format!("ironhermes_test_cron_{}", std::process::id()));
         let job_store = Arc::new(std::sync::Mutex::new(
             ironhermes_cron::JobStore::open(cron_dir)
                 .expect("temp-dir JobStore must succeed in test context"),
@@ -705,7 +709,11 @@ impl AgentRuntime {
             provider_name,
             &model_name,
         );
-        if merged.is_empty() { None } else { Some(merged) }
+        if merged.is_empty() {
+            None
+        } else {
+            Some(merged)
+        }
     }
 }
 
@@ -1015,12 +1023,16 @@ mod tests {
         let mut extras: HashMap<String, serde_json::Value> = HashMap::new();
         extras.insert("num_ctx".to_string(), serde_json::json!(4096u32));
 
-        let mut provider_cfg = ironhermes_core::config::ProviderConfig::default();
-        provider_cfg.extra_request_options = extras;
         // Give the provider a base_url so the resolver can build successfully.
-        provider_cfg.base_url = Some("http://localhost:11434".to_string());
+        let provider_cfg = ironhermes_core::config::ProviderConfig {
+            extra_request_options: extras,
+            base_url: Some("http://localhost:11434".to_string()),
+            ..ironhermes_core::config::ProviderConfig::default()
+        };
 
-        config.providers.insert("test_provider".to_string(), provider_cfg);
+        config
+            .providers
+            .insert("test_provider".to_string(), provider_cfg);
 
         // Make test_provider the main provider.
         config.model.provider = "test_provider".to_string();
@@ -1046,15 +1058,15 @@ mod tests {
         let hook_registry = std::sync::Arc::new(ironhermes_hooks::HookRegistry::new(
             ironhermes_hooks::HooksConfig::default(),
         ));
-        let skill_registry = std::sync::Arc::new(
-            ironhermes_core::SkillRegistry::load_with_paths(&[]),
-        );
+        let skill_registry =
+            std::sync::Arc::new(ironhermes_core::SkillRegistry::load_with_paths(&[]));
         let active_skills = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let cron_dir = std::env::temp_dir()
-            .join(format!("ironhermes_test_cron_extras_{}", std::process::id()));
+        let cron_dir = std::env::temp_dir().join(format!(
+            "ironhermes_test_cron_extras_{}",
+            std::process::id()
+        ));
         let job_store = std::sync::Arc::new(std::sync::Mutex::new(
-            ironhermes_cron::JobStore::open(cron_dir)
-                .expect("temp-dir JobStore must succeed"),
+            ironhermes_cron::JobStore::open(cron_dir).expect("temp-dir JobStore must succeed"),
         ));
         let browser_session = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         let bundle = crate::app_runtime_factory::AppRuntimeBundle {
@@ -1087,9 +1099,8 @@ mod tests {
         };
 
         let result = runtime.resolved_extras_for_test_turn();
-        let map = result.expect(
-            "resolved_extras_for_test_turn must return Some when provider has extras",
-        );
+        let map = result
+            .expect("resolved_extras_for_test_turn must return Some when provider has extras");
         assert_eq!(
             map.get("num_ctx"),
             Some(&serde_json::json!(4096u32)),

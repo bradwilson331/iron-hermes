@@ -526,7 +526,10 @@ mod tests {
         assert_eq!(visible, "", "visible stream should be empty (tag stripped)");
         let refs = x.take_attachments();
         assert_eq!(refs.len(), 1, "exactly one MediaRef extracted");
-        assert_eq!(refs[0].source, MediaSource::Path(PathBuf::from("/tmp/foo.png")));
+        assert_eq!(
+            refs[0].source,
+            MediaSource::Path(PathBuf::from("/tmp/foo.png"))
+        );
         assert_eq!(refs[0].kind, MediaKind::Photo);
         assert_eq!(refs[0].original_tag_text, "<MEDIA: /tmp/foo.png>");
     }
@@ -672,7 +675,10 @@ mod tests {
             visible
         );
         let refs = x.take_attachments();
-        assert!(refs.is_empty(), "no extraction inside fence regardless of inline state");
+        assert!(
+            refs.is_empty(),
+            "no extraction inside fence regardless of inline state"
+        );
     }
 
     // -- URL vs path + MediaKind dispatch (D-06) ----------------------------
@@ -781,7 +787,11 @@ mod tests {
         assert!(visible.contains("İİİ"), "non-ASCII prefix survives");
         assert!(visible.contains("Привет"), "non-ASCII suffix survives");
         let refs = x.take_attachments();
-        assert_eq!(refs.len(), 1, "tag still extracts despite non-ASCII context");
+        assert_eq!(
+            refs.len(),
+            1,
+            "tag still extracts despite non-ASCII context"
+        );
         assert_eq!(refs[0].kind, MediaKind::Photo);
     }
 

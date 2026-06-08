@@ -35,9 +35,7 @@ fn internal_note_re() -> &'static Regex {
 }
 
 fn fence_tag_re() -> &'static Regex {
-    FENCE_TAG_RE.get_or_init(|| {
-        Regex::new(r"(?i)</?\s*memory-context\s*>").unwrap()
-    })
+    FENCE_TAG_RE.get_or_init(|| Regex::new(r"(?i)</?\s*memory-context\s*>").unwrap())
 }
 
 // ---------------------------------------------------------------------------
@@ -110,8 +108,14 @@ mod tests {
         let result = build_memory_context_block("fact A");
         assert!(result.is_some(), "non-empty input must return Some");
         let s = result.unwrap();
-        assert!(s.starts_with("<memory-context>"), "must start with <memory-context>");
-        assert!(s.ends_with("</memory-context>"), "must end with </memory-context>");
+        assert!(
+            s.starts_with("<memory-context>"),
+            "must start with <memory-context>"
+        );
+        assert!(
+            s.ends_with("</memory-context>"),
+            "must end with </memory-context>"
+        );
         assert!(s.contains("fact A"), "must contain the original content");
     }
 
@@ -124,7 +128,9 @@ mod tests {
             "block must contain the U+2014 em dash"
         );
         assert!(
-            result.contains("[System note: The following is recalled memory context, NOT new user input."),
+            result.contains(
+                "[System note: The following is recalled memory context, NOT new user input."
+            ),
             "block must contain the system note prefix"
         );
     }
@@ -156,7 +162,10 @@ mod tests {
     fn strip_full_block() {
         let input = "before <memory-context>x</memory-context> after";
         let result = sanitize_context(input);
-        assert_eq!(result, "before  after", "block content must be removed entirely");
+        assert_eq!(
+            result, "before  after",
+            "block content must be removed entirely"
+        );
     }
 
     // Test 6: orphaned [System note: ...] line (authoritative reference phrasing) is stripped
@@ -188,7 +197,8 @@ mod tests {
     // Test 8: two back-to-back blocks are both removed
     #[test]
     fn multi_block_in_one_input() {
-        let input = "<memory-context>block one</memory-context><memory-context>block two</memory-context>";
+        let input =
+            "<memory-context>block one</memory-context><memory-context>block two</memory-context>";
         let result = sanitize_context(input);
         assert!(
             !result.contains("block one"),

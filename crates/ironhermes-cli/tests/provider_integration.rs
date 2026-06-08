@@ -12,12 +12,18 @@ use std::sync::OnceLock;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// Process-wide ENV_LOCK — separate static from toolset_integration.rs (different binary).
-/// Required because Rust runs tests in the same process on multiple threads by default;
-/// any test that mutates env vars must hold this lock to avoid cross-test bleed.
-fn env_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+/// Process-wide ENV_LOCK for async tests — uses tokio::sync::Mutex so the guard
+/// can be held across .await points without triggering clippy::await_holding_lock.
+fn env_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+/// Process-wide ENV_LOCK for sync (non-async) tests — uses std::sync::Mutex since
+/// sync tests never cross .await points.
+fn env_lock_sync() -> &'static std::sync::Mutex<()> {
+    static LOCK_SYNC: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+    LOCK_SYNC.get_or_init(|| std::sync::Mutex::new(()))
 }
 
 /// RAII env var guard — restores original value on drop, even on panic.
@@ -68,7 +74,7 @@ fn write_config_yaml(home: &std::path::Path, body: &str) {
 /// for a minimal request, the library-level api_key==None assertion is the hard gate.
 #[tokio::test(flavor = "multi_thread")]
 async fn key_does_not_leak_to_wrong_provider() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock().lock().await;
 
     // Mount a wiremock server to capture any outbound requests.
     let server = MockServer::start().await;
@@ -137,7 +143,7 @@ async fn key_does_not_leak_to_wrong_provider() {
 /// must resolve to its configured base_url and use its configured api_key_env.
 #[tokio::test(flavor = "multi_thread")]
 async fn custom_provider_selectable_by_name() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock().lock().await;
 
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -232,7 +238,7 @@ async fn custom_provider_selectable_by_name() {
 /// stdout+stderr that contains NEITHER the key value NOR any `sk-` prefix substring.
 #[test]
 fn provider_test_does_not_print_key() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock_sync().lock().unwrap_or_else(|p| p.into_inner());
     let bin = match ironhermes_bin() {
         Some(p) => p,
         None => {
@@ -299,7 +305,7 @@ providers:
 /// cannot be reset between unit tests in the same process).
 #[test]
 fn legacy_env_banner_emitted_once_per_process() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock_sync().lock().unwrap_or_else(|p| p.into_inner());
     let bin = match ironhermes_bin() {
         Some(p) => p,
         None => {
@@ -346,7 +352,7 @@ fn legacy_env_banner_emitted_once_per_process() {
 /// D-14: enable/disable must persist to config.yaml across binary restarts.
 #[test]
 fn provider_enable_disable_persists() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock_sync().lock().unwrap_or_else(|p| p.into_inner());
     let bin = match ironhermes_bin() {
         Some(p) => p,
         None => {
@@ -401,7 +407,7 @@ fn provider_enable_disable_persists() {
 /// Session-only `--provider` flag must NOT emit the banner.
 #[test]
 fn cache_break_banner_on_persistent_enable_disable() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock_sync().lock().unwrap_or_else(|p| p.into_inner());
     let bin = match ironhermes_bin() {
         Some(p) => p,
         None => {
@@ -454,7 +460,7 @@ fn cache_break_banner_on_persistent_enable_disable() {
 /// - LlmClient posts to {base_url}/chat/completions, so wiremock path = /v1/chat/completions
 #[tokio::test(flavor = "multi_thread")]
 async fn auxiliary_routes_to_separate_model() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock().lock().await;
 
     let aux_server = MockServer::start().await;
     let main_server = MockServer::start().await;
@@ -601,7 +607,7 @@ async fn auxiliary_routes_to_separate_model() {
 /// This subprocess test verifies the error reaches the user at launch.
 #[test]
 fn auxiliary_provider_unknown_name_fails_at_load() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock_sync().lock().unwrap_or_else(|p| p.into_inner());
     let bin = match ironhermes_bin() {
         Some(p) => p,
         None => {
@@ -663,7 +669,7 @@ auxiliary:
 /// and a helpful error message BEFORE any config write occurs.
 #[test]
 fn provider_enable_rejects_slug_injection() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock_sync().lock().unwrap_or_else(|p| p.into_inner());
     let bin = match ironhermes_bin() {
         Some(p) => p,
         None => {

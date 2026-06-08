@@ -42,10 +42,7 @@ pub enum KanbanError {
     /// `expected_run_id` mismatch — write rejected because the worker's run
     /// was superseded by a reclaim + respawn (D-22 / D-41).
     #[error("stale run id: expected={expected}, actual={actual}")]
-    StaleRunId {
-        expected: String,
-        actual: String,
-    },
+    StaleRunId { expected: String, actual: String },
 
     /// `claim_lock` mismatch — worker write gated out (D-41).
     #[error("claim expired for task {task_id}: presented lock={presented_lock}")]
@@ -67,10 +64,7 @@ pub enum KanbanError {
     /// `child_id`. Detected by `KanbanStore::insert_link_checked`
     /// (Phase 36.3.7.6 BUG-36.3.7.6-02, D-link-cycle-detection).
     #[error("link cycle detected: parent={parent_id}, child={child_id}")]
-    LinkCycle {
-        parent_id: String,
-        child_id: String,
-    },
+    LinkCycle { parent_id: String, child_id: String },
 
     /// Bundled skill name not recognised (e.g. passed to
     /// `restore_bundled_kanban_skill` with an unknown name).

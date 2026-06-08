@@ -51,7 +51,7 @@ pub(crate) const BUZZER_OFF_CMD: &str = "CMD_BUZZER#0\n";
 
 /// LED color command prefix (D-02). Full wire is CMD_LED#{R}#{G}#{B}\n built at call time.
 /// The Freenove server defaults led_mode='1' (solid color) so no mode-set preamble is needed.
-pub(crate) const CMD_LED: &str     = "CMD_LED";
+pub(crate) const CMD_LED: &str = "CMD_LED";
 
 /// LED off command. Uses the color channel (CMD_LED#0#0#0) — sets all three channels to 0
 /// via the fast ledIndex path, which completes in microseconds and cannot be interrupted.
@@ -60,16 +60,16 @@ pub(crate) const CMD_LED: &str     = "CMD_LED";
 pub(crate) const CMD_LED_OFF: &str = "CMD_LED#0#0#0\n";
 
 /// Camera gimbal pan range (server-enforced: server.py restrict_value(50, 180)). Per D-15.
-pub(crate) const CAMERA_PAN_MIN: i64  = 50;
-pub(crate) const CAMERA_PAN_MAX: i64  = 180;
+pub(crate) const CAMERA_PAN_MIN: i64 = 50;
+pub(crate) const CAMERA_PAN_MAX: i64 = 180;
 
 /// Camera gimbal tilt range (server-enforced: server.py restrict_value(0, 180)). Per D-15.
 pub(crate) const CAMERA_TILT_MIN: i64 = 0;
 pub(crate) const CAMERA_TILT_MAX: i64 = 180;
 
 /// Midpoint defaults for the unused axis when calling CMD_CAMERA with one axis. Per D-14 + Discretion.
-pub(crate) const CAMERA_PAN_DEFAULT: i64  = 115; // midpoint of 50–180; used as x-default in camera_tilt
-pub(crate) const CAMERA_TILT_DEFAULT: i64 = 90;  // midpoint of 0–180; used as y-default in camera_pan
+pub(crate) const CAMERA_PAN_DEFAULT: i64 = 115; // midpoint of 50–180; used as x-default in camera_tilt
+pub(crate) const CAMERA_TILT_DEFAULT: i64 = 90; // midpoint of 0–180; used as y-default in camera_pan
 
 /// Maximum samples for stream_distance polling loop. Per D-09.
 pub(crate) const STREAM_DISTANCE_MAX_SAMPLES: i64 = 20;
@@ -118,11 +118,11 @@ pub struct HexapodTcpTool;
 pub(crate) fn build_walk_wire(direction: &str, speed: i64) -> String {
     let s = speed.clamp(2, 10);
     match direction {
-        "forward"  => format!("CMD_MOVE#1#0#25#{s}#0\n"),
+        "forward" => format!("CMD_MOVE#1#0#25#{s}#0\n"),
         "backward" => format!("CMD_MOVE#1#0#-25#{s}#0\n"),
-        "left"     => format!("CMD_MOVE#1#-25#0#{s}#0\n"),
-        "right"    => format!("CMD_MOVE#1#25#0#{s}#0\n"),
-        _          => format!("CMD_MOVE#1#0#25#{s}#0\n"), // safe default: forward
+        "left" => format!("CMD_MOVE#1#-25#0#{s}#0\n"),
+        "right" => format!("CMD_MOVE#1#25#0#{s}#0\n"),
+        _ => format!("CMD_MOVE#1#0#25#{s}#0\n"), // safe default: forward
     }
 }
 
@@ -147,10 +147,17 @@ pub(crate) fn parse_battery_response(raw: &str) -> String {
         (Some(s1), Some(s2)) => {
             let v1: f32 = s1.parse().unwrap_or(0.0);
             let v2: f32 = s2.parse().unwrap_or(0.0);
-            let status = if v1 < BATTERY_LOW_V1 || v2 < BATTERY_LOW_V2 { "LOW" } else { "OK" };
+            let status = if v1 < BATTERY_LOW_V1 || v2 < BATTERY_LOW_V2 {
+                "LOW"
+            } else {
+                "OK"
+            };
             format!("Battery: {v1}V / {v2}V ({status})")
         }
-        _ => format!("Error: unexpected battery response from robot: {:?}", raw.trim()),
+        _ => format!(
+            "Error: unexpected battery response from robot: {:?}",
+            raw.trim()
+        ),
     }
 }
 
@@ -175,11 +182,13 @@ pub(crate) fn map_read_outcome(
     addr: &str,
 ) -> anyhow::Result<String> {
     match outcome {
-        Err(_elapsed) => Ok("Error: read timed out after 3s waiting for robot response".to_string()),
-        Ok(Err(_io))  => Ok(format!(
+        Err(_elapsed) => {
+            Ok("Error: read timed out after 3s waiting for robot response".to_string())
+        }
+        Ok(Err(_io)) => Ok(format!(
             "Error: cannot connect to robot at {addr} — is HEXAPOD_IP set and the robot powered on?"
         )),
-        Ok(Ok(raw))   => Ok(raw),
+        Ok(Ok(raw)) => Ok(raw),
     }
 }
 
@@ -343,9 +352,8 @@ impl Tool for HexapodTcpTool {
         // The catch-all fires without attempting any I/O (test 2 requirement).
         // HEXAPOD_IP is only read for the five permitted actions.
         match action {
-            "walk" | "stop" | "read_battery" | "read_distance" | "relax_servos"
-            | "rotate" | "head_pan" | "head_tilt" | "buzzer_on" | "buzzer_off"
-            | "led" | "led_off"
+            "walk" | "stop" | "read_battery" | "read_distance" | "relax_servos" | "rotate"
+            | "head_pan" | "head_tilt" | "buzzer_on" | "buzzer_off" | "led" | "led_off"
             | "stream_distance" | "camera_pan" | "camera_tilt" => {
                 // D-12: read HEXAPOD_IP only for permitted actions
                 let ip = match env::var("HEXAPOD_IP") {
@@ -354,7 +362,7 @@ impl Tool for HexapodTcpTool {
                         return Ok(
                             "Error: HEXAPOD_IP env var not set — cannot connect to robot"
                                 .to_string(),
-                        )
+                        );
                     }
                 };
                 let addr = format!("{ip}:5002");
@@ -364,12 +372,17 @@ impl Tool for HexapodTcpTool {
                     "walk" => {
                         let direction = match args["direction"].as_str() {
                             Some(d @ ("forward" | "backward" | "left" | "right")) => d,
-                            Some(other) => return Ok(format!(
-                                "Error: invalid direction '{other}' — must be one of: forward, backward, left, right"
-                            )),
-                            None => return Ok(
-                                "Error: 'direction' parameter is required for the walk action".to_string()
-                            ),
+                            Some(other) => {
+                                return Ok(format!(
+                                    "Error: invalid direction '{other}' — must be one of: forward, backward, left, right"
+                                ));
+                            }
+                            None => {
+                                return Ok(
+                                    "Error: 'direction' parameter is required for the walk action"
+                                        .to_string(),
+                                );
+                            }
                         };
                         let speed = args["speed"].as_i64().unwrap_or(5);
                         let wire = build_walk_wire(direction, speed);
@@ -430,16 +443,17 @@ impl Tool for HexapodTcpTool {
                         // Cap absolute degrees to prevent u64 overflow and runaway rotation.
                         const MAX_DEGREES: u64 = 3600; // 10 full rotations max
                         let abs_degrees = degrees.unsigned_abs().min(MAX_DEGREES);
-                        let duration = Duration::from_millis(
-                            abs_degrees.saturating_mul(ROTATE_MS_PER_DEGREE)
-                        );
+                        let duration =
+                            Duration::from_millis(abs_degrees.saturating_mul(ROTATE_MS_PER_DEGREE));
                         match send_fire_and_forget(&addr, &wire).await {
                             Ok(_) => {
                                 tokio::time::sleep(duration).await;
                                 match send_fire_and_forget(&addr, STOP_CMD).await {
                                     Ok(_) => Ok("OK".to_string()),
                                     Err(e) => {
-                                        tracing::warn!("hexapod_tcp: rotate stop command failed: {e}");
+                                        tracing::warn!(
+                                            "hexapod_tcp: rotate stop command failed: {e}"
+                                        );
                                         Ok(format!(
                                             "Warning: rotate completed but stop command failed at {addr} — robot may still be moving"
                                         ))
@@ -476,23 +490,19 @@ impl Tool for HexapodTcpTool {
                         }
                     }
 
-                    "buzzer_on" => {
-                        match send_fire_and_forget(&addr, BUZZER_ON_CMD).await {
-                            Ok(_) => Ok("OK".to_string()),
-                            Err(_) => Ok(format!(
-                                "Error: cannot connect to robot at {addr} — is HEXAPOD_IP set and the robot powered on?"
-                            )),
-                        }
-                    }
+                    "buzzer_on" => match send_fire_and_forget(&addr, BUZZER_ON_CMD).await {
+                        Ok(_) => Ok("OK".to_string()),
+                        Err(_) => Ok(format!(
+                            "Error: cannot connect to robot at {addr} — is HEXAPOD_IP set and the robot powered on?"
+                        )),
+                    },
 
-                    "buzzer_off" => {
-                        match send_fire_and_forget(&addr, BUZZER_OFF_CMD).await {
-                            Ok(_) => Ok("OK".to_string()),
-                            Err(_) => Ok(format!(
-                                "Error: cannot connect to robot at {addr} — is HEXAPOD_IP set and the robot powered on?"
-                            )),
-                        }
-                    }
+                    "buzzer_off" => match send_fire_and_forget(&addr, BUZZER_OFF_CMD).await {
+                        Ok(_) => Ok("OK".to_string()),
+                        Err(_) => Ok(format!(
+                            "Error: cannot connect to robot at {addr} — is HEXAPOD_IP set and the robot powered on?"
+                        )),
+                    },
 
                     "led" => {
                         let r = args["r"].as_i64().unwrap_or(0).clamp(0, 255);
@@ -507,17 +517,17 @@ impl Tool for HexapodTcpTool {
                         }
                     }
 
-                    "led_off" => {
-                        match send_fire_and_forget(&addr, CMD_LED_OFF).await {
-                            Ok(_) => Ok("OK".to_string()),
-                            Err(_) => Ok(format!(
-                                "Error: cannot connect to robot at {addr} — is HEXAPOD_IP set and the robot powered on?"
-                            )),
-                        }
-                    }
+                    "led_off" => match send_fire_and_forget(&addr, CMD_LED_OFF).await {
+                        Ok(_) => Ok("OK".to_string()),
+                        Err(_) => Ok(format!(
+                            "Error: cannot connect to robot at {addr} — is HEXAPOD_IP set and the robot powered on?"
+                        )),
+                    },
 
                     "camera_pan" => {
-                        let x = args["x"].as_i64().unwrap_or(CAMERA_PAN_DEFAULT)
+                        let x = args["x"]
+                            .as_i64()
+                            .unwrap_or(CAMERA_PAN_DEFAULT)
                             .clamp(CAMERA_PAN_MIN, CAMERA_PAN_MAX);
                         let wire = format!("CMD_CAMERA#{x}#{CAMERA_TILT_DEFAULT}\n");
                         match send_fire_and_forget(&addr, &wire).await {
@@ -529,7 +539,9 @@ impl Tool for HexapodTcpTool {
                     }
 
                     "camera_tilt" => {
-                        let y = args["y"].as_i64().unwrap_or(CAMERA_TILT_DEFAULT)
+                        let y = args["y"]
+                            .as_i64()
+                            .unwrap_or(CAMERA_TILT_DEFAULT)
                             .clamp(CAMERA_TILT_MIN, CAMERA_TILT_MAX);
                         let wire = format!("CMD_CAMERA#{CAMERA_PAN_DEFAULT}#{y}\n");
                         match send_fire_and_forget(&addr, &wire).await {
@@ -541,8 +553,11 @@ impl Tool for HexapodTcpTool {
                     }
 
                     "stream_distance" => {
-                        let samples = args["samples"].as_i64().unwrap_or(5)
-                            .clamp(1, STREAM_DISTANCE_MAX_SAMPLES) as usize;
+                        let samples = args["samples"]
+                            .as_i64()
+                            .unwrap_or(5)
+                            .clamp(1, STREAM_DISTANCE_MAX_SAMPLES)
+                            as usize;
                         let mut readings: Vec<i64> = Vec::with_capacity(samples);
 
                         for i in 0..samples {
@@ -555,7 +570,8 @@ impl Tool for HexapodTcpTool {
                             // Parse numeric value directly from CMD_SONIC#<dist>\n
                             // Do NOT call parse_distance_response — it returns "Distance: N cm" (RESEARCH Pitfall 6)
                             let parts: Vec<&str> = raw.trim().split('#').collect();
-                            let dist = parts.get(1)
+                            let dist = parts
+                                .get(1)
                                 .and_then(|s| s.trim().parse::<i64>().ok())
                                 .unwrap_or(0);
                             readings.push(dist);
@@ -566,17 +582,22 @@ impl Tool for HexapodTcpTool {
 
                         let min = readings.iter().copied().min().unwrap_or(0);
                         let max = readings.iter().copied().max().unwrap_or(0);
-                        let avg = readings.iter().copied().sum::<i64>() as f64
-                            / readings.len() as f64;
+                        let avg =
+                            readings.iter().copied().sum::<i64>() as f64 / readings.len() as f64;
                         let list: Vec<String> = readings.iter().map(|d| d.to_string()).collect();
                         Ok(format!(
                             "Distances: [{}] cm | min={} max={} avg={:.1}",
-                            list.join(", "), min, max, avg
+                            list.join(", "),
+                            min,
+                            max,
+                            avg
                         ))
                     }
 
                     // Unreachable: outer arm already enumerates exactly these 15 allowed actions
-                    _ => unreachable!("outer match guarantees only the 15 allowed actions reach here"),
+                    _ => unreachable!(
+                        "outer match guarantees only the 15 allowed actions reach here"
+                    ),
                 }
             }
 
@@ -619,7 +640,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[tokio::test]
     async fn test_missing_env_var_returns_ok_error() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         unsafe { std::env::remove_var("HEXAPOD_IP") };
         let tool = HexapodTcpTool;
         let result = tool
@@ -640,7 +661,7 @@ mod tests {
         // Blocked actions fire BEFORE the env var read (D-20), so HEXAPOD_IP
         // value does not matter — but we set it to a non-routable IP to make
         // the intent clear and guard against accidental TCP in the catch-all.
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         unsafe { std::env::set_var("HEXAPOD_IP", "127.0.0.255") };
         let tool = HexapodTcpTool;
         let result = tool
@@ -660,7 +681,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[tokio::test]
     async fn test_calibration_action_blocked() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         unsafe { std::env::set_var("HEXAPOD_IP", "127.0.0.255") };
         let tool = HexapodTcpTool;
         let result = tool
@@ -680,7 +701,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[tokio::test]
     async fn test_servo_power_action_blocked() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         unsafe { std::env::set_var("HEXAPOD_IP", "127.0.0.255") };
         let tool = HexapodTcpTool;
         let result = tool
@@ -724,10 +745,10 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn test_walk_direction_strings() {
-        assert_eq!(build_walk_wire("forward", 5),  "CMD_MOVE#1#0#25#5#0\n");
+        assert_eq!(build_walk_wire("forward", 5), "CMD_MOVE#1#0#25#5#0\n");
         assert_eq!(build_walk_wire("backward", 5), "CMD_MOVE#1#0#-25#5#0\n");
-        assert_eq!(build_walk_wire("left", 5),     "CMD_MOVE#1#-25#0#5#0\n");
-        assert_eq!(build_walk_wire("right", 5),    "CMD_MOVE#1#25#0#5#0\n");
+        assert_eq!(build_walk_wire("left", 5), "CMD_MOVE#1#-25#0#5#0\n");
+        assert_eq!(build_walk_wire("right", 5), "CMD_MOVE#1#25#0#5#0\n");
     }
 
     // -----------------------------------------------------------------------
@@ -783,7 +804,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[tokio::test]
     async fn test_on_session_end_no_panic() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         unsafe { std::env::remove_var("HEXAPOD_IP") };
         let tool = HexapodTcpTool;
         // Must not panic — the spawned future short-circuits on the env-var miss
@@ -799,12 +820,9 @@ mod tests {
     #[tokio::test]
     async fn test_read_timeout_branch() {
         // D-18: construct a real Elapsed by timing out an instant-pending future
-        let elapsed = tokio::time::timeout(
-            Duration::from_nanos(1),
-            std::future::pending::<()>(),
-        )
-        .await
-        .unwrap_err();
+        let elapsed = tokio::time::timeout(Duration::from_nanos(1), std::future::pending::<()>())
+            .await
+            .unwrap_err();
 
         let timeout_result: Result<anyhow::Result<String>, tokio::time::error::Elapsed> =
             Err(elapsed);
@@ -853,7 +871,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[tokio::test]
     async fn test_rotate_zero_degrees_is_noop() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         // With HEXAPOD_IP unset, a real TCP attempt would return an error.
         // execute() must return Ok("OK") for degrees=0 before reading the env var.
         // But execute() reads HEXAPOD_IP before the inner match, so set it to a
@@ -904,7 +922,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[tokio::test]
     async fn test_new_actions_not_blocked() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         unsafe { std::env::remove_var("HEXAPOD_IP") };
         let tool = HexapodTcpTool;
         for action_name in ["rotate", "head_pan", "head_tilt", "buzzer_on", "buzzer_off"] {
@@ -958,7 +976,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[tokio::test]
     async fn test_led_actions_pass_allowlist() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         unsafe { std::env::remove_var("HEXAPOD_IP") };
         let tool = HexapodTcpTool;
 
@@ -971,10 +989,7 @@ mod tests {
             "led should pass allowlist and hit env-var check; got: {led_result}"
         );
 
-        let led_off_result = tool
-            .execute(json!({"action": "led_off"}))
-            .await
-            .unwrap();
+        let led_off_result = tool.execute(json!({"action": "led_off"})).await.unwrap();
         assert!(
             led_off_result.starts_with("Error: HEXAPOD_IP env var not set"),
             "led_off should pass allowlist and hit env-var check; got: {led_off_result}"
@@ -986,7 +1001,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[tokio::test]
     async fn test_new_actions_not_blocked_27_1_4() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         unsafe { std::env::remove_var("HEXAPOD_IP") };
         let tool = HexapodTcpTool;
         for action_name in ["stream_distance", "camera_pan", "camera_tilt"] {
@@ -1008,7 +1023,7 @@ mod tests {
     #[test]
     fn test_stream_distance_samples_clamp() {
         let clamped_high = 99i64.clamp(1, STREAM_DISTANCE_MAX_SAMPLES);
-        let clamped_low  = 0i64.clamp(1, STREAM_DISTANCE_MAX_SAMPLES);
+        let clamped_low = 0i64.clamp(1, STREAM_DISTANCE_MAX_SAMPLES);
         assert_eq!(clamped_high, 20);
         assert_eq!(clamped_low, 1);
     }
@@ -1023,8 +1038,17 @@ mod tests {
         let max = readings.iter().copied().max().unwrap_or(0);
         let avg = readings.iter().copied().sum::<i64>() as f64 / readings.len() as f64;
         let list: Vec<String> = readings.iter().map(|d| d.to_string()).collect();
-        let result = format!("Distances: [{}] cm | min={} max={} avg={:.1}", list.join(", "), min, max, avg);
-        assert_eq!(result, "Distances: [42, 43, 41, 44, 42] cm | min=41 max=44 avg=42.4");
+        let result = format!(
+            "Distances: [{}] cm | min={} max={} avg={:.1}",
+            list.join(", "),
+            min,
+            max,
+            avg
+        );
+        assert_eq!(
+            result,
+            "Distances: [42, 43, 41, 44, 42] cm | min=41 max=44 avg=42.4"
+        );
     }
 
     // -----------------------------------------------------------------------

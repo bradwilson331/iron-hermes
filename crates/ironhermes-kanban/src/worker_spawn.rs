@@ -68,7 +68,7 @@ pub const SAFE_SYSTEM_VARS: &[&str] = &[
     "TERM",
     "RUST_LOG",
     "IRONHERMES_HOME",
-    "IRONHERMES_WORKER_BIN",  // Phase 36.3.7.13 D-02: forward-compat for recursive worker spawn
+    "IRONHERMES_WORKER_BIN", // Phase 36.3.7.13 D-02: forward-compat for recursive worker spawn
 ];
 
 /// Phase 36.3.7.13 D-02: resolve the ironhermes worker binary.
@@ -111,7 +111,12 @@ pub fn resolve_worker_bin() -> String {
 ///
 /// Every other env var, including `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
 /// `GITHUB_TOKEN`, `*_SECRET`, `*_PASSWORD`, etc. (T-36.3.7-03-01).
-pub fn build_kanban_worker_env(task: &Task, run: &TaskRun, workspace: &str, board_slug: &str) -> Vec<(String, String)> {
+pub fn build_kanban_worker_env(
+    task: &Task,
+    run: &TaskRun,
+    workspace: &str,
+    board_slug: &str,
+) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = Vec::new();
 
     // Safe system pass-through (D-18): only include if present in caller env.
@@ -127,7 +132,9 @@ pub fn build_kanban_worker_env(task: &Task, run: &TaskRun, workspace: &str, boar
     // HERMES_KANBAN_DB — path to the board's kanban.db (routes to legacy path for "default").
     env.push((
         "HERMES_KANBAN_DB".into(),
-        crate::paths::board_db_path_for_slug(board_slug).to_string_lossy().into_owned(),
+        crate::paths::board_db_path_for_slug(board_slug)
+            .to_string_lossy()
+            .into_owned(),
     ));
     // HERMES_KANBAN_BOARD — the resolved board slug for this task's board (Phase 36.3.7.9).
     env.push(("HERMES_KANBAN_BOARD".into(), board_slug.to_string()));
@@ -152,12 +159,11 @@ pub fn build_kanban_worker_env(task: &Task, run: &TaskRun, workspace: &str, boar
     // skill extras (D-28 / BUG-36.3.7-01). Emitted only when task.skills is
     // Some AND decodes to a non-empty Vec<String>. Receiver-side consumption
     // is out of scope for 36.3.7.0 (see 36.3.7.0-01-SKILLS-EXTRAS-AUDIT.md).
-    if let Some(ref skills_json) = task.skills {
-        if let Ok(extras) = serde_json::from_str::<Vec<String>>(skills_json) {
-            if !extras.is_empty() {
-                env.push(("HERMES_KANBAN_TASK_SKILLS".into(), skills_json.clone()));
-            }
-        }
+    if let Some(ref skills_json) = task.skills
+        && let Ok(extras) = serde_json::from_str::<Vec<String>>(skills_json)
+        && !extras.is_empty()
+    {
+        env.push(("HERMES_KANBAN_TASK_SKILLS".into(), skills_json.clone()));
     }
 
     // Phase 36.3.7.12 (D-03 / D-06): goal-mode env pair.
@@ -192,7 +198,10 @@ pub fn build_kanban_worker_env(task: &Task, run: &TaskRun, workspace: &str, boar
         // default — absent env var under goal_mode=1 triggers a LOUD tracing::warn!
         // in filter_for_goal_mode_if_applicable (Task 3) to surface misconfig.
         let toolset_preset = task.goal_toolset.as_deref().unwrap_or("restricted");
-        env.push(("HERMES_KANBAN_GOAL_TOOLSET".into(), toolset_preset.to_string()));
+        env.push((
+            "HERMES_KANBAN_GOAL_TOOLSET".into(),
+            toolset_preset.to_string(),
+        ));
     }
 
     env
@@ -227,7 +236,12 @@ pub async fn spawn_worker(task: &Task, run: &TaskRun, workspace: &str) -> Result
 /// it's a scratch workspace), this function creates the directory before
 /// spawning. For `dir:<abs>` workspaces the directory must already exist.
 /// Worktree workspaces are managed by the worker itself.
-pub async fn spawn_worker_for_board(task: &Task, run: &TaskRun, workspace: &str, board_slug: &str) -> Result<u32> {
+pub async fn spawn_worker_for_board(
+    task: &Task,
+    run: &TaskRun,
+    workspace: &str,
+    board_slug: &str,
+) -> Result<u32> {
     let stdout_log = kanban_log_stdout(&task.id);
     let stderr_log = kanban_log_stderr(&task.id);
 
@@ -447,7 +461,10 @@ mod tests {
         let env = build_kanban_worker_env(&task, &run, "/tmp/ws3", "default");
 
         let found = env.iter().find(|(k, _)| k == "HERMES_TENANT");
-        assert!(found.is_some(), "HERMES_TENANT must be present when task.tenant is Some");
+        assert!(
+            found.is_some(),
+            "HERMES_TENANT must be present when task.tenant is Some"
+        );
         assert_eq!(found.unwrap().1, "acme");
     }
 
@@ -545,7 +562,10 @@ mod tests {
             .iter()
             .filter(|(k, _)| k == "HERMES_KANBAN_GOAL_MAX_TURNS")
             .count();
-        assert_eq!(mode_count, 1, "HERMES_KANBAN_GOAL_MODE must appear exactly once");
+        assert_eq!(
+            mode_count, 1,
+            "HERMES_KANBAN_GOAL_MODE must appear exactly once"
+        );
         assert_eq!(
             budget_count, 1,
             "HERMES_KANBAN_GOAL_MAX_TURNS must appear exactly once"

@@ -54,10 +54,7 @@ pub enum QueueError {
     /// is responsible for surfacing cap-hit UX (inline transcript error in the
     /// TUI, HTTP 429 in webhook adapters, etc.).
     #[error("Queue at capacity ({max}) for session {session_key}")]
-    CapacityReached {
-        session_key: String,
-        max: usize,
-    },
+    CapacityReached { session_key: String, max: usize },
 }
 
 /// Shared FIFO queue abstraction.

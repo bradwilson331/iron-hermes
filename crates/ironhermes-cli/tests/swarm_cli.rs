@@ -32,11 +32,9 @@ enum TestSub {
 
 #[test]
 fn swarm_verb_parses_flat_workers() {
-    let parsed = TestCli::try_parse_from([
-        "hermes", "kanban", "swarm", "my goal", "--workers", "a,b,c",
-    ])
-    .ok()
-    .expect("parse should succeed for `kanban swarm <goal> --workers a,b,c`");
+    let parsed =
+        TestCli::try_parse_from(["hermes", "kanban", "swarm", "my goal", "--workers", "a,b,c"])
+            .expect("parse should succeed for `kanban swarm <goal> --workers a,b,c`");
     match parsed.cmd {
         TestSub::Kanban {
             sub:
@@ -65,7 +63,6 @@ fn swarm_verb_parses_rich_workers_json() {
         "--workers-json",
         r#"[{"assignee":"a"},{"assignee":"b","title":"T"}]"#,
     ])
-    .ok()
     .expect("parse should succeed for `kanban swarm <goal> --workers-json '[...]'`");
     match parsed.cmd {
         TestSub::Kanban {
@@ -108,7 +105,6 @@ fn swarm_verb_parses_reference_md_664_example() {
         "--synthesizer",
         "writer",
     ])
-    .ok()
     .expect("parse should succeed for the reference.md §664 example");
     match parsed.cmd {
         TestSub::Kanban {

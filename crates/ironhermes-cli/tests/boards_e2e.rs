@@ -22,7 +22,6 @@
 //! from `#[tokio::test]` functions.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::Arc;
 
 use ironhermes_cli::kanban::boards;
@@ -34,7 +33,7 @@ use tempfile::TempDir;
 use tokio::sync::Mutex as TokioMutex;
 
 /// Serialise all tests that mutate IRONHERMES_HOME / HERMES_KANBAN_BOARD.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -97,7 +96,7 @@ fn assert_envelope_board(json_str: &str, expected_board: &str, expected_source: 
 
 #[tokio::test]
 async fn scenario_a_create_switch_task_list_envelope() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let home = ScopedHome::new();
 
     // Step 1: create board "alpha" with --switch.
@@ -107,11 +106,7 @@ async fn scenario_a_create_switch_task_list_envelope() {
     assert_eq!(code, 0, "boards create alpha --switch should exit 0");
 
     // Step 2: assert board_dir exists and current file contains "alpha".
-    let board_dir = home
-        .root
-        .join("kanban")
-        .join("boards")
-        .join("alpha");
+    let board_dir = home.root.join("kanban").join("boards").join("alpha");
     assert!(
         board_dir.exists(),
         "board dir should exist at {:?}",
@@ -141,7 +136,9 @@ async fn scenario_a_create_switch_task_list_envelope() {
     if default_db_path.exists() {
         let default_store = KanbanStore::open_default().expect("open_default");
         let filters = ironhermes_kanban::store::ListFilters::default();
-        let tasks = default_store.list_tasks(filters).expect("list default tasks");
+        let tasks = default_store
+            .list_tasks(filters)
+            .expect("list default tasks");
         let found_in_default = tasks.iter().any(|t| t.id == task_id);
         assert!(
             !found_in_default,
@@ -158,9 +155,9 @@ async fn scenario_a_create_switch_task_list_envelope() {
 
     // The newly created task must appear in the listing.
     let list_v: Value = serde_json::from_str(&list_result).unwrap();
-    let tasks_arr = list_v["tasks"].as_array().unwrap_or_else(|| {
-        panic!("envelope 'tasks' field missing or not array: {list_result}")
-    });
+    let tasks_arr = list_v["tasks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("envelope 'tasks' field missing or not array: {list_result}"));
     let found = tasks_arr.iter().any(|t| {
         t["id"].as_str() == Some(&task_id) || t["title"].as_str() == Some("alpha-e2e-task")
     });
@@ -179,7 +176,10 @@ async fn scenario_a_create_switch_task_list_envelope() {
 
     // The alpha task must NOT appear in the default board's listing.
     let list_default_v: Value = serde_json::from_str(&list_default_result).unwrap();
-    let default_tasks = list_default_v["tasks"].as_array().cloned().unwrap_or_default();
+    let default_tasks = list_default_v["tasks"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let alpha_in_default = default_tasks
         .iter()
         .any(|t| t["id"].as_str() == Some(&task_id));
@@ -197,7 +197,7 @@ async fn scenario_a_create_switch_task_list_envelope() {
 
 #[tokio::test]
 async fn scenario_b_board_flag_overrides_env_and_file() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = ScopedHome::new();
 
     // Create boards alpha, beta, gamma.
@@ -277,9 +277,9 @@ async fn scenario_b_board_flag_overrides_env_and_file() {
 
 #[test]
 fn scenario_c_archive_board_dir_gone_and_archived_entry_intact() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let home = ScopedHome::new();
     let rt = tokio::runtime::Runtime::new().unwrap();
+    let _guard = rt.block_on(ENV_LOCK.lock());
+    let home = ScopedHome::new();
 
     // Step 1: create board "archive-me" and insert one task.
     rt.block_on(boards::cmd_boards_create(
@@ -301,11 +301,7 @@ fn scenario_c_archive_board_dir_gone_and_archived_entry_intact() {
     };
 
     // Verify board dir exists.
-    let board_dir = home
-        .root
-        .join("kanban")
-        .join("boards")
-        .join("archive-me");
+    let board_dir = home.root.join("kanban").join("boards").join("archive-me");
     assert!(board_dir.exists(), "board dir should exist before rm");
 
     // Step 2: archive (default rm, no --delete).
@@ -322,11 +318,7 @@ fn scenario_c_archive_board_dir_gone_and_archived_entry_intact() {
     );
 
     // Step 4: archived entry must exist under _archived/.
-    let archived_root = home
-        .root
-        .join("kanban")
-        .join("boards")
-        .join("_archived");
+    let archived_root = home.root.join("kanban").join("boards").join("_archived");
     assert!(
         archived_root.exists(),
         "_archived dir must exist after rm: {:?}",

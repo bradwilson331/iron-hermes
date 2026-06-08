@@ -221,10 +221,7 @@ pub fn run_migrations(conn: &mut Connection, current: i64) -> Result<()> {
         //
         // NULL on existing goal_mode cards resolves to "restricted" at
         // worker spawn (D-E1). Same `let _ =` idempotency pattern as v1→v2.
-        let _ = conn.execute(
-            "ALTER TABLE tasks ADD COLUMN goal_toolset TEXT",
-            [],
-        );
+        let _ = conn.execute("ALTER TABLE tasks ADD COLUMN goal_toolset TEXT", []);
         conn.execute("UPDATE schema_version SET version = 3", [])?;
     }
     Ok(())

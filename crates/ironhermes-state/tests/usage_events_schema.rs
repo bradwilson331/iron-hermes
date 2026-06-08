@@ -203,13 +203,22 @@ fn b6_update_session_stats_increments_new_columns() {
         .unwrap();
 
     let conn = store.conn_for_test();
-    let (in_tok, out_tok, tool_calls, cache_r, cache_c, cost): (i64, i64, i64, i64, i64, i64) = conn
-        .query_row(
+    let (in_tok, out_tok, tool_calls, cache_r, cache_c, cost): (i64, i64, i64, i64, i64, i64) =
+        conn.query_row(
             "SELECT input_tokens, output_tokens, tool_call_count, \
              cache_read_tokens, cache_creation_tokens, cost_usd_micros \
              FROM sessions WHERE id = ?1",
             params!["sess-b6"],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
         )
         .unwrap();
 

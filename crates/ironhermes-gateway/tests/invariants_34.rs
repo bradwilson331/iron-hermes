@@ -84,7 +84,10 @@ fn inv_34_02_slack_routes_through_handle_with_multimodal() {
 #[test]
 fn inv_34_03_runner_spawns_discord() {
     let count = RUNNER_SOURCE.matches("run_discord_adapter").count();
-    assert!(count >= 1, "INV-34-03: runner.rs must call run_discord_adapter() so Discord inherits the Learning Loop. Found {count}. See Phase 34 D-10/D-14/D-15.");
+    assert!(
+        count >= 1,
+        "INV-34-03: runner.rs must call run_discord_adapter() so Discord inherits the Learning Loop. Found {count}. See Phase 34 D-10/D-14/D-15."
+    );
 }
 
 /// INV-34-04: GatewayRunner::start spawns run_slack_adapter so Slack
@@ -92,5 +95,8 @@ fn inv_34_03_runner_spawns_discord() {
 #[test]
 fn inv_34_04_runner_spawns_slack() {
     let count = RUNNER_SOURCE.matches("run_slack_adapter").count();
-    assert!(count >= 1, "INV-34-04: runner.rs must call run_slack_adapter() so Slack inherits the Learning Loop. Found {count}. See Phase 34 D-11/D-14/D-15.");
+    assert!(
+        count >= 1,
+        "INV-34-04: runner.rs must call run_slack_adapter() so Slack inherits the Learning Loop. Found {count}. See Phase 34 D-11/D-14/D-15."
+    );
 }

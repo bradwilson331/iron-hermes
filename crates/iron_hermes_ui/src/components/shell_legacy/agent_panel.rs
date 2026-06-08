@@ -17,8 +17,11 @@ pub fn AgentPanel(
     memory_enabled: bool,
 ) -> Element {
     let sid = session_id();
-    let session_display =
-        if sid.is_empty() || sid == "pending" { "—".to_string() } else { sid };
+    let session_display = if sid.is_empty() || sid == "pending" {
+        "—".to_string()
+    } else {
+        sid
+    };
 
     let mut page = use_signal(|| 0_usize);
 
@@ -32,7 +35,11 @@ pub fn AgentPanel(
         .collect();
 
     let total = filtered.len();
-    let total_pages = if total == 0 { 0 } else { (total + PAGE_SIZE - 1) / PAGE_SIZE };
+    let total_pages = if total == 0 {
+        0
+    } else {
+        total.div_ceil(PAGE_SIZE)
+    };
     let cur_page = page().min(if total_pages > 0 { total_pages - 1 } else { 0 });
     let start = cur_page * PAGE_SIZE;
     let end = (start + PAGE_SIZE).min(total);
@@ -168,7 +175,10 @@ fn MemoryCard(session: SessionMemory) -> Element {
         (n, 0, true) => format!("{n} msg{}", if n == 1 { "" } else { "s" }),
         (n, 0, false) => format!("{n} msg{} · {p}", if n == 1 { "" } else { "s" }),
         (n, t, true) => format!("{n} msg{} · {t} tokens", if n == 1 { "" } else { "s" }),
-        (n, t, false) => format!("{n} msg{} · {t} tokens · {p}", if n == 1 { "" } else { "s" }),
+        (n, t, false) => format!(
+            "{n} msg{} · {t} tokens · {p}",
+            if n == 1 { "" } else { "s" }
+        ),
     };
 
     let quoted = if session.last_input.is_empty() {

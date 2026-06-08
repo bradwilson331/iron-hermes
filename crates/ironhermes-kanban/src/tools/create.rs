@@ -238,25 +238,18 @@ impl Tool for KanbanCreateTool {
             })
             .unwrap_or_default();
 
-        let skills: Option<Vec<String>> = args
-            .get("skills")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
+        let skills: Option<Vec<String>> =
+            args.get("skills").and_then(|v| v.as_array()).map(|arr| {
                 arr.iter()
                     .filter_map(|v| v.as_str().map(String::from))
                     .collect()
             });
 
         // Parse max_runtime (integer seconds OR human-readable string).
-        let max_runtime_seconds: Option<i64> = args
-            .get("max_runtime")
-            .and_then(|v| parse_max_runtime(v));
+        let max_runtime_seconds: Option<i64> = args.get("max_runtime").and_then(parse_max_runtime);
 
         let opts = CreateTaskOptions {
-            body: args
-                .get("body")
-                .and_then(|v| v.as_str())
-                .map(String::from),
+            body: args.get("body").and_then(|v| v.as_str()).map(String::from),
             parents,
             // Tenant passed as-given — no auto-inherit per D-38.
             tenant: args
@@ -273,9 +266,7 @@ impl Tool for KanbanCreateTool {
                 .get("idempotency_key")
                 .and_then(|v| v.as_str())
                 .map(String::from),
-            scheduled_at: args
-                .get("scheduled_at")
-                .and_then(|v| v.as_f64()),
+            scheduled_at: args.get("scheduled_at").and_then(|v| v.as_f64()),
             max_runtime_seconds,
             max_retries: args.get("max_retries").and_then(|v| v.as_i64()),
             triage: args
@@ -312,10 +303,13 @@ impl Tool for KanbanCreateTool {
             .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
         let task = store.create_task(&title, &assignee, opts)?;
 
-        crate::tools::common::ok_with_board(json!({
-            "task_id": task.id,
-            "status": task.status,
-        }), &board_ctx)
+        crate::tools::common::ok_with_board(
+            json!({
+                "task_id": task.id,
+                "status": task.status,
+            }),
+            &board_ctx,
+        )
     }
 }
 
@@ -352,15 +346,21 @@ mod tests {
     #[test]
     fn is_available_respects_env() {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
+        unsafe {
+            std::env::remove_var("HERMES_KANBAN_TASK");
+        }
         let store = make_store();
         let tool = KanbanCreateTool::new(store.clone(), false);
         assert!(!tool.is_available());
 
-        unsafe { std::env::set_var("HERMES_KANBAN_TASK", "t_test"); }
+        unsafe {
+            std::env::set_var("HERMES_KANBAN_TASK", "t_test");
+        }
         let tool2 = KanbanCreateTool::new(store.clone(), false);
         assert!(tool2.is_available());
-        unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
+        unsafe {
+            std::env::remove_var("HERMES_KANBAN_TASK");
+        }
 
         let tool3 = KanbanCreateTool::new(store, true);
         assert!(tool3.is_available());
@@ -371,6 +371,9 @@ mod tests {
         let store = make_store();
         let tool = KanbanCreateTool::new(store, true);
         let schema_str = serde_json::to_string(&tool.schema()).unwrap();
-        assert!(schema_str.contains("\"board\""), "schema missing board property: {schema_str}");
+        assert!(
+            schema_str.contains("\"board\""),
+            "schema missing board property: {schema_str}"
+        );
     }
 }

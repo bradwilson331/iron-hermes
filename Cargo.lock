@@ -4636,7 +4636,7 @@ dependencies = [
 
 [[package]]
 name = "iron_hermes_ui"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4672,7 +4672,7 @@ dependencies = [
 
 [[package]]
 name = "ironhermes-agent"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4711,7 +4711,7 @@ dependencies = [
 
 [[package]]
 name = "ironhermes-cli"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -4770,7 +4770,7 @@ dependencies = [
 
 [[package]]
 name = "ironhermes-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4796,7 +4796,7 @@ dependencies = [
 
 [[package]]
 name = "ironhermes-cron"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4816,7 +4816,7 @@ dependencies = [
 
 [[package]]
 name = "ironhermes-cron-runner"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4838,7 +4838,7 @@ dependencies = [
 
 [[package]]
 name = "ironhermes-exec"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4861,7 +4861,7 @@ dependencies = [
 
 [[package]]
 name = "ironhermes-gateway"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4898,7 +4898,7 @@ dependencies = [
 
 [[package]]
 name = "ironhermes-hooks"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4921,7 +4921,7 @@ dependencies = [
 
 [[package]]
 name = "ironhermes-hub"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4947,7 +4947,7 @@ dependencies = [
 
 [[package]]
 name = "ironhermes-kanban"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4971,7 +4971,7 @@ dependencies = [
 
 [[package]]
 name = "ironhermes-mcp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4989,7 +4989,7 @@ dependencies = [
 
 [[package]]
 name = "ironhermes-state"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5005,7 +5005,7 @@ dependencies = [
 
 [[package]]
 name = "ironhermes-tools"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5044,7 +5044,7 @@ dependencies = [
 
 [[package]]
 name = "ironhermes-trajectory"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -5827,7 +5827,7 @@ dependencies = [
 
 [[package]]
 name = "memory-duckdb"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5841,7 +5841,7 @@ dependencies = [
 
 [[package]]
 name = "memory-grafeo"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5857,7 +5857,7 @@ dependencies = [
 
 [[package]]
 name = "memory-sqlite"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",

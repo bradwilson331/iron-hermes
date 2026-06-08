@@ -27,14 +27,13 @@
 use std::sync::{Arc, Mutex};
 
 use ironhermes_kanban::{
-    DispatcherContext, KanbanConfig, KanbanStore,
-    dispatcher::run_dispatch_tick,
+    DispatcherContext, KanbanConfig, KanbanStore, dispatcher::run_dispatch_tick,
 };
 use tokio::sync::Mutex as TokioMutex;
 
 // Serialize all tests that mutate IRONHERMES_HOME to avoid cross-test
 // contamination (process-global env var; `std::env::set_var` is not thread-safe).
-static SERIAL_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static SERIAL_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -72,7 +71,11 @@ fn make_ctx_capturing_spawn(
             })
         },
     );
-    Arc::new(DispatcherContext::with_spawn_fn(store, default_config(), spawn_fn))
+    Arc::new(DispatcherContext::with_spawn_fn(
+        store,
+        default_config(),
+        spawn_fn,
+    ))
 }
 
 /// Seed a `ready` task directly into a store via SQL (bypasses atomic_claim).
@@ -95,7 +98,7 @@ fn seed_ready_task(store: &mut KanbanStore, task_id: &str, assignee: &str) {
 /// "default" must succeed and at least one claim+spawn must occur.
 #[tokio::test]
 async fn dispatcher_tick_sweeps_default_only_when_no_named_boards() {
-    let _guard = SERIAL_MUTEX.lock().unwrap();
+    let _guard = SERIAL_MUTEX.lock().await;
     let dir = tempfile::tempdir().expect("tempdir");
     // Point IRONHERMES_HOME at a fresh dir with no boards/ subdirectory.
     let _env = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
@@ -132,7 +135,7 @@ async fn dispatcher_tick_sweeps_default_only_when_no_named_boards() {
 /// both the default board's tasks AND the alpha board's tasks in the same tick.
 #[tokio::test]
 async fn dispatcher_tick_sweeps_default_plus_named() {
-    let _guard = SERIAL_MUTEX.lock().unwrap();
+    let _guard = SERIAL_MUTEX.lock().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let _env = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
 
@@ -165,7 +168,10 @@ async fn dispatcher_tick_sweeps_default_plus_named() {
 
     // Collect slugs to verify both boards were processed.
     let slugs: Vec<&str> = spawned.iter().map(|(s, _)| s.as_str()).collect();
-    assert!(slugs.contains(&"default"), "default board must be processed");
+    assert!(
+        slugs.contains(&"default"),
+        "default board must be processed"
+    );
     assert!(slugs.contains(&"alpha"), "alpha board must be processed");
 }
 
@@ -183,7 +189,7 @@ async fn dispatcher_tick_sweeps_default_plus_named() {
 /// tasks WERE processed while no task from "broken" appears in spawned list.
 #[tokio::test]
 async fn dispatcher_tick_skips_corrupt_board_continues_sweeping() {
-    let _guard = SERIAL_MUTEX.lock().unwrap();
+    let _guard = SERIAL_MUTEX.lock().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let _env = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
 
@@ -209,7 +215,9 @@ async fn dispatcher_tick_skips_corrupt_board_continues_sweeping() {
     let ctx = make_ctx_capturing_spawn(default_arc, captured.clone());
 
     // Tick must not panic or return Err even though "broken" is in the board list.
-    run_dispatch_tick(&ctx).await.expect("tick must not error on corrupt board");
+    run_dispatch_tick(&ctx)
+        .await
+        .expect("tick must not error on corrupt board");
 
     let spawned = captured.lock().unwrap();
     // default + alpha tasks processed; broken skipped.
@@ -240,7 +248,7 @@ async fn dispatcher_tick_skips_corrupt_board_continues_sweeping() {
 /// (worker cannot accidentally write to a different board's DB).
 #[tokio::test]
 async fn dispatcher_tick_passes_resolved_slug_to_worker_env() {
-    let _guard = SERIAL_MUTEX.lock().unwrap();
+    let _guard = SERIAL_MUTEX.lock().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let _env = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
 
@@ -288,7 +296,10 @@ impl ScopedEnv {
         // SAFETY: guarded by SERIAL_MUTEX which serializes all callers in this
         // test binary; no concurrent env access within this file.
         unsafe { std::env::set_var(key, value) };
-        Self { key: key.to_string(), prev }
+        Self {
+            key: key.to_string(),
+            prev,
+        }
     }
 }
 

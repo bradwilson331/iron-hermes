@@ -142,18 +142,33 @@ mod tests {
     fn kanban_decompose_is_available_gate() {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
-        unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
+        unsafe {
+            std::env::remove_var("HERMES_KANBAN_TASK");
+        }
         let store = make_store();
         let tool = KanbanDecomposeTool::new(store.clone(), false);
-        assert!(!tool.is_available(), "should not be available without env or explicit_enable");
+        assert!(
+            !tool.is_available(),
+            "should not be available without env or explicit_enable"
+        );
 
-        unsafe { std::env::set_var("HERMES_KANBAN_TASK", "t_test"); }
+        unsafe {
+            std::env::set_var("HERMES_KANBAN_TASK", "t_test");
+        }
         let tool2 = KanbanDecomposeTool::new(store.clone(), false);
-        assert!(tool2.is_available(), "should be available when HERMES_KANBAN_TASK is set");
-        unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
+        assert!(
+            tool2.is_available(),
+            "should be available when HERMES_KANBAN_TASK is set"
+        );
+        unsafe {
+            std::env::remove_var("HERMES_KANBAN_TASK");
+        }
 
         let tool3 = KanbanDecomposeTool::new(store, true);
-        assert!(tool3.is_available(), "should be available with explicit_enable=true");
+        assert!(
+            tool3.is_available(),
+            "should be available with explicit_enable=true"
+        );
     }
 
     #[test]

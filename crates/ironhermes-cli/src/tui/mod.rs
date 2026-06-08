@@ -22,17 +22,14 @@ pub mod status_line;
 pub use activity::ActivityState;
 #[allow(unused_imports)] // Used in Task 2 (ctrl-c state machine wiring)
 pub use double_ctrl_c::{CtrlCDecision, DoubleCtrlCState};
+#[allow(unused_imports)]
+// prompt_position_ansi is a public re-export used by tests/repl_prompt_anchoring.rs
 pub use render::{
-    TuiHandle, finish_prompt, finish_prompt_with_reserve, prepare_prompt,
-    prepare_prompt_with_reserve, prompt_position_ansi, reset_terminal_visual,
-    write_into_scroll_region,
+    TuiHandle, prompt_position_ansi, reset_terminal_visual, write_into_scroll_region,
 };
 pub use status_line::StatusLineState;
 
 // Re-exports for Phase 22.1 extension system (consumed by Plan 22.1-02).
 pub use commands::dispatch_command;
-pub use extension::{
-    CommandResult, KeyContext, Keybinding, LayoutSlot, StyleOverrides, TuiEvent, TuiExtension,
-    Widget,
-};
+pub use extension::CommandResult;
 pub use keybindings::KeybindingRegistry;

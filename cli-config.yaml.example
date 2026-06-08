@@ -367,7 +367,7 @@ providers:
     #     order: ["anthropic", "openai"]
   ollama:
     api_key_env: OLLAMA_API_KEY                  # add OLLAMA_API_KEY=ollama in .env
-    base_url: "http://127.0.0.1:11434/v1"    # remote host example; use localhost for local
+    base_url: "http://localhost:11434/v1"        # local Ollama; for a remote host use http://<host>:11434/v1
     api_mode: chat_completions
     default_model: "llama3.1:8b"
     # Provider-level extras — applied to every request to this provider

@@ -261,7 +261,8 @@ impl TelegramAdapter {
         path: &Path,
         thread_id: Option<&str>,
     ) -> Result<MessageResponse> {
-        self.send_file_multipart("sendAudio", "audio", chat_id, path, thread_id).await
+        self.send_file_multipart("sendAudio", "audio", chat_id, path, thread_id)
+            .await
     }
 }
 
@@ -343,11 +344,13 @@ impl PlatformAdapter for TelegramAdapter {
                     "text": content,
                 });
                 if let Some(tid) = thread_id {
-                    plain_params["message_thread_id"] =
-                        serde_json::Value::String(tid.to_string());
+                    plain_params["message_thread_id"] = serde_json::Value::String(tid.to_string());
                 }
 
-                match self.api_call::<TgMessage>("sendMessage", &plain_params).await {
+                match self
+                    .api_call::<TgMessage>("sendMessage", &plain_params)
+                    .await
+                {
                     Ok(msg) => Ok(MessageResponse {
                         message_id: msg.message_id.to_string(),
                         chat_id: chat_id.to_string(),
@@ -398,8 +401,7 @@ impl PlatformAdapter for TelegramAdapter {
             "parse_mode": "MarkdownV2",
         });
 
-        let result: Result<serde_json::Value> =
-            self.api_call("editMessageText", &params).await;
+        let result: Result<serde_json::Value> = self.api_call("editMessageText", &params).await;
 
         match result {
             Ok(_) => Ok(()),
@@ -617,14 +619,8 @@ impl MediaSender for TelegramAdapter {
                 // D-15: documents have a higher cap (50 MiB vs 20 MiB).
                 check_size_cap(p, SIZE_CAP_50_MB).await?;
                 let validated = canonicalize_under_allowed_roots(p)?;
-                self.send_file_multipart(
-                    "sendDocument",
-                    "document",
-                    chat_id,
-                    &validated,
-                    thread_id,
-                )
-                .await
+                self.send_file_multipart("sendDocument", "document", chat_id, &validated, thread_id)
+                    .await
             }
             MediaSource::Url(u) => {
                 validate_url_scheme(u)?;
@@ -670,24 +666,19 @@ fn canonicalize_under_allowed_roots(path: &Path) -> Result<PathBuf> {
         .with_context(|| format!("Failed to canonicalize media path: {}", path.display()))?;
 
     let mut allowed_roots: Vec<PathBuf> = Vec::new();
-    if let Ok(home) = std::env::var("HERMES_HOME") {
-        if let Ok(canon_home) = PathBuf::from(&home).canonicalize() {
-            allowed_roots.push(canon_home);
-        }
+    if let Ok(home) = std::env::var("HERMES_HOME")
+        && let Ok(canon_home) = PathBuf::from(&home).canonicalize()
+    {
+        allowed_roots.push(canon_home);
     }
     if let Ok(canon_tmp) = PathBuf::from("/tmp").canonicalize() {
         allowed_roots.push(canon_tmp);
     }
 
-    let allowed = allowed_roots
-        .iter()
-        .any(|root| canonical.starts_with(root));
+    let allowed = allowed_roots.iter().any(|root| canonical.starts_with(root));
 
     if !allowed {
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("?");
+        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
         warn!(
             filename = %filename,
             "rejected media path outside allowed roots (T-INPUT-MEDIA-PATH)"
@@ -880,22 +871,20 @@ impl ironhermes_tools::AudioDispatcher for TelegramAdapter {
     async fn send_voice_file(
         &self,
         chat_id: &str,
-        path: &std::path::PathBuf,
+        path: &std::path::Path,
         thread_id: Option<&str>,
     ) -> anyhow::Result<()> {
         // Use TgSendApi::send_voice (takes &Path) not MediaSender::send_voice (takes MediaSource)
-        TgSendApi::send_voice(self, chat_id, path.as_path(), thread_id).await
+        TgSendApi::send_voice(self, chat_id, path, thread_id).await
     }
 
     async fn send_audio_file(
         &self,
         chat_id: &str,
-        path: &std::path::PathBuf,
+        path: &std::path::Path,
         thread_id: Option<&str>,
     ) -> anyhow::Result<()> {
         // Use inherent send_audio (takes &Path, returns Result<MessageResponse>)
-        self.send_audio(chat_id, path.as_path(), thread_id)
-            .await
-            .map(|_| ())
+        self.send_audio(chat_id, path, thread_id).await.map(|_| ())
     }
 }

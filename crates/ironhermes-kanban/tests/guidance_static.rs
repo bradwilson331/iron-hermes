@@ -38,7 +38,14 @@ fn guidance_mentions_three_critical_tools() {
 #[test]
 fn guidance_mentions_six_lifecycle_steps() {
     let lower = KANBAN_GUIDANCE.to_lowercase();
-    let keywords = ["orient", "work", "heartbeat", "block", "complete", "terminate"];
+    let keywords = [
+        "orient",
+        "work",
+        "heartbeat",
+        "block",
+        "complete",
+        "terminate",
+    ];
     for kw in &keywords {
         assert!(
             lower.contains(kw),

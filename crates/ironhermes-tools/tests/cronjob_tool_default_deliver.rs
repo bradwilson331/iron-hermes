@@ -15,10 +15,10 @@ use ironhermes_tools::registry::Tool;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
-fn env_lock() -> &'static std::sync::Mutex<()> {
+fn env_lock() -> &'static tokio::sync::Mutex<()> {
     use std::sync::OnceLock;
-    static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 fn make_test_config(tmp: &TempDir, tg_enabled: bool, whitelist: &[i64]) {
@@ -51,7 +51,7 @@ fn parse_response(s: &str) -> Value {
 
 #[tokio::test]
 async fn tg_enabled_single_chat_routes_to_origin_via_tool() {
-    let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = env_lock().lock().await;
     let tmp = TempDir::new().unwrap();
     make_test_config(&tmp, true, &[12345]);
     unsafe {
@@ -82,7 +82,7 @@ async fn tg_enabled_single_chat_routes_to_origin_via_tool() {
 
 #[tokio::test]
 async fn tg_enabled_multi_chat_falls_back_to_local_via_tool() {
-    let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = env_lock().lock().await;
     let tmp = TempDir::new().unwrap();
     make_test_config(&tmp, true, &[12345, 67890]);
     unsafe {
@@ -114,7 +114,7 @@ async fn tg_enabled_multi_chat_falls_back_to_local_via_tool() {
 
 #[tokio::test]
 async fn tg_disabled_falls_back_to_local_via_tool() {
-    let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = env_lock().lock().await;
     let tmp = TempDir::new().unwrap();
     make_test_config(&tmp, false, &[12345]);
     unsafe {
@@ -140,7 +140,7 @@ async fn tg_disabled_falls_back_to_local_via_tool() {
 
 #[tokio::test]
 async fn tg_section_missing_falls_back_to_local_via_tool() {
-    let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = env_lock().lock().await;
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("config.yaml"), "model:\n  default: test\n").unwrap();
     unsafe {
@@ -166,7 +166,7 @@ async fn tg_section_missing_falls_back_to_local_via_tool() {
 
 #[tokio::test]
 async fn explicit_deliver_arg_skips_helper_via_tool() {
-    let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = env_lock().lock().await;
     let tmp = TempDir::new().unwrap();
     make_test_config(&tmp, true, &[12345]);
     unsafe {

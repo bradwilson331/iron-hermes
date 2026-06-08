@@ -77,7 +77,13 @@ fn boards_list_parses_with_json_flag() {
 #[test]
 fn boards_create_parses_minimum_slug_arg() {
     match boards_cmd(&["hermes", "kanban", "boards", "create", "alpha"]) {
-        BoardsCommands::Create { slug, name, description, switch, json } => {
+        BoardsCommands::Create {
+            slug,
+            name,
+            description,
+            switch,
+            json,
+        } => {
             assert_eq!(slug, "alpha");
             assert!(name.is_none());
             assert!(description.is_none());
@@ -91,11 +97,22 @@ fn boards_create_parses_minimum_slug_arg() {
 #[test]
 fn boards_create_parses_with_switch_and_name() {
     match boards_cmd(&[
-        "hermes", "kanban", "boards", "create", "atm10-server",
+        "hermes",
+        "kanban",
+        "boards",
+        "create",
+        "atm10-server",
         "--switch",
-        "--name", "ATM10 Server",
+        "--name",
+        "ATM10 Server",
     ]) {
-        BoardsCommands::Create { slug, name, description, switch, json } => {
+        BoardsCommands::Create {
+            slug,
+            name,
+            description,
+            switch,
+            json,
+        } => {
             assert_eq!(slug, "atm10-server");
             assert_eq!(name.as_deref(), Some("ATM10 Server"));
             assert!(description.is_none());
@@ -109,10 +126,17 @@ fn boards_create_parses_with_switch_and_name() {
 #[test]
 fn boards_create_parses_with_description() {
     match boards_cmd(&[
-        "hermes", "kanban", "boards", "create", "beta",
-        "--description", "Beta board",
+        "hermes",
+        "kanban",
+        "boards",
+        "create",
+        "beta",
+        "--description",
+        "Beta board",
     ]) {
-        BoardsCommands::Create { slug, description, .. } => {
+        BoardsCommands::Create {
+            slug, description, ..
+        } => {
             assert_eq!(slug, "beta");
             assert_eq!(description.as_deref(), Some("Beta board"));
         }
@@ -164,7 +188,14 @@ fn boards_show_parses_with_json_flag() {
 
 #[test]
 fn boards_rename_parses_slug_and_name() {
-    match boards_cmd(&["hermes", "kanban", "boards", "rename", "alpha", "Alpha Board"]) {
+    match boards_cmd(&[
+        "hermes",
+        "kanban",
+        "boards",
+        "rename",
+        "alpha",
+        "Alpha Board",
+    ]) {
         BoardsCommands::Rename { slug, new_name } => {
             assert_eq!(slug, "alpha");
             assert_eq!(new_name, "Alpha Board");

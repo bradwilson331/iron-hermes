@@ -91,10 +91,9 @@ fn ws_rs_new_clears_queue_before_session_reset() {
     // Anchor an upper bound on the arm body — first occurrence of the next
     // `CommandResult::` after NewSession, or end of file if none found.
     let after = &WS_SOURCE[arm_start + "CommandResult::NewSession".len()..];
-    let arm_end_rel = after
-        .find("CommandResult::")
-        .unwrap_or(after.len());
-    let arm_body = &WS_SOURCE[arm_start..arm_start + "CommandResult::NewSession".len() + arm_end_rel];
+    let arm_end_rel = after.find("CommandResult::").unwrap_or(after.len());
+    let arm_body =
+        &WS_SOURCE[arm_start..arm_start + "CommandResult::NewSession".len() + arm_end_rel];
 
     let clear_pos = arm_body
         .find("queue.clear")
@@ -269,7 +268,10 @@ fn pause_toggle_and_double_unpause() {
 
     // /pause: fetch_xor(true) flips false→true, returns old=false.
     let was = flag.fetch_xor(true, Ordering::SeqCst);
-    assert!(!was, "D-01a: was_paused must be false before the first /pause");
+    assert!(
+        !was,
+        "D-01a: was_paused must be false before the first /pause"
+    );
     assert!(
         flag.load(Ordering::SeqCst),
         "D-01a: flag must be true after fetch_xor(true)"

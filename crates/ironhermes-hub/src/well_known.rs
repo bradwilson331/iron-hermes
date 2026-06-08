@@ -208,10 +208,10 @@ impl WellKnownSkillSource {
 
         // Try with skill_name/ prefix first (common for well-known tarballs that include the dir)
         let prefixed = extract_tarball_prefix(&bytes, &format!("{skill_name}/"));
-        if let Ok(files) = prefixed {
-            if !files.is_empty() {
-                return Ok(files);
-            }
+        if let Ok(files) = prefixed
+            && !files.is_empty()
+        {
+            return Ok(files);
         }
 
         // Fallback: no prefix (root-level files)
@@ -231,7 +231,7 @@ impl WellKnownSkillSource {
     /// Extract the skill name from the last path segment of the identifier URL.
     fn skill_name_from_identifier_url(url: &Url) -> Option<String> {
         url.path_segments()?
-            .last()
+            .next_back()
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty())
     }
@@ -255,14 +255,12 @@ fn is_private_host(host: &str) -> bool {
         return true;
     }
     // 172.16.0.0/12 → 172.16.x.x through 172.31.x.x
-    if let Some(rest) = host.strip_prefix("172.") {
-        if let Some(octet_str) = rest.split('.').next() {
-            if let Ok(octet) = octet_str.parse::<u8>() {
-                if (16..=31).contains(&octet) {
-                    return true;
-                }
-            }
-        }
+    if let Some(rest) = host.strip_prefix("172.")
+        && let Some(octet_str) = rest.split('.').next()
+        && let Ok(octet) = octet_str.parse::<u8>()
+        && (16..=31).contains(&octet)
+    {
+        return true;
     }
     false
 }
@@ -399,13 +397,13 @@ impl HubSource for WellKnownSkillSource {
                     "tarball_url must use HTTPS",
                 ));
             }
-            if let Some(host) = tarball_parsed.host_str() {
-                if is_private_host(host) {
-                    return Err(typed(
-                        HubErrorKind::InvalidIdentifier,
-                        format!("tarball_url has private/loopback host (SSRF guard): {host}"),
-                    ));
-                }
+            if let Some(host) = tarball_parsed.host_str()
+                && is_private_host(host)
+            {
+                return Err(typed(
+                    HubErrorKind::InvalidIdentifier,
+                    format!("tarball_url has private/loopback host (SSRF guard): {host}"),
+                ));
             }
         }
 

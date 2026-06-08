@@ -71,9 +71,7 @@ pub fn kill_pid(pid: u32, sig: Signal) -> crate::error::Result<()> {
     };
 
     kill(Pid::from_raw(pid as i32), nix_sig).map_err(|e| {
-        crate::error::KanbanError::Other(anyhow::anyhow!(
-            "kill_pid({pid}, {sig:?}) failed: {e}"
-        ))
+        crate::error::KanbanError::Other(anyhow::anyhow!("kill_pid({pid}, {sig:?}) failed: {e}"))
     })
 }
 
@@ -97,10 +95,10 @@ pub fn kill_pid(_pid: u32, _sig: Signal) -> crate::error::Result<()> {
 /// gateway process context where the env var is typically inherited.
 pub fn current_hostname() -> String {
     // 1. HOSTNAME env (set by bash/zsh and inherited by the gateway process).
-    if let Ok(h) = std::env::var("HOSTNAME") {
-        if !h.is_empty() {
-            return h;
-        }
+    if let Ok(h) = std::env::var("HOSTNAME")
+        && !h.is_empty()
+    {
+        return h;
     }
 
     // 2. /etc/hostname (Linux standard; not present on macOS but harmless to try).

@@ -11,12 +11,10 @@ use ironhermes_core::config::Config;
 use ironhermes_core::constants::get_hermes_home;
 use ironhermes_core::wizard::{
     LEARNING_LOOP_FRAMING, WizardMode, apply_api_key_answer, apply_auxiliary_answer,
-    apply_kanban_section_answer, apply_learning_loop_answer, apply_memory_provider_answer,
-    apply_model_answer, apply_provider_answer, default_block_for, write_defaults_if_absent,
+    apply_learning_loop_answer, apply_memory_provider_answer, apply_model_answer,
+    apply_provider_answer,
 };
 use std::path::Path;
-
-pub use ironhermes_core::wizard::WizardMode as ReExportedWizardMode;
 
 /// Phase 26.4.1 (CFG-02): allow-list of built-in provider names valid for
 /// the `auxiliary.provider` config slot. Must stay lowercase + match the
@@ -43,7 +41,7 @@ fn is_known_aux_provider(name: &str) -> bool {
         return false;
     }
     let lower = trimmed.to_lowercase();
-    KNOWN_AUX_PROVIDERS.iter().any(|p| *p == lower.as_str())
+    KNOWN_AUX_PROVIDERS.contains(&lower.as_str())
 }
 
 /// Construct a fresh rustyline editor for wizard use.
@@ -99,10 +97,10 @@ fn provider_env_var_name(provider: &str) -> String {
 ///    skill library is expected to have been installed by another mechanism.
 fn find_project_skills_source() -> Option<std::path::PathBuf> {
     // 1. Explicit override via env var.
-    if let Ok(s) = std::env::var("IRONHERMES_SOURCE") {
-        if !s.is_empty() {
-            return Some(std::path::PathBuf::from(s));
-        }
+    if let Ok(s) = std::env::var("IRONHERMES_SOURCE")
+        && !s.is_empty()
+    {
+        return Some(std::path::PathBuf::from(s));
     }
     // 2. Dev-build detection: walk up from the binary location.
     let exe = std::env::current_exe().ok()?;
@@ -286,12 +284,27 @@ pub async fn run_setup(section: Option<&str>, mode: WizardMode) -> Result<()> {
         ),
     }
 
-    // Persist the typed Config struct for section flows that don't save mid-stream.
-    // (minimum_viable_flow and memory_section already save internally before the
-    //  learning.* splice, so this is a safe idempotent belt-and-suspenders write.)
-    config
-        .save_to(&hermes_home.join("config.yaml"))
-        .context("writing config.yaml")?;
+    // G2 (site 2 — run_setup belt-and-suspenders save): when config.yaml ALREADY EXISTS
+    // from the install.sh seed, do NOT bare-dump config.save_to() over it.
+    // The in-memory `config` (loaded once above, kanban field = serde_yaml::Value::Null)
+    // is never reconciled with the seam-edited file, so an unconditional save_to here
+    // would serde-re-serialize kanban: null and strip every comment from the seeded
+    // documented file — re-breaking BOTH G1 and G2 AFTER the seam has fixed them.
+    // "seeded documented file must not be bare-dumped; splice essentials in place so
+    //  model/providers/memory comments survive; the seam is the last writer." (G2)
+    // Only bare-dump when config.yaml did NOT exist before run_setup was called
+    // (i.e. no seed — first run without an installer-seeded file).
+    {
+        let config_path = hermes_home.join("config.yaml");
+        if !config_path.exists() {
+            // No seed: bare-dump is safe (no comments to preserve).
+            config
+                .save_to(&config_path)
+                .context("writing config.yaml")?;
+        }
+        // When seed exists: the seam (apply_section_defaults_to_config) and per-section
+        // config_setter splices are the last writers — do NOT overwrite with bare-dump.
+    }
     Ok(())
 }
 
@@ -337,10 +350,30 @@ async fn run_minimum_viable_flow(
     let learning_block = apply_learning_loop_answer(config, &learning_answer);
 
     // 5. Persist the learning.* block via config_setter (D-15 — preserves unknown keys).
-    // Write the typed Config first via save_to, then splice learning.* keys.
-    config
-        .save_to(&hermes_home.join("config.yaml"))
-        .context("writing config.yaml")?;
+    // G2 (seed-exists branch): when config.yaml ALREADY EXISTS from the install.sh seed,
+    // do NOT bare-dump config.save_to() over it — that serde-re-serializes the typed Config
+    // (kanban: Null) and strips every comment from the seeded documented file (G2 root cause).
+    // Instead, splice the wizard's typed essentials via config_setter (raw-text splice).
+    // Only bare-dump when config.yaml does NOT already exist (no seed to preserve).
+    // "seeded documented file must not be bare-dumped; splice essentials in place so
+    //  model/providers/memory comments survive; the seam is the last writer." (G2)
+    let config_path = hermes_home.join("config.yaml");
+    let seed_existed = config_path.exists();
+    if !seed_existed {
+        // No seed: bare-dump is safe (no comments to preserve).
+        config
+            .save_to(&config_path)
+            .context("writing config.yaml")?;
+    } else {
+        // Seed exists: splice wizard's typed essentials (provider, model) in place.
+        // The learning.* splice below preserves unknown keys per D-15.
+        // Provider + model are set by config_setter at steps 1-3 above via providers map.
+        // apply_model_answer + apply_provider_answer mutate config in memory; persist via splice.
+        config_setter::config_set(hermes_home, "model.provider", &config.model.provider)?;
+        if !config.model.default.is_empty() {
+            config_setter::config_set(hermes_home, "model.default", &config.model.default)?;
+        }
+    }
     for (key, value) in &learning_block {
         let key_str = key
             .as_str()
@@ -355,63 +388,12 @@ async fn run_minimum_viable_flow(
         config_setter::config_set(hermes_home, &dotted, &value_str)?;
     }
 
-    // 6. D-10: Additive-merge commented-default blocks for the 13 missing sections
-    // plus kanban (via apply_kanban_section_answer) and gateway/tools stubs.
-    // Uses write_defaults_if_absent so a section is written ONLY when absent —
-    // preserving any value the user already set (D-11 never-clobber rule).
-    // This runs on EVERY invocation (fresh install + update/reinstall) — idempotent.
-    {
-        let config_path = hermes_home.join("config.yaml");
-        let raw_yaml_str = std::fs::read_to_string(&config_path).unwrap_or_default();
-        let mut yaml: serde_yaml::Value =
-            serde_yaml::from_str(&raw_yaml_str).unwrap_or(serde_yaml::Value::Mapping(
-                serde_yaml::Mapping::new(),
-            ));
-
-        // 13 missing sections + gateway + tools stubs.
-        let sections = &[
-            "agent",
-            "terminal",
-            "web",
-            "exec",
-            "cron",
-            "compression",
-            "skills",
-            "delegation",
-            "rate_limit",
-            "batch",
-            "security",
-            "custom_providers",
-            "gateway",
-            "tools",
-        ];
-        for &section in sections {
-            if let Some(block) = default_block_for(section) {
-                write_defaults_if_absent(&mut yaml, section, block);
-            }
-        }
-
-        // kanban: use apply_kanban_section_answer to get the canonical 17-field Mapping,
-        // then insert as a serde_yaml::Value::Mapping under "kanban" if absent.
-        {
-            let kanban_key = serde_yaml::Value::String("kanban".to_string());
-            let kanban_absent = yaml
-                .as_mapping()
-                .map(|m| !m.contains_key(&kanban_key))
-                .unwrap_or(true);
-            if kanban_absent {
-                let kanban_block = apply_kanban_section_answer(config, "");
-                if let serde_yaml::Value::Mapping(m) = &mut yaml {
-                    m.insert(kanban_key, serde_yaml::Value::Mapping(kanban_block));
-                }
-            }
-        }
-
-        // Write back preserving all existing and new keys.
-        if let Ok(out) = serde_yaml::to_string(&yaml) {
-            std::fs::write(&config_path, out).ok();
-        }
-    }
+    // 6. D-10: Additive-merge section defaults via the extracted seam.
+    // apply_section_defaults_to_config performs PURE raw-text append/edit (W1):
+    // it NEVER calls config.save_to() and NEVER serde-re-serializes + overwrites
+    // the whole file (which would strip comments). The seam is the LAST writer to
+    // config.yaml on the seed-exists branch (G2 — preserve seeded documented file).
+    apply_section_defaults_to_config(hermes_home)?;
 
     println!(
         "\nSetup complete. Configuration written to {}.",
@@ -437,8 +419,7 @@ async fn run_minimum_viable_flow(
                 aux_provider.trim()
             );
         } else {
-            let aux_model =
-                prompt_with_default(rl, "Auxiliary model", "gpt-4o-mini")?;
+            let aux_model = prompt_with_default(rl, "Auxiliary model", "gpt-4o-mini")?;
             apply_auxiliary_answer(config, &aux_provider, &aux_model);
         }
     }
@@ -518,7 +499,18 @@ async fn run_memory_section(
     // Phase 24 (CFG-04) actually persists this — for now we just echo it back.
 
     // Splice learning.* block via config_setter (preserves unknown keys per D-15).
-    config.save_to(&hermes_home.join("config.yaml"))?;
+    // G2 (site 3 — run_memory_section save): when config.yaml ALREADY EXISTS from the
+    // install.sh seed, do NOT bare-dump config.save_to() over it — the in-memory config
+    // (kanban: Null) would serde-re-serialize, stripping comments and re-writing kanban: null.
+    // "seeded documented file must not be bare-dumped; splice essentials in place so
+    //  model/providers/memory comments survive; the seam is the last writer." (G2)
+    {
+        let config_path = hermes_home.join("config.yaml");
+        if !config_path.exists() {
+            config.save_to(&config_path)?;
+        }
+        // When seed exists: skip bare-dump; learning.* splice below handles persistence.
+    }
     for (k, v) in &block {
         let key_str = k
             .as_str()
@@ -582,8 +574,7 @@ async fn run_agent_section(config: &mut Config, rl: &mut rustyline::DefaultEdito
             let aux_model = match prompt_with_default(rl, "Auxiliary model", "gpt-4o-mini") {
                 Ok(v) => v,
                 Err(e)
-                    if e.to_string().contains("EOF")
-                        || e.to_string().contains("interrupted") =>
+                    if e.to_string().contains("EOF") || e.to_string().contains("interrupted") =>
                 {
                     "gpt-4o-mini".to_string()
                 }
@@ -844,6 +835,7 @@ pub async fn run_tools_section(
 /// Testability seam paralleling Phase 23's apply_minimum_viable_answers.
 /// Drives the prereq stage without rustyline. Used by integration tests to
 /// bypass rustyline. Writes env-var prereqs to hermes_home/.env.
+#[allow(dead_code)] // testability seam; no integration test currently exercises this path
 pub fn apply_tool_prereq_answers(
     hermes_home: &Path,
     answers: &[(&str, &str, &str)], // (tool_name, prereq_name, value)
@@ -905,8 +897,8 @@ pub async fn run_skills_section(
             // env var gaps: check .env, prompt if missing
             for env_entry in &hm.required_environment_variables {
                 let env_path = hermes_home.join(".env");
-                let already_set = env_var_exists_in_dotenv_setup(&env_path, &env_entry.name)
-                    .unwrap_or(false);
+                let already_set =
+                    env_var_exists_in_dotenv_setup(&env_path, &env_entry.name).unwrap_or(false);
                 if already_set {
                     continue;
                 }
@@ -926,7 +918,9 @@ pub async fn run_skills_section(
                 };
                 let answer = prompt_for_prereq_value(rl, &skill.name, &prereq)?;
                 match answer {
-                    PrereqAnswer::Value(v) => write_env_var_to_dotenv(hermes_home, &prereq.name, &v)?,
+                    PrereqAnswer::Value(v) => {
+                        write_env_var_to_dotenv(hermes_home, &prereq.name, &v)?
+                    }
                     PrereqAnswer::Skip | PrereqAnswer::Defer => continue,
                 }
             }
@@ -974,6 +968,7 @@ pub async fn run_skills_section(
 /// Bypasses rustyline for tests. Tuple shape: `(skill_name, kind, prereq_name, value)`.
 /// `kind` is `"env_var"` → writes to `.env` via `write_env_var_to_dotenv`.
 /// `kind` is `"config_field"` → writes to `config.yaml` via `config_setter::config_set`.
+#[allow(dead_code)] // testability seam; no integration test currently exercises this path
 pub fn apply_skills_prereq_answers(
     hermes_home: &Path,
     answers: &[(&str, &str, &str, &str)], // (skill_name, kind, prereq_name, value)
@@ -1023,6 +1018,7 @@ pub async fn run_terminal_section(
 
 /// Testability seam for terminal section — sets terminal.cwd and saves config.
 /// Bypasses rustyline for tests. Analogous to `apply_skills_prereq_answers`.
+#[allow(dead_code)] // testability seam; no integration test currently exercises this path
 pub fn apply_terminal_answer(hermes_home: &Path, cwd: &str) -> Result<()> {
     let config_path = hermes_home.join("config.yaml");
     let mut config = if config_path.exists() {
@@ -1035,12 +1031,215 @@ pub fn apply_terminal_answer(hermes_home: &Path, cwd: &str) -> Result<()> {
     } else {
         cwd.trim().to_string()
     };
-    config.save_to(&config_path).context("writing config.yaml")?;
+    config
+        .save_to(&config_path)
+        .context("writing config.yaml")?;
     Ok(())
+}
+
+/// Section-defaults seam: merge documented-default blocks for all standard sections
+/// and populate the kanban section with live 17-field defaults.
+///
+/// # Intended first-run UX
+/// Essentials (provider, model) are prompted interactively and spliced into the
+/// documented seed in place. Every other section is left as its seeded documented
+/// block (comments preserved). The kanban section is populated to 17 live fields
+/// (replacing the install.sh-seeded `kanban: null` sentinel). User-SET values are
+/// never overwritten (D-11 never-clobber). No post-seam bare-dump runs on the
+/// seed-exists branch — this seam is the LAST writer to config.yaml.
+///
+/// # W1 constraint (BLOCKER resolved)
+/// This function performs PURE raw-file-text append/edit on config.yaml.
+/// It MUST NOT call `config.save_to()` internally and MUST NOT serde-re-serialize
+/// and overwrite the whole file (`serde_yaml::to_string` + `std::fs::write` strips
+/// every YAML comment — that is the G2 root cause this seam exists to prevent).
+///
+/// # Strategy B (BLOCKER-2 resolved)
+/// Preserve the seed file's own commented sections in place. The `{}`/`[]`
+/// DEFAULT_BLOCK constants are a serde-parse fallback ONLY for sections that are
+/// TRULY ABSENT from the seed (rare). When the seed is the shipped example,
+/// standard sections are already present as documented commented blocks, so the
+/// constants are NOT the documentation source — the seed file's own text is.
+///
+/// To decide absent-vs-present, parse the file into a `serde_yaml::Value` for
+/// the null-aware CHECK only. Write by appending raw section block text to the end
+/// of the existing file (preserving all existing text/comments) for truly-absent
+/// sections. For kanban specifically: when present-but-null, do a targeted
+/// raw-text edit to replace the `kanban:` null line with the 17-field block.
+pub fn apply_section_defaults_to_config(hermes_home: &Path) -> Result<()> {
+    use ironhermes_core::config::Config;
+    use ironhermes_core::wizard::{apply_kanban_section_answer, default_block_for};
+
+    let config_path = hermes_home.join("config.yaml");
+
+    // Read the existing file text (preserving all comments).
+    let existing_text = if config_path.exists() {
+        std::fs::read_to_string(&config_path)
+            .with_context(|| format!("reading {}", config_path.display()))?
+    } else {
+        String::new()
+    };
+
+    // Parse into a Value for the null-aware absent/present CHECK only.
+    // We do NOT write this back whole-file (that would strip comments).
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&existing_text)
+        .unwrap_or(serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+
+    // -------------------------------------------------------------------------
+    // Step 1 (STRATEGY B): Standard sections (agent, terminal, web, exec, cron,
+    // compression, skills, delegation, rate_limit, batch, security,
+    // custom_providers, gateway, tools).
+    //
+    // STRATEGY B: the shipped cli-config.yaml.example already has every standard
+    // section as a documented commented block. Those sections parse as Null in
+    // serde_yaml (because all their sub-fields are commented out), but they ARE
+    // present in the raw file text. The seed's own documented comments are the
+    // documentation source — we do NOT re-dump or overwrite them.
+    //
+    // For a hand-trimmed config where a section is TRULY ABSENT from the raw text
+    // (i.e. the `section:` key line does not appear at all), we append a minimal
+    // stub. For sections that are present in the text (even as null-valued keys),
+    // we leave the existing text intact.
+    //
+    // Check "truly absent" by scanning the raw text for `^section:` pattern,
+    // NOT by the serde_yaml parse value (which is Null for present-but-all-commented).
+    // -------------------------------------------------------------------------
+    let standard_sections = &[
+        "agent",
+        "terminal",
+        "web",
+        "exec",
+        "cron",
+        "compression",
+        "skills",
+        "delegation",
+        "rate_limit",
+        "batch",
+        "security",
+        "custom_providers",
+        "gateway",
+        "tools",
+    ];
+
+    let mut new_text = existing_text.clone();
+
+    for &section in standard_sections {
+        // Truly absent = the `section:` line does not appear in the raw text at all.
+        let pattern_newline = format!("\n{}:", section);
+        let pattern_start = format!("{}:", section);
+        let truly_absent =
+            !new_text.contains(&pattern_newline) && !new_text.starts_with(&pattern_start);
+        if truly_absent {
+            // Append a minimal stub for hand-trimmed configs.
+            // The `{}` constant is the absent-only fallback — NOT the documentation source.
+            if let Some(block) = default_block_for(section) {
+                let _ = block; // constant is the fallback hint; stub is sufficient
+            }
+            new_text.push_str(&format!("\n{}:", section));
+            new_text.push('\n');
+        }
+        // When section IS present in raw text (even as a null-valued key with
+        // commented sub-fields), leave the existing text intact — Strategy B.
+    }
+
+    // -------------------------------------------------------------------------
+    // Step 2: Handle the kanban section with a TARGETED raw-text edit.
+    //
+    // When present-but-null (the install.sh seed: `kanban:` with all sub-fields
+    // commented out parses as Null), insert the 17 live default fields AFTER the
+    // `kanban:` line while preserving the existing commented sub-fields as docs.
+    // When truly absent from the raw text, append the 17-field block.
+    // When present as a non-null Mapping (user-set), leave intact (D-11 never-clobber).
+    //
+    // WRITE METHOD: targeted raw-text splice — find `kanban:` line, insert
+    // indented fields after it. Never serde-re-serialize the whole file (G2).
+    // -------------------------------------------------------------------------
+    let kanban_key = serde_yaml::Value::String("kanban".to_string());
+    let kanban_status = yaml
+        .as_mapping()
+        .map(|m| match m.get(&kanban_key) {
+            None => "absent",
+            Some(serde_yaml::Value::Null) => "null",
+            Some(_) => "present",
+        })
+        .unwrap_or("absent");
+
+    // Build the 17-field kanban YAML text from apply_kanban_section_answer.
+    let kanban_block_text = {
+        let mut dummy = Config::default();
+        let mapping = apply_kanban_section_answer(&mut dummy, "");
+        let as_value = serde_yaml::Value::Mapping(mapping);
+        serde_yaml::to_string(&as_value)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+
+    // Indent each field by 2 spaces for YAML nesting under `kanban:`.
+    let indented_fields: String = kanban_block_text
+        .lines()
+        .map(|line| format!("  {}\n", line))
+        .collect();
+
+    match kanban_status {
+        "null" | "absent" => {
+            // Both cases: write the 17 live fields.
+            // For "null": `kanban:` is in the raw text — insert fields after that line.
+            // For "absent": `kanban:` is not in the raw text — append the whole block.
+            if let Some(pos) = find_kanban_section_line(&new_text) {
+                // "null" case: targeted splice — insert fields after the `kanban:` line,
+                // BEFORE the existing commented sub-fields (which stay as docs context).
+                let line_end = new_text[pos..]
+                    .find('\n')
+                    .map(|i| pos + i + 1)
+                    .unwrap_or(new_text.len());
+                let before = &new_text[..pos];
+                let after = &new_text[line_end..];
+                new_text = format!("{}kanban:\n{}{}", before, indented_fields, after);
+            } else {
+                // "absent" case: append the full kanban block.
+                new_text.push_str(&format!("\nkanban:\n{}", indented_fields));
+            }
+        }
+        _ => {
+            // "present" with a non-null value — leave intact (D-11 never-clobber).
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Step 3: Write the new text back (ONLY if changed).
+    // This is the ONLY file write in this function — pure raw-text, no serde dump.
+    // -------------------------------------------------------------------------
+    if new_text != existing_text {
+        std::fs::write(&config_path, &new_text)
+            .with_context(|| format!("writing {}", config_path.display()))?;
+    }
+
+    Ok(())
+}
+
+/// Find the byte offset of the start of the `kanban:` section line in `text`.
+/// Handles both `kanban:` at start-of-line and after a newline.
+/// Returns None if no `kanban:` line is found.
+fn find_kanban_section_line(text: &str) -> Option<usize> {
+    // Look for a line that is exactly `kanban:` or `kanban: null` at the
+    // top-level indentation (no leading spaces — it's a root-level key).
+    for (offset, _) in text.match_indices('\n') {
+        let rest = &text[offset + 1..];
+        if rest.starts_with("kanban:") {
+            return Some(offset + 1);
+        }
+    }
+    // Also check if the file starts with `kanban:`.
+    if text.starts_with("kanban:") {
+        return Some(0);
+    }
+    None
 }
 
 /// Testability seam — drives minimum-viable flow with pre-scripted strings.
 /// Tests in `tests/setup_wizard.rs` call this directly to bypass rustyline.
+#[allow(dead_code)] // testability seam; tests/setup_wizard.rs intended caller, not yet hooked up
 pub fn apply_minimum_viable_answers(
     config: &mut Config,
     provider: &str,
@@ -1052,6 +1251,131 @@ pub fn apply_minimum_viable_answers(
     apply_api_key_answer(config, api_key);
     apply_model_answer(config, model, ironhermes_core::constants::DEFAULT_MODEL);
     apply_learning_loop_answer(config, learning_loop)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 35.1 D-03: Doctor check at wizard exit (lib-safe inline version)
+// ---------------------------------------------------------------------------
+
+/// Phase 35.1 D-03: Run a health check at wizard exit.
+///
+/// This is a lib-safe inline version of the doctor check, callable from
+/// setup.rs (which compiles as part of the lib crate). The full
+/// `ironhermes doctor` command dispatches through main.rs → doctor::run_doctor_check()
+/// which adds the profile line; the wizard exit version is equivalent but
+/// omits the profile context (not yet loaded in first-run flows).
+///
+/// Always returns `Ok(())` — issues are shown as MISSING lines, not errors.
+fn run_doctor_check() -> Result<()> {
+    use colored::Colorize;
+
+    println!("{}", "IronHermes Doctor".bold().cyan());
+    println!("{}", "─".repeat(40));
+
+    let home = get_hermes_home();
+    let ok_icon = |ok: bool| if ok { "OK".green() } else { "MISSING".yellow() };
+
+    println!("  [{}] Home directory", ok_icon(home.exists()));
+
+    let config_path = ironhermes_core::config::Config::config_path();
+    println!("  [{}] Config file", ok_icon(config_path.exists()));
+
+    let env_path = ironhermes_core::config::Config::env_path();
+    println!("  [{}] .env file", ok_icon(env_path.exists()));
+
+    println!(
+        "  [{}] OpenRouter API key",
+        ok_icon(
+            std::env::var("OPENROUTER_API_KEY")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+        )
+    );
+    println!(
+        "  [{}] Anthropic API key",
+        ok_icon(
+            std::env::var("ANTHROPIC_API_KEY")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+        )
+    );
+
+    let db_path = home.join("state.db");
+    println!("  [{}] State database", ok_icon(db_path.exists()));
+
+    let pid_path = home.join("gateway.pid");
+    if pid_path.exists() {
+        let pid_ok = ironhermes_gateway::pid::read_gateway_pid(&home)
+            .ok()
+            .flatten()
+            .map(|r| {
+                matches!(
+                    ironhermes_gateway::pid::is_pid_alive(r.pid),
+                    ironhermes_gateway::pid::PidLiveness::Live
+                        | ironhermes_gateway::pid::PidLiveness::LiveOtherUser
+                )
+            })
+            .unwrap_or(false);
+        println!(
+            "  [{}] Gateway PID (gateway.pid → live process)",
+            ok_icon(pid_ok)
+        );
+    } else {
+        println!("  [{}] Gateway PID (not running)", ok_icon(true));
+    }
+
+    println!();
+    println!("{}", "Run `ironhermes status` for more details.".dimmed());
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 35.1 D-12: Setup completion summary
+// ---------------------------------------------------------------------------
+
+/// Phase 35.1 D-12: Print a completion summary after wizard + doctor have run.
+///
+/// Shows the configured provider, model, which gateway platforms are enabled,
+/// and a next-step hint. Returns `()` — pure stdout printing, no I/O errors
+/// propagated (doctor already covered failures; this is best-effort UX).
+fn print_setup_completion_summary(config: &Config, _hermes_home: &Path) {
+    use colored::Colorize;
+    println!();
+    println!("{}", "Setup complete!".bold().green());
+    println!("  Provider: {}", config.model.provider);
+    println!("  Model:    {}", config.model.default);
+
+    // Determine telegram-enabled status via typed config access (D-12).
+    let telegram_enabled = config
+        .gateway
+        .platforms
+        .get("telegram")
+        .map(|p| p.enabled)
+        .unwrap_or(false);
+
+    if telegram_enabled {
+        println!("  Telegram: enabled");
+    }
+    println!();
+    if telegram_enabled {
+        println!("  Run `ironhermes gateway` to start the Telegram bot.");
+    } else {
+        println!("  Run `ironhermes` to start chatting.");
+    }
+}
+
+/// Testability seam for the memory section.
+#[allow(dead_code)] // testability seam; no integration test currently exercises this path
+pub fn apply_memory_section_answers(
+    config: &mut Config,
+    learning_loop: &str,
+    backend: &str,
+    _home_path: &str,
+) -> Result<serde_yaml::Mapping> {
+    let block = apply_learning_loop_answer(config, learning_loop);
+    apply_memory_provider_answer(config, backend, "file")?;
+    Ok(block)
 }
 
 // ---------------------------------------------------------------------------
@@ -1307,8 +1631,7 @@ mod tests {
         );
 
         // config.yaml contains providers.openrouter.api_key_env: OPENROUTER_API_KEY
-        let cfg_contents =
-            std::fs::read_to_string(hermes_home.join("config.yaml")).unwrap();
+        let cfg_contents = std::fs::read_to_string(hermes_home.join("config.yaml")).unwrap();
         assert!(
             cfg_contents.contains("openrouter")
                 && cfg_contents.contains("api_key_env")
@@ -1337,10 +1660,8 @@ mod tests {
         .unwrap();
 
         // Load the resulting config.yaml — model.api_key MUST be None/absent.
-        let cfg = ironhermes_core::config::Config::load_from(
-            &hermes_home.join("config.yaml"),
-        )
-        .unwrap();
+        let cfg =
+            ironhermes_core::config::Config::load_from(&hermes_home.join("config.yaml")).unwrap();
         assert!(
             cfg.model.api_key.is_none(),
             "model.api_key must be None after CFG-01 flow; got: {:?}",
@@ -1359,11 +1680,7 @@ mod tests {
             "mistral",
             "groq",
         ] {
-            assert!(
-                is_known_aux_provider(name),
-                "{} must be recognised",
-                name
-            );
+            assert!(is_known_aux_provider(name), "{} must be recognised", name);
         }
         // Case-insensitive
         assert!(is_known_aux_provider("OpenAI"));
@@ -1388,7 +1705,14 @@ mod tests {
     fn cfg_02_known_aux_providers_const_locked() {
         assert_eq!(
             KNOWN_AUX_PROVIDERS,
-            &["openrouter", "anthropic", "openai", "google", "mistral", "groq"],
+            &[
+                "openrouter",
+                "anthropic",
+                "openai",
+                "google",
+                "mistral",
+                "groq"
+            ],
             "KNOWN_AUX_PROVIDERS list is locked by Phase 26.4.1 CONTEXT D-CFG-02 — \
              update both list and test together if a provider is added/removed."
         );
@@ -1661,8 +1985,15 @@ mod tests {
         install_skills_from_source(source_tmp.path(), hermes_tmp.path())
             .expect("install_skills_from_source should succeed");
 
-        let dest = hermes_tmp.path().join("skills").join("testcat").join("skill-a.md");
-        assert!(dest.exists(), "hermes_home/skills/testcat/skill-a.md must exist after install");
+        let dest = hermes_tmp
+            .path()
+            .join("skills")
+            .join("testcat")
+            .join("skill-a.md");
+        assert!(
+            dest.exists(),
+            "hermes_home/skills/testcat/skill-a.md must exist after install"
+        );
     }
 
     /// install_skills_from_source does not overwrite existing files.
@@ -1700,8 +2031,15 @@ mod tests {
         install_skills_from_source(source_tmp.path(), hermes_tmp.path())
             .expect("install_skills_from_source should succeed");
 
-        let dest = hermes_tmp.path().join("skills").join("optcat").join("skill-b.md");
-        assert!(dest.exists(), "hermes_home/skills/optcat/skill-b.md must exist after install from optional-skills");
+        let dest = hermes_tmp
+            .path()
+            .join("skills")
+            .join("optcat")
+            .join("skill-b.md");
+        assert!(
+            dest.exists(),
+            "hermes_home/skills/optcat/skill-b.md must exist after install from optional-skills"
+        );
     }
 
     /// install_skills_from_source returns Ok when optional-skills dir is absent.
@@ -1716,122 +2054,9 @@ mod tests {
         std::fs::write(cat_dir.join("skill-a.md"), "# skill-a").unwrap();
 
         let result = install_skills_from_source(source_tmp.path(), hermes_tmp.path());
-        assert!(result.is_ok(), "must return Ok when optional-skills is absent");
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Phase 35.1 D-03: Doctor check at wizard exit (lib-safe inline version)
-// ---------------------------------------------------------------------------
-
-/// Phase 35.1 D-03: Run a health check at wizard exit.
-///
-/// This is a lib-safe inline version of the doctor check, callable from
-/// setup.rs (which compiles as part of the lib crate). The full
-/// `ironhermes doctor` command dispatches through main.rs → doctor::run_doctor_check()
-/// which adds the profile line; the wizard exit version is equivalent but
-/// omits the profile context (not yet loaded in first-run flows).
-///
-/// Always returns `Ok(())` — issues are shown as MISSING lines, not errors.
-fn run_doctor_check() -> Result<()> {
-    use colored::Colorize;
-
-    println!("{}", "IronHermes Doctor".bold().cyan());
-    println!("{}", "─".repeat(40));
-
-    let home = get_hermes_home();
-    let ok_icon = |ok: bool| if ok { "OK".green() } else { "MISSING".yellow() };
-
-    println!("  [{}] Home directory", ok_icon(home.exists()));
-
-    let config_path = ironhermes_core::config::Config::config_path();
-    println!("  [{}] Config file", ok_icon(config_path.exists()));
-
-    let env_path = ironhermes_core::config::Config::env_path();
-    println!("  [{}] .env file", ok_icon(env_path.exists()));
-
-    println!(
-        "  [{}] OpenRouter API key",
-        ok_icon(std::env::var("OPENROUTER_API_KEY").map(|v| !v.is_empty()).unwrap_or(false))
-    );
-    println!(
-        "  [{}] Anthropic API key",
-        ok_icon(std::env::var("ANTHROPIC_API_KEY").map(|v| !v.is_empty()).unwrap_or(false))
-    );
-
-    let db_path = home.join("state.db");
-    println!("  [{}] State database", ok_icon(db_path.exists()));
-
-    let pid_path = home.join("gateway.pid");
-    if pid_path.exists() {
-        let pid_ok = ironhermes_gateway::pid::read_gateway_pid(&home)
-            .ok()
-            .flatten()
-            .map(|r| {
-                matches!(
-                    ironhermes_gateway::pid::is_pid_alive(r.pid),
-                    ironhermes_gateway::pid::PidLiveness::Live
-                        | ironhermes_gateway::pid::PidLiveness::LiveOtherUser
-                )
-            })
-            .unwrap_or(false);
-        println!(
-            "  [{}] Gateway PID (gateway.pid → live process)",
-            ok_icon(pid_ok)
+        assert!(
+            result.is_ok(),
+            "must return Ok when optional-skills is absent"
         );
-    } else {
-        println!("  [{}] Gateway PID (not running)", ok_icon(true));
     }
-
-    println!();
-    println!("{}", "Run `ironhermes status` for more details.".dimmed());
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Phase 35.1 D-12: Setup completion summary
-// ---------------------------------------------------------------------------
-
-/// Phase 35.1 D-12: Print a completion summary after wizard + doctor have run.
-///
-/// Shows the configured provider, model, which gateway platforms are enabled,
-/// and a next-step hint. Returns `()` — pure stdout printing, no I/O errors
-/// propagated (doctor already covered failures; this is best-effort UX).
-fn print_setup_completion_summary(config: &Config, _hermes_home: &Path) {
-    use colored::Colorize;
-    println!();
-    println!("{}", "Setup complete!".bold().green());
-    println!("  Provider: {}", config.model.provider);
-    println!("  Model:    {}", config.model.default);
-
-    // Determine telegram-enabled status via typed config access (D-12).
-    let telegram_enabled = config
-        .gateway
-        .platforms
-        .get("telegram")
-        .map(|p| p.enabled)
-        .unwrap_or(false);
-
-    if telegram_enabled {
-        println!("  Telegram: enabled");
-    }
-    println!();
-    if telegram_enabled {
-        println!("  Run `ironhermes gateway` to start the Telegram bot.");
-    } else {
-        println!("  Run `ironhermes` to start chatting.");
-    }
-}
-
-/// Testability seam for the memory section.
-pub fn apply_memory_section_answers(
-    config: &mut Config,
-    learning_loop: &str,
-    backend: &str,
-    _home_path: &str,
-) -> Result<serde_yaml::Mapping> {
-    let block = apply_learning_loop_answer(config, learning_loop);
-    apply_memory_provider_answer(config, backend, "file")?;
-    Ok(block)
 }

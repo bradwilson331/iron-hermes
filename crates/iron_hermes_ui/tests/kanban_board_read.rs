@@ -46,11 +46,7 @@ fn fetch_board_read_path_returns_all_non_archived_tasks() {
 
     // Locked: every returned row has a canonical status (D-09 taxonomy).
     let allowed = [
-        "triage",
-        "todo",
-        "ready",
-        "running",
-        "blocked",
+        "triage", "todo", "ready", "running", "blocked",
         "done",
         // archived would be filtered out above
     ];

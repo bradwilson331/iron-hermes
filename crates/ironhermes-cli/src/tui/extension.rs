@@ -42,13 +42,14 @@ pub struct Widget {
     pub height: u16,
 }
 
+#[allow(dead_code)] // Phase 22.1 extension API; Widget construction + truncation wiring pending
 impl Widget {
     /// Construct a Widget, capping `height` at [`MAX_WIDGET_HEIGHT`].
     pub fn new(id: impl Into<String>, content: impl Into<String>, height: u16) -> Self {
         Self {
             id: id.into(),
             content: content.into(),
-            height: height.min(MAX_WIDGET_HEIGHT).max(1),
+            height: height.clamp(1, MAX_WIDGET_HEIGHT),
         }
     }
 
@@ -78,6 +79,7 @@ impl Widget {
 // ---------------------------------------------------------------------------
 
 /// Describes when a keybinding is active.
+#[allow(dead_code)] // Phase 22.1 extension API; InFlight and Always variants wired in future keybinding dispatch
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyContext {
     /// Active only when the agent is idle (no in-flight request).
@@ -152,6 +154,7 @@ pub type StyleOverrides = HashMap<String, String>;
 // ---------------------------------------------------------------------------
 
 /// An event that an extension can publish to the TUI render loop.
+#[allow(dead_code)] // Phase 22.1 extension API; TUI event bus wiring pending
 #[derive(Debug, Clone)]
 pub enum TuiEvent {
     /// Insert or replace a widget identified by `id`.

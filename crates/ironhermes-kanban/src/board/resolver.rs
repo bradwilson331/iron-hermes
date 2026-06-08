@@ -11,8 +11,8 @@
 //! This is a pure function — it reads env vars and one optional file but
 //! performs NO database I/O.
 
-use super::{BoardContext, BoardSource};
 use super::slug::{BoardSlugError, validate_board_slug};
+use super::{BoardContext, BoardSource};
 
 /// Resolve the active board context from the 4-tier precedence chain (D-02).
 ///
@@ -53,7 +53,11 @@ pub fn resolve_board_context(cli_flag: Option<&str>) -> Result<BoardContext, Boa
     // Pitfall 1: "default" maps to legacy path; named boards use board_db_path.
     let db_path = crate::paths::board_db_path_for_slug(&slug);
 
-    Ok(BoardContext { slug, db_path, source })
+    Ok(BoardContext {
+        slug,
+        db_path,
+        source,
+    })
 }
 
 /// Read the `~/.ironhermes/kanban/current` file and return `Some(trimmed_slug)`
@@ -75,8 +79,8 @@ fn read_current_board_file_opt() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// Serialise all env-mutation tests to prevent races when running with
-    /// multiple test threads. Uses the process-wide crate::ENV_LOCK.
+    // Serialise all env-mutation tests to prevent races when running with
+    // multiple test threads. Uses the process-wide crate::ENV_LOCK.
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -99,14 +103,20 @@ mod tests {
             let prev = std::env::var(key).ok();
             // SAFETY: single-threaded (serialised via ENV_LOCK); no concurrent env access.
             unsafe { std::env::set_var(key, value) };
-            Self { key: key.to_string(), prev }
+            Self {
+                key: key.to_string(),
+                prev,
+            }
         }
 
         fn remove(key: &str) -> Self {
             let prev = std::env::var(key).ok();
             // SAFETY: serialised via ENV_LOCK.
             unsafe { std::env::remove_var(key) };
-            Self { key: key.to_string(), prev }
+            Self {
+                key: key.to_string(),
+                prev,
+            }
         }
     }
 

@@ -9,7 +9,6 @@
 // D-15: Platform-dispatch tree — Local→rodio, Telegram→AudioDispatcher methods.
 
 use async_trait::async_trait;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Platform-agnostic audio delivery abstraction.
@@ -26,7 +25,7 @@ pub trait AudioDispatcher: Send + Sync {
     async fn send_voice_file(
         &self,
         chat_id: &str,
-        path: &PathBuf,
+        path: &std::path::Path,
         thread_id: Option<&str>,
     ) -> anyhow::Result<()>;
 
@@ -34,7 +33,7 @@ pub trait AudioDispatcher: Send + Sync {
     async fn send_audio_file(
         &self,
         chat_id: &str,
-        path: &PathBuf,
+        path: &std::path::Path,
         thread_id: Option<&str>,
     ) -> anyhow::Result<()>;
 }
@@ -140,11 +139,7 @@ impl crate::registry::Tool for SendAudioTool {
                         // D-04 + Pitfall 1: MP3 → OGG/opus via ffmpeg subprocess
                         let opus_path = path.with_extension("ogg");
                         let status = tokio::process::Command::new(
-                            self.config
-                                .tts
-                                .ffmpeg_path
-                                .as_deref()
-                                .unwrap_or("ffmpeg"),
+                            self.config.tts.ffmpeg_path.as_deref().unwrap_or("ffmpeg"),
                         )
                         .args(["-y", "-i"])
                         .arg(&path)
@@ -154,18 +149,12 @@ impl crate::registry::Tool for SendAudioTool {
                         .await
                         .map_err(|e| anyhow::anyhow!("ffmpeg spawn failed: {}", e))?;
                         if !status.success() {
-                            anyhow::bail!(
-                                "ffmpeg conversion failed with status {}",
-                                status
-                            );
+                            anyhow::bail!("ffmpeg conversion failed with status {}", status);
                         }
                         dispatcher
                             .send_voice_file(&self.session_key.chat_id, &opus_path, None)
                             .await?;
-                        Ok(format!(
-                            "converted+sent voice: {}",
-                            opus_path.display()
-                        ))
+                        Ok(format!("converted+sent voice: {}", opus_path.display()))
                     }
                     "mp3" => {
                         dispatcher
@@ -202,10 +191,7 @@ impl crate::registry::Tool for SendAudioTool {
                     ),
                 }
             }
-            ref other => anyhow::bail!(
-                "send_audio not yet wired for platform: {:?}",
-                other
-            ),
+            ref other => anyhow::bail!("send_audio not yet wired for platform: {:?}", other),
         }
     }
 }

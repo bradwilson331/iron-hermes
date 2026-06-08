@@ -261,7 +261,9 @@ async fn closure_parses_met_verdict() {
     let kanban = KanbanConfig::default();
     let judge = ironhermes_cli::kanban::commands::build_runtime_judge_fn(&kanban, &config)
         .expect("build_runtime_judge_fn");
-    let out = judge(synthetic_judge_request()).await.expect("Ok JudgeOutput");
+    let out = judge(synthetic_judge_request())
+        .await
+        .expect("Ok JudgeOutput");
     assert_eq!(out.verdict, JudgeVerdict::Met);
     assert_eq!(out.reason, "all criteria satisfied");
 }
@@ -294,7 +296,9 @@ async fn closure_parses_not_met_verdict() {
     let kanban = KanbanConfig::default();
     let judge = ironhermes_cli::kanban::commands::build_runtime_judge_fn(&kanban, &config)
         .expect("build_runtime_judge_fn");
-    let out = judge(synthetic_judge_request()).await.expect("Ok JudgeOutput");
+    let out = judge(synthetic_judge_request())
+        .await
+        .expect("Ok JudgeOutput");
     assert_eq!(out.verdict, JudgeVerdict::NotMet);
     assert_eq!(out.reason, "missing criterion 3");
 }

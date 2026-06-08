@@ -127,11 +127,11 @@ impl Tool for BrowserGetImagesTool {
         // Register newly-assigned image refs in ref_table so browser_click can target them.
         if let Some(arr) = images.as_array() {
             for img in arr {
-                if let Some(r) = img.get("ref").and_then(|v| v.as_u64()) {
-                    if r > start_counter {
-                        sess.ref_table
-                            .insert(r, format!("[data-ironhermes-ref=\"{r}\"]"));
-                    }
+                if let Some(r) = img.get("ref").and_then(|v| v.as_u64())
+                    && r > start_counter
+                {
+                    sess.ref_table
+                        .insert(r, format!("[data-ironhermes-ref=\"{r}\"]"));
                 }
             }
         }

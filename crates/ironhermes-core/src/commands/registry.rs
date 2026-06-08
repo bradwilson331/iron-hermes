@@ -295,14 +295,12 @@ mod tests {
         // Either NotFound or PrefixMatch to "toolset" via the prefix stage
         // is acceptable — the key invariant is that an EXACT alias for
         // "toolsets" no longer resolves.
-        match result {
-            ResolveResult::Exact(cmd) => {
-                assert_ne!(
-                    cmd.name, "toolsets",
-                    "no command named 'toolsets' should exist; got Exact match"
-                );
-            }
-            _ => {} // NotFound or PrefixMatch — both acceptable
+        // NotFound or PrefixMatch — both acceptable; only Exact is a failure
+        if let ResolveResult::Exact(cmd) = result {
+            assert_ne!(
+                cmd.name, "toolsets",
+                "no command named 'toolsets' should exist; got Exact match"
+            );
         }
     }
 

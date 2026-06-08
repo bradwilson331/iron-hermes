@@ -77,8 +77,11 @@ pub struct AppState {
     /// Single-session assumption: events from any in-flight turn route to whichever
     /// ws is currently registered. Multi-session isolation is explicitly out of
     /// scope per CONTEXT.md.
-    pub subagent_callback_slot:
-        Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<crate::protocol::ChatStreamEvent>>>>,
+    pub subagent_callback_slot: Arc<
+        tokio::sync::Mutex<
+            Option<tokio::sync::mpsc::UnboundedSender<crate::protocol::ChatStreamEvent>>,
+        >,
+    >,
     /// Phase 36.3.7.11 Plan 01 (D-08 / D-15): dashboard kanban tail
     /// broadcaster. The tail loop (`run_kanban_tail_loop`) holds the
     /// `Sender`; every `/api/ws/kanban` connection creates its own
@@ -155,9 +158,8 @@ impl AppState {
             >,
         > = Arc::new(tokio::sync::Mutex::new(None));
         let cb_slot = subagent_callback_slot.clone();
-        let progress_callback: ironhermes_tools::delegate_task::SubagentProgressCallback =
-            Arc::new(move |_index: usize,
-                           _event: ironhermes_tools::delegate_task::SubagentProgress| {
+        let progress_callback: ironhermes_tools::delegate_task::SubagentProgressCallback = Arc::new(
+            move |_index: usize, _event: ironhermes_tools::delegate_task::SubagentProgress| {
                 // D-07: counter-only — no payload forwarded.
                 // Use try_lock to avoid awaiting in a sync `Fn`. If the slot is
                 // momentarily contended (extremely unlikely outside Plan 02
@@ -168,7 +170,8 @@ impl AppState {
                         let _ = tx.send(crate::protocol::ChatStreamEvent::SubagentEvent {});
                     }
                 }
-            });
+            },
+        );
 
         // Phase 28.1 Plan 03: build ONE AgentRuntime — it owns the budget,
         // the subagent runner (identity-sharing the same subagent_registry Arc),
@@ -197,19 +200,14 @@ impl AppState {
         // subscriber's connect sees the live event stream immediately.
         // `config.dashboard.kanban.tail_interval_ms` is the source-of-
         // truth interval (default 250 ms via DashboardKanbanConfig::Default).
-        let (kanban_tail_broadcast, _initial_rx) =
-            tokio::sync::broadcast::channel::<String>(256);
+        let (kanban_tail_broadcast, _initial_rx) = tokio::sync::broadcast::channel::<String>(256);
         let kanban_tail_cancel = tokio_util::sync::CancellationToken::new();
         let tail_tx = kanban_tail_broadcast.clone();
         let tail_cancel = kanban_tail_cancel.clone();
         let tail_interval_ms = config.dashboard.kanban.tail_interval_ms;
         tokio::spawn(async move {
-            crate::server::kanban_ws::run_kanban_tail_loop(
-                tail_tx,
-                tail_cancel,
-                tail_interval_ms,
-            )
-            .await;
+            crate::server::kanban_ws::run_kanban_tail_loop(tail_tx, tail_cancel, tail_interval_ms)
+                .await;
         });
 
         // Phase 36.17.7 D-02-d: audio cache lifecycle GC.
@@ -252,7 +250,9 @@ impl AppState {
             // by SessionKey. Explicit `as Arc<dyn ...>` widens the concrete
             // Arc<SessionQueue> to the trait-object field type.
             queue: Arc::new(ironhermes_gateway::session_queue::SessionQueue::new())
-                as Arc<dyn ironhermes_core::queue::MessageQueue<ironhermes_core::session::SessionKey>>,
+                as Arc<
+                    dyn ironhermes_core::queue::MessageQueue<ironhermes_core::session::SessionKey>,
+                >,
             // Phase 32.3 Plan 04: subagent_registry + shrike — same Arcs the
             // delegate-task runner uses, so the four `/api/agents/*` endpoints
             // operate on the live registry.
@@ -319,7 +319,10 @@ impl AppState {
         &self,
         session_id: &str,
     ) -> Arc<std::sync::atomic::AtomicBool> {
-        let mut map = self.running_agents.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = self
+            .running_agents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         map.entry(session_id.to_string())
             .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
             .clone()
@@ -481,9 +484,7 @@ impl AppState {
         prompt_builder.set_user_profile_enabled(self.config.memory.user_profile_enabled);
         // Phase 27.1.1-gap-02: populate active_toolsets so the system-prompt skills
         // catalog text reflects the same enabled set as the API tool schemas.
-        prompt_builder.set_active_toolsets(
-            self.runtime.merged_tools().enabled_toolset_names(),
-        );
+        prompt_builder.set_active_toolsets(self.runtime.merged_tools().enabled_toolset_names());
         prompt_builder.load_memory().await;
         prompt_builder.load_skills();
         let system_msg = prompt_builder.build_system_message();
@@ -526,6 +527,7 @@ impl AppState {
 /// (RESEARCH confirmed no `/agents` endpoint exists in iron_hermes_ui today).
 ///
 /// Call via `AppState::subagent_tree_json()` which delegates here.
+#[allow(dead_code)] // Phase 32.2-05 future API endpoint; no HTTP route wired yet
 pub fn build_subagent_tree_json(
     registry: &ironhermes_agent::subagent_registry::SubagentRegistry,
 ) -> serde_json::Value {
@@ -550,6 +552,7 @@ pub fn build_subagent_tree_json(
 /// `started_at_unix_ms` is `null` because `std::time::Instant` carries no
 /// wall-clock epoch — it is relative-only. A future plan can thread the
 /// session-start `SystemTime` to compute an absolute epoch offset.
+#[allow(dead_code)] // called from build_subagent_tree_json; no active route yet
 fn node_to_json(node: &ironhermes_agent::subagent_registry::SubagentTreeNode) -> serde_json::Value {
     let children: Vec<serde_json::Value> = node.children.iter().map(node_to_json).collect();
     serde_json::json!({
@@ -571,6 +574,7 @@ impl AppState {
     ///
     /// **No HTTP route** — this is a callable method for future API surface use
     /// (RESEARCH confirmed no `/agents` endpoint exists in iron_hermes_ui today).
+    #[allow(dead_code)] // Phase 32.2-05 future API endpoint; no HTTP route wired yet
     pub fn subagent_tree_json(
         &self,
         registry: &ironhermes_agent::subagent_registry::SubagentRegistry,
@@ -655,7 +659,10 @@ pub fn api_agents_prune(
     shrike: Option<&ironhermes_agent::shrike::ShrikeService>,
     body: serde_json::Value,
 ) -> serde_json::Value {
-    let stale_secs = body.get("stale_secs").and_then(|v| v.as_u64()).unwrap_or(120);
+    let stale_secs = body
+        .get("stale_secs")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(120);
     let pruned: Vec<String> = shrike.map(|sh| sh.prune(stale_secs)).unwrap_or_default();
     serde_json::json!({ "pruned": pruned })
 }
@@ -675,16 +682,19 @@ pub fn api_agents_status(
 
 impl AppState {
     /// Phase 32.3 Plan 04: thin AppState wrapper over `api_agents_kill`.
+    #[allow(dead_code)] // Phase 32.3 REST surface; Dioxus server fn wiring pending
     pub fn api_agents_kill(&self, body: serde_json::Value) -> serde_json::Value {
         api_agents_kill(self.shrike.as_deref(), body)
     }
 
     /// Phase 32.3 Plan 04: thin AppState wrapper over `api_agents_interrupt`.
+    #[allow(dead_code)] // Phase 32.3 REST surface; Dioxus server fn wiring pending
     pub fn api_agents_interrupt(&self, body: serde_json::Value) -> serde_json::Value {
         api_agents_interrupt(self.shrike.as_deref(), body)
     }
 
     /// Phase 32.3 Plan 04: thin AppState wrapper over `api_agents_prune`.
+    #[allow(dead_code)] // Phase 32.3 REST surface; Dioxus server fn wiring pending
     pub fn api_agents_prune(&self, body: serde_json::Value) -> serde_json::Value {
         api_agents_prune(self.shrike.as_deref(), body)
     }
@@ -707,7 +717,8 @@ mod phase_36_1_02_state_tests {
     /// Helper: build a minimal AppState for unit testing. Skips the heavy
     /// AgentRuntime / StateStore init by constructing only the running_agents
     /// field directly — tests operate on the public helper, not AppState::init.
-    fn make_running_agents() -> Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> {
+    fn make_running_agents(
+    ) -> Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> {
         Arc::new(std::sync::Mutex::new(HashMap::new()))
     }
 
@@ -799,9 +810,8 @@ mod phase_36_1_02_state_tests {
 
     /// Helper: build an empty queue_paused map for unit testing — same shape
     /// as `make_running_agents` above, namespaced for paused-flag tests.
-    fn make_queue_paused()
-        -> Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>
-    {
+    fn make_queue_paused(
+    ) -> Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>> {
         Arc::new(std::sync::Mutex::new(HashMap::new()))
     }
 
@@ -931,8 +941,7 @@ mod plan_32_2_05_tests {
     /// guard's Drop is a silent no-op. Tests assert tree-json shape, not
     /// lifecycle — that lives in `ironhermes-agent/tests/registration_guard.rs`.
     fn register_no_lifecycle(reg: &mut SubagentRegistry, info: SubagentInfo) {
-        let weak: std::sync::Weak<tokio::sync::RwLock<SubagentRegistry>> =
-            std::sync::Weak::new();
+        let weak: std::sync::Weak<tokio::sync::RwLock<SubagentRegistry>> = std::sync::Weak::new();
         let guard = reg.register_guarded(info, weak);
         std::mem::forget(guard);
     }
@@ -954,11 +963,19 @@ mod plan_32_2_05_tests {
         let root = &arr[0];
         assert_eq!(root["id"], "sub_root0000");
         assert_eq!(root["task_summary"], "task for sub_root0000");
-        assert!(root["uptime_secs"].is_number(), "uptime_secs should be a number");
-        assert!(root["started_at_unix_ms"].is_null(), "started_at_unix_ms should be null");
+        assert!(
+            root["uptime_secs"].is_number(),
+            "uptime_secs should be a number"
+        );
+        assert!(
+            root["started_at_unix_ms"].is_null(),
+            "started_at_unix_ms should be null"
+        );
 
         // root.children has 1 mid node
-        let root_children = root["children"].as_array().expect("root.children should be array");
+        let root_children = root["children"]
+            .as_array()
+            .expect("root.children should be array");
         assert_eq!(root_children.len(), 1, "root should have 1 child (mid)");
 
         let mid = &root_children[0];
@@ -966,13 +983,17 @@ mod plan_32_2_05_tests {
         assert_eq!(mid["task_summary"], "task for sub_mid11111");
 
         // mid.children has 1 leaf node
-        let mid_children = mid["children"].as_array().expect("mid.children should be array");
+        let mid_children = mid["children"]
+            .as_array()
+            .expect("mid.children should be array");
         assert_eq!(mid_children.len(), 1, "mid should have 1 child (leaf)");
 
         let leaf = &mid_children[0];
         assert_eq!(leaf["id"], "sub_leaf2222");
         assert_eq!(leaf["task_summary"], "task for sub_leaf2222");
-        let leaf_children = leaf["children"].as_array().expect("leaf.children should be array");
+        let leaf_children = leaf["children"]
+            .as_array()
+            .expect("leaf.children should be array");
         assert!(leaf_children.is_empty(), "leaf should have no children");
     }
 }
@@ -1080,7 +1101,11 @@ mod plan_32_3_04_tests {
         let body = serde_json::json!({ "stale_secs": 1 });
         let resp = api_agents_prune(Some(&shrike), body);
 
-        assert!(resp["pruned"].is_array(), "pruned must be an array: {}", resp);
+        assert!(
+            resp["pruned"].is_array(),
+            "pruned must be an array: {}",
+            resp
+        );
         let arr = resp["pruned"].as_array().unwrap();
         assert!(arr.is_empty(), "no stale entries yet: {}", resp);
     }
@@ -1125,4 +1150,3 @@ mod plan_32_3_04_tests {
         assert!(status.is_none());
     }
 }
-

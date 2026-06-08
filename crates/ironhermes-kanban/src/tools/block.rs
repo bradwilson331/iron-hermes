@@ -139,19 +139,25 @@ impl Tool for KanbanBlockTool {
             .map_err(|e| anyhow::anyhow!("open board '{}': {}", board_ctx.slug, e))?;
 
         match store.block_task(&task_id, &reason, expected_run_id.as_deref()) {
-            Ok(()) => crate::tools::common::ok_with_board(json!({
-                "status": "ok",
-                "task_id": task_id,
-            }), &board_ctx),
+            Ok(()) => crate::tools::common::ok_with_board(
+                json!({
+                    "status": "ok",
+                    "task_id": task_id,
+                }),
+                &board_ctx,
+            ),
 
             Err(KanbanError::StaleRunId { expected, actual }) => {
-                crate::tools::common::ok_with_board(json!({
-                    "status": "rejected",
-                    "reason": "stale_run_id",
-                    "task_id": task_id,
-                    "expected": expected,
-                    "actual": actual,
-                }), &board_ctx)
+                crate::tools::common::ok_with_board(
+                    json!({
+                        "status": "rejected",
+                        "reason": "stale_run_id",
+                        "task_id": task_id,
+                        "expected": expected,
+                        "actual": actual,
+                    }),
+                    &board_ctx,
+                )
             }
 
             Err(other) => Err(other.into()),
@@ -173,15 +179,21 @@ mod tests {
     #[test]
     fn is_available_respects_env() {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
+        unsafe {
+            std::env::remove_var("HERMES_KANBAN_TASK");
+        }
         let store = make_store();
         let tool = KanbanBlockTool::new(store.clone(), false);
         assert!(!tool.is_available());
 
-        unsafe { std::env::set_var("HERMES_KANBAN_TASK", "t_test"); }
+        unsafe {
+            std::env::set_var("HERMES_KANBAN_TASK", "t_test");
+        }
         let tool2 = KanbanBlockTool::new(store.clone(), false);
         assert!(tool2.is_available());
-        unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
+        unsafe {
+            std::env::remove_var("HERMES_KANBAN_TASK");
+        }
 
         let tool3 = KanbanBlockTool::new(store, true);
         assert!(tool3.is_available());
@@ -192,6 +204,9 @@ mod tests {
         let store = make_store();
         let tool = KanbanBlockTool::new(store, true);
         let schema_str = serde_json::to_string(&tool.schema()).unwrap();
-        assert!(schema_str.contains("\"board\""), "schema missing board property: {schema_str}");
+        assert!(
+            schema_str.contains("\"board\""),
+            "schema missing board property: {schema_str}"
+        );
     }
 }

@@ -85,7 +85,7 @@ fn impact_level_wire_strings_locked() {
 fn jsonl_lines_concatenate_cleanly() {
     // Multi-entry append simulation: each line ends in '\n' (writer's responsibility),
     // and every line parses independently. This locks the JSONL format Plan 4 will write.
-    let entries = vec![
+    let entries = [
         TrajectoryEntry {
             name: "a".to_string(),
             args: serde_json::json!({}),

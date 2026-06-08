@@ -9,7 +9,6 @@
 //! - Slash-dispatch wrapper (tui_rata/commands.rs)
 
 use std::io;
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -273,7 +272,9 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     // commands / session-end hooks, NOT for turns) still needs delegate_task
     // registered so /tools list and /agents reflect the tool. We build a
     // lightweight runner for the TUI registry only (separate from the runtime's).
-    let tui_subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(config.delegation.max_concurrent_children));
+    let tui_subagent_semaphore = Arc::new(tokio::sync::Semaphore::new(
+        config.delegation.max_concurrent_children,
+    ));
     let tui_subagent_runner = Arc::new(
         ironhermes_agent::AgentSubagentRunner::new(client.clone(), resolver.clone(), None)
             .with_subagent_registry(subagent_registry.clone())
@@ -689,11 +690,11 @@ async fn run_app_inner(terminal: &mut DefaultTerminal, app: &mut App) -> Result<
         let transcript_area = compute_transcript_area(size);
 
         // Per-turn spawn: submit() sets pending_tx; we pick it up here and spawn.
-        if app.pending_tx.is_some() {
-            if let Some(cancel) = app.cancel_child.clone() {
-                let tx = app.pending_tx.take().expect("checked above");
-                spawn_turn(app, tx, cancel);
-            }
+        if app.pending_tx.is_some()
+            && let Some(cancel) = app.cancel_child.clone()
+        {
+            let tx = app.pending_tx.take().expect("checked above");
+            spawn_turn(app, tx, cancel);
         }
 
         tokio::select! {
@@ -785,13 +786,12 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
     // into the per-turn system message clone. Mutates messages_snapshot only;
     // app.history[0] is never touched. Field is session-persistent — re-read
     // every turn, never cleared by spawn_turn.
-    if let Some(overlay_text) = &app.active_personality_overlay {
-        if !messages_snapshot.is_empty() {
-            if let Some(MessageContent::Text(ref mut s)) = messages_snapshot[0].content {
-                s.push_str("\n\n");
-                s.push_str(overlay_text);
-            }
-        }
+    if let Some(overlay_text) = &app.active_personality_overlay
+        && !messages_snapshot.is_empty()
+        && let Some(MessageContent::Text(ref mut s)) = messages_snapshot[0].content
+    {
+        s.push_str("\n\n");
+        s.push_str(overlay_text);
     }
     let session_id = app.session_id.clone();
 
@@ -851,7 +851,7 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
             user_id: None,
         };
         let tts_wiring = Some(ironhermes_agent::TtsPerTurnWiring {
-            session_key: Some(session_key.clone()).unwrap(), // explicit Some() literal for D-05 source-grep
+            session_key: session_key.clone(), // explicit Some() literal for D-05 source-grep
             audio_dispatcher: None,
         });
 

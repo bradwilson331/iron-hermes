@@ -156,9 +156,7 @@ fn claude_opus_4_7_is_five_dollar_input() {
 #[test]
 fn claude_opus_4_20250514_is_fifteen_dollar_input() {
     let reg = PricingRegistry::new();
-    let entry = reg
-        .lookup("claude-opus-4-20250514")
-        .expect("legacy opus 4");
+    let entry = reg.lookup("claude-opus-4-20250514").expect("legacy opus 4");
     assert_eq!(
         entry.input_per_1m_micros, 15_000_000,
         "claude-opus-4-20250514 must be $15/M input (legacy April 2025 release)"

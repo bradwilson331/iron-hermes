@@ -48,8 +48,8 @@ pub fn format_job_list(jobs: &[CronJob], all: bool) -> String {
 
     let _ = writeln!(
         out,
-        "  {:<20} {:<20} {:<12} {}",
-        "NAME", "SCHEDULE", "STATUS", "NEXT RUN"
+        "  {:<20} {:<20} {:<12} NEXT RUN",
+        "NAME", "SCHEDULE", "STATUS"
     );
 
     for job in &visible {

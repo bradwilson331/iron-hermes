@@ -1,5 +1,5 @@
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use ironhermes_core::ChatMessage;
@@ -179,17 +179,17 @@ impl SessionStore {
             // prompt + filter sites. The local `workspace_root` token is retained
             // (non-comment) to satisfy INV-25.3-11.
             let workspace_root = self.workspace.as_ref().map(|ws| ws.canonical_root_string());
-            if let Ok(mut state) = self.state.lock() {
-                if let Err(e) = state.create_session(
+            if let Ok(mut state) = self.state.lock()
+                && let Err(e) = state.create_session(
                     &session.session_id,
                     source,
                     Some(model),
                     None, // system_prompt set later
                     None, // no parent
                     workspace_root.as_deref(),
-                ) {
-                    warn!("Failed to persist session to SQLite: {e}");
-                }
+                )
+            {
+                warn!("Failed to persist session to SQLite: {e}");
             }
             self.sessions.insert(string_key.clone(), session);
         }
@@ -202,10 +202,10 @@ impl SessionStore {
         let string_key = key.to_string_key();
         if let Some(session) = self.sessions.get_mut(&string_key) {
             // Write-through to SQLite
-            if let Ok(mut state) = self.state.lock() {
-                if let Err(e) = state.add_message(&session.session_id, &msg) {
-                    warn!("Failed to persist message to SQLite: {e}");
-                }
+            if let Ok(mut state) = self.state.lock()
+                && let Err(e) = state.add_message(&session.session_id, &msg)
+            {
+                warn!("Failed to persist message to SQLite: {e}");
             }
             session.add_message(msg);
             true

@@ -109,136 +109,134 @@ pub async fn fetch_task(
     {
         let task_id_owned = task_id;
         let board_owned = board;
-        let env = tokio::task::spawn_blocking(
-            move || -> Result<WorkerContextEnvelope, String> {
-                use rusqlite::params;
-                // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
-                let store = KanbanStore::open_from_env_or_board(board_owned.as_deref())
-                    .map_err(|e| format!("open_from_env_or_board({:?}): {e}", board_owned))?;
-                let task = store
-                    .get_task(&task_id_owned)
-                    .map_err(|e| format!("get_task('{}'): {e}", task_id_owned))?;
+        let env = tokio::task::spawn_blocking(move || -> Result<WorkerContextEnvelope, String> {
+            use rusqlite::params;
+            // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+            let store = KanbanStore::open_from_env_or_board(board_owned.as_deref())
+                .map_err(|e| format!("open_from_env_or_board({:?}): {e}", board_owned))?;
+            let task = store
+                .get_task(&task_id_owned)
+                .map_err(|e| format!("get_task('{}'): {e}", task_id_owned))?;
 
-                // Workspace fallback — when task.workspace is None the
-                // canonical contract is to substitute the per-task scratch
-                // path. For the dashboard read surface we surface the
-                // task's recorded value (or empty string) since the
-                // scratch-path helper lives behind a feature gate in the
-                // kanban crate. Plan 02 / 03 can revisit if needed.
-                let workspace = task.workspace.clone().unwrap_or_default();
+            // Workspace fallback — when task.workspace is None the
+            // canonical contract is to substitute the per-task scratch
+            // path. For the dashboard read surface we surface the
+            // task's recorded value (or empty string) since the
+            // scratch-path helper lives behind a feature gate in the
+            // kanban crate. Plan 02 / 03 can revisit if needed.
+            let workspace = task.workspace.clone().unwrap_or_default();
 
-                // Parent handoffs (show.rs lines 144-182).
-                let parent_ids: Vec<String> = {
-                    let mut stmt = store
-                        .conn
-                        .prepare(
-                            "SELECT parent_id FROM task_links WHERE child_id = ?1 \
+            // Parent handoffs (show.rs lines 144-182).
+            let parent_ids: Vec<String> = {
+                let mut stmt = store
+                    .conn
+                    .prepare(
+                        "SELECT parent_id FROM task_links WHERE child_id = ?1 \
                              ORDER BY created_at ASC",
-                        )
-                        .map_err(|e| format!("prepare parents: {e}"))?;
-                    let mapped = stmt
-                        .query_map(params![task_id_owned], |r| r.get::<_, String>(0))
-                        .map_err(|e| format!("query parents: {e}"))?;
-                    let mut out: Vec<String> = Vec::new();
-                    for row in mapped {
-                        out.push(row.map_err(|e| format!("collect parents: {e}"))?);
-                    }
-                    out
-                };
-                let mut parent_handoffs: Vec<serde_json::Value> = Vec::new();
-                for pid in &parent_ids {
-                    if let Ok(parent) = store.get_task(pid) {
-                        let run: Option<(Option<String>, Option<String>)> = store
-                            .conn
-                            .query_row(
-                                "SELECT summary, metadata FROM task_runs \
+                    )
+                    .map_err(|e| format!("prepare parents: {e}"))?;
+                let mapped = stmt
+                    .query_map(params![task_id_owned], |r| r.get::<_, String>(0))
+                    .map_err(|e| format!("query parents: {e}"))?;
+                let mut out: Vec<String> = Vec::new();
+                for row in mapped {
+                    out.push(row.map_err(|e| format!("collect parents: {e}"))?);
+                }
+                out
+            };
+            let mut parent_handoffs: Vec<serde_json::Value> = Vec::new();
+            for pid in &parent_ids {
+                if let Ok(parent) = store.get_task(pid) {
+                    let run: Option<(Option<String>, Option<String>)> = store
+                        .conn
+                        .query_row(
+                            "SELECT summary, metadata FROM task_runs \
                                  WHERE task_id = ?1 AND outcome = 'completed' \
                                  ORDER BY ended_at DESC LIMIT 1",
-                                params![pid],
-                                |r| Ok((r.get(0)?, r.get(1)?)),
-                            )
-                            .ok();
-                        let (summary, metadata_str) = run.unwrap_or((None, None));
-                        let metadata: Option<serde_json::Value> = metadata_str
-                            .as_deref()
-                            .and_then(|s| serde_json::from_str(s).ok());
-                        parent_handoffs.push(serde_json::json!({
-                            "parent_id": pid,
-                            "parent_title": parent.title,
-                            "parent_status": parent.status,
-                            "summary": summary,
-                            "metadata": metadata,
-                        }));
-                    }
+                            params![pid],
+                            |r| Ok((r.get(0)?, r.get(1)?)),
+                        )
+                        .ok();
+                    let (summary, metadata_str) = run.unwrap_or((None, None));
+                    let metadata: Option<serde_json::Value> = metadata_str
+                        .as_deref()
+                        .and_then(|s| serde_json::from_str(s).ok());
+                    parent_handoffs.push(serde_json::json!({
+                        "parent_id": pid,
+                        "parent_title": parent.title,
+                        "parent_status": parent.status,
+                        "summary": summary,
+                        "metadata": metadata,
+                    }));
                 }
+            }
 
-                // Prior attempts (show.rs lines 185-200).
-                let prior_attempts: Vec<serde_json::Value> = {
-                    let mut stmt = store
-                        .conn
-                        .prepare(
-                            "SELECT outcome, summary, error, started_at, ended_at \
+            // Prior attempts (show.rs lines 185-200).
+            let prior_attempts: Vec<serde_json::Value> = {
+                let mut stmt = store
+                    .conn
+                    .prepare(
+                        "SELECT outcome, summary, error, started_at, ended_at \
                              FROM task_runs WHERE task_id = ?1 ORDER BY started_at ASC",
-                        )
-                        .map_err(|e| format!("prepare runs: {e}"))?;
-                    let mapped = stmt
-                        .query_map(params![task_id_owned], |r| {
-                            Ok(serde_json::json!({
-                                "outcome": r.get::<_, Option<String>>(0)?,
-                                "summary": r.get::<_, Option<String>>(1)?,
-                                "error": r.get::<_, Option<String>>(2)?,
-                                "started_at": r.get::<_, f64>(3)?,
-                                "ended_at": r.get::<_, Option<f64>>(4)?,
-                            }))
-                        })
-                        .map_err(|e| format!("query runs: {e}"))?;
-                    let mut out: Vec<serde_json::Value> = Vec::new();
-                    for row in mapped {
-                        out.push(row.map_err(|e| format!("collect runs: {e}"))?);
-                    }
-                    out
-                };
+                    )
+                    .map_err(|e| format!("prepare runs: {e}"))?;
+                let mapped = stmt
+                    .query_map(params![task_id_owned], |r| {
+                        Ok(serde_json::json!({
+                            "outcome": r.get::<_, Option<String>>(0)?,
+                            "summary": r.get::<_, Option<String>>(1)?,
+                            "error": r.get::<_, Option<String>>(2)?,
+                            "started_at": r.get::<_, f64>(3)?,
+                            "ended_at": r.get::<_, Option<f64>>(4)?,
+                        }))
+                    })
+                    .map_err(|e| format!("query runs: {e}"))?;
+                let mut out: Vec<serde_json::Value> = Vec::new();
+                for row in mapped {
+                    out.push(row.map_err(|e| format!("collect runs: {e}"))?);
+                }
+                out
+            };
 
-                // Comments (show.rs lines 203-216).
-                let comments: Vec<serde_json::Value> = {
-                    let mut stmt = store
-                        .conn
-                        .prepare(
-                            "SELECT author, body, created_at FROM task_comments \
+            // Comments (show.rs lines 203-216).
+            let comments: Vec<serde_json::Value> = {
+                let mut stmt = store
+                    .conn
+                    .prepare(
+                        "SELECT author, body, created_at FROM task_comments \
                              WHERE task_id = ?1 ORDER BY created_at ASC",
-                        )
-                        .map_err(|e| format!("prepare comments: {e}"))?;
-                    let mapped = stmt
-                        .query_map(params![task_id_owned], |r| {
-                            Ok(serde_json::json!({
-                                "author": r.get::<_, String>(0)?,
-                                "body": r.get::<_, String>(1)?,
-                                "created_at": r.get::<_, f64>(2)?,
-                            }))
-                        })
-                        .map_err(|e| format!("query comments: {e}"))?;
-                    let mut out: Vec<serde_json::Value> = Vec::new();
-                    for row in mapped {
-                        out.push(row.map_err(|e| format!("collect comments: {e}"))?);
-                    }
-                    out
-                };
+                    )
+                    .map_err(|e| format!("prepare comments: {e}"))?;
+                let mapped = stmt
+                    .query_map(params![task_id_owned], |r| {
+                        Ok(serde_json::json!({
+                            "author": r.get::<_, String>(0)?,
+                            "body": r.get::<_, String>(1)?,
+                            "created_at": r.get::<_, f64>(2)?,
+                        }))
+                    })
+                    .map_err(|e| format!("query comments: {e}"))?;
+                let mut out: Vec<serde_json::Value> = Vec::new();
+                for row in mapped {
+                    out.push(row.map_err(|e| format!("collect comments: {e}"))?);
+                }
+                out
+            };
 
-                Ok(WorkerContextEnvelope {
-                    task_id: task.id,
-                    title: task.title,
-                    body: task.body,
-                    status: task.status,
-                    assignee: task.assignee,
-                    tenant: task.tenant,
-                    workspace,
-                    priority: task.priority,
-                    parent_handoffs,
-                    prior_attempts,
-                    comments,
-                })
-            },
-        )
+            Ok(WorkerContextEnvelope {
+                task_id: task.id,
+                title: task.title,
+                body: task.body,
+                status: task.status,
+                assignee: task.assignee,
+                tenant: task.tenant,
+                workspace,
+                priority: task.priority,
+                parent_handoffs,
+                prior_attempts,
+                comments,
+            })
+        })
         .await
         .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
         .map_err(ServerFnError::new)?;
@@ -270,31 +268,29 @@ pub async fn fetch_task_events(
         let task_id_owned = task_id;
         let board_owned = board;
         let effective_limit: u32 = if limit == 0 { 20 } else { limit };
-        let events = tokio::task::spawn_blocking(
-            move || -> Result<Vec<KanbanEventRow>, String> {
-                // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
-                let store = KanbanStore::open_from_env_or_board(board_owned.as_deref())
-                    .map_err(|e| format!("open_from_env_or_board({:?}): {e}", board_owned))?;
-                let mut events = store
-                    .get_events(&task_id_owned)
-                    .map_err(|e| format!("get_events: {e}"))?;
-                // get_events returns id ASC; trim to the last `effective_limit`.
-                if events.len() > effective_limit as usize {
-                    let drop_count = events.len() - effective_limit as usize;
-                    events.drain(0..drop_count);
-                }
-                Ok(events
-                    .into_iter()
-                    .map(|e| KanbanEventRow {
-                        id: e.id,
-                        task_id: e.task_id,
-                        kind: e.kind,
-                        payload: e.payload,
-                        created_at: e.created_at,
-                    })
-                    .collect())
-            },
-        )
+        let events = tokio::task::spawn_blocking(move || -> Result<Vec<KanbanEventRow>, String> {
+            // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+            let store = KanbanStore::open_from_env_or_board(board_owned.as_deref())
+                .map_err(|e| format!("open_from_env_or_board({:?}): {e}", board_owned))?;
+            let mut events = store
+                .get_events(&task_id_owned)
+                .map_err(|e| format!("get_events: {e}"))?;
+            // get_events returns id ASC; trim to the last `effective_limit`.
+            if events.len() > effective_limit as usize {
+                let drop_count = events.len() - effective_limit as usize;
+                events.drain(0..drop_count);
+            }
+            Ok(events
+                .into_iter()
+                .map(|e| KanbanEventRow {
+                    id: e.id,
+                    task_id: e.task_id,
+                    kind: e.kind,
+                    payload: e.payload,
+                    created_at: e.created_at,
+                })
+                .collect())
+        })
         .await
         .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
         .map_err(ServerFnError::new)?;
@@ -324,34 +320,30 @@ pub async fn fetch_task_runs(
     {
         let task_id_owned = task_id;
         let board_owned = board;
-        let runs = tokio::task::spawn_blocking(
-            move || -> Result<Vec<TaskRunRow>, String> {
-                // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
-                let store = KanbanStore::open_from_env_or_board(board_owned.as_deref())
-                    .map_err(|e| format!("open_from_env_or_board({:?}): {e}", board_owned))?;
-                let rows = store
-                    .get_runs(&task_id_owned)
-                    .map_err(|e| format!("get_runs: {e}"))?;
-                Ok(rows
-                    .into_iter()
-                    .map(|r| {
-                        let elapsed_ms = r
-                            .ended_at
-                            .map(|end| ((end - r.started_at) * 1000.0) as i64);
-                        TaskRunRow {
-                            run_id: r.id,
-                            outcome: r.outcome,
-                            started_at: r.started_at,
-                            ended_at: r.ended_at,
-                            elapsed_ms,
-                            summary: r.summary,
-                            error: r.error,
-                            worker: None,
-                        }
-                    })
-                    .collect())
-            },
-        )
+        let runs = tokio::task::spawn_blocking(move || -> Result<Vec<TaskRunRow>, String> {
+            // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+            let store = KanbanStore::open_from_env_or_board(board_owned.as_deref())
+                .map_err(|e| format!("open_from_env_or_board({:?}): {e}", board_owned))?;
+            let rows = store
+                .get_runs(&task_id_owned)
+                .map_err(|e| format!("get_runs: {e}"))?;
+            Ok(rows
+                .into_iter()
+                .map(|r| {
+                    let elapsed_ms = r.ended_at.map(|end| ((end - r.started_at) * 1000.0) as i64);
+                    TaskRunRow {
+                        run_id: r.id,
+                        outcome: r.outcome,
+                        started_at: r.started_at,
+                        ended_at: r.ended_at,
+                        elapsed_ms,
+                        summary: r.summary,
+                        error: r.error,
+                        worker: None,
+                    }
+                })
+                .collect())
+        })
         .await
         .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
         .map_err(ServerFnError::new)?;
@@ -381,35 +373,33 @@ pub async fn fetch_comments(
     {
         let task_id_owned = task_id;
         let board_owned = board;
-        let rows = tokio::task::spawn_blocking(
-            move || -> Result<Vec<CommentRow>, String> {
-                use rusqlite::params;
-                // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
-                let store = KanbanStore::open_from_env_or_board(board_owned.as_deref())
-                    .map_err(|e| format!("open_from_env_or_board({:?}): {e}", board_owned))?;
-                let mut stmt = store
-                    .conn
-                    .prepare(
-                        "SELECT author, body, created_at FROM task_comments \
+        let rows = tokio::task::spawn_blocking(move || -> Result<Vec<CommentRow>, String> {
+            use rusqlite::params;
+            // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+            let store = KanbanStore::open_from_env_or_board(board_owned.as_deref())
+                .map_err(|e| format!("open_from_env_or_board({:?}): {e}", board_owned))?;
+            let mut stmt = store
+                .conn
+                .prepare(
+                    "SELECT author, body, created_at FROM task_comments \
                          WHERE task_id = ?1 ORDER BY created_at ASC",
-                    )
-                    .map_err(|e| format!("prepare comments: {e}"))?;
-                let mapped = stmt
-                    .query_map(params![task_id_owned], |r| {
-                        Ok(CommentRow {
-                            author: r.get(0)?,
-                            body: r.get(1)?,
-                            created_at: r.get(2)?,
-                        })
+                )
+                .map_err(|e| format!("prepare comments: {e}"))?;
+            let mapped = stmt
+                .query_map(params![task_id_owned], |r| {
+                    Ok(CommentRow {
+                        author: r.get(0)?,
+                        body: r.get(1)?,
+                        created_at: r.get(2)?,
                     })
-                    .map_err(|e| format!("query comments: {e}"))?;
-                let mut rows: Vec<CommentRow> = Vec::new();
-                for row in mapped {
-                    rows.push(row.map_err(|e| format!("collect comments: {e}"))?);
-                }
-                Ok(rows)
-            },
-        )
+                })
+                .map_err(|e| format!("query comments: {e}"))?;
+            let mut rows: Vec<CommentRow> = Vec::new();
+            for row in mapped {
+                rows.push(row.map_err(|e| format!("collect comments: {e}"))?);
+            }
+            Ok(rows)
+        })
         .await
         .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
         .map_err(ServerFnError::new)?;
@@ -491,9 +481,8 @@ pub async fn patch_task_status(
             let current = store
                 .get_task(&task_id_owned)
                 .map_err(|e| format!("get_task('{}'): {e}", task_id_owned))?;
-            let current_status = KanbanStatus::from_wire_str(&current.status).ok_or_else(
-                || format!("unknown current status on task: {:?}", current.status),
-            )?;
+            let current_status = KanbanStatus::from_wire_str(&current.status)
+                .ok_or_else(|| format!("unknown current status on task: {:?}", current.status))?;
 
             // D-14 / Risk 8 branching:
             match (new_status_owned, prompt_payload_owned) {
@@ -501,8 +490,7 @@ pub async fn patch_task_status(
                 (KanbanStatus::Done, Some(PromptPayload::Complete { summary, metadata })) => {
                     if summary.is_empty() {
                         return Err(
-                            "Risk 8: completing a task requires a non-empty summary"
-                                .to_string(),
+                            "Risk 8: completing a task requires a non-empty summary".to_string()
                         );
                     }
                     // The canonical kanban_complete contract: current_profile
@@ -526,8 +514,7 @@ pub async fn patch_task_status(
                 (KanbanStatus::Blocked, Some(PromptPayload::Block { reason })) => {
                     if reason.is_empty() {
                         return Err(
-                            "Risk 8: blocking a task requires a non-empty reason"
-                                .to_string(),
+                            "Risk 8: blocking a task requires a non-empty reason".to_string()
                         );
                     }
                     store
@@ -537,8 +524,7 @@ pub async fn patch_task_status(
                 // Wrong PromptPayload variant for the target status.
                 (KanbanStatus::Done, Some(PromptPayload::Block { .. })) => {
                     return Err(
-                        "D-13: Done target requires PromptPayload::Complete, not Block"
-                            .to_string(),
+                        "D-13: Done target requires PromptPayload::Complete, not Block".to_string(),
                     );
                 }
                 (KanbanStatus::Blocked, Some(PromptPayload::Complete { .. })) => {

@@ -29,19 +29,20 @@ use std::collections::HashSet;
 fn format_relative(unix_secs_str: &str) -> String {
     let unix_secs: f64 = unix_secs_str.parse().unwrap_or(0.0);
     let now_ms = js_sys::Date::now();
-    let then_ms = unix_secs * 1000.0;           // seconds → milliseconds (Pitfall 4)
+    let then_ms = unix_secs * 1000.0; // seconds → milliseconds (Pitfall 4)
     let diff_secs = ((now_ms - then_ms) / 1000.0) as i64;
     match diff_secs {
-        s if s < 5       => "just now".to_string(),
-        s if s < 60      => format!("{}s ago", s),
-        s if s < 3_600   => format!("{}m ago", s / 60),
-        s if s < 86_400  => format!("{}h ago", s / 3_600),
+        s if s < 5 => "just now".to_string(),
+        s if s < 60 => format!("{}s ago", s),
+        s if s < 3_600 => format!("{}m ago", s / 60),
+        s if s < 86_400 => format!("{}h ago", s / 3_600),
         s if s < 604_800 => format!("{}d ago", s / 86_400),
-        _                => format!("{}w ago", diff_secs / 604_800),
+        _ => format!("{}w ago", diff_secs / 604_800),
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)] // stub for non-wasm builds; wasm32 caller is gated behind #[cfg(target_arch = "wasm32")]
 fn format_relative(_: &str) -> String {
     // Server/native build stub — no js_sys available.
     "\u{2014}".to_string()
@@ -163,10 +164,7 @@ fn SessionRow(
 
     // Title fallback: SessionInfo.title is Option<String>; fall back to
     // the id when the server has not assigned a human label yet.
-    let title = session
-        .title
-        .clone()
-        .unwrap_or_else(|| session.id.clone());
+    let title = session.title.clone().unwrap_or_else(|| session.id.clone());
 
     // Keep the last 8 characters of long server-side session keys so two
     // parallel sessions are still distinguishable in the row sub-text.
@@ -226,4 +224,3 @@ fn SessionRow(
         }
     }
 }
-

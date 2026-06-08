@@ -188,15 +188,9 @@ fn tui_queue_cap_hit() {
     let key = make_key();
 
     for i in 0..MAX_QUEUE_DEPTH {
-        queue
-            .try_push(&key, format!("m{}", i))
-            .expect("under cap");
+        queue.try_push(&key, format!("m{}", i)).expect("under cap");
     }
-    assert_eq!(
-        queue.len(&key),
-        MAX_QUEUE_DEPTH,
-        "filled to cap (=128)"
-    );
+    assert_eq!(queue.len(&key), MAX_QUEUE_DEPTH, "filled to cap (=128)");
 
     let result = queue.try_push(&key, "overflow".to_string());
     assert!(

@@ -20,9 +20,9 @@ use std::sync::OnceLock;
 
 /// Process-wide lock for env-var mutation in tests (Rust 2024 makes set_var unsafe).
 /// Source: crates/ironhermes-tools/tests/browser_integration.rs:21
-pub(crate) fn env_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+pub(crate) fn env_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 /// RAII guard that restores the previous env var value on drop.
@@ -170,7 +170,7 @@ static MIN_PDF: &[u8] = b"%PDF-1.4\n1 0 obj\n<</Type/Catalog/Pages 2 0 R>>\nendo
 // =============================================================================
 #[tokio::test(flavor = "multi_thread")]
 async fn web_extract_single_url_local_fallback_returns_markdown() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock().lock().await;
     let _f = EnvGuard::unset("FIRECRAWL_API_KEY");
     let _e = EnvGuard::unset("EXA_API_KEY");
     let _t = EnvGuard::unset("TAVILY_API_KEY");
@@ -223,7 +223,7 @@ async fn web_extract_single_url_local_fallback_returns_markdown() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread")]
 async fn web_extract_pdf_url_routes_to_pdf_backend() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock().lock().await;
     let _f = EnvGuard::unset("FIRECRAWL_API_KEY");
     let _e = EnvGuard::unset("EXA_API_KEY");
     let _t = EnvGuard::unset("TAVILY_API_KEY");
@@ -286,7 +286,7 @@ async fn web_extract_pdf_url_routes_to_pdf_backend() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread")]
 async fn web_extract_youtube_url_dispatches_to_skill() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock().lock().await;
     let _f = EnvGuard::unset("FIRECRAWL_API_KEY");
     let _e = EnvGuard::unset("EXA_API_KEY");
     let _t = EnvGuard::unset("TAVILY_API_KEY");
@@ -342,7 +342,7 @@ async fn web_extract_youtube_url_dispatches_to_skill() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread")]
 async fn web_extract_summary_tier_thresholds() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock().lock().await;
     let _f = EnvGuard::unset("FIRECRAWL_API_KEY");
     let _e = EnvGuard::unset("EXA_API_KEY");
     let _t = EnvGuard::unset("TAVILY_API_KEY");
@@ -429,7 +429,7 @@ async fn web_extract_summary_tier_thresholds() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread")]
 async fn web_extract_use_llm_processing_false_skips_all_aux_calls() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock().lock().await;
     let _f = EnvGuard::unset("FIRECRAWL_API_KEY");
     let _e = EnvGuard::unset("EXA_API_KEY");
     let _t = EnvGuard::unset("TAVILY_API_KEY");
@@ -491,7 +491,7 @@ async fn web_extract_summarization_role_resolves_via_phase26_cascade() {
     use ironhermes_core::ProviderResolver;
     use ironhermes_core::config::Config;
 
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock().lock().await;
     let _f = EnvGuard::unset("FIRECRAWL_API_KEY");
     let _e = EnvGuard::unset("EXA_API_KEY");
     let _t = EnvGuard::unset("TAVILY_API_KEY");
@@ -704,7 +704,7 @@ impl SummarizationClientHandle for Phase26CascadeHandle {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread")]
 async fn web_extract_secret_in_url_redacted() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock().lock().await;
 
     let server = MockServer::start().await; // intentionally no mocks: any hit would 404
 
@@ -739,7 +739,7 @@ async fn web_extract_secret_in_url_redacted() {
 // =============================================================================
 #[tokio::test(flavor = "multi_thread")]
 async fn web_extract_multi_url_partial_failure_returns_per_url_errors() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock().lock().await;
     let _f = EnvGuard::unset("FIRECRAWL_API_KEY");
     let _e = EnvGuard::unset("EXA_API_KEY");
     let _t = EnvGuard::unset("TAVILY_API_KEY");
@@ -822,7 +822,7 @@ async fn web_extract_excluded_when_no_backend_available() {
     // Despite the test name (lifted verbatim from VALIDATION.md), the assertion
     // is that web_extract is NOT excluded — D-27 says it's ALWAYS available
     // because the local backend has no env-var prereq.
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock().lock().await;
     let _f = EnvGuard::unset("FIRECRAWL_API_KEY");
     let _e = EnvGuard::unset("EXA_API_KEY");
     let _t = EnvGuard::unset("TAVILY_API_KEY");

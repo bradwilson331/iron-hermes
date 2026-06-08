@@ -11,7 +11,7 @@
 //! machine across deltas, holding back partial-tag tails and discarding
 //! everything inside a span.
 
-const OPEN_TAG: &str = "<memory-context>";  // 16 chars
+const OPEN_TAG: &str = "<memory-context>"; // 16 chars
 const CLOSE_TAG: &str = "</memory-context>"; // 17 chars
 
 /// Stateful scrubber for streaming text that may contain split memory-context
@@ -133,8 +133,8 @@ impl StreamingContextScrubber {
             self.in_span = false;
             return String::new();
         }
-        let tail = std::mem::take(&mut self.buf);
-        tail
+
+        std::mem::take(&mut self.buf)
     }
 
     /// Find the first ASCII-case-insensitive occurrence of `needle` in `haystack`,
@@ -190,8 +190,14 @@ mod tests {
         assert!(out.contains("hello"), "should contain 'hello'");
         assert!(out.contains("world"), "should contain 'world'");
         assert!(!out.contains("secret"), "should NOT contain 'secret'");
-        assert!(!out.contains("<memory-context>"), "should NOT contain open tag");
-        assert!(!out.contains("</memory-context>"), "should NOT contain close tag");
+        assert!(
+            !out.contains("<memory-context>"),
+            "should NOT contain open tag"
+        );
+        assert!(
+            !out.contains("</memory-context>"),
+            "should NOT contain close tag"
+        );
     }
 
     #[test]
@@ -203,7 +209,10 @@ mod tests {
         assert!(combined.contains("hi "), "should contain 'hi '");
         assert!(combined.contains(" bye"), "should contain ' bye'");
         assert!(!combined.contains("secret"), "should NOT contain 'secret'");
-        assert!(!combined.contains("<memory-con"), "should NOT leak partial open tag");
+        assert!(
+            !combined.contains("<memory-con"),
+            "should NOT leak partial open tag"
+        );
         assert!(!combined.contains("text>"), "should NOT leak tag fragment");
     }
 
@@ -216,7 +225,10 @@ mod tests {
         assert!(combined.contains('a'), "should contain 'a'");
         assert!(combined.contains('b'), "should contain 'b'");
         assert!(!combined.contains("secret"), "should NOT contain 'secret'");
-        assert!(!combined.contains("</memory-con"), "should NOT leak partial close tag");
+        assert!(
+            !combined.contains("</memory-con"),
+            "should NOT leak partial close tag"
+        );
     }
 
     #[test]
@@ -224,7 +236,10 @@ mod tests {
         let mut s = StreamingContextScrubber::new();
         // The partial tag tail should be held, not emitted
         let out1 = s.feed("ok <memory-cont");
-        assert_eq!(out1, "ok ", "partial tag tail must be held back, not emitted");
+        assert_eq!(
+            out1, "ok ",
+            "partial tag tail must be held back, not emitted"
+        );
         // Next delta disproves the tag — held buffer + new text should appear
         let out2 = s.feed("inues normally");
         let combined = out1 + &out2;
@@ -243,10 +258,16 @@ mod tests {
         let mut s = StreamingContextScrubber::new();
         let out = s.feed("x<memory-context>open forever");
         assert!(out.contains('x'), "text before open tag should be emitted");
-        assert!(!out.contains("open forever"), "span content should NOT be emitted");
+        assert!(
+            !out.contains("open forever"),
+            "span content should NOT be emitted"
+        );
         // flush() must discard the unterminated span and return "" (no leak)
         let tail = s.flush();
-        assert_eq!(tail, "", "flush of unterminated span must return empty string");
+        assert_eq!(
+            tail, "",
+            "flush of unterminated span must return empty string"
+        );
     }
 
     #[test]
@@ -279,7 +300,8 @@ mod tests {
     #[test]
     fn two_complete_blocks_back_to_back() {
         let mut s = StreamingContextScrubber::new();
-        let out = s.feed("<memory-context>a</memory-context><memory-context>b</memory-context>tail");
+        let out =
+            s.feed("<memory-context>a</memory-context><memory-context>b</memory-context>tail");
         assert_eq!(out, "tail", "only text after both blocks should be visible");
         let tail = s.flush();
         assert_eq!(tail, "", "flush should return empty after clean stream");

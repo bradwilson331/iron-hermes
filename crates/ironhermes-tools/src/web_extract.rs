@@ -93,20 +93,20 @@ impl WebExtractTool {
 /// contract — only string LEAVES are mutated.
 pub(crate) fn redact_url_args(raw: &serde_json::Value) -> serde_json::Value {
     let mut redacted = raw.clone();
-    if let Some(obj) = redacted.as_object_mut() {
-        if let Some(urls) = obj.get_mut("urls") {
-            if let Some(arr) = urls.as_array_mut() {
-                for u in arr.iter_mut() {
-                    if let Some(s) = u.as_str() {
-                        let redacted_url = redact_secrets_in_url(s, &[]);
-                        *u = serde_json::Value::String(redacted_url);
-                    }
+    if let Some(obj) = redacted.as_object_mut()
+        && let Some(urls) = obj.get_mut("urls")
+    {
+        if let Some(arr) = urls.as_array_mut() {
+            for u in arr.iter_mut() {
+                if let Some(s) = u.as_str() {
+                    let redacted_url = redact_secrets_in_url(s, &[]);
+                    *u = serde_json::Value::String(redacted_url);
                 }
-            } else if let Some(s) = urls.as_str() {
-                // Tolerate single-string url field (some callers may pass a scalar).
-                let redacted_url = redact_secrets_in_url(s, &[]);
-                *urls = serde_json::Value::String(redacted_url);
             }
+        } else if let Some(s) = urls.as_str() {
+            // Tolerate single-string url field (some callers may pass a scalar).
+            let redacted_url = redact_secrets_in_url(s, &[]);
+            *urls = serde_json::Value::String(redacted_url);
         }
     }
     redacted

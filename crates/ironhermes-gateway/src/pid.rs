@@ -214,12 +214,11 @@ fn current_profile_label(home: &Path) -> String {
     // the directory name immediately after `profiles/`.
     let components: Vec<_> = home.components().collect();
     for window in components.windows(2) {
-        if let std::path::Component::Normal(name) = window[0] {
-            if name == "profiles" {
-                if let std::path::Component::Normal(slug) = window[1] {
-                    return slug.to_string_lossy().to_string();
-                }
-            }
+        if let std::path::Component::Normal(name) = window[0]
+            && name == "profiles"
+            && let std::path::Component::Normal(slug) = window[1]
+        {
+            return slug.to_string_lossy().to_string();
         }
     }
     "default".to_string()

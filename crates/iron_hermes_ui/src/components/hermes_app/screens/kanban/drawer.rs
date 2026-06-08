@@ -541,9 +541,7 @@ fn EventStreamSection(
 
 /// D-20 sub-section: render existing comments.
 #[component]
-fn CommentList(
-    comments_state: Option<Option<Result<Vec<CommentRow>, ServerFnError>>>,
-) -> Element {
+fn CommentList(comments_state: Option<Option<Result<Vec<CommentRow>, ServerFnError>>>) -> Element {
     rsx! {
         match comments_state {
             Some(Some(Ok(rows))) if rows.is_empty() => rsx! {
@@ -576,6 +574,7 @@ fn CommentList(
 // ============================================================================
 
 /// Map `task_runs.outcome` value → human-readable badge label per UI-SPEC §7.7.
+#[allow(dead_code)] // called in rsx! format string; dead_code fires on test target
 fn outcome_label(outcome: Option<&str>) -> &'static str {
     match outcome {
         Some("completed") => "COMPLETED",
@@ -591,6 +590,7 @@ fn outcome_label(outcome: Option<&str>) -> &'static str {
 }
 
 /// Format an elapsed duration in milliseconds as a short string.
+#[allow(dead_code)] // called in rsx! format string; dead_code fires on test target
 fn format_elapsed_ms(ms: i64) -> String {
     if ms < 1000 {
         format!("{}ms", ms)
@@ -602,6 +602,7 @@ fn format_elapsed_ms(ms: i64) -> String {
 }
 
 /// Format a Unix epoch (float seconds) as a short relative age string.
+#[allow(dead_code)] // called in rsx! format string; dead_code fires on test target
 fn format_unix_secs(secs: f64) -> String {
     let now = current_unix_time();
     if now <= 0.0 {
@@ -619,6 +620,7 @@ fn format_unix_secs(secs: f64) -> String {
     }
 }
 
+#[allow(dead_code)] // called from format_unix_secs; dead_code fires on test target
 fn current_unix_time() -> f64 {
     #[cfg(target_arch = "wasm32")]
     {

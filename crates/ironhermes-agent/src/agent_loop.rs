@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use ironhermes_core::{ChatMessage, ChatResponse, ToolCall, ToolSchema, Usage};
 use ironhermes_core::pricing::{PricingRegistry, compute_cost_micros};
+use ironhermes_core::{ChatMessage, ChatResponse, ToolCall, ToolSchema, Usage};
 use ironhermes_hooks::{HookEvent, HookEventKind, HookRegistry};
 use ironhermes_state::StateStore;
 use ironhermes_tools::ToolRegistry;
@@ -74,8 +74,7 @@ pub(crate) fn is_delegation_failure_result(result: &str) -> bool {
 /// enough to bail the parent loop on the same turn, distinct from the
 /// two-strike threshold for max_iterations / timeout / error.
 pub(crate) fn is_delegation_kill_result(result: &str) -> bool {
-    result.contains("[subagent-failure: cancelled")
-        || result.contains("Cancelled by parent")
+    result.contains("[subagent-failure: cancelled") || result.contains("Cancelled by parent")
 }
 
 /// Result of an agent loop execution.
@@ -308,9 +307,8 @@ pub struct AgentLoop {
     /// turn; any mtime increase fires the context-file-edit warning and
     /// updates the snapshot (idempotency invariant — Test 5 in
     /// `tests/cache_break_warnings.rs`).
-    context_file_mtimes: std::sync::Mutex<
-        std::collections::HashMap<std::path::PathBuf, std::time::SystemTime>,
-    >,
+    context_file_mtimes:
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, std::time::SystemTime>>,
     /// Phase 36.2 Plan 08 (D-CACHE-03): paths the surface wants the cache-break
     /// system to watch. Empty by default — populated via
     /// `with_context_file_paths` so existing call sites that don't track
@@ -482,10 +480,7 @@ impl AgentLoop {
     /// mtime since the previous turn fires the context-file-edit cache-break
     /// warning exactly once per change (Test 5 idempotency).
     /// Typical paths: SOUL.md, AGENTS.md, CLAUDE.md.
-    pub fn with_context_file_paths(
-        mut self,
-        paths: Vec<std::path::PathBuf>,
-    ) -> Self {
+    pub fn with_context_file_paths(mut self, paths: Vec<std::path::PathBuf>) -> Self {
         self.context_file_paths = paths;
         self
     }
@@ -671,7 +666,6 @@ impl AgentLoop {
                         let m = m.clone();
                         Box::pin(async move {
                             // Dispatch to the memory manager handle's tool call router.
-                            use ironhermes_tools::memory_manager_handle::MemoryManagerHandle;
                             let g = m.lock().await;
                             g.handle_tool_call("memory", args)
                                 .await
@@ -834,7 +828,11 @@ impl AgentLoop {
     pub fn activity_summary(&self) -> ActivitySummary {
         let last = *self.activity_last.lock().expect("activity_last poisoned");
         let kind = *self.activity_kind.lock().expect("activity_kind poisoned");
-        let tool = self.current_tool.lock().expect("current_tool poisoned").clone();
+        let tool = self
+            .current_tool
+            .lock()
+            .expect("current_tool poisoned")
+            .clone();
         ActivitySummary {
             seconds_since: last.elapsed().as_secs_f64(),
             last_kind: kind,
@@ -935,10 +933,10 @@ impl AgentLoop {
             let rest = &err_str[open + 1..];
             if rest.len() >= 4 {
                 let (digits, tail) = rest.split_at(3);
-                if tail.starts_with(' ') {
-                    if let Ok(code) = digits.parse::<u16>() {
-                        return Some(code);
-                    }
+                if tail.starts_with(' ')
+                    && let Ok(code) = digits.parse::<u16>()
+                {
+                    return Some(code);
                 }
             }
         }
@@ -1082,9 +1080,9 @@ impl AgentLoop {
             let provider_for_write = provider_str.clone();
             let model_for_write = model_str.clone();
             let write_result: Result<(), anyhow::Error> = (|| {
-                let guard = store.lock().map_err(|_| {
-                    anyhow::anyhow!("state store mutex poisoned")
-                })?;
+                let guard = store
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("state store mutex poisoned"))?;
                 let tx = guard.conn_for_test().unchecked_transaction()?;
                 // INSERT usage_events row.
                 tx.execute(
@@ -1212,9 +1210,9 @@ impl AgentLoop {
             let variant_name = provider_error.variant_name().to_string();
             let session_for_write = session_id.clone();
             let write_result: Result<(), anyhow::Error> = (|| {
-                let guard = store.lock().map_err(|_| {
-                    anyhow::anyhow!("state store mutex poisoned")
-                })?;
+                let guard = store
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("state store mutex poisoned"))?;
                 let tx = guard.conn_for_test().unchecked_transaction()?;
                 tx.execute(
                     "INSERT INTO usage_events \
@@ -1272,10 +1270,10 @@ impl AgentLoop {
 
         // Drain transient pressure message (D-24 channel 3) BEFORE compression so it
         // sits on the same pre-chat message vector the LLM is about to see.
-        if let (Some(tracker), Some(sid)) = (&self.pressure_tracker, &self.session_id) {
-            if let Some(transient) = tracker.take_transient(sid) {
-                messages.push(ChatMessage::system(transient));
-            }
+        if let (Some(tracker), Some(sid)) = (&self.pressure_tracker, &self.session_id)
+            && let Some(transient) = tracker.take_transient(sid)
+        {
+            messages.push(ChatMessage::system(transient));
         }
 
         // Belt-and-suspenders: snapshot caller's vec before invoking the engine
@@ -1406,12 +1404,7 @@ impl AgentLoop {
             let current = self.client.model();
             if !prev.is_empty() && prev != current {
                 tracker
-                    .warn_cache_break_model_swap(
-                        sid,
-                        prev,
-                        current,
-                        self.hook_registry.as_deref(),
-                    )
+                    .warn_cache_break_model_swap(sid, prev, current, self.hook_registry.as_deref())
                     .await;
             }
         }
@@ -1437,21 +1430,21 @@ impl AgentLoop {
 
         loop {
             // D-21: Check cancellation token before each iteration
-            if let Some(ref token) = self.cancel_token {
-                if token.is_cancelled() {
-                    info!(turns = turns_used, "Agent loop cancelled by parent");
-                    return Ok(AgentResult {
-                        messages,
-                        appended,
-                        turns_used,
-                        finished_naturally: false,
-                        final_response: Some("Cancelled by parent".to_string()),
-                        total_usage,
-                        compression_count_after: self.compression_count,
-                        stop_reason: StopReason::Cancelled,
-                        context_warnings: Vec::new(),
-                    });
-                }
+            if let Some(ref token) = self.cancel_token
+                && token.is_cancelled()
+            {
+                info!(turns = turns_used, "Agent loop cancelled by parent");
+                return Ok(AgentResult {
+                    messages,
+                    appended,
+                    turns_used,
+                    finished_naturally: false,
+                    final_response: Some("Cancelled by parent".to_string()),
+                    total_usage,
+                    compression_count_after: self.compression_count,
+                    stop_reason: StopReason::Cancelled,
+                    context_warnings: Vec::new(),
+                });
             }
 
             if turns_used >= self.max_iterations {
@@ -1463,25 +1456,25 @@ impl AgentLoop {
             // consume() is SeqCst decrement; None means Stop100 → clean terminate
             // (NEVER panic, NEVER process::exit — this is the unskippable yolo
             // guardrail). Parent + child subagents share the same counter.
-            if let Some(ref handle) = self.budget {
-                if handle.consume().is_none() {
-                    info!(
-                        target: "ironhermes_agent::budget",
-                        used = handle.used(), max = handle.max(),
-                        "iteration budget exhausted; stopping cleanly (Stop100)"
-                    );
-                    return Ok(AgentResult {
-                        messages,
-                        appended,
-                        turns_used,
-                        finished_naturally: false,
-                        final_response: None,
-                        total_usage,
-                        compression_count_after: self.compression_count,
-                        stop_reason: StopReason::BudgetExhausted,
-                        context_warnings: Vec::new(),
-                    });
-                }
+            if let Some(ref handle) = self.budget
+                && handle.consume().is_none()
+            {
+                info!(
+                    target: "ironhermes_agent::budget",
+                    used = handle.used(), max = handle.max(),
+                    "iteration budget exhausted; stopping cleanly (Stop100)"
+                );
+                return Ok(AgentResult {
+                    messages,
+                    appended,
+                    turns_used,
+                    finished_naturally: false,
+                    final_response: None,
+                    total_usage,
+                    compression_count_after: self.compression_count,
+                    stop_reason: StopReason::BudgetExhausted,
+                    context_warnings: Vec::new(),
+                });
             }
 
             // ── Phase 36.2 Plan 08 (D-CACHE-03 trigger 3): per-turn mtime poll ─
@@ -1529,10 +1522,7 @@ impl AgentLoop {
                         (self.pressure_tracker.as_ref(), self.session_id.as_deref())
                 {
                     tracker
-                        .warn_cache_break_context_file_edit(
-                            sid,
-                            self.hook_registry.as_deref(),
-                        )
+                        .warn_cache_break_context_file_edit(sid, self.hook_registry.as_deref())
                         .await;
                 }
             }
@@ -1553,7 +1543,7 @@ impl AgentLoop {
             if self.context_engine.is_some() {
                 self.pre_chat_compress(&mut messages).await;
             } else if let Some(ref compressor) = self.compressor {
-                let mut comp = compressor.lock().await;
+                let comp = compressor.lock().await;
                 comp.compress(&mut messages);
             }
 
@@ -1575,24 +1565,19 @@ impl AgentLoop {
                         let guard = mgr.lock().await;
                         guard.prefetch_with_query(&user_msg_text, session_id).await
                     };
-                    if let Ok(raw) = raw {
-                        if let Some(block) =
-                            crate::memory_context::build_memory_context_block(&raw)
-                        {
-                            // D-08: insert only when recall is non-empty.
-                            let insert_idx = messages
-                                .iter()
-                                .rposition(|m| m.role == ironhermes_core::Role::User)
-                                .unwrap_or(messages.len());
-                            messages.insert(
-                                insert_idx,
-                                ChatMessage::recall_system(block),
-                            );
-                        }
-                        // D-08: when build returns None (empty recall), do NOT insert.
-                        // The retain above already evicted the prior recall message, so
-                        // a file-provider-only session's buffer is byte-identical to pre-34a.
+                    if let Ok(raw) = raw
+                        && let Some(block) = crate::memory_context::build_memory_context_block(&raw)
+                    {
+                        // D-08: insert only when recall is non-empty.
+                        let insert_idx = messages
+                            .iter()
+                            .rposition(|m| m.role == ironhermes_core::Role::User)
+                            .unwrap_or(messages.len());
+                        messages.insert(insert_idx, ChatMessage::recall_system(block));
                     }
+                    // D-08: when build returns None (empty recall), do NOT insert.
+                    // The retain above already evicted the prior recall message, so
+                    // a file-provider-only session's buffer is byte-identical to pre-34a.
                 }
             }
 
@@ -1695,14 +1680,15 @@ impl AgentLoop {
                         self.write_usage_failure(&provider_error);
 
                         // Try fallback if available and not already activated (PROV-07, D-11)
-                        if should_fallback && !self.fallback_activated {
-                            if let Some(fallback) = self.fallback_client.take() {
-                                warn!("Primary LLM failed, activating fallback provider: {err}");
-                                self.client = fallback;
-                                self.fallback_activated = true;
-                                retry_count = 0;
-                                continue;
-                            }
+                        if should_fallback
+                            && !self.fallback_activated
+                            && let Some(fallback) = self.fallback_client.take()
+                        {
+                            warn!("Primary LLM failed, activating fallback provider: {err}");
+                            self.client = fallback;
+                            self.fallback_activated = true;
+                            retry_count = 0;
+                            continue;
                         }
 
                         // Retry transient errors with backoff
@@ -1886,7 +1872,14 @@ impl AgentLoop {
     ) -> Result<(ChatMessage, Option<Usage>)> {
         let response: ChatResponse = self
             .client
-            .chat_completion(messages, tools, None, None, None, self.resolved_extras.clone())
+            .chat_completion(
+                messages,
+                tools,
+                None,
+                None,
+                None,
+                self.resolved_extras.clone(),
+            )
             .await
             .context("LLM call failed")?;
 
@@ -1919,7 +1912,14 @@ impl AgentLoop {
     ) -> Result<(ChatMessage, Option<Usage>)> {
         let mut rx = self
             .client
-            .chat_completion_stream(messages, tools, None, None, None, self.resolved_extras.clone())
+            .chat_completion_stream(
+                messages,
+                tools,
+                None,
+                None,
+                None,
+                self.resolved_extras.clone(),
+            )
             .await
             .context("Streaming LLM call failed")?;
 
@@ -2169,10 +2169,8 @@ impl AgentLoop {
                         && name.as_str() != "memory_recall");
                 if is_memory_write_tool
                     && self.session_has_prior_turns
-                    && let (Some(tracker), Some(sid)) = (
-                        self.pressure_tracker.as_ref(),
-                        self.session_id.as_deref(),
-                    )
+                    && let (Some(tracker), Some(sid)) =
+                        (self.pressure_tracker.as_ref(), self.session_id.as_deref())
                 {
                     tracker
                         .warn_cache_break_memory_edit(sid, self.hook_registry.as_deref())
@@ -2220,9 +2218,8 @@ impl AgentLoop {
                             }
                         };
                     }
-                    return format!(
-                        r#"{{"error":"unavailable","reason":"memory manager not configured"}}"#
-                    );
+                    return r#"{"error":"unavailable","reason":"memory manager not configured"}"#
+                        .to_string();
                 }
 
                 // Phase 32.1 Plan 02 Task 2: bump activity tracker before tool dispatch.
@@ -2294,17 +2291,16 @@ impl AgentLoop {
                         let mut final_result = result;
                         const FILE_ACCESS_TOOLS: &[&str] =
                             &["read_file", "write_file", "patch", "search_files"];
-                        if FILE_ACCESS_TOOLS.contains(&name.as_str()) {
-                            if let Some(ref disc) = self.subdir_discovery {
-                                if let Some(ref path_str) = tool_path_arg {
-                                    let path = std::path::Path::new(path_str);
-                                    if let Ok(mut discovery) = disc.lock() {
-                                        if let Some(ctx) = discovery.check_path(path) {
-                                            debug!(tool = %name, path = %path_str, "Subdirectory context discovered");
-                                            final_result.push_str(&ctx);
-                                        }
-                                    }
-                                }
+                        if FILE_ACCESS_TOOLS.contains(&name.as_str())
+                            && let Some(ref disc) = self.subdir_discovery
+                            && let Some(ref path_str) = tool_path_arg
+                        {
+                            let path = std::path::Path::new(path_str);
+                            if let Ok(mut discovery) = disc.lock()
+                                && let Some(ctx) = discovery.check_path(path)
+                            {
+                                debug!(tool = %name, path = %path_str, "Subdirectory context discovered");
+                                final_result.push_str(&ctx);
                             }
                         }
                         final_result
@@ -2613,8 +2609,8 @@ mod hooks_ordering_tests {
             1,
             "blocked tool must emit exactly one ToolCompleted"
         );
-        assert_eq!(
-            tool_completed[0].0, false,
+        assert!(
+            !tool_completed[0].0,
             "blocked tool ToolCompleted must have success=false"
         );
         assert!(
@@ -2713,13 +2709,13 @@ mod hooks_ordering_tests {
         ));
     }
 
-    /// D-01 / audit warning #4: agent_loop.rs must not fire MessageReceived or ResponseSent.
-    /// Uses include_str! as a compile-time regression guard — future edits that reintroduce
-    /// these forbidden fires will trip this test without needing a mock LlmClient.
-    ///
-    /// We search for the fire_hook call patterns specifically so the assertion strings
-    /// themselves (which mention the type names for documentation purposes) do not
-    /// cause false positives.
+    // D-01 / audit warning #4: agent_loop.rs must not fire MessageReceived or ResponseSent.
+    // Uses include_str! as a compile-time regression guard — future edits that reintroduce
+    // these forbidden fires will trip this test without needing a mock LlmClient.
+    //
+    // We search for the fire_hook call patterns specifically so the assertion strings
+    // themselves (which mention the type names for documentation purposes) do not
+    // cause false positives.
     // -----------------------------------------------------------------------
     // Skill enforcement tests (SKILL-06 / 07.5-01 Task 2)
     // -----------------------------------------------------------------------
@@ -3101,8 +3097,7 @@ mod hooks_ordering_tests {
 #[cfg(test)]
 mod delegation_failure_tests {
     use super::{
-        MAX_CONSECUTIVE_DELEGATION_FAILURES, SUBAGENT_FAILURE_MARKER,
-        is_delegation_failure_result,
+        MAX_CONSECUTIVE_DELEGATION_FAILURES, SUBAGENT_FAILURE_MARKER, is_delegation_failure_result,
     };
 
     #[test]
@@ -3418,8 +3413,8 @@ mod fallback_tests {
     }
 
     /// Marquee transport case: Ollama not running, full reqwest/hyper-util chain.
-    /// `{err:#}` contains `"error sending request for url"` (reqwest Kind::Request)
-    /// + `"tcp connect error"` (hyper-util) + `"Connection refused"` (OS errno).
+    /// `{err:#}` contains `"error sending request for url"` (reqwest Kind::Request),
+    /// `"tcp connect error"` (hyper-util), and `"Connection refused"` (OS errno).
     /// All three needles match; each is independently sufficient.
     #[test]
     fn test_classify_transport_request_send_marker() {
@@ -3458,10 +3453,7 @@ mod fallback_tests {
         );
         let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
         assert!(should_retry, "transport errors should be retryable");
-        assert!(
-            should_fallback,
-            "connect timeout should trigger fallback"
-        );
+        assert!(should_fallback, "connect timeout should trigger fallback");
     }
 
     /// DNS resolution failure: exercises `"dns error"` and `"failed to lookup address"`.
@@ -3474,10 +3466,7 @@ mod fallback_tests {
         );
         let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
         assert!(should_retry, "transport errors should be retryable");
-        assert!(
-            should_fallback,
-            "DNS failure should trigger fallback"
-        );
+        assert!(should_fallback, "DNS failure should trigger fallback");
     }
 
     /// Connection reset by peer — fed alone (no `"error sending request for url"`)
@@ -3488,10 +3477,7 @@ mod fallback_tests {
         let err = anyhow!("Connection reset by peer (os error 54)");
         let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
         assert!(should_retry, "transport errors should be retryable");
-        assert!(
-            should_fallback,
-            "connection reset should trigger fallback"
-        );
+        assert!(should_fallback, "connection reset should trigger fallback");
     }
 
     /// Regression guard against Pitfall 1: SSE stream read timeout is NOT a transport
@@ -3604,8 +3590,8 @@ mod fallback_tests {
             "Streaming chat completion failed (400 Bad Request): qwen/qwen3.7-max is not a valid model ID [body: {{\"error\":{{\"message\":\"qwen/qwen3.7-max is not a valid model ID\",\"code\":400}}}}]"
         );
         let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
-        assert_eq!(should_retry, false, "phase 36.14 PROV-07: 400 Bad Request");
-        assert_eq!(should_fallback, true, "phase 36.14 PROV-07: 400 Bad Request");
+        assert!(!should_retry, "phase 36.14 PROV-07: 400 Bad Request");
+        assert!(should_fallback, "phase 36.14 PROV-07: 400 Bad Request");
     }
 
     #[test]
@@ -3615,8 +3601,14 @@ mod fallback_tests {
             "Streaming chat completion failed (400 Bad Request): qwen/qwen3.7-max is not a valid model ID [body: {{\"error\":{{\"message\":\"qwen/qwen3.7-max is not a valid model ID\",\"code\":\"400\"}}}}]"
         );
         let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
-        assert_eq!(should_retry, false, "phase 36.14 PROV-07: string-code 400 Bad Request");
-        assert_eq!(should_fallback, true, "phase 36.14 PROV-07: string-code 400 Bad Request");
+        assert!(
+            !should_retry,
+            "phase 36.14 PROV-07: string-code 400 Bad Request"
+        );
+        assert!(
+            should_fallback,
+            "phase 36.14 PROV-07: string-code 400 Bad Request"
+        );
     }
 
     #[test]
@@ -3625,8 +3617,11 @@ mod fallback_tests {
             "Streaming chat completion failed (429 Too Many Requests): rate limit exceeded [body: {{\"error\":{{\"message\":\"rate limit exceeded\",\"code\":429}}}}]"
         );
         let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
-        assert_eq!(should_retry, true, "phase 36.14 PROV-07: 429 Too Many Requests");
-        assert_eq!(should_fallback, true, "phase 36.14 PROV-07: 429 Too Many Requests");
+        assert!(should_retry, "phase 36.14 PROV-07: 429 Too Many Requests");
+        assert!(
+            should_fallback,
+            "phase 36.14 PROV-07: 429 Too Many Requests"
+        );
     }
 
     #[test]
@@ -3635,8 +3630,14 @@ mod fallback_tests {
             "Streaming chat completion failed (500 Internal Server Error): upstream error [body: {{\"error\":{{\"message\":\"upstream error\",\"code\":500}}}}]"
         );
         let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
-        assert_eq!(should_retry, true, "phase 36.14 PROV-07: 500 Internal Server Error");
-        assert_eq!(should_fallback, true, "phase 36.14 PROV-07: 500 Internal Server Error");
+        assert!(
+            should_retry,
+            "phase 36.14 PROV-07: 500 Internal Server Error"
+        );
+        assert!(
+            should_fallback,
+            "phase 36.14 PROV-07: 500 Internal Server Error"
+        );
     }
 
     #[test]
@@ -3645,8 +3646,8 @@ mod fallback_tests {
             "Streaming chat completion failed (502 Bad Gateway): bad gateway [body: {{\"error\":{{\"message\":\"bad gateway\",\"code\":502}}}}]"
         );
         let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
-        assert_eq!(should_retry, true, "phase 36.14 PROV-07: 502 Bad Gateway");
-        assert_eq!(should_fallback, true, "phase 36.14 PROV-07: 502 Bad Gateway");
+        assert!(should_retry, "phase 36.14 PROV-07: 502 Bad Gateway");
+        assert!(should_fallback, "phase 36.14 PROV-07: 502 Bad Gateway");
     }
 
     #[test]
@@ -3655,8 +3656,11 @@ mod fallback_tests {
             "Streaming chat completion failed (503 Service Unavailable): service unavailable [body: {{\"error\":{{\"message\":\"service unavailable\",\"code\":503}}}}]"
         );
         let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
-        assert_eq!(should_retry, true, "phase 36.14 PROV-07: 503 Service Unavailable");
-        assert_eq!(should_fallback, true, "phase 36.14 PROV-07: 503 Service Unavailable");
+        assert!(should_retry, "phase 36.14 PROV-07: 503 Service Unavailable");
+        assert!(
+            should_fallback,
+            "phase 36.14 PROV-07: 503 Service Unavailable"
+        );
     }
 
     #[test]
@@ -3665,8 +3669,11 @@ mod fallback_tests {
             "Streaming chat completion failed (SSE error): upstream failure [body: {{\"error\":{{\"message\":\"upstream failure\"}}}}]"
         );
         let (should_retry, should_fallback) = AgentLoop::classify_llm_error(&err);
-        assert_eq!(should_retry, true, "phase 36.14 PROV-07: unknown code SSE error");
-        assert_eq!(should_fallback, false, "phase 36.14 PROV-07: unknown code SSE error — safe conservative default");
+        assert!(should_retry, "phase 36.14 PROV-07: unknown code SSE error");
+        assert!(
+            !should_fallback,
+            "phase 36.14 PROV-07: unknown code SSE error — safe conservative default"
+        );
     }
 }
 
@@ -3716,6 +3723,7 @@ mod plan_18_06_tests {
         }
     }
 
+    #[allow(clippy::type_complexity)] // test helper return; type alias would only exist here, inline is clearer
     fn make_engine(
         threshold: f32,
     ) -> (
@@ -4270,7 +4278,10 @@ mod activity_tracker_tests {
     fn interrupt_cancels_token() {
         let token = CancellationToken::new();
         let agent = AgentLoop::for_tests().with_cancellation_token(token.clone());
-        assert!(!agent.is_cancelled(), "should not be cancelled before interrupt");
+        assert!(
+            !agent.is_cancelled(),
+            "should not be cancelled before interrupt"
+        );
         agent.interrupt("inactivity timeout");
         assert!(
             agent.is_cancelled(),
@@ -4314,7 +4325,10 @@ mod activity_tracker_tests {
         agent.mark_activity_for_test(ActivityKind::ToolCall, None);
         let after = agent.activity_summary();
         assert_eq!(after.last_kind, ActivityKind::ToolCall);
-        assert_eq!(after.current_tool, None, "current_tool should be cleared after reset");
+        assert_eq!(
+            after.current_tool, None,
+            "current_tool should be cleared after reset"
+        );
     }
 
     /// Test 5: `interrupt()` on an agent without a CancellationToken is a no-op
@@ -4410,9 +4424,15 @@ mod activity_tracker_run_wiring {
 
     #[async_trait]
     impl Tool for TrackingMockTool {
-        fn name(&self) -> &str { "track_mock" }
-        fn toolset(&self) -> &str { "test" }
-        fn description(&self) -> &str { "tracking mock tool" }
+        fn name(&self) -> &str {
+            "track_mock"
+        }
+        fn toolset(&self) -> &str {
+            "test"
+        }
+        fn description(&self) -> &str {
+            "tracking mock tool"
+        }
         fn schema(&self) -> ToolSchema {
             ToolSchema::new(
                 "track_mock",
@@ -4467,8 +4487,7 @@ mod activity_tracker_run_wiring {
             "last_kind should be ToolCall after execute_tool_call"
         );
         assert_eq!(
-            summary.current_tool,
-            None,
+            summary.current_tool, None,
             "current_tool should be None after post-dispatch reset"
         );
     }
@@ -4524,9 +4543,10 @@ mod resolved_extras_tests {
         let mut map: HashMap<String, serde_json::Value> = HashMap::new();
         map.insert("num_ctx".to_string(), serde_json::json!(8192u32));
         let agent = make_minimal_agent().with_resolved_extras(Some(map.clone()));
-        let stored = agent.resolved_extras.as_ref().expect(
-            "resolved_extras must be Some after with_resolved_extras(Some(map))",
-        );
+        let stored = agent
+            .resolved_extras
+            .as_ref()
+            .expect("resolved_extras must be Some after with_resolved_extras(Some(map))");
         assert_eq!(
             stored.get("num_ctx"),
             Some(&serde_json::json!(8192u32)),

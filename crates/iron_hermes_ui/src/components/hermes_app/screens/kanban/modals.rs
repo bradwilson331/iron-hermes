@@ -324,10 +324,7 @@ pub fn ArchiveConfirmModal(
 /// UI-SPEC §7.2 CreateTaskModal: title (required) + assignee + priority +
 /// tenant + body + Start in Triage checkbox.
 #[component]
-pub fn CreateTaskModal(
-    on_dismiss: EventHandler<()>,
-    on_success: EventHandler<()>,
-) -> Element {
+pub fn CreateTaskModal(on_dismiss: EventHandler<()>, on_success: EventHandler<()>) -> Element {
     let mut title: Signal<String> = use_signal(String::new);
     let mut assignee: Signal<String> = use_signal(String::new);
     let mut priority: Signal<i64> = use_signal(|| 2);

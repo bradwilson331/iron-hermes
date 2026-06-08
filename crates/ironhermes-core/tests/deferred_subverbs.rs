@@ -41,9 +41,7 @@ impl KanbanStoreReader for FakeStore {
     }
 
     fn deferred_subverb_message(&self, name: &str) -> String {
-        format!(
-            "/kanban {name}: use 'hermes kanban {name}' from the CLI for this subverb."
-        )
+        format!("/kanban {name}: use 'hermes kanban {name}' from the CLI for this subverb.")
     }
 }
 

@@ -132,9 +132,7 @@ pub fn parse_schedule(input: &str) -> Result<ScheduleParsed> {
 /// - `Once`: `ONESHOT_GRACE_SECONDS` (120)
 pub fn compute_grace_seconds(schedule: &ScheduleParsed) -> i64 {
     match schedule {
-        ScheduleParsed::Interval { minutes, .. } => {
-            ((*minutes as i64) * 60 / 2).clamp(120, 7200)
-        }
+        ScheduleParsed::Interval { minutes, .. } => ((*minutes as i64) * 60 / 2).clamp(120, 7200),
         ScheduleParsed::Cron { .. } => 3600,
         ScheduleParsed::Once { .. } => ONESHOT_GRACE_SECONDS,
     }
@@ -148,10 +146,10 @@ pub fn compute_grace_seconds(schedule: &ScheduleParsed) -> i64 {
 /// anchored at `last_run_at` instead of `after` for recurring schedules.
 ///
 /// - `Once`:    returns `Some(run_at)` if `run_at > after`, else `None`.
-///              `last_run_at` is ignored for Once.
+///   `last_run_at` is ignored for Once.
 /// - `Interval`: when `last_run_at` is `Some(t)`, returns `Some(t + period)`;
-///               when `None`, returns `Some(after + period)`. This prevents
-///               drift across crashes by anchoring at the last known run.
+///   when `None`, returns `Some(after + period)`. This prevents
+///   drift across crashes by anchoring at the last known run.
 /// - `Cron`:    finds the first tick strictly after `last_run_at.unwrap_or(after)`.
 pub fn compute_next_run_from(
     schedule: &ScheduleParsed,

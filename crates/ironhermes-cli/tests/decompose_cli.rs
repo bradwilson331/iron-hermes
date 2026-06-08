@@ -46,13 +46,14 @@ fn decompose_single_id_parses() {
         .expect("parse should succeed for `kanban decompose t_abc`");
     match parsed.cmd {
         TestSub::Kanban {
-            sub: KanbanCommands::Decompose {
-                id,
-                all,
-                tenant,
-                json,
-                board,
-            },
+            sub:
+                KanbanCommands::Decompose {
+                    id,
+                    all,
+                    tenant,
+                    json,
+                    board,
+                },
         } => {
             assert_eq!(id.as_deref(), Some("t_abc"));
             assert!(!all, "all should default to false");
@@ -79,13 +80,14 @@ fn decompose_all_with_tenant_and_json_parses() {
     .expect("parse should succeed for `kanban decompose --all --tenant engineering --json`");
     match parsed.cmd {
         TestSub::Kanban {
-            sub: KanbanCommands::Decompose {
-                id,
-                all,
-                tenant,
-                json,
-                ..
-            },
+            sub:
+                KanbanCommands::Decompose {
+                    id,
+                    all,
+                    tenant,
+                    json,
+                    ..
+                },
         } => {
             assert!(id.is_none(), "id should be None when --all is set");
             assert!(all, "all should be true");
@@ -110,23 +112,19 @@ fn decompose_rejects_id_and_all_together() {
 #[test]
 fn specify_id_with_author_parses() {
     let parsed = TestCli::try_parse_from([
-        "hermes",
-        "kanban",
-        "specify",
-        "t_xyz",
-        "--author",
-        "operator",
+        "hermes", "kanban", "specify", "t_xyz", "--author", "operator",
     ])
     .expect("parse should succeed for `kanban specify t_xyz --author operator`");
     match parsed.cmd {
         TestSub::Kanban {
-            sub: KanbanCommands::Specify {
-                id,
-                all,
-                author,
-                json,
-                ..
-            },
+            sub:
+                KanbanCommands::Specify {
+                    id,
+                    all,
+                    author,
+                    json,
+                    ..
+                },
         } => {
             assert_eq!(id.as_deref(), Some("t_xyz"));
             assert!(!all);
@@ -144,12 +142,7 @@ fn specify_all_with_json_parses() {
         .expect("parse should succeed for `kanban specify --all --json`");
     match parsed.cmd {
         TestSub::Kanban {
-            sub: KanbanCommands::Specify {
-                id,
-                all,
-                json,
-                ..
-            },
+            sub: KanbanCommands::Specify { id, all, json, .. },
         } => {
             assert!(id.is_none());
             assert!(all);
@@ -162,15 +155,9 @@ fn specify_all_with_json_parses() {
 /// Test 6 (bonus): --board flag on decompose is captured correctly.
 #[test]
 fn decompose_with_board_flag_parses() {
-    let parsed = TestCli::try_parse_from([
-        "hermes",
-        "kanban",
-        "decompose",
-        "t_abc",
-        "--board",
-        "alpha",
-    ])
-    .expect("parse should succeed for `kanban decompose t_abc --board alpha`");
+    let parsed =
+        TestCli::try_parse_from(["hermes", "kanban", "decompose", "t_abc", "--board", "alpha"])
+            .expect("parse should succeed for `kanban decompose t_abc --board alpha`");
     match parsed.cmd {
         TestSub::Kanban {
             sub: KanbanCommands::Decompose { id, board, .. },

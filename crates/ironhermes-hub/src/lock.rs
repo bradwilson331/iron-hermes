@@ -170,7 +170,7 @@ mod tests {
     use chrono::Utc;
 
     fn with_test_hermes_home<F: FnOnce(&Path)>(f: F) {
-        let _guard = crate::test_env_lock();
+        let _guard = crate::test_env_lock().blocking_lock();
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var("HERMES_HOME").ok();
         unsafe {
@@ -266,8 +266,8 @@ mod tests {
             "identifier":"/home/user/my-skill","repoPath":"SKILL.md",
             "snapshotHash":"","computedHash":"abc123",
             "installedAt":"2026-05-08T00:00:00Z"}"#;
-        let e: SkillLockEntry = serde_json::from_str(json)
-            .expect("local-dir source must deserialize without error");
+        let e: SkillLockEntry =
+            serde_json::from_str(json).expect("local-dir source must deserialize without error");
         assert_eq!(e.source, "local-dir");
         assert_eq!(e.snapshot_hash, "");
         assert_eq!(e.identifier, "/home/user/my-skill");
@@ -473,7 +473,7 @@ mod migration_tests {
     use std::path::PathBuf;
 
     fn with_test_hermes_home<F: FnOnce(&std::path::Path)>(f: F) {
-        let _guard = crate::test_env_lock();
+        let _guard = crate::test_env_lock().blocking_lock();
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var("HERMES_HOME").ok();
         unsafe {

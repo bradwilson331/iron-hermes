@@ -86,17 +86,20 @@ fn has_runnable_llm(config: &Config, hermes_home: &std::path::Path) -> bool {
     }
     // Check 2: raw .env file scan (belt-and-suspenders).
     let env_path = hermes_home.join(".env");
-    if env_path.exists() {
-        if let Ok(text) = std::fs::read_to_string(&env_path) {
-            for key in &[
-                "OPENROUTER_API_KEY=",
-                "ANTHROPIC_API_KEY=",
-                "OPENAI_API_KEY=",
-            ] {
-                // l.len() > key.len() rejects empty-value lines (T-35.1-01).
-                if text.lines().any(|l| l.starts_with(key) && l.len() > key.len()) {
-                    return true;
-                }
+    if env_path.exists()
+        && let Ok(text) = std::fs::read_to_string(&env_path)
+    {
+        for key in &[
+            "OPENROUTER_API_KEY=",
+            "ANTHROPIC_API_KEY=",
+            "OPENAI_API_KEY=",
+        ] {
+            // l.len() > key.len() rejects empty-value lines (T-35.1-01).
+            if text
+                .lines()
+                .any(|l| l.starts_with(key) && l.len() > key.len())
+            {
+                return true;
             }
         }
     }
@@ -180,7 +183,10 @@ mod tests {
         let result = has_runnable_llm(&config, tmp.path());
         // SAFETY: restore env.
         unsafe { std::env::remove_var("OPENROUTER_API_KEY") };
-        assert!(result, "expected true when OPENROUTER_API_KEY is set in env");
+        assert!(
+            result,
+            "expected true when OPENROUTER_API_KEY is set in env"
+        );
     }
 
     #[test]

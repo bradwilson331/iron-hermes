@@ -12,8 +12,7 @@ const MAIN_RS: &str = include_str!("../src/main.rs");
 /// CFG-03 INV-01: run_preflight gate widened to include Gateway.
 #[test]
 fn gate_widened_to_gateway_for_run_preflight() {
-    let pattern =
-        "Some(Commands::Chat { .. }) | Some(Commands::Gateway { .. }) | None";
+    let pattern = "Some(Commands::Chat { .. }) | Some(Commands::Gateway { .. }) | None";
     let matches: Vec<_> = MAIN_RS.match_indices(pattern).collect();
     assert_eq!(
         matches.len(),
@@ -46,8 +45,7 @@ fn sibling_gates_not_widened_to_gateway() {
     let unwidened_alt = "matches!(&cli.command, Some(Commands::Chat { .. }) | None)";
     let count = MAIN_RS.matches(unwidened).count() + MAIN_RS.matches(unwidened_alt).count();
     assert_eq!(
-        count,
-        2,
+        count, 2,
         "Phase 26.4.1 CFG-03: expected EXACTLY TWO un-widened sibling gates \
          (is_interactive_repl + is_chat_or_bare). Found {} matches across both \
          un-widened forms. Widening either of those to Gateway would suppress \

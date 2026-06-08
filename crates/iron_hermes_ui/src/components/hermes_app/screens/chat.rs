@@ -14,6 +14,14 @@
 use dioxus::prelude::*;
 
 /// Assistant avatar — copper low-poly wings logo used on agent chat bubbles.
+// The chat-screen types below (AVATAR_LOGO, ChatBubbleKind, ToolRow, ChatBubble +
+// its constructors) are all consumed by the HermesApp subtree (mod.rs receive
+// loop / send handler construct ChatBubble at 204/246/302/356/369, ToolRow at
+// 212; ScreenChat renders AVATAR_LOGO). In a binary crate `pub` does not keep
+// unreferenced items alive, so under `--all-features` — where `legacy-shell`
+// mounts WarpHermes instead of HermesApp — this whole cluster reads as dead.
+// Live in the default (non-legacy-shell) build; hence item-level allows below.
+#[allow(dead_code)]
 const AVATAR_LOGO: Asset = asset!("/assets/i_hermes_logo.png");
 
 // ---------------------------------------------------------------------------
@@ -23,6 +31,8 @@ const AVATAR_LOGO: Asset = asset!("/assets/i_hermes_logo.png");
 /// Bubble role — drives the CSS class that selects user / assistant /
 /// error styling. Maps 1:1 to `chat-msg.user`, `chat-msg.assistant`, and
 /// an error variant rendered as `chat-bubble is-error`.
+// dead under --all-features/legacy-shell; see AVATAR_LOGO note above.
+#[allow(dead_code)]
 #[derive(Clone, PartialEq, Debug)]
 pub enum ChatBubbleKind {
     User,
@@ -40,6 +50,8 @@ pub enum ChatBubbleKind {
 /// `done` flips to `true` when the matching `ChatStreamEvent::ToolCallEnd`
 /// arrives; `success` carries the server-reported outcome. Renders as
 /// `.chat-progress-row.is-running` / `.is-done.is-success` / `.is-done.is-error`.
+// dead under --all-features/legacy-shell; see AVATAR_LOGO note above.
+#[allow(dead_code)]
 #[derive(Clone, PartialEq, Debug)]
 pub struct ToolRow {
     pub name: String,
@@ -53,6 +65,8 @@ pub struct ToolRow {
 /// `tool_rows` is mutated in-place by the receive loop in `mod.rs` when
 /// `ChatStreamEvent::ToolCallStart` / `ToolCallEnd` arrive for the
 /// currently-streaming assistant bubble.
+// dead under --all-features/legacy-shell; see AVATAR_LOGO note above.
+#[allow(dead_code)]
 #[derive(Clone, PartialEq, Debug)]
 pub struct ChatBubble {
     pub id: u64,
@@ -65,6 +79,8 @@ pub struct ChatBubble {
     pub audio_mime: Option<String>,
 }
 
+// constructors dead under --all-features/legacy-shell; see AVATAR_LOGO note above.
+#[allow(dead_code)]
 impl ChatBubble {
     pub fn user(id: u64, text: String) -> Self {
         Self {
@@ -117,6 +133,7 @@ impl ChatBubble {
 ///
 /// `Copy` is required so consumers can `let send = use_context::<ChatSendHandler>();`
 /// inside RSX closures without manual cloning.
+#[allow(dead_code)] // context-provider newtype; consumed via use_context::<ChatSendHandler>() in ScreenChat
 #[derive(Clone, Copy)]
 pub struct ChatSendHandler(pub EventHandler<String>);
 

@@ -135,9 +135,7 @@ fn redact_non_prose(body: &str) -> String {
                 // 2. Try to open a fenced code block (only at line start).
                 if is_line_start(bytes, i) {
                     let indent_end = skip_indent(bytes, i); // skip up to 3 spaces
-                    if let Some((fc, fl, consumed)) =
-                        try_consume_fence_open(bytes, indent_end)
-                    {
+                    if let Some((fc, fl, consumed)) = try_consume_fence_open(bytes, indent_end) {
                         // Emit spaces for the indent + fence opener bytes.
                         pad_space(&mut out, (indent_end - i) + consumed);
                         i = indent_end + consumed;

@@ -209,7 +209,12 @@ pub fn classify_llm_error_typed(err: &anyhow::Error) -> ProviderError {
 /// chain string. No regex — simple needle search + ASCII-digit parse.
 fn parse_retry_after(err_str: &str) -> Option<Duration> {
     let lower = err_str.to_lowercase();
-    for needle in ["retry-after:", "retry_after:", "retry after:", "retry-after "] {
+    for needle in [
+        "retry-after:",
+        "retry_after:",
+        "retry after:",
+        "retry-after ",
+    ] {
         if let Some(idx) = lower.find(needle) {
             // Use byte indices into the lowercased haystack to find the
             // numeric tail; ASCII so byte == char alignment is preserved.
@@ -279,10 +284,7 @@ fn classify_404_subcases(err_str: &str) -> ProviderError {
     if lower.contains("model") && lower.contains("not found") {
         return ProviderError::ModelNotFound;
     }
-    if lower.contains("policy")
-        || lower.contains("guardrail")
-        || lower.contains("blocked")
-    {
+    if lower.contains("policy") || lower.contains("guardrail") || lower.contains("blocked") {
         // Provider-policy-blocked maps to Auth in the Python failover table.
         return ProviderError::Auth;
     }
@@ -428,9 +430,8 @@ mod tests {
 
     #[test]
     fn typed_429_with_retry_after_header_parses_duration() {
-        let err = anyhow!(
-            "HTTP request failed with status: 429 Too Many Requests; retry-after: 60"
-        );
+        let err =
+            anyhow!("HTTP request failed with status: 429 Too Many Requests; retry-after: 60");
         match classify_llm_error_typed(&err) {
             ProviderError::RateLimited { retry_after } => {
                 assert_eq!(retry_after, Some(Duration::from_secs(60)));

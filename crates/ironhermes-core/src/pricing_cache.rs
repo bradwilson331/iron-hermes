@@ -227,8 +227,7 @@ pub fn parse_openrouter_body(body: &serde_json::Value) -> HashMap<String, Pricin
         };
 
         let input_per_1m_micros = openrouter_token_str_to_per_1m_micros(pricing.get("prompt"));
-        let output_per_1m_micros =
-            openrouter_token_str_to_per_1m_micros(pricing.get("completion"));
+        let output_per_1m_micros = openrouter_token_str_to_per_1m_micros(pricing.get("completion"));
         let cache_read_per_1m_micros =
             openrouter_token_str_to_per_1m_micros(pricing.get("input_cache_read"));
         let cache_creation_per_1m_micros =

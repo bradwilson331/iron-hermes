@@ -17,9 +17,9 @@
 //! Wiremock harness mirrors crates/ironhermes-agent/tests/streaming_usage_capture.rs.
 
 use ironhermes_agent::client::LlmClient;
-use ironhermes_core::config_extras::{ProviderModelConfig, resolve_extras};
-use ironhermes_core::config::ProviderConfig;
 use ironhermes_core::ChatMessage;
+use ironhermes_core::config::ProviderConfig;
+use ironhermes_core::config_extras::{ProviderModelConfig, resolve_extras};
 use std::collections::HashMap;
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -63,8 +63,8 @@ async fn assert_request_body_contains(
     let req = requests
         .last()
         .expect("at least one request must have been captured");
-    let body: serde_json::Value = serde_json::from_slice(&req.body)
-        .expect("request body must be valid JSON");
+    let body: serde_json::Value =
+        serde_json::from_slice(&req.body).expect("request body must be valid JSON");
     let actual = body.pointer(json_pointer).unwrap_or_else(|| {
         panic!(
             "JSON pointer '{}' not found in request body: {}",
@@ -148,11 +148,7 @@ async fn openrouter_provider_order_nested_in_request_body() {
         .await;
 
     // Use a non-Claude OpenRouter route so this stays in D-05 scope (not D-06).
-    let client = LlmClient::new(
-        server.uri(),
-        "test-key",
-        "meta-llama/llama-3.1-8b-instruct",
-    );
+    let client = LlmClient::new(server.uri(), "test-key", "meta-llama/llama-3.1-8b-instruct");
     let messages = vec![ChatMessage::user("hi")];
     let extra = HashMap::from([(
         "provider".to_string(),
@@ -359,11 +355,15 @@ fn extra_model_switch_picks_per_model_override_d10() {
     let mut models: HashMap<String, ProviderModelConfig> = HashMap::new();
     models.insert(
         "llama3.1:8b".to_string(),
-        ProviderModelConfig { extra_request_options: model_8b_extras },
+        ProviderModelConfig {
+            extra_request_options: model_8b_extras,
+        },
     );
     models.insert(
         "llama3.1:70b".to_string(),
-        ProviderModelConfig { extra_request_options: model_70b_extras },
+        ProviderModelConfig {
+            extra_request_options: model_70b_extras,
+        },
     );
 
     providers.insert(

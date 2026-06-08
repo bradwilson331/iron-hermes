@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
+use ironhermes_core::config::ToolsConfig;
 use ironhermes_core::constants::get_hermes_home;
 use ironhermes_core::{Config, ProviderResolver, SkillRecord, SkillRegistry, SubagentConfig};
-use ironhermes_core::config::ToolsConfig;
 use ironhermes_cron::JobStore;
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_hooks::{
@@ -534,10 +534,13 @@ mod tests {
     /// get_definitions(None), while non-web tools (read_file, terminal) remain.
     #[tokio::test]
     async fn test_toolset_config_filters_disabled_web() {
-        use ironhermes_core::config::{ToolsConfig, ToolsetEntry};
+        use ironhermes_core::config::ToolsetEntry;
         let mut config = Config::default();
         // Explicitly disable the web toolset.
-        config.tools.toolsets.insert("web".to_string(), ToolsetEntry { enabled: false });
+        config
+            .tools
+            .toolsets
+            .insert("web".to_string(), ToolsetEntry { enabled: false });
 
         let resolver = ProviderResolver::build(&config).expect("resolver should build");
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -652,7 +655,10 @@ mod tests {
         }
 
         let mut config = Config::default();
-        config.tools.toolsets.insert("robotics".to_string(), ToolsetEntry { enabled: false });
+        config
+            .tools
+            .toolsets
+            .insert("robotics".to_string(), ToolsetEntry { enabled: false });
 
         let resolver = ProviderResolver::build(&config).expect("resolver should build");
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));

@@ -18,13 +18,13 @@ pub fn messages_to_sharegpt(messages: &[ChatMessage]) -> Vec<ShareGptTurn> {
             }
             Role::Assistant => {
                 // Text content as "gpt" turn
-                if let Some(text) = msg.content_text() {
-                    if !text.is_empty() {
-                        turns.push(ShareGptTurn {
-                            from: "gpt".to_string(),
-                            value: text.to_string(),
-                        });
-                    }
+                if let Some(text) = msg.content_text()
+                    && !text.is_empty()
+                {
+                    turns.push(ShareGptTurn {
+                        from: "gpt".to_string(),
+                        value: text.to_string(),
+                    });
                 }
                 // Tool calls as separate "tool_call" turns (D-07)
                 if let Some(tool_calls) = &msg.tool_calls {

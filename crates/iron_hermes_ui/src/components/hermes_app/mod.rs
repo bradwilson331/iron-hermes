@@ -181,11 +181,11 @@ pub fn HermesApp() -> Element {
             loop {
                 match ws.recv_raw().await {
                     Ok(dioxus_fullstack::Message::Text(t)) => {
-                        let event: crate::protocol::ChatStreamEvent =
-                            match serde_json::from_str(&t) {
-                                Ok(e) => e,
-                                Err(_) => continue, // Skip malformed frames silently.
-                            };
+                        let event: crate::protocol::ChatStreamEvent = match serde_json::from_str(&t)
+                        {
+                            Ok(e) => e,
+                            Err(_) => continue, // Skip malformed frames silently.
+                        };
                         match event {
                             crate::protocol::ChatStreamEvent::Delta { text } => {
                                 let sid = *streaming_id.read();
@@ -286,18 +286,20 @@ pub fn HermesApp() -> Element {
                                 parts.push(&uint8_array);
                                 let opts = web_sys::BlobPropertyBag::new();
                                 opts.set_type(&mime);
-                                if let Ok(blob) = web_sys::Blob::new_with_u8_array_sequence_and_options(
-                                    &parts, &opts,
-                                ) {
-                                    if let Ok(url) = web_sys::Url::create_object_url_with_blob(&blob) {
+                                if let Ok(blob) =
+                                    web_sys::Blob::new_with_u8_array_sequence_and_options(
+                                        &parts, &opts,
+                                    )
+                                {
+                                    if let Ok(url) =
+                                        web_sys::Url::create_object_url_with_blob(&blob)
+                                    {
                                         let id = {
                                             let n = *next_id.read();
                                             next_id.set(n + 1);
                                             n
                                         };
-                                        bubbles
-                                            .write()
-                                            .push(ChatBubble::audio(id, url, mime));
+                                        bubbles.write().push(ChatBubble::audio(id, url, mime));
                                     }
                                 }
                             }
@@ -425,6 +427,11 @@ pub fn HermesApp() -> Element {
 // for clarity at the only call site, and `.write()` / `.set()` take `&self`
 // internally so this compiles cleanly under both default and `legacy-shell`
 // features.
+// Called from HermesApp's `send` EventHandler (mod.rs:347). In a binary crate an
+// unreferenced `pub fn` does not suppress dead_code, so when `--all-features`
+// enables `legacy-shell` (app.rs mounts WarpHermes, leaving HermesApp and this
+// helper unreferenced) dead_code fires. Live in the default build.
+#[allow(dead_code)]
 fn dispatch_slash(
     cmd: &str,
     bubbles: &mut Signal<Vec<ChatBubble>>,

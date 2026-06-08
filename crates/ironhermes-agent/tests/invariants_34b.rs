@@ -12,18 +12,14 @@
 //!   (b) `preprocess_context_references_async` does NOT appear in the three
 //!       surface files (handler.rs, state.rs, main.rs) — centralization invariant.
 
-const RUNTIME_SOURCE: &str =
-    include_str!("../src/agent_runtime.rs");
+const RUNTIME_SOURCE: &str = include_str!("../src/agent_runtime.rs");
 
 // handler.rs lives in ironhermes-gateway (not iron_hermes_ui) per project layout.
-const HANDLER_SOURCE: &str =
-    include_str!("../../ironhermes-gateway/src/handler.rs");
+const HANDLER_SOURCE: &str = include_str!("../../ironhermes-gateway/src/handler.rs");
 
-const STATE_SOURCE: &str =
-    include_str!("../../iron_hermes_ui/src/server/state.rs");
+const STATE_SOURCE: &str = include_str!("../../iron_hermes_ui/src/server/state.rs");
 
-const MAIN_SOURCE: &str =
-    include_str!("../../ironhermes-cli/src/main.rs");
+const MAIN_SOURCE: &str = include_str!("../../ironhermes-cli/src/main.rs");
 
 /// (a) Centralization-before-engine invariant:
 /// The byte offset of `preprocess_context_references_async` in agent_runtime.rs
@@ -137,8 +133,7 @@ fn surfaces_consume_context_warnings() {
 /// The `--- Attached Context ---` block MUST still be embedded (model needs it).
 #[test]
 fn warnings_not_embedded_in_message_text() {
-    let embedding_marker =
-        "final_msg.push_str(\"\\n\\n--- Context Warnings ---";
+    let embedding_marker = "final_msg.push_str(\"\\n\\n--- Context Warnings ---";
 
     assert!(
         !CONTEXT_REFS_SOURCE.contains(embedding_marker),

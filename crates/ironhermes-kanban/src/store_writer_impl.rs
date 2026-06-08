@@ -81,10 +81,7 @@ impl KanbanStoreWriter for KanbanStoreWriterImpl {
             .map_err(|e| format!("append_subscription: {}", e))
     }
 
-    fn list_subscriptions_for_task(
-        &self,
-        task_id: &str,
-    ) -> Result<Vec<SubscriptionView>, String> {
+    fn list_subscriptions_for_task(&self, task_id: &str) -> Result<Vec<SubscriptionView>, String> {
         let store = open_store()?;
         store
             .list_subscriptions_for_task(task_id)

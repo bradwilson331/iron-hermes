@@ -156,8 +156,10 @@ pub(crate) async fn run_memory_setup_with_io<R: BufRead, W: Write>(
     // can call get_config_schema() on it. Override HERMES_HOME only for
     // the duration of this call — factory reads IRONHERMES_HOME via
     // `get_hermes_home()`.
-    let mut cfg = ironhermes_core::config::MemoryConfig::default();
-    cfg.provider = selected.clone();
+    let cfg = ironhermes_core::config::MemoryConfig {
+        provider: selected.clone(),
+        ..ironhermes_core::config::MemoryConfig::default()
+    };
     let provider_arc = ironhermes_agent::memory::factory::build_memory_provider(&cfg)
         .await
         .context("building provider for schema introspection")?;
@@ -257,10 +259,10 @@ pub(crate) fn prompt_line<R: BufRead, W: Write>(
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let line = line.trim_end_matches(['\n', '\r']).to_string();
-    if line.is_empty() {
-        if let Some(d) = default {
-            return Ok(d.to_string());
-        }
+    if line.is_empty()
+        && let Some(d) = default
+    {
+        return Ok(d.to_string());
     }
     Ok(line)
 }
@@ -347,7 +349,7 @@ mod tests {
 
         let quoted = posix_single_quote("new-secret").unwrap();
         let mut f = OpenOptions::new().append(true).open(&env).unwrap();
-        writeln!(f, "{}={}", "NEW_KEY", quoted).unwrap();
+        writeln!(f, "NEW_KEY={}", quoted).unwrap();
 
         let text = std::fs::read_to_string(&env).unwrap();
         assert!(text.contains("EXISTING_KEY='value'"));
@@ -398,7 +400,7 @@ mod tests {
     /// the provider selection line.
     #[tokio::test]
     async fn scripted_wizard_round_trip_file_provider() {
-        let _guard = crate::test_env_lock();
+        let _guard = crate::test_env_lock_async().lock().await;
         let tmp = tempfile::TempDir::new().unwrap();
         unsafe {
             std::env::set_var("IRONHERMES_HOME", tmp.path());
@@ -447,7 +449,7 @@ mod tests {
             .open(&env_path)
             .unwrap();
         let quoted = posix_single_quote("sk-scripted-test-value").unwrap();
-        writeln!(file, "{}={}", "TEST_API_KEY", quoted).unwrap();
+        writeln!(file, "TEST_API_KEY={}", quoted).unwrap();
         drop(file);
 
         let text = std::fs::read_to_string(&env_path).unwrap();
@@ -464,7 +466,7 @@ mod tests {
     /// so the wizard is a single-read round-trip.
     #[tokio::test]
     async fn optional_defaults_skipped() {
-        let _guard = crate::test_env_lock();
+        let _guard = crate::test_env_lock_async().lock().await;
         let tmp = tempfile::TempDir::new().unwrap();
         unsafe {
             std::env::set_var("IRONHERMES_HOME", tmp.path());
@@ -490,7 +492,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_provider_is_rejected() {
-        let _guard = crate::test_env_lock();
+        let _guard = crate::test_env_lock_async().lock().await;
         let tmp = tempfile::TempDir::new().unwrap();
         unsafe {
             std::env::set_var("IRONHERMES_HOME", tmp.path());

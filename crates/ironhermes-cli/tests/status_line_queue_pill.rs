@@ -136,8 +136,7 @@ fn queue_transcript_line() {
     // from commands.rs:1040.
     let cap_msg = format!("Queue is full ({}/{}). /stop or /flush to drain.", 128, 128);
     assert_eq!(
-        cap_msg,
-        "Queue is full (128/128). /stop or /flush to drain.",
+        cap_msg, "Queue is full (128/128). /stop or /flush to drain.",
         "cap-hit message text frozen by D-09 stability guard"
     );
 }

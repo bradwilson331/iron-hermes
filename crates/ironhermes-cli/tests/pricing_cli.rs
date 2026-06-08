@@ -16,9 +16,7 @@ use assert_cmd::Command;
 use ironhermes_cli::pricing_cmd::{
     PricingSubcommand, cmd_list_to_string, cmd_refresh_from_url_with_path,
 };
-use ironhermes_core::pricing_cache::{
-    PricingCache, cost_field_to_micros, parse_models_dev_body,
-};
+use ironhermes_core::pricing_cache::{PricingCache, cost_field_to_micros, parse_models_dev_body};
 use std::sync::OnceLock;
 use tempfile::TempDir;
 use wiremock::matchers::method;
@@ -229,7 +227,10 @@ async fn cmd_refresh_handles_network_failure_without_touching_cache() {
     assert!(result.is_err(), "network failure must error");
 
     let post = std::fs::read_to_string(&cache_path).unwrap();
-    assert_eq!(post, pre_existing, "cache must be byte-identical to pre-state");
+    assert_eq!(
+        post, pre_existing,
+        "cache must be byte-identical to pre-state"
+    );
 }
 
 // ---------------------------------------------------------------------------

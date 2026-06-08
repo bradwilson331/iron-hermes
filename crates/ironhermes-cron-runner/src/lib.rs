@@ -22,14 +22,23 @@ pub use tick_loop::{prepare_mcp_for_tick, run_tick_loop};
 
 #[cfg(test)]
 pub(crate) mod test_util {
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::OnceLock;
 
     // Serializes tests that mutate process-wide env vars (IRONHERMES_HOME,
     // BASH_PATH, PYTHON_PATH, IRONHERMES_CRON_SCRIPT_TIMEOUT). Both
     // `prompt_builder` and `script_runner` tests share this lock.
-    pub fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    // Uses tokio::sync::Mutex so the guard can be held across .await points
+    // in async tests without triggering clippy::await_holding_lock.
+    pub fn env_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    // Separate sync lock for non-async tests (e.g. workdir guard tests in
+    // runner.rs). These do not cross .await points so std::sync::Mutex is fine.
+    pub fn env_lock_sync() -> &'static std::sync::Mutex<()> {
+        static LOCK_SYNC: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        LOCK_SYNC.get_or_init(|| std::sync::Mutex::new(()))
     }
 }
 

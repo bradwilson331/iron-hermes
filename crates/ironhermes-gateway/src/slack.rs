@@ -183,8 +183,8 @@ pub fn slack_event_to_message_event(event: &SlackMessageEvent) -> MessageEvent {
             .unwrap_or_default(),
         attachments: vec![], // Phase 34: text-only; attachment support deferred
         thread_id: event.origin.thread_ts.as_ref().map(|t| t.to_string()),
-        chat_name: None,     // channel name lookup is a separate Web API call — deferred
-        sender_name: None,   // user name lookup is a separate Web API call — deferred
+        chat_name: None, // channel name lookup is a separate Web API call — deferred
+        sender_name: None, // user name lookup is a separate Web API call — deferred
         replied_to_id: None, // thread parent captured in thread_id above
     }
 }
@@ -228,13 +228,13 @@ async fn on_push_event(
     }
 
     // Skip message-changed / message-deleted subtypes — only process new messages.
-    if let Some(ref subtype) = msg_event.subtype {
-        match subtype {
-            SlackMessageEventType::BotMessage
-            | SlackMessageEventType::MessageChanged
-            | SlackMessageEventType::MessageDeleted => return Ok(()),
-            _ => {}
-        }
+    if let Some(
+        SlackMessageEventType::BotMessage
+        | SlackMessageEventType::MessageChanged
+        | SlackMessageEventType::MessageDeleted,
+    ) = msg_event.subtype.as_ref()
+    {
+        return Ok(());
     }
 
     let sender_id = msg_event
@@ -272,7 +272,10 @@ async fn on_push_event(
     // Build MessageEvent + ProcessedAttachments BEFORE spawning (borrow-checker safe).
     // This ensures the callback returns Ok(()) within ~3s (T-34-04 ACK timing mitigation).
     let event_for_handler = slack_event_to_message_event(&msg_event);
-    let processed = ProcessedAttachments { text_prefix: None, image_data_uri: None };
+    let processed = ProcessedAttachments {
+        text_prefix: None,
+        image_data_uri: None,
+    };
     let h = state.handler.clone();
     let a = state.adapter.clone();
     let c = state.cancel.child_token();
@@ -282,7 +285,10 @@ async fn on_push_event(
 
     // T-34-04: Non-blocking ACK — spawn handler in background, return Ok(()) immediately.
     tokio::spawn(async move {
-        if let Err(e) = h.handle_with_multimodal(&event_for_handler, a, c, processed).await {
+        if let Err(e) = h
+            .handle_with_multimodal(&event_for_handler, a, c, processed)
+            .await
+        {
             tracing::error!("Slack handler error: {e:#}");
         }
     });

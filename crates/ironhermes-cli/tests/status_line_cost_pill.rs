@@ -19,10 +19,7 @@ use ironhermes_cli::tui_rata::status_line::{StatusLineState, render_status_line_
 
 fn pill_content_strings(state: &StatusLineState) -> Vec<String> {
     let line = render_status_line_ratatui(state);
-    line.spans
-        .iter()
-        .map(|s| s.content.to_string())
-        .collect()
+    line.spans.iter().map(|s| s.content.to_string()).collect()
 }
 
 fn rendered_text(state: &StatusLineState) -> String {
@@ -88,7 +85,7 @@ fn t5_cost_pill_renders_three_decimals() {
 }
 
 #[test]
-fn t6_token_pill_renders_one_decimal_K() {
+fn t6_token_pill_renders_one_decimal_k() {
     let s = StatusLineState {
         session_total_tokens: 12_400_usize,
         ..StatusLineState::default()
@@ -101,7 +98,7 @@ fn t6_token_pill_renders_one_decimal_K() {
 }
 
 #[test]
-fn t7_large_values_format_in_dollars_and_K_tokens() {
+fn t7_large_values_format_in_dollars_and_k_tokens() {
     // $1500 = 1_500_000_000 micros; 1_500_000 tokens = "1500.0K tok"
     let s = StatusLineState {
         cost_usd_micros: 1_500_000_000_i64,

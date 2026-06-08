@@ -9,6 +9,7 @@
 use dioxus::prelude::*;
 use std::collections::HashMap;
 
+#[allow(dead_code)] // called from use_memo closure in ScreenSkills; dead_code fires on lib target
 fn tab_predicate(category: &str, enabled: bool, tab: &str) -> bool {
     match tab {
         "bundled" => category == "bundled",
@@ -18,6 +19,7 @@ fn tab_predicate(category: &str, enabled: bool, tab: &str) -> bool {
     }
 }
 
+#[allow(dead_code)] // called from use_memo closure in ScreenSkills; dead_code fires on test target
 fn search_matches(name: &str, description: &str, query: &str) -> bool {
     if query.is_empty() {
         return true;
@@ -40,12 +42,12 @@ pub fn ScreenSkills(is_active: bool) -> Element {
 
     // Tab and search signals — let mut so event handlers can .set()
     let mut active_tab = use_signal(|| "all");
-    let mut search_query = use_signal(|| String::new());
+    let mut search_query = use_signal(String::new);
 
     // Optimistic toggle state — HashMap<name, enabled> owned by this screen
-    let mut toggle_states: Signal<HashMap<String, bool>> = use_signal(|| HashMap::new());
+    let mut toggle_states: Signal<HashMap<String, bool>> = use_signal(HashMap::new);
     // Per-skill error messages — populated on server Err, cleared on next click
-    let mut toggle_errors: Signal<HashMap<String, String>> = use_signal(|| HashMap::new());
+    let mut toggle_errors: Signal<HashMap<String, String>> = use_signal(HashMap::new);
 
     // Seed toggle_states from skills_list on first non-empty load (Pitfall 3).
     // use_effect re-runs each render; guard ensures we only seed once and
@@ -64,8 +66,14 @@ pub fn ScreenSkills(is_active: bool) -> Element {
 
     // Live tab counts — computed from skills_list (server-sourced per Pitfall 6)
     let count_all = skills_list.len();
-    let count_bundled = skills_list.iter().filter(|s| s.category == "bundled").count();
-    let count_installed = skills_list.iter().filter(|s| s.category != "bundled").count();
+    let count_bundled = skills_list
+        .iter()
+        .filter(|s| s.category == "bundled")
+        .count();
+    let count_installed = skills_list
+        .iter()
+        .filter(|s| s.category != "bundled")
+        .count();
     let count_enabled = skills_list.iter().filter(|s| s.enabled).count();
 
     // Header sub-copy uses optimistic count (tracks live flips);
@@ -83,7 +91,10 @@ pub fn ScreenSkills(is_active: bool) -> Element {
         let query = search_query();
         skills_for_memo
             .iter()
-            .filter(|s| tab_predicate(&s.category, s.enabled, tab) && search_matches(&s.name, &s.description, &query))
+            .filter(|s| {
+                tab_predicate(&s.category, s.enabled, tab)
+                    && search_matches(&s.name, &s.description, &query)
+            })
             .cloned()
             .collect::<Vec<crate::server::api::SkillInfo>>()
     });
@@ -121,10 +132,9 @@ pub fn ScreenSkills(is_active: bool) -> Element {
                 Err(_) => {
                     // Revert optimistic flip and surface inline error
                     toggle_states.write().insert(name.clone(), current);
-                    toggle_errors.write().insert(
-                        name.clone(),
-                        "Toggle failed — try again.".to_string(),
-                    );
+                    toggle_errors
+                        .write()
+                        .insert(name.clone(), "Toggle failed — try again.".to_string());
                 }
             }
         });
@@ -220,8 +230,8 @@ pub fn ScreenSkills(is_active: bool) -> Element {
 #[component]
 fn SkillCard(
     skill: crate::server::api::SkillInfo,
-    enabled: bool,               // plain bool — NOT Signal<bool>; parent owns toggle_states
-    error_msg: Option<String>,   // None = no error; Some = revert error text
+    enabled: bool, // plain bool — NOT Signal<bool>; parent owns toggle_states
+    error_msg: Option<String>, // None = no error; Some = revert error text
     on_toggle: EventHandler<()>, // fires on .tgl click; parent owns the spawn
 ) -> Element {
     rsx! {

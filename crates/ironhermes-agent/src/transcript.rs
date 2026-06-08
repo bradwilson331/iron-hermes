@@ -107,15 +107,15 @@ impl TranscriptWriter {
     /// will subsequently fail silently (Pitfall 3 / E-08).
     pub fn open(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                tracing::warn!(
-                    target: "ironhermes_agent::transcript",
-                    path = ?parent,
-                    error = ?e,
-                    "failed to create transcripts dir; writes will fail silently"
-                );
-            }
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!(
+                target: "ironhermes_agent::transcript",
+                path = ?parent,
+                error = ?e,
+                "failed to create transcripts dir; writes will fail silently"
+            );
         }
         Self { path }
     }
@@ -175,7 +175,8 @@ impl TranscriptWriter {
                 opts.append(true).create(true);
                 #[cfg(unix)]
                 {
-                    use std::os::unix::fs::OpenOptionsExt;
+                    // tokio::fs::OpenOptions provides its own inherent mode() on unix;
+                    // the std OpenOptionsExt trait import is not needed here.
                     opts.mode(0o600);
                 }
                 opts.open(&path).await

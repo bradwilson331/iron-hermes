@@ -165,6 +165,87 @@ async fn fetch_local(
     extract_content_local(&body, url)
 }
 
+// --- WebReadTool ---
+
+pub struct WebReadTool;
+
+#[async_trait]
+impl Tool for WebReadTool {
+    fn name(&self) -> &str {
+        "web_read"
+    }
+
+    fn toolset(&self) -> &str {
+        "web"
+    }
+
+    fn description(&self) -> &str {
+        "Fetch a web page and return its content as markdown."
+    }
+
+    fn schema(&self) -> ToolSchema {
+        ToolSchema::new(
+            "web_read",
+            "Fetch a web page and return its content as markdown.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL of the web page to fetch."
+                    }
+                },
+                "required": ["url"]
+            }),
+        )
+    }
+
+    fn prerequisites(&self) -> Vec<crate::registry::Prerequisite> {
+        vec![crate::registry::Prerequisite {
+            kind: "env_var".to_string(),
+            name: "FIRECRAWL_API_KEY".to_string(),
+            description: "Firecrawl API key — optional. Without it, web_read uses the plain-text fallback path.".to_string(),
+            required: false,
+        }]
+    }
+
+    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
+        let raw_url = args["url"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: url"))?;
+
+        // Normalize URL: prepend https:// if no scheme is provided.
+        let url = if !raw_url.starts_with("http://") && !raw_url.starts_with("https://") {
+            format!("https://{raw_url}")
+        } else {
+            raw_url.to_string()
+        };
+        let url = url.as_str();
+
+        // SSRF validation before any fetch (D-16).
+        validate_url_async(url).await?;
+
+        // Load config (fall back to defaults if config file missing).
+        let config = Config::load().unwrap_or_default();
+
+        // Try Firecrawl first if API key is set (D-02).
+        let content = if std::env::var("FIRECRAWL_API_KEY").is_ok() {
+            match fetch_with_firecrawl(url).await {
+                Ok(content) => content,
+                Err(e) => {
+                    warn!("Firecrawl failed, falling back to local fetch: {}", e);
+                    fetch_local(url, &config.web).await?
+                }
+            }
+        } else {
+            fetch_local(url, &config.web).await?
+        };
+
+        // Smart truncation (D-13, D-14, D-15).
+        Ok(truncate_content(&content, config.web.max_content_chars))
+    }
+}
+
 // --- Unit tests ---
 
 #[cfg(test)]
@@ -344,86 +425,5 @@ mod tests {
         let result = extract_content_local(html, "https://notitle.example.com").unwrap();
         assert!(result.starts_with("Source: https://notitle.example.com\n\n"));
         assert!(!result.starts_with("# "));
-    }
-}
-
-// --- WebReadTool ---
-
-pub struct WebReadTool;
-
-#[async_trait]
-impl Tool for WebReadTool {
-    fn name(&self) -> &str {
-        "web_read"
-    }
-
-    fn toolset(&self) -> &str {
-        "web"
-    }
-
-    fn description(&self) -> &str {
-        "Fetch a web page and return its content as markdown."
-    }
-
-    fn schema(&self) -> ToolSchema {
-        ToolSchema::new(
-            "web_read",
-            "Fetch a web page and return its content as markdown.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "The URL of the web page to fetch."
-                    }
-                },
-                "required": ["url"]
-            }),
-        )
-    }
-
-    fn prerequisites(&self) -> Vec<crate::registry::Prerequisite> {
-        vec![crate::registry::Prerequisite {
-            kind: "env_var".to_string(),
-            name: "FIRECRAWL_API_KEY".to_string(),
-            description: "Firecrawl API key — optional. Without it, web_read uses the plain-text fallback path.".to_string(),
-            required: false,
-        }]
-    }
-
-    async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
-        let raw_url = args["url"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("Missing required parameter: url"))?;
-
-        // Normalize URL: prepend https:// if no scheme is provided.
-        let url = if !raw_url.starts_with("http://") && !raw_url.starts_with("https://") {
-            format!("https://{raw_url}")
-        } else {
-            raw_url.to_string()
-        };
-        let url = url.as_str();
-
-        // SSRF validation before any fetch (D-16).
-        validate_url_async(url).await?;
-
-        // Load config (fall back to defaults if config file missing).
-        let config = Config::load().unwrap_or_default();
-
-        // Try Firecrawl first if API key is set (D-02).
-        let content = if std::env::var("FIRECRAWL_API_KEY").is_ok() {
-            match fetch_with_firecrawl(url).await {
-                Ok(content) => content,
-                Err(e) => {
-                    warn!("Firecrawl failed, falling back to local fetch: {}", e);
-                    fetch_local(url, &config.web).await?
-                }
-            }
-        } else {
-            fetch_local(url, &config.web).await?
-        };
-
-        // Smart truncation (D-13, D-14, D-15).
-        Ok(truncate_content(&content, config.web.max_content_chars))
     }
 }

@@ -13,8 +13,5 @@ pub mod shell_legacy;
 #[cfg(feature = "legacy-shell")]
 pub mod warp_hermes;
 
-#[cfg(feature = "legacy-shell")]
-pub use warp_hermes::WarpHermes;
-
 // Consumers of legacy primitives import via
 // `crate::components::shell_legacy::TitleBar` etc., gated by the feature flag.

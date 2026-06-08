@@ -33,7 +33,6 @@ enum TestSub {
 #[test]
 fn heartbeat_verb_parses_with_id_only() {
     let parsed = TestCli::try_parse_from(["hermes", "kanban", "heartbeat", "t_x"])
-        .ok()
         .expect("parse should succeed for `kanban heartbeat t_x`");
     match parsed.cmd {
         TestSub::Kanban {
@@ -48,16 +47,9 @@ fn heartbeat_verb_parses_with_id_only() {
 
 #[test]
 fn heartbeat_verb_parses_with_id_and_note() {
-    let parsed = TestCli::try_parse_from([
-        "hermes",
-        "kanban",
-        "heartbeat",
-        "t_x",
-        "--note",
-        "halfway",
-    ])
-    .ok()
-    .expect("parse should succeed for `kanban heartbeat t_x --note halfway`");
+    let parsed =
+        TestCli::try_parse_from(["hermes", "kanban", "heartbeat", "t_x", "--note", "halfway"])
+            .expect("parse should succeed for `kanban heartbeat t_x --note halfway`");
     match parsed.cmd {
         TestSub::Kanban {
             sub: KanbanCommands::Heartbeat { id, note },

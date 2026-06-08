@@ -112,10 +112,16 @@ fn append_then_list_by_task() {
         "list_subscriptions_for_task must return both rows (BUG-36.3.7.5-02)"
     );
     // id ASC ordering — first row is the first insert.
-    assert_eq!(rows[0].platform, "telegram", "row 0 must be the auto insert");
+    assert_eq!(
+        rows[0].platform, "telegram",
+        "row 0 must be the auto insert"
+    );
     assert_eq!(rows[0].source, "auto");
     assert_eq!(rows[0].thread_id, "", "None thread_id stored as ''");
-    assert_eq!(rows[1].platform, "discord", "row 1 must be the explicit insert");
+    assert_eq!(
+        rows[1].platform, "discord",
+        "row 1 must be the explicit insert"
+    );
     assert_eq!(rows[1].source, "explicit");
 }
 
@@ -390,7 +396,10 @@ fn orphaned_kanban_notify_subs_table_is_dropped_on_open() {
                 |row| row.get(0),
             )
             .expect("subs count");
-        assert_eq!(count, 1, "kanban_subscriptions must still be created normally");
+        assert_eq!(
+            count, 1,
+            "kanban_subscriptions must still be created normally"
+        );
     }
 
     // And re-opening is idempotent (DROP runs again, still no-op).

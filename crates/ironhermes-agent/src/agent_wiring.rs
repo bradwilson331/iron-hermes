@@ -9,7 +9,7 @@
 //! (which ignores the config threshold).
 
 use std::sync::Arc;
-use tokio::sync::{Mutex as TokioMutex, RwLock};
+use tokio::sync::Mutex as TokioMutex;
 
 use ironhermes_core::{Config, ProviderResolver};
 use ironhermes_hooks::HookRegistry;
@@ -42,6 +42,7 @@ use crate::pressure_warning::PressureTracker;
 /// When `tracker` is `None` (the common one-shot path), a fresh
 /// `PressureTracker` is created as before — backwards-compatible with all
 /// existing call sites.
+#[allow(clippy::too_many_arguments)] // wiring fn: each arg is a distinct dependency; params-struct would require changes across all call sites
 pub fn attach_context_engine(
     agent: AgentLoop,
     config: &Config,
@@ -77,6 +78,7 @@ mod tests {
     use crate::{AgentLoop, AnyClient, LlmClient};
     use ironhermes_core::ChatMessage;
     use ironhermes_tools::ToolRegistry;
+    use tokio::sync::RwLock;
 
     fn bare_agent() -> AgentLoop {
         let client = AnyClient::ChatCompletions(LlmClient::new(

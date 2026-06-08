@@ -267,7 +267,8 @@ pub trait KanbanStoreWriter: Send + Sync {
     /// The `json` flag is a hint — the writer impl typically ignores it (the
     /// `--json` output is handled by the dispatcher arm above), but it's passed
     /// through for any writer that wants to vary behavior.
-    fn create_task_simple(&self, title: &str, assignee: &str, json: bool) -> Result<String, String>;
+    fn create_task_simple(&self, title: &str, assignee: &str, json: bool)
+    -> Result<String, String>;
 
     /// Append a subscription row. Mirrors the underlying KanbanStore method but
     /// returns a string error so the trait stays free of any kanban-crate error

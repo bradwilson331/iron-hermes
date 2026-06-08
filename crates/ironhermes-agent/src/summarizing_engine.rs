@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::any_client::AnyClient;
-use crate::context_compressor::{estimate_message_tokens, estimate_messages_tokens};
+use crate::context_compressor::estimate_messages_tokens;
 use crate::context_engine::{
     CompressionMode, CompressionOutcome, ContextEngine, ContextError, ContextStats,
     LocalPruningEngine,
@@ -940,22 +940,23 @@ mod tests {
         total_token_target: usize,
         protect_last_tokens: usize,
     ) -> Vec<ChatMessage> {
-        let mut msgs = Vec::new();
-        msgs.push(ChatMessage::system("sys"));
-        msgs.push(ChatMessage::user("first user"));
-        msgs.push(ChatMessage::assistant("first assistant"));
         // Pair goes at position 3 initially; we grow prunable region before it
         // and add exactly enough tail filler after tool_result to pull
         // protect_start between assistant and tool_result.
-        msgs.push(ChatMessage::assistant_tool_calls(vec![ToolCall {
-            id: "web_read_1".into(),
-            call_type: "function".into(),
-            function: FunctionCall {
-                name: "web_read".into(),
-                arguments: r#"{"url":"https://example.com"}"#.into(),
-            },
-        }]));
-        msgs.push(ChatMessage::tool_result("web_read_1", pair_body));
+        let mut msgs = vec![
+            ChatMessage::system("sys"),
+            ChatMessage::user("first user"),
+            ChatMessage::assistant("first assistant"),
+            ChatMessage::assistant_tool_calls(vec![ToolCall {
+                id: "web_read_1".into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: "web_read".into(),
+                    arguments: r#"{"url":"https://example.com"}"#.into(),
+                },
+            }]),
+            ChatMessage::tool_result("web_read_1", pair_body),
+        ];
 
         // Phase 1: Grow prunable region BEFORE the pair until total tokens
         // hit target. This also ensures enough prunable content exists that

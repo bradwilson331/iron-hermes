@@ -10,13 +10,12 @@
 
 use std::sync::Arc;
 
-use ironhermes_kanban::store::{CreateTaskOptions, KanbanStore};
 use ironhermes_kanban::mention::MAX_MENTION_CHAIN_DEPTH;
+use ironhermes_kanban::store::{CreateTaskOptions, KanbanStore};
 use ironhermes_kanban::store::{MentionChildSpec, MentionPlan};
 use ironhermes_kanban::tools::{
     KanbanBlockTool, KanbanCommentTool, KanbanCompleteTool, KanbanCreateTool, KanbanHeartbeatTool,
-    KanbanLinkTool, KanbanListTool, KanbanMentionTool, KanbanShowTool, KanbanSwarmTool,
-    KanbanUnblockTool,
+    KanbanLinkTool, KanbanListTool, KanbanMentionTool, KanbanShowTool, KanbanUnblockTool,
 };
 use ironhermes_kanban::{KanbanWorkerSpec, SwarmGraphIds, SwarmGraphSpec};
 use ironhermes_tools::Tool;
@@ -36,7 +35,7 @@ use tokio::sync::Mutex as TokioMutex;
 // test panicked while holding the lock, we still run, the stale env-var
 // state from that test would have been remove_var'd before the panic in
 // well-formed tests OR is overwritten by the new test's set_var.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -104,31 +103,44 @@ fn seed_running_task(
 
 #[tokio::test]
 async fn kanban_show_unavailable_without_env() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
+    let _env_guard = ENV_LOCK.lock().await;
+    unsafe {
+        std::env::remove_var("HERMES_KANBAN_TASK");
+    }
     let store = make_store();
     let tool = KanbanShowTool::new(store, false);
-    assert!(!tool.is_available(), "should be unavailable without env or explicit_enable");
+    assert!(
+        !tool.is_available(),
+        "should be unavailable without env or explicit_enable"
+    );
 }
 
 #[tokio::test]
 async fn kanban_show_available_with_explicit_enable() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
+    let _env_guard = ENV_LOCK.lock().await;
+    unsafe {
+        std::env::remove_var("HERMES_KANBAN_TASK");
+    }
     let store = make_store();
     let tool = KanbanShowTool::new(store, true);
-    assert!(tool.is_available(), "explicit_enable=true should make tool available");
+    assert!(
+        tool.is_available(),
+        "explicit_enable=true should make tool available"
+    );
 }
 
 #[tokio::test]
 async fn kanban_show_envelope_shape() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
 
     // Create parent task, mark it done with a run that has summary+metadata.
     let parent_id = {
         let mut s = store.lock().await;
-        let opts = CreateTaskOptions { created_by: Some("bot".into()), ..Default::default() };
+        let opts = CreateTaskOptions {
+            created_by: Some("bot".into()),
+            ..Default::default()
+        };
         let parent = s.create_task("Parent Task", "bot-worker", opts).unwrap();
         let pid = parent.id.clone();
         // Insert a completed run for the parent.
@@ -137,10 +149,9 @@ async fn kanban_show_envelope_shape() {
              VALUES ('r_parent', ?1, 'lock', 1000.0, 2000.0, 'completed', 'parent done', '{\"key\":\"val\"}')",
             params![pid],
         ).unwrap();
-        s.conn.execute(
-            "UPDATE tasks SET status='done' WHERE id=?1",
-            params![pid],
-        ).unwrap();
+        s.conn
+            .execute("UPDATE tasks SET status='done' WHERE id=?1", params![pid])
+            .unwrap();
         pid
     };
 
@@ -159,24 +170,35 @@ async fn kanban_show_envelope_shape() {
     // Add two comments to the child.
     {
         let mut s = store.lock().await;
-        s.add_comment(&child_id, "operator", "first comment").unwrap();
+        s.add_comment(&child_id, "operator", "first comment")
+            .unwrap();
         s.add_comment(&child_id, "bot", "second comment").unwrap();
     }
 
     // Set env so tool is available.
-    unsafe { std::env::set_var("HERMES_KANBAN_TASK", &child_id); }
+    unsafe {
+        std::env::set_var("HERMES_KANBAN_TASK", &child_id);
+    }
     let tool = KanbanShowTool::new(store, false);
     let result = tool.execute(json!({})).await.unwrap();
     let v: Value = serde_json::from_str(&result).unwrap();
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
+    unsafe {
+        std::env::remove_var("HERMES_KANBAN_TASK");
+    }
 
     // Assert envelope shape.
     assert_eq!(v["task_id"].as_str().unwrap(), child_id);
     assert_eq!(v["title"].as_str().unwrap(), "Child Task");
     assert!(v["parent_handoffs"].is_array());
     assert_eq!(v["parent_handoffs"].as_array().unwrap().len(), 1);
-    assert_eq!(v["parent_handoffs"][0]["parent_id"].as_str().unwrap(), parent_id);
-    assert_eq!(v["parent_handoffs"][0]["summary"].as_str().unwrap(), "parent done");
+    assert_eq!(
+        v["parent_handoffs"][0]["parent_id"].as_str().unwrap(),
+        parent_id
+    );
+    assert_eq!(
+        v["parent_handoffs"][0]["summary"].as_str().unwrap(),
+        "parent done"
+    );
     assert!(v["comments"].is_array());
     assert_eq!(v["comments"].as_array().unwrap().len(), 2);
     assert_eq!(v["comments"][0]["author"].as_str().unwrap(), "operator");
@@ -189,15 +211,19 @@ async fn kanban_show_envelope_shape() {
 
 #[tokio::test]
 async fn kanban_complete_rejects_stale_run_id() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let task_id = {
         let mut s = store.lock().await;
         seed_running_task(&mut s, "Test Task", "bot-worker", "r_real", Some("bot"))
     };
 
-    unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id); }
-    unsafe { std::env::set_var("HERMES_PROFILE", "bot"); }
+    unsafe {
+        std::env::set_var("HERMES_KANBAN_TASK", &task_id);
+    }
+    unsafe {
+        std::env::set_var("HERMES_PROFILE", "bot");
+    }
     let tool = KanbanCompleteTool::new(store, false);
 
     let result = tool
@@ -208,8 +234,12 @@ async fn kanban_complete_rejects_stale_run_id() {
         .await
         .unwrap();
 
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
-    unsafe { std::env::remove_var("HERMES_PROFILE"); }
+    unsafe {
+        std::env::remove_var("HERMES_KANBAN_TASK");
+    }
+    unsafe {
+        std::env::remove_var("HERMES_PROFILE");
+    }
 
     let v: Value = serde_json::from_str(&result).unwrap();
     assert_eq!(v["status"].as_str().unwrap(), "rejected");
@@ -218,15 +248,19 @@ async fn kanban_complete_rejects_stale_run_id() {
 
 #[tokio::test]
 async fn kanban_complete_rejects_phantom_created_cards() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let task_id = {
         let mut s = store.lock().await;
         seed_running_task(&mut s, "Test Task", "bot-worker", "r_real", Some("bot"))
     };
 
-    unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id); }
-    unsafe { std::env::set_var("HERMES_PROFILE", "bot"); }
+    unsafe {
+        std::env::set_var("HERMES_KANBAN_TASK", &task_id);
+    }
+    unsafe {
+        std::env::set_var("HERMES_PROFILE", "bot");
+    }
     let tool = KanbanCompleteTool::new(store.clone(), false);
 
     let result = tool
@@ -237,15 +271,21 @@ async fn kanban_complete_rejects_phantom_created_cards() {
         .await
         .unwrap();
 
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
-    unsafe { std::env::remove_var("HERMES_PROFILE"); }
+    unsafe {
+        std::env::remove_var("HERMES_KANBAN_TASK");
+    }
+    unsafe {
+        std::env::remove_var("HERMES_PROFILE");
+    }
 
     let v: Value = serde_json::from_str(&result).unwrap();
     assert_eq!(v["status"].as_str().unwrap(), "rejected");
     assert_eq!(v["reason"].as_str().unwrap(), "created_cards");
     let phantom = v["phantom_ids"].as_array().unwrap();
     assert!(
-        phantom.iter().any(|p| p.as_str() == Some("t_does_not_exist")),
+        phantom
+            .iter()
+            .any(|p| p.as_str() == Some("t_does_not_exist")),
         "phantom_ids must contain t_does_not_exist"
     );
 
@@ -259,12 +299,15 @@ async fn kanban_complete_rejects_phantom_created_cards() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(count, 1, "completion_rejected event must be permanently written");
+    assert_eq!(
+        count, 1,
+        "completion_rejected event must be permanently written"
+    );
 }
 
 #[tokio::test]
 async fn kanban_complete_rejects_wrong_profile_card() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
 
     // Create a child task owned by "other_profile".
@@ -283,8 +326,12 @@ async fn kanban_complete_rejects_wrong_profile_card() {
         seed_running_task(&mut s, "Parent", "bot-worker", "r_real", Some("bot"))
     };
 
-    unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id); }
-    unsafe { std::env::set_var("HERMES_PROFILE", "bot"); }
+    unsafe {
+        std::env::set_var("HERMES_KANBAN_TASK", &task_id);
+    }
+    unsafe {
+        std::env::set_var("HERMES_PROFILE", "bot");
+    }
     let tool = KanbanCompleteTool::new(store, false);
 
     let result = tool
@@ -295,8 +342,12 @@ async fn kanban_complete_rejects_wrong_profile_card() {
         .await
         .unwrap();
 
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
-    unsafe { std::env::remove_var("HERMES_PROFILE"); }
+    unsafe {
+        std::env::remove_var("HERMES_KANBAN_TASK");
+    }
+    unsafe {
+        std::env::remove_var("HERMES_PROFILE");
+    }
 
     let v: Value = serde_json::from_str(&result).unwrap();
     assert_eq!(v["status"].as_str().unwrap(), "rejected");
@@ -307,7 +358,7 @@ async fn kanban_complete_rejects_wrong_profile_card() {
 
 #[tokio::test]
 async fn kanban_complete_accepts_valid_created_cards() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
 
     // Bot creates child task.
@@ -326,8 +377,12 @@ async fn kanban_complete_accepts_valid_created_cards() {
         seed_running_task(&mut s, "Parent Task", "bot-worker", "r_real", Some("bot"))
     };
 
-    unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id); }
-    unsafe { std::env::set_var("HERMES_PROFILE", "bot"); }
+    unsafe {
+        std::env::set_var("HERMES_KANBAN_TASK", &task_id);
+    }
+    unsafe {
+        std::env::set_var("HERMES_PROFILE", "bot");
+    }
     let tool = KanbanCompleteTool::new(store, false);
 
     let result = tool
@@ -339,8 +394,12 @@ async fn kanban_complete_accepts_valid_created_cards() {
         .await
         .unwrap();
 
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
-    unsafe { std::env::remove_var("HERMES_PROFILE"); }
+    unsafe {
+        std::env::remove_var("HERMES_KANBAN_TASK");
+    }
+    unsafe {
+        std::env::remove_var("HERMES_PROFILE");
+    }
 
     let v: Value = serde_json::from_str(&result).unwrap();
     assert_eq!(v["status"].as_str().unwrap(), "ok");
@@ -352,7 +411,7 @@ async fn kanban_complete_accepts_valid_created_cards() {
 
 #[tokio::test]
 async fn kanban_create_idempotency_key_dedups() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
 
     let tool = KanbanCreateTool::new(store.clone(), true);
@@ -396,7 +455,7 @@ async fn kanban_create_idempotency_key_dedups() {
 
 #[tokio::test]
 async fn kanban_create_with_parents_starts_in_todo() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
 
     // Create a ready parent.
@@ -426,7 +485,7 @@ async fn kanban_create_with_parents_starts_in_todo() {
 
 #[tokio::test]
 async fn kanban_create_rejects_relative_dir_workspace() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let tool = KanbanCreateTool::new(store, true);
 
@@ -460,14 +519,16 @@ async fn kanban_create_max_runtime_parses_human() {
 
 #[tokio::test]
 async fn kanban_block_with_review_required_prefix_logs_advisory() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let task_id = {
         let mut s = store.lock().await;
         seed_running_task(&mut s, "Review Task", "bot-worker", "r_review", Some("bot"))
     };
 
-    unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id); }
+    unsafe {
+        std::env::set_var("HERMES_KANBAN_TASK", &task_id);
+    }
     let tool = KanbanBlockTool::new(store.clone(), false);
 
     let result = tool
@@ -478,7 +539,9 @@ async fn kanban_block_with_review_required_prefix_logs_advisory() {
         .await
         .unwrap();
 
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
+    unsafe {
+        std::env::remove_var("HERMES_KANBAN_TASK");
+    }
 
     let v: Value = serde_json::from_str(&result).unwrap();
     assert_eq!(v["status"].as_str().unwrap(), "ok");
@@ -495,14 +558,16 @@ async fn kanban_block_with_review_required_prefix_logs_advisory() {
 
 #[tokio::test]
 async fn kanban_list_returns_compact_summaries() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
 
     // Seed a few tasks.
     {
         let mut s = store.lock().await;
-        s.create_task("Task A", "bot-worker", CreateTaskOptions::default()).unwrap();
-        s.create_task("Task B", "bot-worker", CreateTaskOptions::default()).unwrap();
+        s.create_task("Task A", "bot-worker", CreateTaskOptions::default())
+            .unwrap();
+        s.create_task("Task B", "bot-worker", CreateTaskOptions::default())
+            .unwrap();
     }
 
     let tool = KanbanListTool::new(store, true);
@@ -510,14 +575,19 @@ async fn kanban_list_returns_compact_summaries() {
     let v: Value = serde_json::from_str(&result).unwrap();
 
     // Plan 07: list now returns {"tasks": [...], "board": ..., "board_source": ...}.
-    let tasks = v["tasks"].as_array().expect("expected tasks array in envelope");
+    let tasks = v["tasks"]
+        .as_array()
+        .expect("expected tasks array in envelope");
     assert!(tasks.len() >= 2);
     // Compact shape: must have id, title, status — must NOT have body.
     let first = &tasks[0];
     assert!(first.get("id").is_some());
     assert!(first.get("title").is_some());
     assert!(first.get("status").is_some());
-    assert!(first.get("body").is_none(), "list must not include body (D-25)");
+    assert!(
+        first.get("body").is_none(),
+        "list must not include body (D-25)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -526,7 +596,7 @@ async fn kanban_list_returns_compact_summaries() {
 
 #[tokio::test]
 async fn kanban_comment_adds_comment_to_task() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
 
     let task_id = {
@@ -536,8 +606,12 @@ async fn kanban_comment_adds_comment_to_task() {
             .id
     };
 
-    unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id); }
-    unsafe { std::env::set_var("HERMES_PROFILE", "bot"); }
+    unsafe {
+        std::env::set_var("HERMES_KANBAN_TASK", &task_id);
+    }
+    unsafe {
+        std::env::set_var("HERMES_PROFILE", "bot");
+    }
     let tool = KanbanCommentTool::new(store.clone(), false);
 
     let result = tool
@@ -545,8 +619,12 @@ async fn kanban_comment_adds_comment_to_task() {
         .await
         .unwrap();
 
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
-    unsafe { std::env::remove_var("HERMES_PROFILE"); }
+    unsafe {
+        std::env::remove_var("HERMES_KANBAN_TASK");
+    }
+    unsafe {
+        std::env::remove_var("HERMES_PROFILE");
+    }
 
     let v: Value = serde_json::from_str(&result).unwrap();
     assert!(v.get("comment_id").is_some());
@@ -571,21 +649,29 @@ async fn kanban_comment_adds_comment_to_task() {
 
 #[tokio::test]
 async fn kanban_heartbeat_appends_event_row() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let task_id = {
         let mut s = store.lock().await;
         seed_running_task(&mut s, "Long Op", "alice", "r_hb", Some("alice"))
     };
 
-    unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id); }
-    unsafe { std::env::set_var("HERMES_KANBAN_RUN_ID", "r_hb"); }
+    unsafe {
+        std::env::set_var("HERMES_KANBAN_TASK", &task_id);
+    }
+    unsafe {
+        std::env::set_var("HERMES_KANBAN_RUN_ID", "r_hb");
+    }
 
     let tool = KanbanHeartbeatTool::new(store.clone(), false);
     let result = tool.execute(json!({"note": "halfway"})).await.unwrap();
 
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
-    unsafe { std::env::remove_var("HERMES_KANBAN_RUN_ID"); }
+    unsafe {
+        std::env::remove_var("HERMES_KANBAN_TASK");
+    }
+    unsafe {
+        std::env::remove_var("HERMES_KANBAN_RUN_ID");
+    }
 
     let v: Value = serde_json::from_str(&result).unwrap();
     assert_eq!(
@@ -614,11 +700,15 @@ async fn kanban_heartbeat_appends_event_row() {
 
 #[tokio::test]
 async fn kanban_heartbeat_missing_task_id_errors_without_env() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
 
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
-    unsafe { std::env::remove_var("HERMES_KANBAN_RUN_ID"); }
+    unsafe {
+        std::env::remove_var("HERMES_KANBAN_TASK");
+    }
+    unsafe {
+        std::env::remove_var("HERMES_KANBAN_RUN_ID");
+    }
 
     // explicit_enable=true so is_available() is true even without the env var;
     // we want the execute() path to be the one that rejects.
@@ -648,7 +738,7 @@ fn seed_plain_task(store: &mut KanbanStore, title: &str) -> String {
 
 #[tokio::test]
 async fn kanban_link_happy_path_inserts_row() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let (a, b) = {
         let mut s = store.lock().await;
@@ -684,7 +774,7 @@ async fn kanban_link_happy_path_inserts_row() {
 
 #[tokio::test]
 async fn kanban_link_rejects_cycle() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let (a, b) = {
         let mut s = store.lock().await;
@@ -730,7 +820,7 @@ async fn kanban_link_rejects_cycle() {
 
 #[tokio::test]
 async fn kanban_link_phantom_id_rejected() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let b = {
         let mut s = store.lock().await;
@@ -771,7 +861,7 @@ async fn kanban_link_phantom_id_rejected() {
 
 #[tokio::test]
 async fn kanban_unblock_happy_path_from_blocked() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let task_id = {
         let mut s = store.lock().await;
@@ -788,10 +878,7 @@ async fn kanban_unblock_happy_path_from_blocked() {
     };
 
     let tool = KanbanUnblockTool::new(store.clone(), true);
-    let result = tool
-        .execute(json!({"task_id": &task_id}))
-        .await
-        .unwrap();
+    let result = tool.execute(json!({"task_id": &task_id})).await.unwrap();
     let v: Value = serde_json::from_str(&result).unwrap();
 
     assert_eq!(
@@ -829,7 +916,7 @@ async fn kanban_unblock_happy_path_from_blocked() {
 
 #[tokio::test]
 async fn kanban_unblock_rejects_wrong_status() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let task_id = {
         let mut s = store.lock().await;
@@ -844,10 +931,7 @@ async fn kanban_unblock_rejects_wrong_status() {
     };
 
     let tool = KanbanUnblockTool::new(store.clone(), true);
-    let result = tool
-        .execute(json!({"task_id": &task_id}))
-        .await
-        .unwrap();
+    let result = tool.execute(json!({"task_id": &task_id})).await.unwrap();
     let v: Value = serde_json::from_str(&result).unwrap();
 
     assert_eq!(
@@ -870,10 +954,7 @@ async fn kanban_unblock_rejects_wrong_status() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(
-        status, "done",
-        "BUG-36.3.7.6-03: status not silently moved"
-    );
+    assert_eq!(status, "done", "BUG-36.3.7.6-03: status not silently moved");
 
     let unblocked_count: i64 = s
         .conn
@@ -901,11 +982,7 @@ async fn kanban_unblock_rejects_wrong_status() {
 
 /// Helper that builds a minimal SwarmGraphSpec with a flat-form worker set,
 /// no verifier, no synth, no blackboard.
-fn seed_swarm_graph(
-    store: &mut KanbanStore,
-    goal: &str,
-    workers: &[&str],
-) -> SwarmGraphIds {
+fn seed_swarm_graph(store: &mut KanbanStore, goal: &str, workers: &[&str]) -> SwarmGraphIds {
     let spec = SwarmGraphSpec {
         goal: goal.to_string(),
         workers: workers
@@ -934,7 +1011,7 @@ fn seed_swarm_graph(
 
 #[tokio::test]
 async fn swarm_fan_out_only_creates_root_and_workers() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let mut s = store.lock().await;
 
@@ -986,18 +1063,16 @@ async fn swarm_fan_out_only_creates_root_and_workers() {
     // No comments seeded.
     let comment_count: i64 = s
         .conn
-        .query_row(
-            "SELECT count(*) FROM task_comments",
-            params![],
-            |r| r.get(0),
-        )
+        .query_row("SELECT count(*) FROM task_comments", params![], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(comment_count, 0);
 }
 
 #[tokio::test]
 async fn swarm_with_verifier_gates_on_all_workers() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let mut s = store.lock().await;
 
@@ -1053,7 +1128,7 @@ async fn swarm_with_verifier_gates_on_all_workers() {
 
 #[tokio::test]
 async fn swarm_full_4_tier_matches_reference_md_664() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let mut s = store.lock().await;
 
@@ -1122,7 +1197,7 @@ async fn swarm_full_4_tier_matches_reference_md_664() {
 
 #[tokio::test]
 async fn swarm_with_synth_no_verifier_gates_synth_on_workers() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let mut s = store.lock().await;
 
@@ -1162,12 +1237,15 @@ async fn swarm_with_synth_no_verifier_gates_synth_on_workers() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(synth_inbound, 3, "synth's parents are all workers (P3 quorum)");
+    assert_eq!(
+        synth_inbound, 3,
+        "synth's parents are all workers (P3 quorum)"
+    );
 }
 
 #[tokio::test]
 async fn swarm_blackboard_arg_seeds_initial_comment_on_root() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let mut s = store.lock().await;
 
@@ -1217,7 +1295,7 @@ async fn swarm_blackboard_arg_seeds_initial_comment_on_root() {
 
 #[tokio::test]
 async fn swarm_idempotency_key_replays_return_same_graph() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let mut s = store.lock().await;
 
@@ -1287,7 +1365,7 @@ async fn swarm_idempotency_key_replays_return_same_graph() {
 
 #[tokio::test]
 async fn swarm_invalid_assignee_rolls_back_whole_graph() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let mut s = store.lock().await;
 
@@ -1306,11 +1384,9 @@ async fn swarm_invalid_assignee_rolls_back_whole_graph() {
         .unwrap();
     let comment_before: i64 = s
         .conn
-        .query_row(
-            "SELECT count(*) FROM task_comments",
-            params![],
-            |r| r.get(0),
-        )
+        .query_row("SELECT count(*) FROM task_comments", params![], |r| {
+            r.get(0)
+        })
         .unwrap();
 
     let spec = SwarmGraphSpec {
@@ -1361,11 +1437,9 @@ async fn swarm_invalid_assignee_rolls_back_whole_graph() {
         .unwrap();
     let comment_after: i64 = s
         .conn
-        .query_row(
-            "SELECT count(*) FROM task_comments",
-            params![],
-            |r| r.get(0),
-        )
+        .query_row("SELECT count(*) FROM task_comments", params![], |r| {
+            r.get(0)
+        })
         .unwrap();
 
     assert_eq!(task_before, task_after, "no tasks rows on rollback");
@@ -1379,7 +1453,7 @@ async fn swarm_invalid_assignee_rolls_back_whole_graph() {
 
 #[tokio::test]
 async fn swarm_rich_worker_form_accepts_per_card_title_and_body() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let mut s = store.lock().await;
 
@@ -1423,7 +1497,7 @@ async fn swarm_rich_worker_form_accepts_per_card_title_and_body() {
 
 #[tokio::test]
 async fn swarm_flat_worker_form_auto_titles_each_card() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let mut s = store.lock().await;
 
@@ -1443,7 +1517,7 @@ async fn swarm_flat_worker_form_auto_titles_each_card() {
 #[tokio::test]
 async fn swarm_root_card_has_ended_at_set() {
     // Risk 1 mitigation — explicit invariant lock for D-root-ended-at.
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let mut s = store.lock().await;
 
@@ -1506,7 +1580,7 @@ fn make_single_child_plan(
 
 #[tokio::test]
 async fn mention_happy_path_single_mention_creates_one_child() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let mut s = store.lock().await;
 
@@ -1558,15 +1632,12 @@ async fn mention_happy_path_single_mention_creates_one_child() {
 
 #[tokio::test]
 async fn mention_multi_mention_body_creates_n_children() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let mut s = store.lock().await;
 
-    let (parent_id, _) = seed_mention_parent(
-        &mut s,
-        "Assign @bob, @carol, and @dave to this",
-        "alice",
-    );
+    let (parent_id, _) =
+        seed_mention_parent(&mut s, "Assign @bob, @carol, and @dave to this", "alice");
     // Seed known assignees.
     for name in ["bob", "carol", "dave"] {
         s.create_task(&format!("{name} task"), name, CreateTaskOptions::default())
@@ -1634,10 +1705,7 @@ async fn mention_inside_fenced_block_skipped() {
         handles.contains(&"reviewer"),
         "prose @reviewer must be found"
     );
-    assert!(
-        handles.contains(&"author"),
-        "prose @author must be found"
-    );
+    assert!(handles.contains(&"author"), "prose @author must be found");
     assert!(
         !handles.contains(&"fenced_handle"),
         "@fenced_handle inside fence must be skipped: {handles:?}"
@@ -1763,7 +1831,9 @@ async fn mention_unknown_handle_pending_policy() {
 
 #[tokio::test]
 async fn mention_unknown_handle_error_policy() {
-    use ironhermes_kanban::mention::{FallbackPolicy, Resolution, ResolverCtx, SkipReason, resolve_mention};
+    use ironhermes_kanban::mention::{
+        FallbackPolicy, Resolution, ResolverCtx, SkipReason, resolve_mention,
+    };
     use std::collections::HashSet;
 
     let known: HashSet<String> = HashSet::new();
@@ -1788,7 +1858,9 @@ async fn mention_unknown_handle_error_policy() {
 
 #[tokio::test]
 async fn mention_self_reference_skipped() {
-    use ironhermes_kanban::mention::{FallbackPolicy, Resolution, ResolverCtx, SkipReason, resolve_mention};
+    use ironhermes_kanban::mention::{
+        FallbackPolicy, Resolution, ResolverCtx, SkipReason, resolve_mention,
+    };
     use std::collections::HashSet;
 
     let mut known: HashSet<String> = HashSet::new();
@@ -1817,7 +1889,7 @@ async fn mention_self_reference_skipped() {
 
 #[tokio::test]
 async fn mention_ancestor_cycle_skipped() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let mut s = store.lock().await;
 
@@ -1895,7 +1967,7 @@ async fn mention_ancestor_cycle_skipped() {
 
 #[tokio::test]
 async fn mention_idempotency_key_replays_return_same_children() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let mut s = store.lock().await;
 
@@ -1959,7 +2031,7 @@ async fn mention_idempotency_key_replays_return_same_children() {
 
 #[tokio::test]
 async fn mention_invalid_task_id_rejected() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
 
     // No HERMES_KANBAN_TASK set, no task_id arg — should reject.
@@ -1987,7 +2059,7 @@ async fn mention_invalid_task_id_rejected() {
 
 #[tokio::test]
 async fn mention_task_id_defaults_to_hermes_kanban_task_env() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
 
     // Seed a task so the tool can find it.
@@ -2066,7 +2138,7 @@ async fn mention_case_insensitive_handle_resolution() {
 
 #[tokio::test]
 async fn mention_invalid_assignee_rejected_before_tx() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let mut s = store.lock().await;
 
@@ -2133,8 +2205,14 @@ async fn mention_invalid_assignee_rejected_before_tx() {
         .unwrap();
 
     assert_eq!(task_before, task_after, "no tasks rows after pre-tx reject");
-    assert_eq!(link_before, link_after, "no task_links rows after pre-tx reject");
-    assert_eq!(event_before, event_after, "no task_events rows after pre-tx reject");
+    assert_eq!(
+        link_before, link_after,
+        "no task_links rows after pre-tx reject"
+    );
+    assert_eq!(
+        event_before, event_after,
+        "no task_events rows after pre-tx reject"
+    );
 }
 
 // ─── Test 16b: mid-batch UNIQUE-constraint failure actually triggers rollback ─
@@ -2150,7 +2228,7 @@ async fn mention_invalid_assignee_rejected_before_tx() {
 
 #[tokio::test]
 async fn mention_unique_collision_rolls_back_first_child() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let mut s = store.lock().await;
 
@@ -2239,7 +2317,7 @@ async fn mention_unique_collision_rolls_back_first_child() {
 /// shows the matching column values.
 #[tokio::test]
 async fn create_goal_mode_sets_columns() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
     let tool = KanbanCreateTool::new(store.clone(), true);
 
@@ -2274,7 +2352,8 @@ async fn create_goal_mode_sets_columns() {
 /// and `goal_max_turns` (default 20) under `properties`.
 #[test]
 fn schema_contains_goal_properties() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _env_guard = rt.block_on(ENV_LOCK.lock());
     let store = {
         let dir = tempfile::tempdir().unwrap();
         unsafe { std::env::set_var("IRONHERMES_HOME", dir.path()) };
@@ -2304,7 +2383,7 @@ fn schema_contains_goal_properties() {
 
 #[tokio::test]
 async fn mention_registered_eleventh_tool() {
-    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env_guard = ENV_LOCK.lock().await;
     use ironhermes_kanban::tools::register_kanban_tools;
     use ironhermes_tools::ToolRegistry;
 

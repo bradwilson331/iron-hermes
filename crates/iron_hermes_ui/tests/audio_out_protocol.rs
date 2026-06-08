@@ -1,10 +1,10 @@
 //! Phase 36.17.7 Plan 04 — Wave 0 tests for ChatStreamEvent::AudioOut protocol.
 //!
 //! Locks:
-//! - protocol.rs: `ChatStreamEvent::AudioOut { mime, uuid, bytes }` variant +
+//! - protocol.rs: `ChatStreamEvent::AudioOut { mime, uuid, bytes }` variant and
 //!   the inline `test_audio_out_json_shape` test that pins the wire format.
-//! - hermes_app/mod.rs: UNCONDITIONAL `Message::Binary` recv arm (REVISION HIGH 7)
-//!   + `ChatStreamEvent::AudioOut` handler + `create_object_url_with_blob` Blob
+//! - hermes_app/mod.rs: UNCONDITIONAL `Message::Binary` recv arm (REVISION HIGH 7),
+//!   `ChatStreamEvent::AudioOut` handler, and `create_object_url_with_blob` Blob
 //!   URL first-play (REVISION HIGH 4).
 //!
 //! Test 5 (`mod_rs_handles_audio_out_in_recv_loop`) stays RED until Task 5

@@ -43,6 +43,9 @@ pub struct McpManager {
     /// GAP-8 at the user-facing level. When rmcp later exposes a pre-spawned-
     /// Child constructor, the slot becomes load-bearing without any manager
     /// changes (Option A upgrade).
+    // Complex task-registry type: one-of-a-kind management structure —
+    // a type alias would only appear here and not improve readability.
+    #[allow(clippy::type_complexity)]
     tasks: Mutex<
         HashMap<
             String,
@@ -447,9 +450,11 @@ mod tests {
         let manager = McpManager::new(registry);
 
         let mut configs = HashMap::new();
-        let mut disabled = McpServerConfig::default();
-        disabled.enabled = false;
-        disabled.command = Some("echo".to_string());
+        let disabled = McpServerConfig {
+            enabled: false,
+            command: Some("echo".to_string()),
+            ..Default::default()
+        };
         configs.insert("disabled_server".to_string(), disabled);
 
         manager.start_all(configs).await;
@@ -727,15 +732,17 @@ mod tests {
         let registry = Arc::new(RwLock::new(ToolRegistry::new()));
         let manager = McpManager::new(registry.clone());
 
-        let mut cfg = McpServerConfig::default();
-        cfg.command = Some("sleep".to_string());
-        cfg.args = vec!["300".to_string()];
-        cfg.enabled = true;
         // Short connect_timeout so server_task doesn't burn full 60s retrying
         // (note: `sleep 300` never speaks MCP, so server_task will fail the
         // initialize handshake repeatedly and retry with backoff — tight
         // connect_timeout keeps the test window small).
-        cfg.connect_timeout = 1;
+        let cfg = McpServerConfig {
+            command: Some("sleep".to_string()),
+            args: vec!["300".to_string()],
+            enabled: true,
+            connect_timeout: 1,
+            ..Default::default()
+        };
 
         let mut configs = HashMap::new();
         configs.insert("sleepy".to_string(), cfg);

@@ -48,7 +48,7 @@ fn agent_loop_provider_error_returns_err_anyhow_prov07() {
     let needle = "StreamEvent::ProviderError(body)";
     let idx = AGENT_LOOP_SOURCE.find(needle).expect(
         "PROV-07 (phase 36.14): agent_loop.rs must contain `StreamEvent::ProviderError(body)` \
-         match arm. See phase 36.14-sse-stream-error-fallback-gap."
+         match arm. See phase 36.14-sse-stream-error-fallback-gap.",
     );
     let window_end = (idx + needle.len() + 400).min(AGENT_LOOP_SOURCE.len());
     let window = &AGENT_LOOP_SOURCE[idx..window_end];

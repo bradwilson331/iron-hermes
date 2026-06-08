@@ -9,13 +9,16 @@
 
 use std::sync::{Arc, Mutex};
 
-use ironhermes_core::Config;
-use ironhermes_cron::{DeliveryTarget, TgSendApi};
-use ironhermes_cron::job::{CronJob, JobState, RepeatConfig, ScheduleParsed};
-use ironhermes_cron_runner::dispatch_all_targets;
 use chrono::Utc;
+use ironhermes_core::Config;
+use ironhermes_cron::job::{CronJob, JobState, RepeatConfig, ScheduleParsed};
+use ironhermes_cron::{DeliveryTarget, TgSendApi};
+use ironhermes_cron_runner::dispatch_all_targets;
 
 struct FakeTgClient {
+    // Allow: single-use test mock field; extracting a type alias would add
+    // indirection with no gain in a self-contained test file.
+    #[allow(clippy::type_complexity)]
     pub calls: Arc<Mutex<Vec<(String, String, Option<String>)>>>, // (chat_id, content, thread_id)
     pub fail: bool,
 }
@@ -40,10 +43,38 @@ impl TgSendApi for FakeTgClient {
         }
     }
 
-    async fn send_voice(&self, _: &str, _: &std::path::Path, _: Option<&str>) -> anyhow::Result<()> { Ok(()) }
-    async fn send_image_file(&self, _: &str, _: &std::path::Path, _: Option<&str>) -> anyhow::Result<()> { Ok(()) }
-    async fn send_video(&self, _: &str, _: &std::path::Path, _: Option<&str>) -> anyhow::Result<()> { Ok(()) }
-    async fn send_document(&self, _: &str, _: &std::path::Path, _: Option<&str>) -> anyhow::Result<()> { Ok(()) }
+    async fn send_voice(
+        &self,
+        _: &str,
+        _: &std::path::Path,
+        _: Option<&str>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn send_image_file(
+        &self,
+        _: &str,
+        _: &std::path::Path,
+        _: Option<&str>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn send_video(
+        &self,
+        _: &str,
+        _: &std::path::Path,
+        _: Option<&str>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+    async fn send_document(
+        &self,
+        _: &str,
+        _: &std::path::Path,
+        _: Option<&str>,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 fn fake_tg(fail: bool) -> Arc<FakeTgClient> {
@@ -106,18 +137,16 @@ async fn telegram_target_invokes_send_message() {
     let job = make_job("telegram:12345");
     let config = config_no_wrap();
     let tg_client: Arc<dyn TgSendApi> = fake.clone();
-    let errors = dispatch_all_targets(
-        vec![target],
-        "hello world",
-        &job,
-        &config,
-        Some(&tg_client),
-    ).await;
+    let errors =
+        dispatch_all_targets(vec![target], "hello world", &job, &config, Some(&tg_client)).await;
     assert!(errors.is_empty(), "expected no errors: {:?}", errors);
     let calls = fake.calls.lock().unwrap();
     assert_eq!(calls.len(), 1, "expected exactly one send_message call");
     assert_eq!(calls[0].0, "12345", "chat_id must match target.chat_id");
-    assert!(calls[0].1.contains("hello world"), "content must contain job output");
+    assert!(
+        calls[0].1.contains("hello world"),
+        "content must contain job output"
+    );
     assert_eq!(calls[0].2, None, "thread_id must be None");
 }
 
@@ -128,13 +157,7 @@ async fn empty_targets_does_not_call_tg() {
     let job = make_job("local");
     let config = Config::default();
     let tg_client: Arc<dyn TgSendApi> = fake.clone();
-    let errors = dispatch_all_targets(
-        vec![],
-        "some output",
-        &job,
-        &config,
-        Some(&tg_client),
-    ).await;
+    let errors = dispatch_all_targets(vec![], "some output", &job, &config, Some(&tg_client)).await;
     assert!(errors.is_empty());
     let calls = fake.calls.lock().unwrap();
     assert!(
@@ -163,8 +186,13 @@ async fn tg_send_failure_is_non_fatal() {
         &job,
         &config,
         Some(&tg_client),
-    ).await;
+    )
+    .await;
     // Error should be accumulated
     assert_eq!(errors.len(), 1, "expected 1 accumulated error");
-    assert!(errors[0].contains("99999"), "error should mention chat_id: {}", errors[0]);
+    assert!(
+        errors[0].contains("99999"),
+        "error should mention chat_id: {}",
+        errors[0]
+    );
 }

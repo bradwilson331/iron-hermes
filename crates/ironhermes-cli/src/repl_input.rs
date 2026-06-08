@@ -251,23 +251,23 @@ impl ReplInputChannel {
                 // NotFound here so first-run launches do not warn.
                 let _ = rl.set_max_history_size(1000);
                 let _ = rl.set_history_ignore_dups(true);
-                if let Some(ref path) = history_path {
-                    if let Err(e) = rl.load_history(path) {
-                        match &e {
-                            rustyline::error::ReadlineError::Io(io_err)
-                                if io_err.kind() == std::io::ErrorKind::NotFound =>
-                            {
-                                // First run: history file does not exist yet.
-                                // Silent — this is expected, not an error.
-                            }
-                            _ => {
-                                tracing::warn!(
-                                    target: "ironhermes_cli::repl_input",
-                                    path = ?path,
-                                    error = ?e,
-                                    "failed to load REPL history; continuing with empty history",
-                                );
-                            }
+                if let Some(ref path) = history_path
+                    && let Err(e) = rl.load_history(path)
+                {
+                    match &e {
+                        rustyline::error::ReadlineError::Io(io_err)
+                            if io_err.kind() == std::io::ErrorKind::NotFound =>
+                        {
+                            // First run: history file does not exist yet.
+                            // Silent — this is expected, not an error.
+                        }
+                        _ => {
+                            tracing::warn!(
+                                target: "ironhermes_cli::repl_input",
+                                path = ?path,
+                                error = ?e,
+                                "failed to load REPL history; continuing with empty history",
+                            );
                         }
                     }
                 }
@@ -327,15 +327,15 @@ impl ReplInputChannel {
                             // to disk before tearing down the worker. Errors
                             // are logged but not propagated — shutdown must
                             // still complete cleanly.
-                            if let Some(ref path) = history_path {
-                                if let Err(e) = rl.save_history(path) {
-                                    tracing::warn!(
-                                        target: "ironhermes_cli::repl_input",
-                                        path = ?path,
-                                        error = ?e,
-                                        "failed to save REPL history",
-                                    );
-                                }
+                            if let Some(ref path) = history_path
+                                && let Err(e) = rl.save_history(path)
+                            {
+                                tracing::warn!(
+                                    target: "ironhermes_cli::repl_input",
+                                    path = ?path,
+                                    error = ?e,
+                                    "failed to save REPL history",
+                                );
                             }
                             break;
                         }

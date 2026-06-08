@@ -63,9 +63,10 @@ pub async fn handle_pricing_command(cmd: PricingSubcommand) -> Result<()> {
     match cmd {
         PricingSubcommand::List => cmd_list().await,
         PricingSubcommand::Refresh { force, source } => cmd_refresh(force, &source).await,
-        PricingSubcommand::Backfill { dry_run, clean_orphans } => {
-            cmd_backfill(dry_run, clean_orphans).await
-        }
+        PricingSubcommand::Backfill {
+            dry_run,
+            clean_orphans,
+        } => cmd_backfill(dry_run, clean_orphans).await,
     }
 }
 
@@ -190,9 +191,7 @@ async fn cmd_refresh(force: bool, source_str: &str) -> Result<()> {
             // Surface the distinction between fetch-failed and empty-rejected
             // so operators can tell at a glance which path tripped.
             if msg.contains("EMPTY-REJECTED:") {
-                eprintln!(
-                    "hermes pricing refresh: source returned 0 entries (suspicious schema)."
-                );
+                eprintln!("hermes pricing refresh: source returned 0 entries (suspicious schema).");
                 eprintln!("Re-run with --force to overwrite cache anyway.");
                 std::process::exit(EXIT_EMPTY_REJECTED);
             } else {
@@ -266,16 +265,17 @@ async fn cmd_backfill(dry_run: bool, clean_orphans: bool) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("open StateStore: {e}"))?;
 
     // Compute closure shared between dry-run and write paths.
-    let recompute = |model: &str, in_tok: i64, out_tok: i64, cache_read: i64, cache_create: i64| -> i64 {
-        let entry = registry.lookup_or_zero(model);
-        ironhermes_core::pricing::compute_cost_micros(
-            &entry,
-            in_tok,
-            out_tok,
-            cache_read,
-            cache_create,
-        )
-    };
+    let recompute =
+        |model: &str, in_tok: i64, out_tok: i64, cache_read: i64, cache_create: i64| -> i64 {
+            let entry = registry.lookup_or_zero(model);
+            ironhermes_core::pricing::compute_cost_micros(
+                &entry,
+                in_tok,
+                out_tok,
+                cache_read,
+                cache_create,
+            )
+        };
 
     let stats = store
         .backfill_usage_costs(recompute, dry_run, clean_orphans)
@@ -318,12 +318,8 @@ async fn cmd_backfill(dry_run: bool, clean_orphans: bool) -> Result<()> {
             "\nNote: {} usage_events rows have a session_id with no matching sessions row.",
             stats.orphan_rows,
         );
-        println!(
-            "  Pass --clean-orphans to delete them. Otherwise they still carry recomputed"
-        );
-        println!(
-            "  cost but do NOT contribute to any session aggregate."
-        );
+        println!("  Pass --clean-orphans to delete them. Otherwise they still carry recomputed");
+        println!("  cost but do NOT contribute to any session aggregate.");
     }
     Ok(())
 }

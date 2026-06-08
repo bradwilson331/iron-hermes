@@ -56,10 +56,10 @@ pub async fn validate_url_async(url: &str) -> anyhow::Result<()> {
 /// or `localhost`). Only consulted when the `IRONHERMES_SSRF_TEST_ALLOW_LOOPBACK`
 /// env var is set; production code never reaches this branch.
 fn is_loopback_host(url: &str) -> bool {
-    if let Ok(parsed) = url::Url::parse(url) {
-        if let Some(host) = parsed.host_str() {
-            return host == "127.0.0.1" || host == "::1" || host == "localhost";
-        }
+    if let Ok(parsed) = url::Url::parse(url)
+        && let Some(host) = parsed.host_str()
+    {
+        return host == "127.0.0.1" || host == "::1" || host == "localhost";
     }
     false
 }

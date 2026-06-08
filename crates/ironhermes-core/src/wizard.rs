@@ -235,11 +235,16 @@ pub fn apply_kanban_section_answer(config: &mut Config, _enable: &str) -> serde_
 
 /// Additive-merge helper: insert `section_key` into `yaml_value` only when absent.
 ///
-/// Contract (D-11, never-clobber rule):
+/// Contract (D-11, never-clobber rule + G1 null-is-absent rule):
 /// - If `yaml_value` is a Mapping and does NOT contain `section_key`, parse
 ///   `default_block` via `serde_yaml::from_str` and insert it under `section_key`.
-/// - If `section_key` is already present, this is a no-op — the existing value
-///   is never overwritten (idempotent).
+/// - If `section_key` is present with a NON-NULL value, this is a no-op — the
+///   existing value is never overwritten (D-11 idempotent / never-clobber).
+/// - If `section_key` is present with `Value::Null`, it is treated as ABSENT and
+///   populated with `default_block` (G1 + D-11 null-is-absent rule): install.sh
+///   seeds every all-commented section as a bare key with no sub-fields, which
+///   `serde_yaml` parses as `Null`. That Null is the absence-of-value sentinel,
+///   NOT a value the user set — populating it does not violate never-clobber.
 /// - If `yaml_value` is not a Mapping (e.g. Null on an empty file), it is
 ///   promoted to a Mapping before inserting, so a fresh-install always works.
 ///
@@ -256,9 +261,21 @@ pub fn write_defaults_if_absent(
 
     if let serde_yaml::Value::Mapping(map) = yaml_value {
         let key = serde_yaml::Value::String(section_key.to_string());
-        if map.contains_key(&key) {
-            // Key already present — never clobber (D-11).
-            return;
+        match map.get(&key) {
+            Some(serde_yaml::Value::Null) => {
+                // G1 + D-11 null-is-absent rule: present-but-null is the install.sh
+                // seed sentinel (all sub-fields are commented out, so the section key
+                // parses as Null). Treat it as absent and fall through to insert.
+                // Remove the null entry first so the insert below works cleanly.
+                map.remove(&key);
+            }
+            Some(_) => {
+                // Key is present with a real non-null value — never clobber (D-11).
+                return;
+            }
+            None => {
+                // Key is absent — fall through to insert.
+            }
         }
         // Parse the default_block YAML into a Value, then insert under the key.
         // If parsing fails (malformed constant), skip silently — don't crash setup.
@@ -399,7 +416,7 @@ mod tests {
         ];
         for field in expected_fields {
             assert!(
-                block.contains_key(&serde_yaml::Value::String(field.to_string())),
+                block.contains_key(serde_yaml::Value::String(field.to_string())),
                 "apply_kanban_section_answer must emit field `{field}`"
             );
         }
@@ -412,7 +429,7 @@ mod tests {
         write_defaults_if_absent(&mut yaml, "new_section", "enabled: false");
         let map = yaml.as_mapping().expect("must remain a mapping");
         assert!(
-            map.contains_key(&serde_yaml::Value::String("new_section".to_string())),
+            map.contains_key(serde_yaml::Value::String("new_section".to_string())),
             "write_defaults_if_absent must insert the key when absent"
         );
     }
@@ -426,6 +443,70 @@ mod tests {
         assert_eq!(
             yaml, after_first,
             "write_defaults_if_absent must not clobber an existing section on second call (D-11)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Plan 07 Task 1: null-aware write_defaults_if_absent tests (G1 fix)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn write_defaults_if_absent_replaces_present_but_null() {
+        // G1 root cause: install.sh seeds `kanban:` with no sub-fields, which
+        // parses as `kanban: null` (present-but-null). The old code treated this
+        // as "present" and returned early without populating. Per D-11, a
+        // null value is the absence-of-value sentinel, NOT a user-set value.
+        let mut yaml: serde_yaml::Value = serde_yaml::from_str("kanban:\n").unwrap();
+        {
+            let map = yaml.as_mapping().expect("must be a mapping");
+            let key = serde_yaml::Value::String("kanban".to_string());
+            assert!(
+                map.contains_key(&key),
+                "test precondition: kanban key must be present"
+            );
+            assert_eq!(
+                map.get(&key),
+                Some(&serde_yaml::Value::Null),
+                "test precondition: kanban value must be Null"
+            );
+        }
+        write_defaults_if_absent(&mut yaml, "kanban", "foo: 1");
+        let map = yaml.as_mapping().expect("must remain a mapping");
+        let val = map
+            .get(serde_yaml::Value::String("kanban".to_string()))
+            .expect("kanban key must still be present");
+        assert_ne!(
+            val,
+            &serde_yaml::Value::Null,
+            "write_defaults_if_absent must replace present-but-null with the default block (G1 + D-11 null-is-absent rule)"
+        );
+    }
+
+    #[test]
+    fn write_defaults_if_absent_preserves_present_non_null() {
+        // D-11 never-clobber: a present non-null mapping must survive a second call.
+        let mut yaml: serde_yaml::Value = serde_yaml::from_str("{}").unwrap();
+        write_defaults_if_absent(&mut yaml, "kanban", "max_in_progress: 5");
+        let before = yaml.clone();
+        // Second call with a different block must be a no-op.
+        write_defaults_if_absent(&mut yaml, "kanban", "max_in_progress: 99");
+        assert_eq!(
+            yaml, before,
+            "write_defaults_if_absent must NOT clobber a present non-null value (D-11)"
+        );
+        // Confirm the value is still 5, not 99.
+        let map = yaml.as_mapping().unwrap();
+        let kanban = map
+            .get(serde_yaml::Value::String("kanban".to_string()))
+            .expect("kanban must be present");
+        let inner = kanban.as_mapping().expect("kanban must be a mapping");
+        let mip = inner
+            .get(serde_yaml::Value::String("max_in_progress".to_string()))
+            .expect("max_in_progress must be present");
+        assert_eq!(
+            mip.as_u64(),
+            Some(5),
+            "max_in_progress must remain 5 (D-11 never-clobber)"
         );
     }
 
@@ -473,10 +554,12 @@ mod tests {
     #[test]
     fn apply_auxiliary_answer_overwrites_existing() {
         use crate::config::AuxiliaryConfig;
-        let mut config = Config::default();
-        config.auxiliary = AuxiliaryConfig {
-            provider: "old-provider".to_string(),
-            model: "old-model".to_string(),
+        let mut config = Config {
+            auxiliary: AuxiliaryConfig {
+                provider: "old-provider".to_string(),
+                model: "old-model".to_string(),
+            },
+            ..Default::default()
         };
         apply_auxiliary_answer(&mut config, "openai", "gpt-4o-mini");
         assert_eq!(

@@ -82,7 +82,7 @@ pub enum BoardsCommands {
 // ---------------------------------------------------------------------------
 
 pub async fn cmd_boards_list(json: bool) -> Result<i32> {
-    use ironhermes_kanban::paths::{board_dir, list_boards};
+    use ironhermes_kanban::paths::list_boards;
 
     let ctx = board::resolve_board_context(None).context("Failed to resolve board context")?;
     let named = list_boards().context("Failed to read boards directory")?;
@@ -139,8 +139,7 @@ pub async fn cmd_boards_create(
     }
 
     // T-1: validate slug at CLI boundary (defense in depth)
-    let validated_slug =
-        board::validate_board_slug(&slug).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let validated_slug = board::validate_board_slug(&slug).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     let dir = paths::board_dir(&validated_slug);
 
@@ -155,8 +154,7 @@ pub async fn cmd_boards_create(
     }
 
     // Step 1: create directory
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("create board dir {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("create board dir {}", dir.display()))?;
 
     // Step 2: initialize DB (T-3 ordering: dir first, then DB, then current file)
     KanbanStore::open_for_board(&validated_slug).context("Failed to initialize board DB")?;
@@ -187,8 +185,7 @@ pub async fn cmd_boards_create(
 // ---------------------------------------------------------------------------
 
 pub async fn cmd_boards_switch(slug: String) -> Result<i32> {
-    let validated_slug =
-        board::validate_board_slug(&slug).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let validated_slug = board::validate_board_slug(&slug).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // "default" is always valid — no on-disk dir to verify
     if validated_slug != "default" {
@@ -236,8 +233,7 @@ pub async fn cmd_boards_show(json: bool) -> Result<i32> {
 // ---------------------------------------------------------------------------
 
 pub async fn cmd_boards_rename(slug: String, new_name: String) -> Result<i32> {
-    let validated_slug =
-        board::validate_board_slug(&slug).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let validated_slug = board::validate_board_slug(&slug).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     if validated_slug == "default" {
         eprintln!("cannot rename the built-in 'default' board");
@@ -268,8 +264,7 @@ pub async fn cmd_boards_rename(slug: String, new_name: String) -> Result<i32> {
 // ---------------------------------------------------------------------------
 
 pub async fn cmd_boards_rm(slug: String, delete: bool) -> Result<i32> {
-    let validated_slug =
-        board::validate_board_slug(&slug).map_err(|e| anyhow::anyhow!("{}", e))?;
+    let validated_slug = board::validate_board_slug(&slug).map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // D-01 invariant: cannot remove the built-in default board
     if validated_slug == "default" {
@@ -335,7 +330,9 @@ pub async fn cmd_boards_rm(slug: String, delete: bool) -> Result<i32> {
                 let _ = std::fs::remove_file(&self.path);
             }
         }
-        let _lock_guard = LockGuard { path: lock_path.clone() };
+        let _lock_guard = LockGuard {
+            path: lock_path.clone(),
+        };
 
         // Pre-flight count inside the lock (D-07)
         let count = {
@@ -375,7 +372,10 @@ pub async fn cmd_boards_rm(slug: String, delete: bool) -> Result<i32> {
         std::fs::rename(&board_path, &dest)
             .with_context(|| format!("archive board '{}' to {}", validated_slug, dest.display()))?;
 
-        println!("archived {} -> _archived/{}-{}", validated_slug, validated_slug, ts);
+        println!(
+            "archived {} -> _archived/{}-{}",
+            validated_slug, validated_slug, ts
+        );
     }
 
     Ok(0)
@@ -430,7 +430,11 @@ fn read_board_toml(path: &std::path::Path) -> Option<BoardToml> {
 /// Write board.toml with the given name and description fields.
 /// Uses atomic tmp+rename for crash safety.
 /// Uses `toml::to_string` for correct escaping (CR-02 fix).
-fn write_board_toml(dir: &std::path::Path, name: Option<&str>, description: Option<&str>) -> Result<()> {
+fn write_board_toml(
+    dir: &std::path::Path,
+    name: Option<&str>,
+    description: Option<&str>,
+) -> Result<()> {
     let toml_path = dir.join("board.toml");
     let tmp_path = dir.join("board.toml.tmp");
 
@@ -438,8 +442,7 @@ fn write_board_toml(dir: &std::path::Path, name: Option<&str>, description: Opti
         name: name.map(|s| s.to_string()),
         description: description.map(|s| s.to_string()),
     };
-    let content = toml::to_string(&board)
-        .with_context(|| "failed to serialize board.toml")?;
+    let content = toml::to_string(&board).with_context(|| "failed to serialize board.toml")?;
 
     std::fs::write(&tmp_path, content.as_bytes())
         .with_context(|| format!("write tmp board.toml {}", tmp_path.display()))?;

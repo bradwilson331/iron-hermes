@@ -46,7 +46,11 @@ pub enum ChatStreamEvent {
     ///   {"AudioOut":{"mime":"audio/mpeg","uuid":"<uuidv4>","bytes":[<u8>...]}}
     /// Transmitted as Message::Binary per D-02-a. The `bytes` field serializes
     /// as a JSON array of u8 values (no `serde_bytes` dep — plain Vec<u8>).
-    AudioOut { mime: String, uuid: String, bytes: Vec<u8> },
+    AudioOut {
+        mime: String,
+        uuid: String,
+        bytes: Vec<u8>,
+    },
 }
 
 // =============================================================================
@@ -377,8 +381,7 @@ mod tests {
             depth: 7,
             paused: true,
         };
-        let json_paused =
-            serde_json::to_string(&ev_paused).expect("serialize paused QueueUpdated");
+        let json_paused = serde_json::to_string(&ev_paused).expect("serialize paused QueueUpdated");
         assert_eq!(
             json_paused, r#"{"QueueUpdated":{"depth":7,"paused":true}}"#,
             "D-11: paused=true variant must serialize correctly"
@@ -548,8 +551,7 @@ mod tests {
     fn test_decompose_or_specify_round_trip() {
         for v in [DecomposeOrSpecify::Decompose, DecomposeOrSpecify::Specify] {
             let json = serde_json::to_string(&v).expect("serialize");
-            let parsed: DecomposeOrSpecify =
-                serde_json::from_str(&json).expect("deserialize");
+            let parsed: DecomposeOrSpecify = serde_json::from_str(&json).expect("deserialize");
             assert_eq!(parsed, v, "D-13: DecomposeOrSpecify must round-trip");
         }
         // External-tag bare-string shape.
@@ -576,8 +578,10 @@ mod tests {
             message: "Use: hermes kanban decompose t_abc".to_string(),
         };
         let json = serde_json::to_string(&nw).expect("serialize NotWired");
-        let parsed: DecomposeResult =
-            serde_json::from_str(&json).expect("deserialize NotWired");
-        assert_eq!(parsed, nw, "D-13: DecomposeResult::NotWired must round-trip");
+        let parsed: DecomposeResult = serde_json::from_str(&json).expect("deserialize NotWired");
+        assert_eq!(
+            parsed, nw,
+            "D-13: DecomposeResult::NotWired must round-trip"
+        );
     }
 }

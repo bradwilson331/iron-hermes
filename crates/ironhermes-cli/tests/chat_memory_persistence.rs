@@ -12,22 +12,24 @@ use tempfile::TempDir;
 
 /// Process-global env lock — `IRONHERMES_HOME` is shared across the whole
 /// test binary and multiple tests can race.
-fn env_lock() -> &'static std::sync::Mutex<()> {
+fn env_lock() -> &'static tokio::sync::Mutex<()> {
     use std::sync::OnceLock;
-    static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 #[tokio::test]
 async fn memory_persists_across_invocations_with_file_provider() {
-    let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = env_lock().lock().await;
     let tmp = TempDir::new().unwrap();
     unsafe {
         std::env::set_var("IRONHERMES_HOME", tmp.path());
     }
 
-    let mut cfg = ironhermes_core::config::MemoryConfig::default();
-    cfg.provider = "file".to_string();
+    let cfg = ironhermes_core::config::MemoryConfig {
+        provider: "file".to_string(),
+        ..ironhermes_core::config::MemoryConfig::default()
+    };
 
     // First invocation: build the manager, add a memory line.
     {
@@ -72,14 +74,16 @@ async fn memory_persists_across_invocations_with_file_provider() {
 #[cfg(feature = "memory-sqlite")]
 #[tokio::test]
 async fn memory_persists_across_invocations_with_sqlite_provider() {
-    let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = env_lock().lock().await;
     let tmp = TempDir::new().unwrap();
     unsafe {
         std::env::set_var("IRONHERMES_HOME", tmp.path());
     }
 
-    let mut cfg = ironhermes_core::config::MemoryConfig::default();
-    cfg.provider = "sqlite".to_string();
+    let cfg = ironhermes_core::config::MemoryConfig {
+        provider: "sqlite".to_string(),
+        ..ironhermes_core::config::MemoryConfig::default()
+    };
 
     let mgr1 = ironhermes_agent::memory::factory::build_memory_manager(&cfg)
         .await

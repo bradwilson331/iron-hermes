@@ -26,12 +26,7 @@ use ironhermes_agent::PressureTracker;
 async fn warn_cache_break_model_swap_emits_d_cache_03_text() {
     let tracker = PressureTracker::new();
     tracker
-        .warn_cache_break_model_swap(
-            "s1",
-            "claude-opus-4-7",
-            "claude-sonnet-4-6",
-            None,
-        )
+        .warn_cache_break_model_swap("s1", "claude-opus-4-7", "claude-sonnet-4-6", None)
         .await;
 
     let drained = tracker.drain_cache_break_warnings("s1");
@@ -72,9 +67,7 @@ async fn warn_cache_break_memory_edit_emits_d_cache_03_text() {
 #[tokio::test]
 async fn warn_cache_break_context_file_edit_emits_d_cache_03_text() {
     let tracker = PressureTracker::new();
-    tracker
-        .warn_cache_break_context_file_edit("s1", None)
-        .await;
+    tracker.warn_cache_break_context_file_edit("s1", None).await;
 
     let drained = tracker.drain_cache_break_warnings("s1");
     assert_eq!(drained.len(), 1, "exactly one warning fired");
@@ -130,9 +123,7 @@ async fn cache_break_warnings_accumulate_per_session() {
         .warn_cache_break_model_swap("s1", "a", "b", None)
         .await;
     tracker.warn_cache_break_memory_edit("s1", None).await;
-    tracker
-        .warn_cache_break_context_file_edit("s1", None)
-        .await;
+    tracker.warn_cache_break_context_file_edit("s1", None).await;
 
     let drained = tracker.drain_cache_break_warnings("s1");
     assert_eq!(

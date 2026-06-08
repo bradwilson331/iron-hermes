@@ -7,6 +7,12 @@ use ironhermes_core::memory_store::MemoryStore;
 /// Load provider-specific JSON config from `$HERMES_HOME/<provider_name>.json`.
 /// Returns `Value::Null` when the file is missing (provider uses defaults).
 /// Logs a warning and returns `Value::Null` when JSON is malformed.
+// Every non-test caller lives inside a `#[cfg(feature = "memory-{sqlite,duckdb,grafeo}")]`
+// provider-construction arm (lines 65/91/117 and 250/276/302). A downstream crate that
+// links ironhermes-agent without enabling any `memory-*` feature (e.g. iron_hermes_ui's
+// default feature unification) compiles all of those arms away, so this helper appears
+// dead in that configuration even though it is live whenever any provider feature is on.
+#[allow(dead_code)]
 fn load_provider_config(hermes_home: &std::path::Path, provider_name: &str) -> serde_json::Value {
     let config_path = hermes_home.join(format!("{}.json", provider_name));
     match std::fs::read_to_string(&config_path) {
@@ -373,7 +379,7 @@ mod tests {
         feature = "memory-grafeo"
     ))]
     use ironhermes_core::memory_store::MemoryTarget;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::OnceLock;
 
     /// Serializes tests that mutate `IRONHERMES_HOME` via `std::env::set_var`.
     ///
@@ -384,15 +390,12 @@ mod tests {
     /// test flakes — see 20-01-SUMMARY.md Deviations / test-isolation fix).
     ///
     /// Every test in this module that calls `set_var("IRONHERMES_HOME", ...)`
-    /// MUST hold `env_lock()` for its entire duration. The returned
-    /// `MutexGuard` outlives the tempdir and is dropped at test-function
-    /// return, which is sufficient because `build_memory_provider` is awaited
-    /// to completion before the guard is dropped.
-    fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) // poison-tolerant for test-panic recovery
+    /// MUST hold `env_lock().lock().await` for its entire duration. Uses
+    /// `tokio::sync::Mutex` so the guard can be held across `.await` points
+    /// without triggering `clippy::await_holding_lock`.
+    fn env_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
     }
 
     fn cfg(provider: &str) -> MemoryConfig {
@@ -406,7 +409,7 @@ mod tests {
     async fn file_provider_returns_ok() {
         // Also exercises the load_from_disk path — a missing memories
         // directory must not cause a bail (warn-on-error behavior).
-        let _guard = env_lock();
+        let _guard = env_lock().lock().await;
         let tmp = tempfile::TempDir::new().unwrap();
         // SAFETY: test-only env mutation; serialized by `env_lock` so no other
         // test in this module can race this thread's view of IRONHERMES_HOME.
@@ -430,7 +433,7 @@ mod tests {
         // reads IRONHERMES_HOME indirectly via `build_memory_provider` and a
         // concurrent env-mutating test could point it at a tempdir that is
         // deleted mid-call.
-        let _guard = env_lock();
+        let _guard = env_lock().lock().await;
         let result = build_memory_provider(&cfg("totally-unknown")).await;
         assert!(result.is_err(), "unknown provider must error");
         let msg = result.err().unwrap().to_string();
@@ -449,7 +452,7 @@ mod tests {
     async fn sqlite_provider_with_feature_returns_ok() {
         // UAT Test 2 regression guard — this test must pass under
         // `cargo test -p ironhermes-agent --features memory-sqlite`.
-        let _guard = env_lock();
+        let _guard = env_lock().lock().await;
         let _tmp = tempfile::TempDir::new().expect("tempdir");
         unsafe {
             std::env::set_var("IRONHERMES_HOME", _tmp.path());
@@ -496,7 +499,7 @@ mod tests {
         // the var immediately before each factory call guarantees the provider
         // opens the correct tempdir even if a racing test clobbered it between
         // our two phases.
-        let _guard = env_lock();
+        let _guard = env_lock().lock().await;
         let tmp = tempfile::TempDir::new().unwrap();
 
         unsafe {
@@ -528,7 +531,7 @@ mod tests {
     #[tokio::test]
     async fn duckdb_round_trip_via_factory() {
         // See sqlite_round_trip_via_factory for the double-set rationale.
-        let _guard = env_lock();
+        let _guard = env_lock().lock().await;
         let tmp = tempfile::TempDir::new().unwrap();
 
         unsafe {
@@ -560,7 +563,7 @@ mod tests {
 
     #[tokio::test]
     async fn factory_builds_manager_with_no_mirror() {
-        let _guard = env_lock();
+        let _guard = env_lock().lock().await;
         let tmp = tempfile::TempDir::new().unwrap();
         unsafe {
             std::env::set_var("IRONHERMES_HOME", tmp.path());
@@ -584,7 +587,7 @@ mod tests {
 
     #[tokio::test]
     async fn factory_returns_none_when_memory_disabled() {
-        let _guard = env_lock();
+        let _guard = env_lock().lock().await;
         let tmp = tempfile::TempDir::new().unwrap();
         unsafe {
             std::env::set_var("IRONHERMES_HOME", tmp.path());
@@ -609,7 +612,7 @@ mod tests {
     #[tokio::test]
     async fn grafeo_round_trip_via_factory() {
         // See sqlite_round_trip_via_factory for the double-set rationale.
-        let _guard = env_lock();
+        let _guard = env_lock().lock().await;
         let tmp = tempfile::TempDir::new().unwrap();
 
         unsafe {
@@ -640,7 +643,7 @@ mod tests {
 
     #[tokio::test]
     async fn factory_loads_provider_config_json_when_present() {
-        let _guard = env_lock();
+        let _guard = env_lock().lock().await;
         let tmp = tempfile::TempDir::new().unwrap();
         // Write a valid sqlite.json config file
         let config_path = tmp.path().join("sqlite.json");
@@ -655,7 +658,7 @@ mod tests {
 
     #[tokio::test]
     async fn factory_uses_null_when_config_file_absent() {
-        let _guard = env_lock();
+        let _guard = env_lock().lock().await;
         let tmp = tempfile::TempDir::new().unwrap();
         let loaded = load_provider_config(tmp.path(), "nonexistent");
         assert!(
@@ -666,7 +669,7 @@ mod tests {
 
     #[tokio::test]
     async fn factory_uses_null_when_config_json_malformed() {
-        let _guard = env_lock();
+        let _guard = env_lock().lock().await;
         let tmp = tempfile::TempDir::new().unwrap();
         let config_path = tmp.path().join("sqlite.json");
         std::fs::write(&config_path, "not valid json {{{").unwrap();

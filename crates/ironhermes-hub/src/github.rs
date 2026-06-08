@@ -426,10 +426,10 @@ impl HubSource for GitHubSource {
         }
 
         // If we got nothing and hit a rate-limit, surface that error.
-        if out.is_empty() {
-            if let Some(e) = last_rate_limit {
-                return Err(e);
-            }
+        if out.is_empty()
+            && let Some(e) = last_rate_limit
+        {
+            return Err(e);
         }
 
         out.truncate(limit);

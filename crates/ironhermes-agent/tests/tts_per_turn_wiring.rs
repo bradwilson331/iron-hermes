@@ -14,7 +14,7 @@
 use std::sync::Arc;
 
 use ironhermes_agent::{TtsPerTurnWiring, TurnRequest};
-use ironhermes_core::{Config, types::Platform, SessionKey};
+use ironhermes_core::{Config, SessionKey, types::Platform};
 use ironhermes_tools::{AudioDispatcher, NotSupportedAudioDispatcher};
 
 // ── Test 1: TurnRequest::default() has no tts_wiring (regression guard) ──────
@@ -47,7 +47,8 @@ fn tts_per_turn_wiring_constructs_with_no_dispatcher() {
 
 #[test]
 fn tts_per_turn_wiring_constructs_with_some_dispatcher() {
-    let dispatcher: Arc<dyn AudioDispatcher> = Arc::new(NotSupportedAudioDispatcher::new("discord"));
+    let dispatcher: Arc<dyn AudioDispatcher> =
+        Arc::new(NotSupportedAudioDispatcher::new("discord"));
     let wiring = TtsPerTurnWiring {
         session_key: SessionKey::new(Platform::Local, "test"),
         audio_dispatcher: Some(dispatcher),
@@ -112,7 +113,9 @@ fn agent_runtime_source_uses_default_default_in_from_config() {
 fn app_runtime_factory_input_derives_default() {
     const SRC: &str = include_str!("../src/app_runtime_factory.rs");
     assert!(
-        SRC.contains("#[derive(Default)]") || SRC.contains("#[derive(Clone, Default)]") || SRC.contains("#[derive(Default, Clone)]"),
+        SRC.contains("#[derive(Default)]")
+            || SRC.contains("#[derive(Clone, Default)]")
+            || SRC.contains("#[derive(Default, Clone)]"),
         "app_runtime_factory.rs must have #[derive(Default)] on AppRuntimeFactoryInput"
     );
     assert!(

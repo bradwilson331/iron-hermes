@@ -6,17 +6,16 @@
 mod fixtures;
 
 use std::collections::HashSet;
-use std::sync::Mutex;
 
 use ironhermes_hub::{
     AlwaysBlockedScanner, AlwaysCleanScanner, GitHubAuth, GitHubSource, HubError, HubErrorKind,
-    SkillLock, SkillScanner, bundle_content_hash, install,
+    SkillLock, install,
 };
 
-use wiremock::matchers::{method, path, path_regex};
+use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Set up a test environment with HERMES_HOME pointing to a tempdir.
 /// Returns the tempdir (must stay alive for the test duration) and the skills root path.
@@ -69,7 +68,7 @@ async fn mount_github_mocks(server: &MockServer) {
 
 #[tokio::test]
 async fn install_github_happy_path() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let prev = std::env::var("HERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
@@ -127,7 +126,7 @@ async fn install_github_happy_path() {
 
 #[tokio::test]
 async fn install_rejects_already_installed() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let prev = std::env::var("HERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
@@ -174,7 +173,7 @@ async fn install_rejects_already_installed() {
 
 #[tokio::test]
 async fn install_community_scan_blocked() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let prev = std::env::var("HERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
@@ -211,7 +210,7 @@ async fn install_community_scan_blocked() {
 
     // Verify no partial state left
     let skills_dir = std::fs::read_dir(&skills_root).unwrap();
-    let count: usize = skills_dir.filter_map(|e| e.ok()).count();
+    let _count: usize = skills_dir.filter_map(|e| e.ok()).count();
     // Only .hub directory might exist, no skill directories
     for entry in std::fs::read_dir(&skills_root).unwrap() {
         let entry = entry.unwrap();
@@ -235,7 +234,7 @@ async fn install_community_scan_blocked() {
 
 #[tokio::test]
 async fn install_trusted_scan_warn_but_load() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let prev = std::env::var("HERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
@@ -278,7 +277,7 @@ async fn install_trusted_scan_warn_but_load() {
 
 #[tokio::test]
 async fn install_failure_leaves_no_partial_state() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let prev = std::env::var("HERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
@@ -331,7 +330,7 @@ async fn install_failure_leaves_no_partial_state() {
 
 #[tokio::test]
 async fn install_content_hash_matches_bundle_hash() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let prev = std::env::var("HERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
@@ -362,7 +361,7 @@ async fn install_content_hash_matches_bundle_hash() {
 
 #[tokio::test]
 async fn install_uses_category_from_frontmatter() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let prev = std::env::var("HERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
@@ -413,7 +412,6 @@ async fn install_uses_category_from_frontmatter() {
 fn build_categorized_tarball(category: &str) -> Vec<u8> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
-    use std::io::Write;
 
     let skill_md = format!(
         "---\nname: my-tool\ndescription: A tool\nmetadata:\n  hermes:\n    category: {}\n---\n\n# My Tool\n",

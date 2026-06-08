@@ -13,9 +13,7 @@
 //! uses `tokio::task::block_in_place` (RESEARCH Pitfall 1). Every
 //! `#[tokio::test]` here uses `flavor = "multi_thread", worker_threads = 2`.
 
-use ironhermes_agent::subagent_registry::{
-    SubagentInfo, SubagentRegistry, SubagentRegistryHandle,
-};
+use ironhermes_agent::subagent_registry::{SubagentInfo, SubagentRegistry, SubagentRegistryHandle};
 use ironhermes_core::commands::context::SubagentListSnapshot;
 use std::path::PathBuf;
 use std::sync::Arc;

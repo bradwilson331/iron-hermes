@@ -36,9 +36,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ironhermes_agent::{
-    AgentLoop, ProviderError, RateLimitKey, RateLimitTracker, hash_api_key,
-};
+use ironhermes_agent::{AgentLoop, ProviderError, RateLimitKey, RateLimitTracker, hash_api_key};
 use ironhermes_core::Usage;
 use ironhermes_core::pricing::{PricingRegistry, compute_cost_micros};
 use ironhermes_state::StateStore;
@@ -181,7 +179,10 @@ fn b1_success_path_writes_usage_events_and_updates_sessions() {
     assert_eq!(out_tok, 50);
     assert_eq!(cache_read, 800);
     assert_eq!(cache_create, 400);
-    assert!(error_kind.is_none(), "success row must have error_kind NULL");
+    assert!(
+        error_kind.is_none(),
+        "success row must have error_kind NULL"
+    );
     assert_eq!(provider, "anthropic");
     assert_eq!(model, "claude-opus-4-7");
 
@@ -280,7 +281,10 @@ fn b4_failure_path_writes_row_with_error_kind() {
     // Sessions row NOT incremented on failure path.
     let (s_in, s_out, _, _, _) = select_session_aggregates(&store, "sess-b4");
     assert_eq!(s_in, 0, "sessions input_tokens NOT incremented on failure");
-    assert_eq!(s_out, 0, "sessions output_tokens NOT incremented on failure");
+    assert_eq!(
+        s_out, 0,
+        "sessions output_tokens NOT incremented on failure"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -319,8 +323,7 @@ fn b6_tracker_record_headers_invoked_on_success() {
 
 #[tokio::test]
 async fn b7_tracker_record_429_invoked_on_ratelimited_failure() {
-    let (agent, _store, tracker, mut rx, _tmp) =
-        make_test_agent("sess-b7", "claude-opus-4-7");
+    let (agent, _store, tracker, mut rx, _tmp) = make_test_agent("sess-b7", "claude-opus-4-7");
     agent.write_usage_failure(&ProviderError::RateLimited {
         retry_after: Some(Duration::from_secs(30)),
     });
@@ -338,7 +341,10 @@ async fn b7_tracker_record_429_invoked_on_ratelimited_failure() {
         model: "claude-opus-4-7".to_string(),
     };
     let state = tracker.snapshot(&key).expect("tracker state present");
-    assert_eq!(state.last_source, ironhermes_agent::RateLimitSource::Reactive429);
+    assert_eq!(
+        state.last_source,
+        ironhermes_agent::RateLimitSource::Reactive429
+    );
     assert_eq!(state.remaining_requests, Some(0));
 }
 
@@ -365,7 +371,10 @@ fn b8_tracker_receives_hashed_not_cleartext_api_key() {
     // Sanity: the hash is exactly 16 bytes.
     assert_eq!(expected_hash.len(), 16);
     // And the captured state was indeed recorded.
-    assert_eq!(state.last_source, ironhermes_agent::RateLimitSource::Reactive429);
+    assert_eq!(
+        state.last_source,
+        ironhermes_agent::RateLimitSource::Reactive429
+    );
 
     // Anti-shape check: a key built from the *cleartext* string as if it
     // were a 16-byte buffer must NOT match anything in the tracker.
@@ -419,12 +428,18 @@ fn b10_subagent_rows_tagged_with_subagents_session_id() {
     let store = Arc::new(std::sync::Mutex::new(store));
 
     let registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
-    let client_parent = ironhermes_agent::any_client::AnyClient::ChatCompletions(
-        ironhermes_agent::LlmClient::new("http://localhost".to_string(), "".to_string(), "claude-opus-4-7"),
-    );
-    let client_child = ironhermes_agent::any_client::AnyClient::ChatCompletions(
-        ironhermes_agent::LlmClient::new("http://localhost".to_string(), "".to_string(), "claude-opus-4-7"),
-    );
+    let client_parent =
+        ironhermes_agent::any_client::AnyClient::ChatCompletions(ironhermes_agent::LlmClient::new(
+            "http://localhost".to_string(),
+            "".to_string(),
+            "claude-opus-4-7",
+        ));
+    let client_child =
+        ironhermes_agent::any_client::AnyClient::ChatCompletions(ironhermes_agent::LlmClient::new(
+            "http://localhost".to_string(),
+            "".to_string(),
+            "claude-opus-4-7",
+        ));
 
     let parent = AgentLoop::new(client_parent, registry.clone(), 4)
         .with_state_store(store.clone())
@@ -456,7 +471,10 @@ fn b11_unknown_model_writes_zero_cost_without_panic() {
 
     let (_, _, _, _, cost, _, _, model) = select_one_usage_event(&store, "sess-b11");
     assert_eq!(cost, 0, "unknown model → 0 cost via lookup_or_zero");
-    assert_eq!(model, "foobar-unknown", "model name still recorded for forensics");
+    assert_eq!(
+        model, "foobar-unknown",
+        "model name still recorded for forensics"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -473,9 +491,12 @@ fn b12_context_compressor_cache_atomics_populated_via_record_usage_full() {
         .unwrap();
     let store = Arc::new(std::sync::Mutex::new(store_inner));
     let registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
-    let client = ironhermes_agent::any_client::AnyClient::ChatCompletions(
-        ironhermes_agent::LlmClient::new("http://localhost".to_string(), "".to_string(), "claude-opus-4-7"),
-    );
+    let client =
+        ironhermes_agent::any_client::AnyClient::ChatCompletions(ironhermes_agent::LlmClient::new(
+            "http://localhost".to_string(),
+            "".to_string(),
+            "claude-opus-4-7",
+        ));
     let agent = AgentLoop::new(client, registry, 4)
         .with_state_store(store)
         .with_session_id("sess-b12")

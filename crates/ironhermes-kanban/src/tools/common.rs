@@ -33,9 +33,7 @@ use crate::board::{BoardContext, BoardSlugError, default_board_context, resolve_
 /// Returns `(ctx, None)` on success.  Returns `(default_board_context(), Some(err))` when
 /// the slug fails validation — the caller MUST use the returned error to emit a rejection,
 /// but still has a valid `BoardContext` for envelope serialisation.
-pub fn resolve_board_context_from_args(
-    args: &Value,
-) -> (BoardContext, Option<BoardSlugError>) {
+pub fn resolve_board_context_from_args(args: &Value) -> (BoardContext, Option<BoardSlugError>) {
     let slug_opt = args.get("board").and_then(|v| v.as_str());
     match resolve_board_context(slug_opt) {
         Ok(ctx) => (ctx, None),
@@ -105,9 +103,7 @@ pub fn reject_with_board(reason: &str, detail: &str, ctx: Option<&BoardContext>)
             board = c.slug,
             source = c.source.as_str(),
         ),
-        None => format!(
-            r#"{{"status":"rejected","reason":"{reason}","detail":"{safe_detail}"}}"#,
-        ),
+        None => format!(r#"{{"status":"rejected","reason":"{reason}","detail":"{safe_detail}"}}"#,),
     }
 }
 
@@ -117,7 +113,10 @@ pub fn reject_with_board(reason: &str, detail: &str, ctx: Option<&BoardContext>)
 /// Use this when the rejection needs structured fields beyond `"detail"` (e.g.
 /// `"task_id"`, `"current"`, `"expected"`, `"parent_id"`, `"child_id"`) to
 /// preserve backward-compatible envelope shapes while adding D-08 provenance.
-pub fn reject_value_with_board(mut value: Value, ctx: Option<&BoardContext>) -> anyhow::Result<String> {
+pub fn reject_value_with_board(
+    mut value: Value,
+    ctx: Option<&BoardContext>,
+) -> anyhow::Result<String> {
     if let Some(c) = ctx
         && let Some(map) = value.as_object_mut()
     {
@@ -179,11 +178,26 @@ mod tests {
         let ctx = make_ctx("gamma", BoardSource::File);
         let json_str = reject_with_board("invalid_board", "bad slug", Some(&ctx));
 
-        assert!(json_str.contains("\"board\":\"gamma\""), "missing board field: {json_str}");
-        assert!(json_str.contains("\"board_source\":\"file\""), "missing board_source: {json_str}");
-        assert!(json_str.contains("\"status\":\"rejected\""), "missing status: {json_str}");
-        assert!(json_str.contains("\"reason\":\"invalid_board\""), "missing reason: {json_str}");
-        assert!(json_str.contains("\"detail\":\"bad slug\""), "missing detail: {json_str}");
+        assert!(
+            json_str.contains("\"board\":\"gamma\""),
+            "missing board field: {json_str}"
+        );
+        assert!(
+            json_str.contains("\"board_source\":\"file\""),
+            "missing board_source: {json_str}"
+        );
+        assert!(
+            json_str.contains("\"status\":\"rejected\""),
+            "missing status: {json_str}"
+        );
+        assert!(
+            json_str.contains("\"reason\":\"invalid_board\""),
+            "missing reason: {json_str}"
+        );
+        assert!(
+            json_str.contains("\"detail\":\"bad slug\""),
+            "missing detail: {json_str}"
+        );
         // Valid JSON.
         let parsed: Value = serde_json::from_str(&json_str).expect("must be valid JSON");
         assert_eq!(parsed["board"], "gamma");
@@ -193,8 +207,14 @@ mod tests {
     fn reject_with_board_none_ctx_omits_board_fields() {
         let json_str = reject_with_board("err", "detail text", None);
 
-        assert!(!json_str.contains("\"board\""), "should not have board: {json_str}");
-        assert!(!json_str.contains("\"board_source\""), "should not have board_source: {json_str}");
+        assert!(
+            !json_str.contains("\"board\""),
+            "should not have board: {json_str}"
+        );
+        assert!(
+            !json_str.contains("\"board_source\""),
+            "should not have board_source: {json_str}"
+        );
         let parsed: Value = serde_json::from_str(&json_str).expect("must be valid JSON");
         assert_eq!(parsed["status"], "rejected");
     }
@@ -205,7 +225,8 @@ mod tests {
         // Detail contains backslash and double-quote — these must be escaped.
         let json_str = reject_with_board("err", r#"path\to\"file""#, Some(&ctx));
         // Must parse as valid JSON.
-        let parsed: Value = serde_json::from_str(&json_str).expect("must be valid JSON after escaping");
+        let parsed: Value =
+            serde_json::from_str(&json_str).expect("must be valid JSON after escaping");
         assert!(parsed["detail"].as_str().unwrap().contains("path"));
     }
 
@@ -215,7 +236,9 @@ mod tests {
     fn resolve_from_args_with_string_board_returns_flag_source() {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Ensure env does not interfere.
-        unsafe { std::env::remove_var("HERMES_KANBAN_BOARD"); }
+        unsafe {
+            std::env::remove_var("HERMES_KANBAN_BOARD");
+        }
 
         let args = json!({ "board": "myproject" });
         let (ctx, err) = resolve_board_context_from_args(&args);
@@ -229,14 +252,20 @@ mod tests {
     fn resolve_from_args_with_no_board_returns_default_source_when_no_env_file() {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Clear env and use a tempdir as IRONHERMES_HOME so no current file exists.
-        unsafe { std::env::remove_var("HERMES_KANBAN_BOARD"); }
+        unsafe {
+            std::env::remove_var("HERMES_KANBAN_BOARD");
+        }
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("IRONHERMES_HOME", dir.path()); }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", dir.path());
+        }
 
         let args = json!({});
         let (ctx, err) = resolve_board_context_from_args(&args);
 
-        unsafe { std::env::remove_var("IRONHERMES_HOME"); }
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
 
         assert!(err.is_none(), "unexpected error: {:?}", err);
         assert_eq!(ctx.slug, "default");
@@ -246,7 +275,9 @@ mod tests {
     #[test]
     fn resolve_from_args_with_invalid_slug_returns_err_and_default_ctx() {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::remove_var("HERMES_KANBAN_BOARD"); }
+        unsafe {
+            std::env::remove_var("HERMES_KANBAN_BOARD");
+        }
 
         // Path traversal slug must fail validation.
         let args = json!({ "board": "../etc/passwd" });

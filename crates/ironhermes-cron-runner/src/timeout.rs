@@ -1,7 +1,7 @@
 //! Inactivity + wall-clock timeout primitives.
 //! Implemented in Task 2 of plan 32.1-05b.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::future::Future;
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
@@ -122,7 +122,10 @@ mod tests {
     #[tokio::test]
     async fn test3_wall_clock_succeeds_fast_future() {
         let result = run_with_wall_clock(async { Ok::<_, anyhow::Error>("done") }, 60).await;
-        assert!(result.is_ok(), "Expected Ok for fast future with 60s deadline");
+        assert!(
+            result.is_ok(),
+            "Expected Ok for fast future with 60s deadline"
+        );
         assert_eq!(result.unwrap(), "done");
     }
 

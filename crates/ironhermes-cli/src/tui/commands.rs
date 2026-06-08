@@ -95,15 +95,14 @@ pub fn dispatch_command(
             // Phase 21.8.2 D-06/D-08: SKILL-13 dynamic fallback. Registered commands
             // win because the 3-stage resolution ran first; we only reach NotFound when
             // no registered command matched. cmd is already the bare token (no leading /).
-            if let Some(registry) = &ctx.skill_registry {
-                if let Some(record) = registry.find(cmd) {
-                    if let Some(body) = registry.read_content(&record.name) {
-                        return CommandResult::SkillActivated {
-                            name: record.name.clone(),
-                            body,
-                        };
-                    }
-                }
+            if let Some(registry) = &ctx.skill_registry
+                && let Some(record) = registry.find(cmd)
+                && let Some(body) = registry.read_content(&record.name)
+            {
+                return CommandResult::SkillActivated {
+                    name: record.name.clone(),
+                    body,
+                };
             }
             // Phase 22.3 D-10 / UI-SPEC TYPO-4: append Levenshtein-2 suggestion
             // when a known top-level command is close. Candidates derived from
@@ -146,7 +145,9 @@ fn map_core_to_tui(core: CoreCommandResult) -> CommandResult {
         CoreCommandResult::McpReload => CommandResult::McpReload,
         // Phase 21.8.2 Plan 02: pass through to REPL loop — Plan 03 lands real integration arms.
         CoreCommandResult::SkillsReload => CommandResult::SkillsReload,
-        CoreCommandResult::SkillActivated { name, body } => CommandResult::SkillActivated { name, body },
+        CoreCommandResult::SkillActivated { name, body } => {
+            CommandResult::SkillActivated { name, body }
+        }
         CoreCommandResult::PersonalityApplied(text) => CommandResult::Handled(text),
         // Phase 36.17.1 Plan 03 Task 1: the SessionQueue lives on GatewayRunner
         // only — the legacy TUI surface has no per-session FIFO and cannot
@@ -176,6 +177,7 @@ fn map_core_to_tui(core: CoreCommandResult) -> CommandResult {
 /// - Header `"Available commands:"`
 /// - Commands grouped by category with 2-space indent
 /// - Keybindings section (if `keybinding_registry` is Some)
+#[allow(dead_code)] // called by print_help() in main.rs; production /help dispatch pending
 pub fn format_help(
     _extensions: &[Box<dyn TuiExtension>],
     keybinding_registry: Option<&KeybindingRegistry>,
@@ -227,6 +229,7 @@ pub fn format_help(
 
 /// Build a default CommandRouter for CLI use (Platform::Local).
 /// Convenience used by print_help() and tests.
+#[allow(dead_code)] // used by print_help() and planned TUI test wiring
 pub fn build_cli_router() -> CommandRouter {
     CommandRouter::new(build_registry())
 }
@@ -248,6 +251,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
+    #[allow(dead_code)] // test helper retained for future keybinding dispatch tests
     fn make_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent {
             code,
@@ -271,6 +275,7 @@ mod tests {
 
     // --- Test extension helpers ---
 
+    #[allow(dead_code)] // test extension stub retained for future extension dispatch tests
     struct NoOpExt;
     impl TuiExtension for NoOpExt {
         fn name(&self) -> &str {

@@ -251,19 +251,14 @@ fn cmd_agents(args: &[&str], ctx: &CommandContext) -> CommandResult {
             let token = match args.get(1) {
                 Some(s) => *s,
                 None => {
-                    return CommandResult::Error(
-                        "/agents interrupt <id>: missing id".to_string(),
-                    );
+                    return CommandResult::Error("/agents interrupt <id>: missing id".to_string());
                 }
             };
             let entries = reg.list_summary();
             match resolve_subagent_id(token, &entries) {
                 Resolve::Exact(id) => {
                     if reg.interrupt(&id) {
-                        CommandResult::Output(format!(
-                            "Interrupted {} \u{2014} finalizing...",
-                            id
-                        ))
+                        CommandResult::Output(format!("Interrupted {} \u{2014} finalizing...", id))
                     } else {
                         CommandResult::Output(format!("No active subagent with id {}.", id))
                     }
@@ -304,18 +299,14 @@ fn cmd_agents(args: &[&str], ctx: &CommandContext) -> CommandResult {
             let token = match args.get(1) {
                 Some(s) => *s,
                 None => {
-                    return CommandResult::Error(
-                        "/agents status <id>: missing id".to_string(),
-                    );
+                    return CommandResult::Error("/agents status <id>: missing id".to_string());
                 }
             };
             let entries = reg.list_summary();
             match resolve_subagent_id(token, &entries) {
                 Resolve::Exact(id) => match reg.status(&id) {
                     Some(info) => CommandResult::Output(render_status_kv(&info)),
-                    None => {
-                        CommandResult::Output(format!("No active subagent with id {}.", id))
-                    }
+                    None => CommandResult::Output(format!("No active subagent with id {}.", id)),
                 },
                 Resolve::None => {
                     CommandResult::Output(format!("No active subagent with id {}.", token))
@@ -533,14 +524,15 @@ fn resolve_subagent_id(token: &str, entries: &[(String, String, std::time::Durat
     // 2. Position alias: `subagent-N` or bare `N`. 1-indexed against the
     //    current list order. Out-of-range → None.
     let numeric = token.strip_prefix("subagent-").unwrap_or(token);
-    if let Ok(n) = numeric.parse::<usize>() {
-        if n >= 1 && n <= entries.len() {
-            return Resolve::Exact(entries[n - 1].0.clone());
-        }
-        // Numeric token out of range — fall through to prefix match so
-        // a numeric-looking hex token like `12345` can still match an id
-        // suffix.
+    if let Ok(n) = numeric.parse::<usize>()
+        && n >= 1
+        && n <= entries.len()
+    {
+        return Resolve::Exact(entries[n - 1].0.clone());
     }
+    // Numeric token out of range — fall through to prefix match so
+    // a numeric-looking hex token like `12345` can still match an id
+    // suffix.
     // 3. Prefix match against full id or the hex suffix after `sub_`.
     let mut matches: Vec<String> = Vec::new();
     for (id, _, _) in entries {
@@ -702,11 +694,11 @@ fn cmd_usage(args: &[&str], ctx: &CommandContext) -> CommandResult {
                 }
             }
             "--since" => {
-                if let Some(v) = iter.next() {
-                    if let Some(secs) = parse_since(v) {
-                        since_seconds = Some(secs);
-                        session_id = None;
-                    }
+                if let Some(v) = iter.next()
+                    && let Some(secs) = parse_since(v)
+                {
+                    since_seconds = Some(secs);
+                    session_id = None;
                 }
             }
             _ => { /* unknown flag — ignore so future additions don't break old call sites */ }
@@ -1141,15 +1133,34 @@ fn cmd_cron(args: &[&str], ctx: &CommandContext) -> CommandResult {
 /// These are KNOWN deferred names that route to a CLI-redirect message.
 /// UNKNOWN names fall through to typo-suggest (matching cmd_cron behavior).
 const DEFERRED_KANBAN_SUBVERBS: &[&str] = &[
-    "claim", "complete", "block", "unblock", "comment", "archive",
-    "reclaim", "reassign", "assign", "link", "unlink",
-    "init", "tail", "watch", "runs", "assignees", "dispatch",
-    "stats", "log", "context", "gc", "daemon", "diagnostics",
+    "claim",
+    "complete",
+    "block",
+    "unblock",
+    "comment",
+    "archive",
+    "reclaim",
+    "reassign",
+    "assign",
+    "link",
+    "unlink",
+    "init",
+    "tail",
+    "watch",
+    "runs",
+    "assignees",
+    "dispatch",
+    "stats",
+    "log",
+    "context",
+    "gc",
+    "daemon",
+    "diagnostics",
     "swarm",
     "mention",
-    "boards",      // Phase 36.3.7.9
-    "decompose",   // Phase 36.3.7.10 — use `hermes kanban decompose` CLI verb
-    "specify",     // Phase 36.3.7.10 — use `hermes kanban specify` CLI verb
+    "boards",    // Phase 36.3.7.9
+    "decompose", // Phase 36.3.7.10 — use `hermes kanban decompose` CLI verb
+    "specify",   // Phase 36.3.7.10 — use `hermes kanban specify` CLI verb
 ];
 
 /// Map ironhermes-core's Platform enum to the lowercase string form used by
@@ -1238,31 +1249,29 @@ fn cmd_kanban(args: &[&str], ctx: &CommandContext) -> CommandResult {
             // Auto-subscribe hook (skip if --json per CONTEXT.md locked decision +
             // docs/kanban/reference.md:718). Failures here are logged but do NOT
             // fail the whole arm — the task was successfully created.
-            if !json {
-                if let Some(chat_id) = ctx.chat_id.as_deref() {
-                    let platform = platform_to_str(&ctx.platform);
-                    match writer.append_subscription(
-                        &task_id,
-                        &platform,
-                        chat_id,
-                        ctx.thread_id.as_deref(),
-                        "auto",
-                    ) {
-                        Ok(_) => {
-                            tracing::debug!(
-                                task_id = %task_id,
-                                platform = %platform,
-                                chat_id = chat_id,
-                                "auto-subscribed origin chat to task"
-                            );
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                task_id = %task_id,
-                                error = %e,
-                                "auto-subscribe failed; task created OK but notifier won't deliver"
-                            );
-                        }
+            if !json && let Some(chat_id) = ctx.chat_id.as_deref() {
+                let platform = platform_to_str(&ctx.platform);
+                match writer.append_subscription(
+                    &task_id,
+                    &platform,
+                    chat_id,
+                    ctx.thread_id.as_deref(),
+                    "auto",
+                ) {
+                    Ok(_) => {
+                        tracing::debug!(
+                            task_id = %task_id,
+                            platform = %platform,
+                            chat_id = chat_id,
+                            "auto-subscribed origin chat to task"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            error = %e,
+                            "auto-subscribe failed; task created OK but notifier won't deliver"
+                        );
                     }
                 }
             }
@@ -1444,7 +1453,7 @@ fn cmd_commands(args: &[&str], ctx: &CommandContext, router: &CommandRouter) -> 
 
     let cmds = router.commands_for_platform(&ctx.platform);
     let total_cmds = cmds.len();
-    let total_pages = (total_cmds + PAGE_SIZE - 1) / PAGE_SIZE;
+    let total_pages = total_cmds.div_ceil(PAGE_SIZE);
     let total_pages = total_pages.max(1);
     let page = page.min(total_pages);
 
@@ -1515,8 +1524,7 @@ fn cmd_models_refresh() -> CommandResult {
     }
 
     // Save to disk
-    let mut cache = crate::models_cache::ModelsCache::default();
-    cache.entries = entries;
+    let cache = crate::models_cache::ModelsCache { entries };
     match cache.save() {
         Ok(()) => lines.push(format!(
             "Fetch complete. {} entries saved to cache.",
@@ -2888,8 +2896,8 @@ mod tests {
 #[cfg(test)]
 mod skills_reload_tests {
     use super::*;
-    use crate::commands::context::CommandContext;
     use crate::commands::Platform;
+    use crate::commands::context::CommandContext;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
 
@@ -2905,14 +2913,20 @@ mod skills_reload_tests {
     fn cmd_skills_no_args_returns_no_skills_loaded_when_registry_none() {
         let ctx = empty_ctx();
         let result = cmd_skills(&[], &ctx);
-        assert_eq!(result, CommandResult::Output("No skills loaded.".to_string()));
+        assert_eq!(
+            result,
+            CommandResult::Output("No skills loaded.".to_string())
+        );
     }
 
     #[test]
     fn cmd_skills_reload_arg_returns_skills_not_configured_when_registry_none() {
         let ctx = empty_ctx();
         let result = cmd_skills(&["reload"], &ctx);
-        assert_eq!(result, CommandResult::Output("Skills not configured.".to_string()));
+        assert_eq!(
+            result,
+            CommandResult::Output("Skills not configured.".to_string())
+        );
     }
 
     #[test]
@@ -2980,7 +2994,12 @@ mod cmd_agents_tree_tests {
         }
     }
 
-    fn make_entry(id: &str, summary: &str, parent_id: Option<&str>, depth: usize) -> SubagentTreeEntry {
+    fn make_entry(
+        id: &str,
+        summary: &str,
+        parent_id: Option<&str>,
+        depth: usize,
+    ) -> SubagentTreeEntry {
         SubagentTreeEntry {
             id: id.to_string(),
             task_summary: summary.to_string(),
@@ -3024,13 +3043,28 @@ mod cmd_agents_tree_tests {
             other => panic!("expected Output, got {:?}", other),
         };
         // Legacy flat-list format: "- subagent-N (id) (summary) — uptimes"
-        assert!(output.contains("subagent-1"), "should contain subagent-1 alias");
-        assert!(output.contains("subagent-2"), "should contain subagent-2 alias");
-        assert!(output.contains("subagent-3"), "should contain subagent-3 alias");
+        assert!(
+            output.contains("subagent-1"),
+            "should contain subagent-1 alias"
+        );
+        assert!(
+            output.contains("subagent-2"),
+            "should contain subagent-2 alias"
+        );
+        assert!(
+            output.contains("subagent-3"),
+            "should contain subagent-3 alias"
+        );
         assert!(output.contains("task A"), "should contain task A summary");
         // No tree connectors in flat mode
-        assert!(!output.contains("\u{2514}\u{2500}\u{2500}"), "flat mode should not have └── connector");
-        assert!(!output.contains("\u{251C}\u{2500}\u{2500}"), "flat mode should not have ├── connector");
+        assert!(
+            !output.contains("\u{2514}\u{2500}\u{2500}"),
+            "flat mode should not have └── connector"
+        );
+        assert!(
+            !output.contains("\u{251C}\u{2500}\u{2500}"),
+            "flat mode should not have ├── connector"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -3052,17 +3086,30 @@ mod cmd_agents_tree_tests {
         };
         // Should contain tree connectors
         assert!(
-            output.contains("\u{251C}\u{2500}\u{2500}") || output.contains("\u{2514}\u{2500}\u{2500}"),
+            output.contains("\u{251C}\u{2500}\u{2500}")
+                || output.contains("\u{2514}\u{2500}\u{2500}"),
             "nested tree should contain ├── or └── connector; got:\n{}",
             output
         );
         // Last child gets └──
-        assert!(output.contains("\u{2514}\u{2500}\u{2500}"), "last child should have └── connector");
+        assert!(
+            output.contains("\u{2514}\u{2500}\u{2500}"),
+            "last child should have └── connector"
+        );
         // Status pills
-        assert!(output.contains("[running]"), "should contain [running] status pill");
+        assert!(
+            output.contains("[running]"),
+            "should contain [running] status pill"
+        );
         // Summaries present
-        assert!(output.contains("fetch data"), "should contain child_a summary");
-        assert!(output.contains("write output"), "should contain child_b summary");
+        assert!(
+            output.contains("fetch data"),
+            "should contain child_a summary"
+        );
+        assert!(
+            output.contains("write output"),
+            "should contain child_b summary"
+        );
     }
 
     // -------------------------------------------------------------------------
@@ -3078,17 +3125,29 @@ mod cmd_agents_tree_tests {
         let output = render_agent_tree(&entries);
         // root level: no prefix, gets connector
         assert!(
-            output.contains("\u{2514}\u{2500}\u{2500}") || output.contains("\u{251C}\u{2500}\u{2500}"),
+            output.contains("\u{2514}\u{2500}\u{2500}")
+                || output.contains("\u{251C}\u{2500}\u{2500}"),
             "should contain tree connector at root; got:\n{}",
             output
         );
         // The mid level should have a continuation prefix (root is last, so "    ")
         // and the leaf should be nested deeper.
-        assert!(output.contains("leaf task"), "leaf task should appear in output");
-        assert!(output.contains("mid task"), "mid task should appear in output");
-        assert!(output.contains("root task"), "root task should appear in output");
+        assert!(
+            output.contains("leaf task"),
+            "leaf task should appear in output"
+        );
+        assert!(
+            output.contains("mid task"),
+            "mid task should appear in output"
+        );
+        assert!(
+            output.contains("root task"),
+            "root task should appear in output"
+        );
         // 3-level: ensure leaf line contains two connector-depth's worth of prefix
-        let leaf_line = output.lines().find(|l| l.contains("leaf task"))
+        let leaf_line = output
+            .lines()
+            .find(|l| l.contains("leaf task"))
             .expect("leaf task line should exist");
         // At depth 2, leaf_line should have at least 4 spaces of indentation prefix before connector
         assert!(

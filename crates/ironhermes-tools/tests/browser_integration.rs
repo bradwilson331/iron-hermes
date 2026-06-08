@@ -18,9 +18,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 // Process-wide env lock (mirrors provider_integration.rs / toolset_integration.rs)
 // =============================================================================
 
-fn env_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+fn env_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 // =============================================================================
@@ -105,7 +105,7 @@ async fn invoke(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_navigate_then_snapshot_returns_refs() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock().lock().await;
     if !chromium_available() {
         eprintln!("SKIP browser_navigate_then_snapshot_returns_refs: no chromium binary (D-22)");
         return;
@@ -174,7 +174,7 @@ async fn browser_navigate_then_snapshot_returns_refs() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_click_with_stale_ref_returns_structured_error() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock().lock().await;
     if !chromium_available() {
         eprintln!(
             "SKIP browser_click_with_stale_ref_returns_structured_error: no chromium binary (D-22)"
@@ -338,7 +338,7 @@ impl VisionClientHandle for ResolverVisionHandle {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn browser_vision_routes_to_auxiliary_vision_role() {
-    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _g = env_lock().lock().await;
     if !chromium_available() {
         eprintln!("SKIP browser_vision_routes_to_auxiliary_vision_role: no chromium binary (D-22)");
         return;

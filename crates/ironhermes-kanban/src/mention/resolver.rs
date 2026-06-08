@@ -379,9 +379,18 @@ mod tests {
     // ------------------------------------------------------------------
     #[test]
     fn fallback_policy_from_str_parses_three_values_and_rejects_others() {
-        assert_eq!("skip".parse::<FallbackPolicy>().unwrap(), FallbackPolicy::Skip);
-        assert_eq!("pending".parse::<FallbackPolicy>().unwrap(), FallbackPolicy::Pending);
-        assert_eq!("error".parse::<FallbackPolicy>().unwrap(), FallbackPolicy::Error);
+        assert_eq!(
+            "skip".parse::<FallbackPolicy>().unwrap(),
+            FallbackPolicy::Skip
+        );
+        assert_eq!(
+            "pending".parse::<FallbackPolicy>().unwrap(),
+            FallbackPolicy::Pending
+        );
+        assert_eq!(
+            "error".parse::<FallbackPolicy>().unwrap(),
+            FallbackPolicy::Error
+        );
 
         // Uppercase rejected
         assert!("SKIP".parse::<FallbackPolicy>().is_err());

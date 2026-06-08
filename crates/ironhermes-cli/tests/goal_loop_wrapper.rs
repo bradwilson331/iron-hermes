@@ -17,12 +17,12 @@
 //!    "judge unavailable"; NO budget_exhausted event.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use ironhermes_kanban::{
-    cas::{atomic_claim, build_claim_lock, DEFAULT_CLAIM_TTL_SECONDS},
     CreateTaskOptions, JudgeFn, JudgeOutput, JudgeRequest, JudgeVerdict, KanbanStore,
+    cas::{DEFAULT_CLAIM_TTL_SECONDS, atomic_claim, build_claim_lock},
 };
 use rusqlite::Connection;
 use serde_json::Value;
@@ -30,7 +30,7 @@ use tempfile::TempDir;
 
 // Test-local mutex serializing env-var manipulation across the five tests
 // in this binary (parallel tests share the process env).
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn now() -> f64 {
     std::time::SystemTime::now()
@@ -119,7 +119,7 @@ fn task_goal_turns_used(db_path: &Path, task_id: &str) -> u32 {
 
 #[tokio::test]
 async fn non_goal_passthrough_calls_run_once() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().await;
     // SAFETY: tests serialize via ENV_LOCK; production code only reads env.
     unsafe {
         std::env::remove_var("HERMES_KANBAN_GOAL_MODE");
@@ -171,12 +171,26 @@ async fn non_goal_passthrough_calls_run_once() {
     drop(store_arc);
     assert!(result.is_ok(), "wrapper returned Err: {:?}", result.err());
 
-    assert_eq!(turn_runs.load(Ordering::SeqCst), 1, "expected exactly one turn-run");
-    assert_eq!(judge_calls.load(Ordering::SeqCst), 0, "judge must not fire in non-goal path");
+    assert_eq!(
+        turn_runs.load(Ordering::SeqCst),
+        1,
+        "expected exactly one turn-run"
+    );
+    assert_eq!(
+        judge_calls.load(Ordering::SeqCst),
+        0,
+        "judge must not fire in non-goal path"
+    );
 
     assert_eq!(count_subkind_events(&db_path, &task_id, "judge_verdict"), 0);
-    assert_eq!(count_subkind_events(&db_path, &task_id, "goal_turn_advanced"), 0);
-    assert_eq!(count_subkind_events(&db_path, &task_id, "goal_budget_exhausted"), 0);
+    assert_eq!(
+        count_subkind_events(&db_path, &task_id, "goal_turn_advanced"),
+        0
+    );
+    assert_eq!(
+        count_subkind_events(&db_path, &task_id, "goal_budget_exhausted"),
+        0
+    );
     assert_eq!(task_goal_turns_used(&db_path, &task_id), 0);
 }
 
@@ -186,7 +200,7 @@ async fn non_goal_passthrough_calls_run_once() {
 
 #[tokio::test]
 async fn judge_met_exits_cleanly() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().await;
     unsafe {
         std::env::set_var("HERMES_KANBAN_GOAL_MODE", "1");
         std::env::set_var("HERMES_KANBAN_GOAL_MAX_TURNS", "10");
@@ -239,7 +253,10 @@ async fn judge_met_exits_cleanly() {
     assert!(result.is_ok(), "wrapper returned Err: {:?}", result.err());
     assert_eq!(turn_runs.load(Ordering::SeqCst), 1);
     assert_eq!(count_subkind_events(&db_path, &task_id, "judge_verdict"), 1);
-    assert_eq!(count_subkind_events(&db_path, &task_id, "goal_budget_exhausted"), 0);
+    assert_eq!(
+        count_subkind_events(&db_path, &task_id, "goal_budget_exhausted"),
+        0
+    );
     assert_eq!(
         task_status(&db_path, &task_id),
         "running",
@@ -253,7 +270,7 @@ async fn judge_met_exits_cleanly() {
 
 #[tokio::test]
 async fn self_termination_exits_cleanly() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().await;
     unsafe {
         std::env::set_var("HERMES_KANBAN_GOAL_MODE", "1");
         std::env::set_var("HERMES_KANBAN_GOAL_MAX_TURNS", "10");
@@ -325,8 +342,15 @@ async fn self_termination_exits_cleanly() {
 
     assert!(result.is_ok(), "wrapper returned Err: {:?}", result.err());
     assert_eq!(turn_runs.load(Ordering::SeqCst), 1);
-    assert_eq!(judge_calls.load(Ordering::SeqCst), 0, "judge must not fire after self-term");
-    assert_eq!(count_subkind_events(&db_path, &task_id, "goal_budget_exhausted"), 0);
+    assert_eq!(
+        judge_calls.load(Ordering::SeqCst),
+        0,
+        "judge must not fire after self-term"
+    );
+    assert_eq!(
+        count_subkind_events(&db_path, &task_id, "goal_budget_exhausted"),
+        0
+    );
     assert_eq!(task_status(&db_path, &task_id), "done");
 }
 
@@ -336,7 +360,7 @@ async fn self_termination_exits_cleanly() {
 
 #[tokio::test]
 async fn budget_exhaustion_synthesizes_block() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().await;
     unsafe {
         std::env::set_var("HERMES_KANBAN_GOAL_MODE", "1");
         std::env::set_var("HERMES_KANBAN_GOAL_MAX_TURNS", "3");
@@ -387,10 +411,20 @@ async fn budget_exhaustion_synthesizes_block() {
     }
 
     assert!(result.is_ok(), "wrapper returned Err: {:?}", result.err());
-    assert_eq!(turn_runs.load(Ordering::SeqCst), 3, "expected 3 turn-runs for max_turns=3");
+    assert_eq!(
+        turn_runs.load(Ordering::SeqCst),
+        3,
+        "expected 3 turn-runs for max_turns=3"
+    );
     assert_eq!(count_subkind_events(&db_path, &task_id, "judge_verdict"), 3);
-    assert_eq!(count_subkind_events(&db_path, &task_id, "goal_budget_exhausted"), 1);
-    assert_eq!(count_subkind_events(&db_path, &task_id, "goal_turn_advanced"), 3);
+    assert_eq!(
+        count_subkind_events(&db_path, &task_id, "goal_budget_exhausted"),
+        1
+    );
+    assert_eq!(
+        count_subkind_events(&db_path, &task_id, "goal_turn_advanced"),
+        3
+    );
     assert_eq!(
         task_status(&db_path, &task_id),
         "blocked",
@@ -404,7 +438,7 @@ async fn budget_exhaustion_synthesizes_block() {
 
 #[tokio::test]
 async fn two_consecutive_judge_errors_block() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().await;
     unsafe {
         std::env::set_var("HERMES_KANBAN_GOAL_MODE", "1");
         std::env::set_var("HERMES_KANBAN_GOAL_MAX_TURNS", "10");

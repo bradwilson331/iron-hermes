@@ -52,7 +52,10 @@ async fn discord_send_audio_returns_err_with_discord_in_message() {
         .send_audio_file("chat1", &PathBuf::from("/tmp/x.mp3"), None)
         .await;
 
-    assert!(result.is_err(), "send_audio_file must return Err for discord dispatcher");
+    assert!(
+        result.is_err(),
+        "send_audio_file must return Err for discord dispatcher"
+    );
     let err_msg = format!("{}", result.unwrap_err());
     assert!(
         err_msg.contains("discord"),
@@ -71,7 +74,10 @@ async fn slack_send_voice_returns_err_with_slack_in_message() {
         .send_voice_file("chat1", &PathBuf::from("/tmp/y.ogg"), None)
         .await;
 
-    assert!(result.is_err(), "send_voice_file must return Err for slack dispatcher");
+    assert!(
+        result.is_err(),
+        "send_voice_file must return Err for slack dispatcher"
+    );
     let err_msg = format!("{}", result.unwrap_err());
     assert!(
         err_msg.contains("slack"),

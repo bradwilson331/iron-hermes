@@ -51,16 +51,15 @@ use std::sync::Arc;
 use anyhow::Context;
 use ironhermes_kanban::{
     GOAL_SUBKIND_BUDGET_EXHAUSTED, GOAL_SUBKIND_JUDGE_ERROR, GOAL_SUBKIND_JUDGE_VERDICT,
-    GOAL_SUBKIND_TURN_ADVANCED, JudgeFn, JudgeOutput, JudgeRequest, JudgeVerdict,
-    KanbanEventKind, KanbanStore,
+    GOAL_SUBKIND_TURN_ADVANCED, JudgeFn, JudgeOutput, JudgeRequest, JudgeVerdict, KanbanEventKind,
+    KanbanStore,
 };
 use tokio::sync::Mutex as TokioMutex;
 
 /// `BoxFuture` alias — mirrors `crates/ironhermes-kanban/src/decomposer.rs:58`
 /// to avoid the `futures::future::BoxFuture` dep (this crate doesn't pull
 /// `futures` in directly).
-pub type GoalLoopFuture<T> =
-    Pin<Box<dyn std::future::Future<Output = T> + Send + 'static>>;
+pub type GoalLoopFuture<T> = Pin<Box<dyn std::future::Future<Output = T> + Send + 'static>>;
 
 /// Per-turn agent runner. Called once per goal-loop iteration with the
 /// running message vector; returns the assistant's final textual output
@@ -69,9 +68,7 @@ pub type GoalLoopFuture<T> =
 /// Production code wraps `AgentRuntime::run_turn(TurnRequest)`. Tests pass
 /// a mock closure. The narrow `Vec<String> -> String` signature avoids
 /// leaking `ChatMessage` / `AgentResult` into the public surface.
-pub type TurnRunner = Box<
-    dyn FnMut(Vec<String>) -> GoalLoopFuture<anyhow::Result<String>> + Send,
->;
+pub type TurnRunner = Box<dyn FnMut(Vec<String>) -> GoalLoopFuture<anyhow::Result<String>> + Send>;
 
 // ---------------------------------------------------------------------------
 // BudgetSentinel — RAII guard for the synthetic kanban_block on budget
@@ -301,7 +298,10 @@ pub async fn run_goal_loop_if_enabled(
             turn: turn + 1,
         };
         match judge_fn(req).await {
-            Ok(JudgeOutput { verdict: JudgeVerdict::Met, reason }) => {
+            Ok(JudgeOutput {
+                verdict: JudgeVerdict::Met,
+                reason,
+            }) => {
                 let mut guard = store.lock().await;
                 let _ = guard.append_event(
                     task_id,
@@ -318,7 +318,10 @@ pub async fn run_goal_loop_if_enabled(
                 sentinel.done = true;
                 return Ok(());
             }
-            Ok(JudgeOutput { verdict: JudgeVerdict::NotMet, reason }) => {
+            Ok(JudgeOutput {
+                verdict: JudgeVerdict::NotMet,
+                reason,
+            }) => {
                 {
                     let mut guard = store.lock().await;
                     let _ = guard.append_event(

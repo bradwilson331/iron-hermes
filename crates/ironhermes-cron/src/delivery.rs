@@ -27,8 +27,9 @@ pub struct DeliveryTarget {
 /// Any token that is NOT in this list will never trigger an env-var read.
 /// This prevents env-var enumeration via crafted `deliver` values
 /// (e.g. `deliver = "stripe_secret"` would otherwise read `STRIPE_SECRET_HOME_CHANNEL`).
-pub const KNOWN_DELIVERY_PLATFORMS: &[&str] =
-    &["telegram", "discord", "slack", "matrix", "whatsapp", "webhook", "qq"];
+pub const KNOWN_DELIVERY_PLATFORMS: &[&str] = &[
+    "telegram", "discord", "slack", "matrix", "whatsapp", "webhook", "qq",
+];
 
 // ---------------------------------------------------------------------------
 // Private env-var mapping helpers
@@ -36,34 +37,34 @@ pub const KNOWN_DELIVERY_PLATFORMS: &[&str] =
 
 fn home_channel_env_var(platform: &str) -> Option<&'static str> {
     match platform {
-        "telegram"  => Some("TELEGRAM_HOME_CHANNEL"),
-        "discord"   => Some("DISCORD_HOME_CHANNEL"),
-        "slack"     => Some("SLACK_HOME_CHANNEL"),
-        "matrix"    => Some("MATRIX_HOME_CHANNEL"),
-        "whatsapp"  => Some("WHATSAPP_HOME_CHANNEL"),
-        "webhook"   => Some("WEBHOOK_HOME_CHANNEL"),
-        "qq"        => Some("QQ_HOME_CHANNEL"),
-        _           => None,
+        "telegram" => Some("TELEGRAM_HOME_CHANNEL"),
+        "discord" => Some("DISCORD_HOME_CHANNEL"),
+        "slack" => Some("SLACK_HOME_CHANNEL"),
+        "matrix" => Some("MATRIX_HOME_CHANNEL"),
+        "whatsapp" => Some("WHATSAPP_HOME_CHANNEL"),
+        "webhook" => Some("WEBHOOK_HOME_CHANNEL"),
+        "qq" => Some("QQ_HOME_CHANNEL"),
+        _ => None,
     }
 }
 
 fn legacy_home_channel_env_var(platform: &str) -> Option<&'static str> {
     match platform {
         "qq" => Some("QQBOT_HOME_CHANNEL"),
-        _    => None,
+        _ => None,
     }
 }
 
 fn home_channel_thread_env_var(platform: &str) -> Option<&'static str> {
     match platform {
-        "telegram"  => Some("TELEGRAM_HOME_CHANNEL_THREAD_ID"),
-        "discord"   => Some("DISCORD_HOME_CHANNEL_THREAD_ID"),
-        "slack"     => Some("SLACK_HOME_CHANNEL_THREAD_ID"),
-        "matrix"    => Some("MATRIX_HOME_CHANNEL_THREAD_ID"),
-        "whatsapp"  => Some("WHATSAPP_HOME_CHANNEL_THREAD_ID"),
-        "webhook"   => Some("WEBHOOK_HOME_CHANNEL_THREAD_ID"),
-        "qq"        => Some("QQ_HOME_CHANNEL_THREAD_ID"),
-        _           => None,
+        "telegram" => Some("TELEGRAM_HOME_CHANNEL_THREAD_ID"),
+        "discord" => Some("DISCORD_HOME_CHANNEL_THREAD_ID"),
+        "slack" => Some("SLACK_HOME_CHANNEL_THREAD_ID"),
+        "matrix" => Some("MATRIX_HOME_CHANNEL_THREAD_ID"),
+        "whatsapp" => Some("WHATSAPP_HOME_CHANNEL_THREAD_ID"),
+        "webhook" => Some("WEBHOOK_HOME_CHANNEL_THREAD_ID"),
+        "qq" => Some("QQ_HOME_CHANNEL_THREAD_ID"),
+        _ => None,
     }
 }
 
@@ -84,7 +85,7 @@ fn lookup_telegram_whitelist_fallback() -> Option<DeliveryTarget> {
     // Config::load reads ${IRONHERMES_HOME}/config.yaml (or defaults if missing).
     // Failures are non-fatal — fallback simply returns None.
     let config = match ironhermes_core::config::Config::load() {
-        Ok(c)  => c,
+        Ok(c) => c,
         Err(e) => {
             tracing::debug!(error = %e, "telegram fallback: Config::load failed — skipping");
             return None;
@@ -138,10 +139,11 @@ fn lookup_home_channel(platform: &str) -> Option<DeliveryTarget> {
     // Gap-closure 32.1-09: telegram-only config.yaml whitelist fallback.
     // Runs ONLY when both the primary and legacy env vars yielded nothing,
     // AND the platform is telegram. Other platforms remain env-only.
-    if chat_id.is_none() && platform == "telegram" {
-        if let Some(target) = lookup_telegram_whitelist_fallback() {
-            return Some(target);
-        }
+    if chat_id.is_none()
+        && platform == "telegram"
+        && let Some(target) = lookup_telegram_whitelist_fallback()
+    {
+        return Some(target);
     }
 
     let chat_id = chat_id?;
@@ -387,11 +389,10 @@ mod tests {
     use super::*;
     use crate::job::{CronJob, JobOrigin, JobState, RepeatConfig, ScheduleParsed};
     use chrono::Utc;
-    use std::sync::MutexGuard;
     use tempfile::TempDir;
 
-    fn env_lock() -> MutexGuard<'static, ()> {
-        crate::test_env_lock()
+    fn env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        crate::test_env_lock().blocking_lock()
     }
 
     fn make_job(deliver: &str, origin: Option<JobOrigin>) -> CronJob {
@@ -593,11 +594,10 @@ mod multi_target_tests {
     use super::*;
     use crate::job::{CronJob, JobOrigin, JobState, RepeatConfig, ScheduleParsed};
     use chrono::Utc;
-    use std::sync::MutexGuard;
 
     /// Serialise all env-mutating tests to avoid races.
-    fn env_lock() -> MutexGuard<'static, ()> {
-        crate::test_env_lock()
+    fn env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        crate::test_env_lock().blocking_lock()
     }
 
     fn make_job(deliver: &str, origin: Option<JobOrigin>) -> CronJob {
@@ -730,7 +730,10 @@ mod multi_target_tests {
         unsafe {
             std::env::remove_var("IRONHERMES_HOME");
         }
-        assert!(targets.is_empty(), "should return empty when home channel unset and no config.yaml");
+        assert!(
+            targets.is_empty(),
+            "should return empty when home channel unset and no config.yaml"
+        );
     }
 
     // Test 7: legacy env var fallback for qq
@@ -866,7 +869,10 @@ mod multi_target_tests {
         unsafe {
             std::env::remove_var("REDDIT_HOME_CHANNEL");
         }
-        assert!(targets.is_empty(), "unknown platform must not produce targets");
+        assert!(
+            targets.is_empty(),
+            "unknown platform must not produce targets"
+        );
     }
 
     // Test 14: path traversal shaped token
@@ -874,7 +880,10 @@ mod multi_target_tests {
     fn test14_path_traversal_shaped_token() {
         let job = make_job("../etc/passwd", None);
         let targets = resolve_delivery_targets(&job);
-        assert!(targets.is_empty(), "traversal-shaped token must not produce targets");
+        assert!(
+            targets.is_empty(),
+            "traversal-shaped token must not produce targets"
+        );
     }
 
     // Test 15: deduplication — same target appears twice
@@ -906,11 +915,10 @@ mod multi_target_tests {
 #[cfg(test)]
 mod save_job_output_tests_phase_32_1 {
     use super::*;
-    use std::sync::MutexGuard;
     use tempfile::TempDir;
 
-    fn env_lock() -> MutexGuard<'static, ()> {
-        crate::test_env_lock()
+    fn env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        crate::test_env_lock().blocking_lock()
     }
 
     // Test 1: fsync source-grep verified via acceptance criteria; functional regression test
@@ -947,7 +955,11 @@ mod save_job_output_tests_phase_32_1 {
         }
         let meta = fs::metadata(&path).expect("stat output file");
         let mode = meta.permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "output .md file must have mode 0600, got {:o}", mode);
+        assert_eq!(
+            mode, 0o600,
+            "output .md file must have mode 0600, got {:o}",
+            mode
+        );
     }
 
     // Test 3: Unix chmod 0700 on output directory
@@ -967,7 +979,11 @@ mod save_job_output_tests_phase_32_1 {
         let dir = path.parent().expect("output file must have a parent dir");
         let meta = fs::metadata(dir).expect("stat output dir");
         let mode = meta.permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700, "output dir must have mode 0700, got {:o}", mode);
+        assert_eq!(
+            mode, 0o700,
+            "output dir must have mode 0700, got {:o}",
+            mode
+        );
     }
 
     // Test 4: regression — atomic rename still works and file is readable
@@ -984,7 +1000,10 @@ mod save_job_output_tests_phase_32_1 {
             std::env::remove_var("IRONHERMES_HOME");
         }
         assert!(path.exists(), "final path must exist after rename");
-        assert!(path.to_string_lossy().ends_with(".md"), "path must end with .md");
+        assert!(
+            path.to_string_lossy().ends_with(".md"),
+            "path must end with .md"
+        );
         // No .tmp file should remain
         let tmp_path = path.with_extension("md.tmp");
         assert!(!tmp_path.exists(), ".tmp file must not exist after rename");
@@ -1003,12 +1022,11 @@ mod telegram_whitelist_fallback_tests {
     use crate::job::{CronJob, JobOrigin, JobState, RepeatConfig, ScheduleParsed};
     use chrono::Utc;
     use std::io::Write;
-    use std::sync::MutexGuard;
     use tempfile::TempDir;
 
     /// Serialise all env-mutating tests to avoid races.
-    fn env_lock() -> MutexGuard<'static, ()> {
-        crate::test_env_lock()
+    fn env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        crate::test_env_lock().blocking_lock()
     }
 
     fn make_job(deliver: &str, origin: Option<JobOrigin>) -> CronJob {
@@ -1082,7 +1100,10 @@ mod telegram_whitelist_fallback_tests {
         }
         assert_eq!(targets.len(), 1, "should have one target");
         assert_eq!(targets[0].platform, "telegram");
-        assert_eq!(targets[0].chat_id, "env-value", "env var must win over config.yaml whitelist");
+        assert_eq!(
+            targets[0].chat_id, "env-value",
+            "env var must win over config.yaml whitelist"
+        );
     }
 
     // Test 2: config fallback fires — single whitelist entry, env unset
@@ -1106,7 +1127,10 @@ mod telegram_whitelist_fallback_tests {
         assert_eq!(targets.len(), 1, "fallback should yield one target");
         assert_eq!(targets[0].platform, "telegram");
         assert_eq!(targets[0].chat_id, "12345");
-        assert_eq!(targets[0].thread_id, None, "config fallback must not fabricate thread_id");
+        assert_eq!(
+            targets[0].thread_id, None,
+            "config fallback must not fabricate thread_id"
+        );
     }
 
     // Test 3: config fallback — zero whitelist entries, env unset → empty
@@ -1191,7 +1215,10 @@ mod telegram_whitelist_fallback_tests {
         unsafe {
             std::env::remove_var("IRONHERMES_HOME");
         }
-        assert!(targets.is_empty(), "disabled telegram section must return empty");
+        assert!(
+            targets.is_empty(),
+            "disabled telegram section must return empty"
+        );
     }
 
     // Test 7: no fallback for non-telegram platform (discord) — config not consulted
@@ -1213,7 +1240,10 @@ mod telegram_whitelist_fallback_tests {
         unsafe {
             std::env::remove_var("IRONHERMES_HOME");
         }
-        assert!(targets.is_empty(), "discord has no config fallback — must return empty");
+        assert!(
+            targets.is_empty(),
+            "discord has no config fallback — must return empty"
+        );
     }
 
     // Test 8: no config fallback for qq platform either
@@ -1235,7 +1265,10 @@ mod telegram_whitelist_fallback_tests {
         unsafe {
             std::env::remove_var("IRONHERMES_HOME");
         }
-        assert!(targets.is_empty(), "qq has no config fallback — must return empty");
+        assert!(
+            targets.is_empty(),
+            "qq has no config fallback — must return empty"
+        );
     }
 
     // Test 9: thread_id env var still wins when env var is set
@@ -1260,7 +1293,11 @@ mod telegram_whitelist_fallback_tests {
         }
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].chat_id, "env-tg", "env var chat_id must win");
-        assert_eq!(targets[0].thread_id, Some("42".to_string()), "thread_id must be set from env");
+        assert_eq!(
+            targets[0].thread_id,
+            Some("42".to_string()),
+            "thread_id must be set from env"
+        );
     }
 
     // Test 10: config fallback yields no thread_id (config.yaml has no thread_id semantics)
@@ -1307,7 +1344,11 @@ mod telegram_whitelist_fallback_tests {
         unsafe {
             std::env::remove_var("IRONHERMES_HOME");
         }
-        assert_eq!(targets.len(), 1, "explicit chat_id form must produce one target");
+        assert_eq!(
+            targets.len(),
+            1,
+            "explicit chat_id form must produce one target"
+        );
         assert_eq!(
             targets[0].chat_id, "caller-supplied",
             "explicit chat_id must win over config whitelist"

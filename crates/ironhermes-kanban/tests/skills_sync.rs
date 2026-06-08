@@ -23,21 +23,33 @@ fn first_run_writes_both_skills() {
     let tmp = temp_skills_root();
     let root = tmp.path();
 
-    let report = sync_bundled_kanban_skills(root, false)
-        .expect("sync_bundled_kanban_skills should succeed");
+    let report =
+        sync_bundled_kanban_skills(root, false).expect("sync_bundled_kanban_skills should succeed");
 
     let worker_path = root.join("kanban-worker").join("SKILL.md");
     let orchestrator_path = root.join("kanban-orchestrator").join("SKILL.md");
 
-    assert!(worker_path.exists(), "kanban-worker/SKILL.md should exist after first sync");
-    assert!(orchestrator_path.exists(), "kanban-orchestrator/SKILL.md should exist after first sync");
+    assert!(
+        worker_path.exists(),
+        "kanban-worker/SKILL.md should exist after first sync"
+    );
+    assert!(
+        orchestrator_path.exists(),
+        "kanban-orchestrator/SKILL.md should exist after first sync"
+    );
 
     let worker_content = std::fs::read_to_string(&worker_path).expect("read worker SKILL.md");
     let orchestrator_content =
         std::fs::read_to_string(&orchestrator_path).expect("read orchestrator SKILL.md");
 
-    assert!(!worker_content.is_empty(), "kanban-worker/SKILL.md should be non-empty");
-    assert!(!orchestrator_content.is_empty(), "kanban-orchestrator/SKILL.md should be non-empty");
+    assert!(
+        !worker_content.is_empty(),
+        "kanban-worker/SKILL.md should be non-empty"
+    );
+    assert!(
+        !orchestrator_content.is_empty(),
+        "kanban-orchestrator/SKILL.md should be non-empty"
+    );
 
     assert_eq!(report.worker_action, SyncAction::Wrote);
     assert_eq!(report.orchestrator_action, SyncAction::Wrote);
@@ -56,11 +68,13 @@ fn second_run_preserves_user_edits() {
     std::fs::write(&worker_path, "USER EDIT").expect("write user edit");
 
     // Second sync with force=false — should preserve the user edit.
-    let report = sync_bundled_kanban_skills(root, false)
-        .expect("second sync should succeed");
+    let report = sync_bundled_kanban_skills(root, false).expect("second sync should succeed");
 
     let content = std::fs::read_to_string(&worker_path).expect("read after second sync");
-    assert_eq!(content, "USER EDIT", "user edit must be preserved when force=false");
+    assert_eq!(
+        content, "USER EDIT",
+        "user edit must be preserved when force=false"
+    );
     assert_eq!(
         report.worker_action,
         SyncAction::Skipped,
@@ -81,15 +95,17 @@ fn force_overwrites_user_edits() {
     std::fs::write(&worker_path, "USER EDIT").expect("write user edit");
 
     // Force sync — must overwrite.
-    let report = sync_bundled_kanban_skills(root, true)
-        .expect("force sync should succeed");
+    let report = sync_bundled_kanban_skills(root, true).expect("force sync should succeed");
 
     let content = std::fs::read_to_string(&worker_path).expect("read after force sync");
     assert_eq!(
         content, KANBAN_WORKER_SKILL_MD,
         "force sync must restore bundled content"
     );
-    assert_ne!(content, "USER EDIT", "user edit must be overwritten when force=true");
+    assert_ne!(
+        content, "USER EDIT",
+        "user edit must be overwritten when force=true"
+    );
     assert_eq!(
         report.worker_action,
         SyncAction::Restored,
@@ -106,7 +122,10 @@ fn restore_helper_writes_bundled() {
         .expect("restore_bundled_kanban_skill should succeed for kanban-worker");
 
     let worker_path = root.join("kanban-worker").join("SKILL.md");
-    assert!(worker_path.exists(), "kanban-worker/SKILL.md should exist after restore");
+    assert!(
+        worker_path.exists(),
+        "kanban-worker/SKILL.md should exist after restore"
+    );
 
     let content = std::fs::read_to_string(&worker_path).expect("read restored SKILL.md");
     assert_eq!(
@@ -121,7 +140,10 @@ fn restore_unknown_skill_errors() {
     let root = tmp.path();
 
     let result = restore_bundled_kanban_skill(root, "unknown-skill");
-    assert!(result.is_err(), "restore_bundled_kanban_skill should error for unknown skill");
+    assert!(
+        result.is_err(),
+        "restore_bundled_kanban_skill should error for unknown skill"
+    );
 
     match result.unwrap_err() {
         KanbanError::UnknownSkill(name) => {
@@ -173,9 +195,8 @@ fn sync_idempotent_on_second_call() {
     // Second sync — should be a no-op.
     let report = sync_bundled_kanban_skills(root, false).expect("second sync");
 
-    let worker_content_after =
-        std::fs::read_to_string(root.join("kanban-worker").join("SKILL.md"))
-            .expect("read worker after second sync");
+    let worker_content_after = std::fs::read_to_string(root.join("kanban-worker").join("SKILL.md"))
+        .expect("read worker after second sync");
 
     assert_eq!(
         worker_content_before, worker_content_after,
@@ -203,9 +224,8 @@ fn bundled_content_matches_include_str_source() {
 
     let worker_on_disk =
         std::fs::read(root.join("kanban-worker").join("SKILL.md")).expect("read worker bytes");
-    let orchestrator_on_disk =
-        std::fs::read(root.join("kanban-orchestrator").join("SKILL.md"))
-            .expect("read orchestrator bytes");
+    let orchestrator_on_disk = std::fs::read(root.join("kanban-orchestrator").join("SKILL.md"))
+        .expect("read orchestrator bytes");
 
     assert_eq!(
         worker_on_disk.as_slice(),

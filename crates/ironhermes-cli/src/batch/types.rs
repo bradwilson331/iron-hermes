@@ -8,6 +8,7 @@ pub struct BatchEntry {
     #[serde(default)]
     pub system: Option<String>,
     /// Optional tool allowlist.
+    #[allow(dead_code)] // deserialized from JSONL; read in batch/tests.rs; production runner wiring pending
     #[serde(default)]
     pub tools: Option<Vec<String>>,
 }

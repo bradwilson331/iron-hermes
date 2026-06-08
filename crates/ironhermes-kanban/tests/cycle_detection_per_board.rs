@@ -21,13 +21,11 @@
 //!    cross-board links fail at the lookup layer (D-05 rationale: cycle SQL never
 //!    sees cross-board IDs because they don't exist in the connected DB).
 
-use std::sync::Mutex;
-
 use ironhermes_kanban::error::KanbanError;
 use ironhermes_kanban::store::{CreateTaskOptions, KanbanStore};
 
 /// Serialize all tests that mutate `IRONHERMES_HOME`.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -71,7 +69,10 @@ fn cycle_detection_works_unchanged_on_default_board() {
     // C → A would close the cycle — must be rejected with LinkCycle.
     let result = store.insert_link_checked(&c, &a);
     match result {
-        Err(KanbanError::LinkCycle { parent_id, child_id }) => {
+        Err(KanbanError::LinkCycle {
+            parent_id,
+            child_id,
+        }) => {
             assert_eq!(parent_id, c, "parent_id in LinkCycle must be C");
             assert_eq!(child_id, a, "child_id in LinkCycle must be A");
         }
@@ -110,7 +111,10 @@ fn cycle_detection_works_independently_on_named_board() {
     // C → A closes the cycle on the alpha board — must be rejected with LinkCycle.
     let result = store.insert_link_checked(&c, &a);
     match result {
-        Err(KanbanError::LinkCycle { parent_id, child_id }) => {
+        Err(KanbanError::LinkCycle {
+            parent_id,
+            child_id,
+        }) => {
             assert_eq!(parent_id, c, "alpha: parent_id in LinkCycle must be C");
             assert_eq!(child_id, a, "alpha: child_id in LinkCycle must be A");
         }
@@ -169,9 +173,9 @@ fn cross_board_link_is_blocked_by_construction_not_by_cycle_sql() {
             );
         }
         Err(e) => panic!("expected TaskNotFound but got unexpected error: {e}"),
-        Ok(()) => panic!(
-            "cross-board insert_link_checked must fail — task X doesn't exist in alpha's DB"
-        ),
+        Ok(()) => {
+            panic!("cross-board insert_link_checked must fail — task X doesn't exist in alpha's DB")
+        }
     }
 
     unsafe { std::env::remove_var("IRONHERMES_HOME") };

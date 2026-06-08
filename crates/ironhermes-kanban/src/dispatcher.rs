@@ -97,7 +97,13 @@ impl DispatcherContext {
             dispatcher_pid: std::process::id(),
             spawn_fn: Arc::new(|task, run, workspace, board_slug| {
                 Box::pin(async move {
-                    crate::worker_spawn::spawn_worker_for_board(&task, &run, &workspace, &board_slug).await
+                    crate::worker_spawn::spawn_worker_for_board(
+                        &task,
+                        &run,
+                        &workspace,
+                        &board_slug,
+                    )
+                    .await
                 })
             }),
             decompose_fn: None,
@@ -173,7 +179,9 @@ pub async fn run_dispatch_tick(ctx: &DispatcherContext) -> Result<()> {
     match crate::paths::list_boards() {
         Ok(named) => all_boards.extend(named),
         Err(e) => {
-            tracing::warn!("[kanban] dispatcher could not enumerate boards: {e}; using default only");
+            tracing::warn!(
+                "[kanban] dispatcher could not enumerate boards: {e}; using default only"
+            );
         }
     }
 
@@ -231,20 +239,20 @@ pub async fn run_dispatch_tick_for_board(ctx: &DispatcherContext, board_slug: &s
     // Gate 1: config.auto_decompose must be true (default false — zero cost when off).
     // Gate 2: decompose_fn must be Some (gateway runner ships None in v1 — graceful no-op).
     // Both gates must pass; either gate failing short-circuits with zero work + zero noise.
-    if ctx.config.auto_decompose {
-        if let Some(ref decompose_fn) = ctx.decompose_fn {
-            async {
-                if let Err(e) = decompose_triage_tasks(ctx, decompose_fn).await {
-                    tracing::warn!(error = %e, board = board_slug, "auto-decompose step error");
-                }
+    if ctx.config.auto_decompose
+        && let Some(ref decompose_fn) = ctx.decompose_fn
+    {
+        async {
+            if let Err(e) = decompose_triage_tasks(ctx, decompose_fn).await {
+                tracing::warn!(error = %e, board = board_slug, "auto-decompose step error");
             }
-            .instrument(tracing::info_span!(
-                "kanban.dispatch.step",
-                step = "auto_decompose",
-                board = board_slug,
-            ))
-            .await;
         }
+        .instrument(tracing::info_span!(
+            "kanban.dispatch.step",
+            step = "auto_decompose",
+            board = board_slug,
+        ))
+        .await;
     }
 
     let now = now_secs();
@@ -580,7 +588,7 @@ async fn reclaim_stale_claims(ctx: &DispatcherContext, now: f64) -> Result<()> {
                 .as_ref()
                 .map(|r| r.id.as_str())
                 .unwrap_or("reclaimed-no-run");
-            let error_msg = format!("claim TTL expired with dead or null PID");
+            let error_msg = "claim TTL expired with dead or null PID".to_string();
             apply_circuit_breaker(ctx, &task, run_id_arg, &error_msg, now).await?;
         }
     }
@@ -790,19 +798,21 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
         Some(n) => Some(n as i64),
     };
 
-    if let Some(cap) = cap {
-        if running_count >= cap {
-            tracing::info!(
-                max_in_progress = cap,
-                running_count = running_count,
-                "max_in_progress reached, skipping spawn"
-            );
-            return Ok(());
-        }
+    if let Some(cap) = cap
+        && running_count >= cap
+    {
+        tracing::info!(
+            max_in_progress = cap,
+            running_count = running_count,
+            "max_in_progress reached, skipping spawn"
+        );
+        return Ok(());
     }
 
     // Determine how many slots are available.
-    let slots = cap.map(|c| (c - running_count) as usize).unwrap_or(usize::MAX);
+    let slots = cap
+        .map(|c| (c - running_count) as usize)
+        .unwrap_or(usize::MAX);
 
     // Fetch ready tasks ordered by priority DESC, created_at ASC (D-10).
     let ready_tasks: Vec<Task> = {
@@ -914,10 +924,11 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
         );
 
         // Determine workspace for this task (D-31).
-        let workspace = task
-            .workspace
-            .clone()
-            .unwrap_or_else(|| crate::paths::kanban_workspace_for(&task.id).to_string_lossy().into_owned());
+        let workspace = task.workspace.clone().unwrap_or_else(|| {
+            crate::paths::kanban_workspace_for(&task.id)
+                .to_string_lossy()
+                .into_owned()
+        });
 
         // Resolve dir: prefix if present.
         let workspace = if let Some(tail) = workspace.strip_prefix("dir:") {
@@ -938,7 +949,8 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
         // Step 8: spawn worker. The board slug is captured in ctx.spawn_fn by the
         // per-board context wrapper in run_dispatch_tick; the empty string below
         // is ignored by that wrapper (the wrapper uses its captured slug).
-        let spawn_result = (ctx.spawn_fn)(task.clone(), run.clone(), workspace.clone(), String::new()).await;
+        let spawn_result =
+            (ctx.spawn_fn)(task.clone(), run.clone(), workspace.clone(), String::new()).await;
 
         match spawn_result {
             Ok(pid) => {
@@ -1003,12 +1015,7 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
                 // Release claim (resets to ready so circuit breaker can block it).
                 {
                     let mut store = ctx.store.lock().await;
-                    let _ = release_claim(
-                        &mut store.conn,
-                        &task.id,
-                        &claim_lock,
-                        "spawn_failed",
-                    );
+                    let _ = release_claim(&mut store.conn, &task.id, &claim_lock, "spawn_failed");
                 }
 
                 // Append spawn_failed event.
@@ -1056,13 +1063,21 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
 /// - `"active_pr"`: recent comment contains a GitHub PR URL.
 ///
 /// Returns `None` if spawn should proceed.
-pub fn respawn_guard_reason(store: &KanbanStore, task: &Task, now: f64) -> Result<Option<&'static str>> {
+pub fn respawn_guard_reason(
+    store: &KanbanStore,
+    task: &Task,
+    now: f64,
+) -> Result<Option<&'static str>> {
     // Check last closed run for blocker_auth.
     let last_run: Option<TaskRun> = {
         let runs = store.get_runs(&task.id)?;
         runs.into_iter()
             .filter(|r| r.ended_at.is_some())
-            .max_by(|a, b| a.started_at.partial_cmp(&b.started_at).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|a, b| {
+                a.started_at
+                    .partial_cmp(&b.started_at)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     };
 
     if let Some(ref run) = last_run {
@@ -1079,24 +1094,27 @@ pub fn respawn_guard_reason(store: &KanbanStore, task: &Task, now: f64) -> Resul
         }
 
         // recent_success: last run completed within 3600 seconds.
-        if run.outcome.as_deref() == Some("completed") {
-            if let Some(ended_at) = run.ended_at {
-                if now - ended_at < 3600.0 {
-                    return Ok(Some("recent_success"));
-                }
-            }
+        if run.outcome.as_deref() == Some("completed")
+            && let Some(ended_at) = run.ended_at
+            && now - ended_at < 3600.0
+        {
+            return Ok(Some("recent_success"));
         }
     }
 
     // active_pr: any comment in the last 7 days with a GitHub PR URL.
     let seven_days_ago = now - 7.0 * 24.0 * 3600.0;
-    let has_active_pr: bool = store.conn.query_row(
-        "SELECT COUNT(*) FROM task_comments \
+    let has_active_pr: bool = store
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM task_comments \
          WHERE task_id=?1 AND created_at >= ?2 \
          AND body LIKE '%github.com%/pull/%'",
-        params![task.id, seven_days_ago],
-        |r| r.get::<_, i64>(0),
-    ).unwrap_or(0) > 0;
+            params![task.id, seven_days_ago],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
 
     if has_active_pr {
         return Ok(Some("active_pr"));

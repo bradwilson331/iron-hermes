@@ -105,10 +105,11 @@ impl PlatformAdapter for RecordingFailingAdapter {
         message_id: &str,
         content: &str,
     ) -> anyhow::Result<()> {
-        self.edit_log
-            .lock()
-            .unwrap()
-            .push((chat_id.to_string(), message_id.to_string(), content.to_string()));
+        self.edit_log.lock().unwrap().push((
+            chat_id.to_string(),
+            message_id.to_string(),
+            content.to_string(),
+        ));
         Ok(())
     }
 
@@ -118,10 +119,11 @@ impl PlatformAdapter for RecordingFailingAdapter {
         message_id: &str,
         content: &str,
     ) -> anyhow::Result<()> {
-        self.edit_log
-            .lock()
-            .unwrap()
-            .push((chat_id.to_string(), message_id.to_string(), content.to_string()));
+        self.edit_log.lock().unwrap().push((
+            chat_id.to_string(),
+            message_id.to_string(),
+            content.to_string(),
+        ));
         Ok(())
     }
 
@@ -153,10 +155,11 @@ impl PlatformAdapter for RecordingFailingAdapter {
         message_id: &str,
         emoji: &str,
     ) -> anyhow::Result<()> {
-        self.reactions
-            .lock()
-            .unwrap()
-            .push((chat_id.to_string(), message_id.to_string(), emoji.to_string()));
+        self.reactions.lock().unwrap().push((
+            chat_id.to_string(),
+            message_id.to_string(),
+            emoji.to_string(),
+        ));
         Ok(())
     }
 
@@ -340,7 +343,10 @@ async fn test_5_same_chat_messages_emit_5_eye_reactions_and_fifo_order_through_h
     let adapter = RecordingFailingAdapter::new();
     let session_queue = Arc::new(SessionQueue::new());
     let store = build_test_session_store();
-    let handler = Arc::new(build_test_handler_with_queue(store.clone(), session_queue.clone()));
+    let handler = Arc::new(build_test_handler_with_queue(
+        store.clone(),
+        session_queue.clone(),
+    ));
     let uqm = Arc::new(UserQueueManager::new(
         adapter.clone() as Arc<dyn PlatformAdapter>,
         session_queue.clone(),
@@ -444,12 +450,9 @@ async fn test_5_same_chat_messages_emit_5_eye_reactions_and_fifo_order_through_h
             .filter(|(_, m, e)| *m == id && e == "👀")
             .count();
         assert_eq!(
-            count,
-            1,
+            count, 1,
             "msg_{} expected exactly 1 👀, got {}. Full reactions log: {:?}",
-            i,
-            count,
-            *reactions
+            i, count, *reactions
         );
     }
 
@@ -555,7 +558,10 @@ async fn test_worker_exit_dispatch_race() {
     let adapter = RecordingFailingAdapter::new();
     let session_queue = Arc::new(SessionQueue::new());
     let store = build_test_session_store();
-    let handler = Arc::new(build_test_handler_with_queue(store.clone(), session_queue.clone()));
+    let handler = Arc::new(build_test_handler_with_queue(
+        store.clone(),
+        session_queue.clone(),
+    ));
     let uqm = Arc::new(UserQueueManager::new(
         adapter.clone() as Arc<dyn PlatformAdapter>,
         session_queue.clone(),
@@ -642,7 +648,10 @@ async fn test_multimodal_payload_roundtrips_through_sidecar_to_handler() {
     let adapter = RecordingFailingAdapter::new();
     let session_queue = Arc::new(SessionQueue::new());
     let store = build_test_session_store();
-    let handler = Arc::new(build_test_handler_with_queue(store.clone(), session_queue.clone()));
+    let handler = Arc::new(build_test_handler_with_queue(
+        store.clone(),
+        session_queue.clone(),
+    ));
     let uqm = Arc::new(UserQueueManager::new(
         adapter.clone() as Arc<dyn PlatformAdapter>,
         session_queue.clone(),
@@ -854,16 +863,26 @@ async fn test_slash_command_bypasses_per_chat_worker() {
     let adapter = RecordingFailingAdapter::new();
     let session_queue = Arc::new(SessionQueue::new());
     let store = build_test_session_store();
-    let handler = Arc::new(build_test_handler_with_queue(store.clone(), session_queue.clone()));
+    let handler = Arc::new(build_test_handler_with_queue(
+        store.clone(),
+        session_queue.clone(),
+    ));
     let session_key = SessionKey::new(Platform::Telegram, "chat_fp").with_user("u_fp");
 
     // Step 1 — Pre-load 1 free-text event into SessionQueue (would be popped by a worker if one existed).
     // No worker is spawned, so this event sits idle. This represents an "in-flight turn" from the
     // fast-path's perspective: any per-chat-worker-serialized routing would block behind this.
     session_queue
-        .try_push(&session_key, make_event_full("chat_fp", "free_1", "free text waiting", "u_fp"))
+        .try_push(
+            &session_key,
+            make_event_full("chat_fp", "free_1", "free text waiting", "u_fp"),
+        )
         .expect("free-text try_push must succeed (queue empty)");
-    assert_eq!(session_queue.len(&session_key), 1, "Free-text event must be in queue");
+    assert_eq!(
+        session_queue.len(&session_key),
+        1,
+        "Free-text event must be in queue"
+    );
 
     // Step 2 — Dispatch a slash command via the fast-path-equivalent direct call.
     // This is exactly what runner.rs's fast-path branch does: build empty ProcessedAttachments
@@ -926,13 +945,17 @@ async fn test_slash_command_bypasses_per_chat_worker() {
     // We can verify by popping it: it must still be `free_1`, not the synthesized /queue event.
     // Note: SessionQueue is FIFO, so the first pop is free_1 (pushed first), the second pop is
     // the /queue synthesized event (pushed by the intercept after).
-    let first = session_queue.pop(&session_key).expect("first pop must yield free_1");
+    let first = session_queue
+        .pop(&session_key)
+        .expect("first pop must yield free_1");
     assert_eq!(
         first.message_id, "free_1",
         "FIFO order broken: first pop should be free_1, got {}",
         first.message_id
     );
-    let second = session_queue.pop(&session_key).expect("second pop must yield /queue synthesized event");
+    let second = session_queue
+        .pop(&session_key)
+        .expect("second pop must yield /queue synthesized event");
     assert_eq!(
         second.content, "interrupt this",
         "/queue intercept must synthesize event with content == args (got: {})",

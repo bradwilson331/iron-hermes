@@ -334,10 +334,7 @@ fn queue_with_args_returns_queued_variant() {
         ironhermes_core::commands::handlers::dispatch(&cmd, &["later task"], &ctx, &router);
     match result {
         CommandResult::Queued { message } => {
-            assert_eq!(
-                message, "later task",
-                "queued message joins args verbatim"
-            );
+            assert_eq!(message, "later task", "queued message joins args verbatim");
         }
         other => panic!("Expected Queued {{ message }} from /queue, got {:?}", other),
     }

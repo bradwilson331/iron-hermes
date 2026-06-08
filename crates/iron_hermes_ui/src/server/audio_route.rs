@@ -19,9 +19,9 @@
 //! `tokio::fs::read` keeps the route compatible with the axum runtime that
 //! Dioxus fullstack mounts.
 
-use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use axum::response::IntoResponse;
+use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use ironhermes_core::constants::get_hermes_home;
 #[cfg(feature = "server")]
@@ -79,6 +79,7 @@ pub async fn serve_audio(uuid: String) -> Result<Vec<u8>, ServerFnError> {
 /// Same three-layer T-path-traversal mitigations: Uuid::parse_str +
 /// canonicalize + starts_with on `$IRONHERMES_HOME/audio_cache/`.
 #[cfg(feature = "server")]
+#[allow(dead_code)] // audio route; no Axum router entry wired yet (TTS phase pending)
 pub async fn serve_audio_axum(
     axum::extract::Path(uuid): axum::extract::Path<String>,
 ) -> axum::response::Response {
@@ -106,11 +107,7 @@ pub async fn serve_audio_axum(
     }
 
     match tokio::fs::read(&canon).await {
-        Ok(bytes) => (
-            [(axum::http::header::CONTENT_TYPE, "audio/mpeg")],
-            bytes,
-        )
-            .into_response(),
+        Ok(bytes) => ([(axum::http::header::CONTENT_TYPE, "audio/mpeg")], bytes).into_response(),
         Err(_) => (axum::http::StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }

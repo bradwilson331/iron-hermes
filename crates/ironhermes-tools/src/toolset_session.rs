@@ -94,13 +94,13 @@ impl RegistryToolsetSession {
             return Err("toolset name must not be empty".to_string());
         }
         let mut chars = name.chars();
-        if let Some(first) = chars.next() {
-            if !first.is_ascii_lowercase() {
-                return Err(format!(
-                    "invalid toolset name '{}': must start with a-z",
-                    name
-                ));
-            }
+        if let Some(first) = chars.next()
+            && !first.is_ascii_lowercase()
+        {
+            return Err(format!(
+                "invalid toolset name '{}': must start with a-z",
+                name
+            ));
         }
         for c in chars {
             if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {

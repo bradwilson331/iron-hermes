@@ -56,9 +56,8 @@ pub fn ScreenAgents(is_active: bool) -> Element {
     // seeing other screens, and (b) the empty-list fallback during the initial
     // load window is visually indistinguishable from an empty registry — exact
     // same UI as if no agents exist yet.
-    let mut agents_resource = use_resource(move || async move {
-        crate::server::api::api_agents_list().await
-    });
+    let mut agents_resource =
+        use_resource(move || async move { crate::server::api::api_agents_list().await });
 
     // Phase 26.7.1 Plan 01 — screen-level signals.
     //
@@ -72,24 +71,25 @@ pub fn ScreenAgents(is_active: bool) -> Element {
     // monotonic clock). web_time::Instant is API-identical (pub use of
     // std::time::Instant on native; Performance.now()-backed shim on wasm32)
     // so .elapsed() and Duration arithmetic in the decay sweep work unchanged.
-    let mut recently_terminated = use_signal(||
-        std::collections::HashMap::<String, (crate::server::api::AgentInfo, web_time::Instant)>::new()
-    );
+    let mut recently_terminated = use_signal(|| {
+        std::collections::HashMap::<String, (crate::server::api::AgentInfo, web_time::Instant)>::new(
+        )
+    });
     // prev_live: snapshot of the agent list from the PREVIOUS render, used by
     // diff_terminations to detect newly-absent ids.
-    let mut prev_live = use_signal(|| Vec::<crate::server::api::AgentInfo>::new());
+    let mut prev_live = use_signal(Vec::<crate::server::api::AgentInfo>::new);
     // rpc_in_flight: counts in-flight kill/interrupt RPCs across all cards.
     // The poll loop checks this before restarting the resource (D-05).
-    let mut rpc_in_flight = use_signal(|| 0u32);
+    let rpc_in_flight = use_signal(|| 0u32);
 
     // Consume context signals provided by Task 1's HermesApp providers.
     // Binding here proves the context is resolvable on first render (including
     // SSR), preventing the "Could not find context" panic.
-    let ws_connected_ctx = use_context::<Signal<bool>>();      // is_ws_connected
-    let subagent_events = use_context::<Signal<u64>>();        // D-07 — increments on ws SubagentEvent
-    // Phase 36.3.7.11 D-03 — Agents-toolbar `KANBAN BOARD →` button writes to
-    // the screen signal published by HermesApp. Same context-access pattern as
-    // screens/sessions.rs:63 and screens/settings.rs:326.
+    let ws_connected_ctx = use_context::<Signal<bool>>(); // is_ws_connected
+    let subagent_events = use_context::<Signal<u64>>(); // D-07 — increments on ws SubagentEvent
+                                                        // Phase 36.3.7.11 D-03 — Agents-toolbar `KANBAN BOARD →` button writes to
+                                                        // the screen signal published by HermesApp. Same context-access pattern as
+                                                        // screens/sessions.rs:63 and screens/settings.rs:326.
     let mut active_screen = use_context::<Signal<crate::state::Screen>>();
 
     // Materialise the list and error flag BEFORE the rsx! block so no
@@ -254,7 +254,11 @@ pub fn ScreenAgents(is_active: bool) -> Element {
             // Plan 01 ships with the initial value (false) giving 1500 ms
             // baseline. Plan 02 wires the recv-loop .set() calls that promote
             // to 5000 ms while connected.
-            let interval_ms: u32 = if *ws_connected_ctx.read() { 5_000 } else { 1_500 };
+            let interval_ms: u32 = if *ws_connected_ctx.read() {
+                5_000
+            } else {
+                1_500
+            };
             // ws_connected_ctx borrow ends at ; — interval_ms is Copy.
             gloo_timers::future::TimeoutFuture::new(interval_ms).await;
         }
@@ -317,11 +321,15 @@ pub fn ScreenAgents(is_active: bool) -> Element {
     // Signal-borrow discipline: `*last_seen.read()` copies a `u64` and the
     // borrow ends at `;` before any `.set()` / `.restart()` call. No borrow
     // is held across the (synchronous) restart.
+    // Allow: subagent_events is a Signal<u64>, not a bare fn pointer.
+    // Calling subagent_events() reads the current u64 value as initial state;
+    // passing &subagent_events would be a wrong type for use_signal's initializer.
+    #[allow(clippy::redundant_closure)]
     let mut last_seen = use_signal(|| subagent_events());
-    let mut agents_resource_for_effect = agents_resource;   // Resource is Copy
+    let mut agents_resource_for_effect = agents_resource; // Resource is Copy
     use_effect(move || {
-        let cur = subagent_events();        // subscribe; Copy u64 — no borrow
-        let prev = *last_seen.read();       // Copy u64 — borrow ends at ;
+        let cur = subagent_events(); // subscribe; Copy u64 — no borrow
+        let prev = *last_seen.read(); // Copy u64 — borrow ends at ;
         if cur > prev {
             last_seen.set(cur);
             agents_resource_for_effect.restart();
@@ -451,12 +459,7 @@ fn AgentCard(
     let agent_id_int = agent.id.clone();
 
     // Derive avatar letter from first char of agent id.
-    let avatar_letter = agent
-        .id
-        .chars()
-        .next()
-        .unwrap_or('S')
-        .to_ascii_uppercase();
+    let avatar_letter = agent.id.chars().next().unwrap_or('S').to_ascii_uppercase();
 
     rsx! {
         div {

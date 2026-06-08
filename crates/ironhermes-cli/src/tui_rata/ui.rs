@@ -78,7 +78,10 @@ fn render_transcript(frame: &mut Frame, app: &App, area: Rect) {
     let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
     frame.render_stateful_widget(
         scrollbar,
-        area.inner(Margin { vertical: 1, horizontal: 1 }),
+        area.inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        }),
         &mut scrollbar_state,
     );
 }
@@ -154,7 +157,8 @@ mod tests {
             .map(|i| format!("ln{}", i))
             .collect::<Vec<_>>()
             .join("\n");
-        let app = App::new_test_with_messages(vec![("assistant", Box::leak(body.into_boxed_str()))]);
+        let app =
+            App::new_test_with_messages(vec![("assistant", Box::leak(body.into_boxed_str()))]);
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| ui(f, &app)).unwrap();
@@ -174,14 +178,16 @@ mod tests {
             has_scrollbar,
             "expected scrollbar thumb in column 78 rows 1..17 (transcript content area) when \
              content overflows; got all-space. Buffer dump for col 78 rows 1..17: {:?}",
-            (1u16..17).map(|r| buf.cell((78, r)).map(|c| c.symbol().to_string())).collect::<Vec<_>>()
+            (1u16..17)
+                .map(|r| buf.cell((78, r)).map(|c| c.symbol().to_string()))
+                .collect::<Vec<_>>()
         );
     }
 
     /// D-03 — end-to-end auto-scroll integration test.
     ///
-    /// Proves that after `StreamEvent::Finished` (simulated via `scroll_to_bottom`)
-    /// + `reconcile_scroll`, the transcript scrolls to the true visual bottom and
+    /// Proves that after `StreamEvent::Finished` (simulated via `scroll_to_bottom`
+    /// and `reconcile_scroll`), the transcript scrolls to the true visual bottom and
     /// the last in-viewport content row is non-blank when rendered to an 80x24
     /// TestBackend.
     #[test]
@@ -200,7 +206,10 @@ mod tests {
         );
         let mut app = App::new_test_with_messages(vec![("assistant", long_body)]);
 
-        let size = ratatui::prelude::Size { width: 80, height: 24 };
+        let size = ratatui::prelude::Size {
+            width: 80,
+            height: 24,
+        };
         let transcript_area = compute_transcript_area(size);
 
         // Simulate StreamEvent::Finished: mirrors handle_stream_event's scroll_to_bottom call
@@ -216,11 +225,9 @@ mod tests {
             "test setup: expected max_scroll > 0, got 0 — adjust body length or terminal height"
         );
         assert_eq!(
-            app.transcript_scroll,
-            max,
+            app.transcript_scroll, max,
             "auto-scroll must land at true bottom: scroll={}, max={}",
-            app.transcript_scroll,
-            max
+            app.transcript_scroll, max
         );
 
         // Visual assertion: render at scroll=max and confirm the last content row is non-blank.

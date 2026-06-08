@@ -158,8 +158,10 @@ mod tests {
     #[test]
     fn test_config_accessor() {
         use crate::config::HooksConfig;
-        let mut cfg = HooksConfig::default();
-        cfg.blocked_tools = vec!["terminal".to_string()];
+        let cfg = HooksConfig {
+            blocked_tools: vec!["terminal".to_string()],
+            ..HooksConfig::default()
+        };
         let registry = HookRegistry::new(cfg);
         assert_eq!(registry.config().blocked_tools, vec!["terminal"]);
     }

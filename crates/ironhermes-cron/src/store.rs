@@ -9,7 +9,10 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::job::{CronJob, JobOrigin, JobState, RepeatConfig, ScheduleParsed};
-use crate::parser::{compute_grace_seconds, compute_next_run, compute_next_run_from, parse_schedule, ONESHOT_GRACE_SECONDS};
+use crate::parser::{
+    ONESHOT_GRACE_SECONDS, compute_grace_seconds, compute_next_run, compute_next_run_from,
+    parse_schedule,
+};
 
 // ---------------------------------------------------------------------------
 // LegacyCronJob — matches the OLD CronJob shape for migration
@@ -197,12 +200,10 @@ impl JobStore {
                         legacy_jobs.len(),
                         self.path.display()
                     );
-                    let jobs: Vec<CronJob> =
-                        legacy_jobs.into_iter().map(CronJob::from).collect();
+                    let jobs: Vec<CronJob> = legacy_jobs.into_iter().map(CronJob::from).collect();
                     // Persist migrated format so subsequent reloads take the fast path.
                     let tmp_path = self.path.with_extension("json.tmp");
-                    let json =
-                        serde_json::to_string_pretty(&jobs).context("serialize migrated")?;
+                    let json = serde_json::to_string_pretty(&jobs).context("serialize migrated")?;
                     {
                         let mut f = fs::File::create(&tmp_path)
                             .with_context(|| format!("create tmp: {}", tmp_path.display()))?;
@@ -214,10 +215,7 @@ impl JobStore {
                     #[cfg(unix)]
                     {
                         use std::os::unix::fs::PermissionsExt;
-                        let _ = fs::set_permissions(
-                            &self.path,
-                            fs::Permissions::from_mode(0o600),
-                        );
+                        let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600));
                     }
                     jobs
                 }
@@ -424,25 +422,26 @@ impl JobStore {
                     // Stale fast-forward: per-schedule dynamic grace
                     let grace_secs = compute_grace_seconds(&job.schedule);
                     let age_secs = (now - next_run_at).num_seconds();
-                    if age_secs > grace_secs {
-                        if let Ok(Some(new_next)) = compute_next_run(&job.schedule, now) {
-                            warn!(
-                                "Fast-forwarding stale job '{}' from {} to {}",
-                                job.name, next_run_at, new_next
-                            );
-                            job.next_run_at = Some(new_next);
-                            needs_save = true;
-                        }
+                    if age_secs > grace_secs
+                        && let Ok(Some(new_next)) = compute_next_run(&job.schedule, now)
+                    {
+                        warn!(
+                            "Fast-forwarding stale job '{}' from {} to {}",
+                            job.name, next_run_at, new_next
+                        );
+                        job.next_run_at = Some(new_next);
+                        needs_save = true;
                     }
                 }
             }
         }
 
         // Best-effort save for recovered next_run_at values
-        if needs_save {
-            if let Err(e) = self.save() {
-                warn!("get_due_jobs: failed to persist recovered next_run_at: {}", e);
-            }
+        if needs_save && let Err(e) = self.save() {
+            warn!(
+                "get_due_jobs: failed to persist recovered next_run_at: {}",
+                e
+            );
         }
 
         // Pass 2: collect due jobs
@@ -460,7 +459,7 @@ impl JobStore {
                         // Only Once schedules reach here (recurring was recovered above)
                         if let ScheduleParsed::Once { run_at, .. } = &j.schedule {
                             let age = (now - *run_at).num_seconds();
-                            j.last_run_at.is_none() && age >= 0 && age <= ONESHOT_GRACE_SECONDS
+                            j.last_run_at.is_none() && (0..=ONESHOT_GRACE_SECONDS).contains(&age)
                         } else {
                             false
                         }
@@ -1080,7 +1079,7 @@ mod tests {
 #[cfg(test)]
 mod store_phase_32_1_tests {
     use super::*;
-    use crate::job::{JobState, RepeatConfig, ScheduleParsed};
+    use crate::job::ScheduleParsed;
     use chrono::Duration;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -1156,7 +1155,11 @@ mod store_phase_32_1_tests {
         store.save().expect("save");
         let file_meta = fs::metadata(&store.path).expect("file meta");
         let file_mode = file_meta.permissions().mode() & 0o777;
-        assert_eq!(file_mode, 0o600, "jobs.json must be 0600, got {:o}", file_mode);
+        assert_eq!(
+            file_mode, 0o600,
+            "jobs.json must be 0600, got {:o}",
+            file_mode
+        );
     }
 
     // Test 3: control-char repair — bell byte in name is repaired
@@ -1183,12 +1186,19 @@ mod store_phase_32_1_tests {
         assert_eq!(store.list_jobs().len(), 1, "must load 1 job after repair");
         // BEL (0x07) must be replaced — name must not contain the byte 0x07
         let name = &store.list_jobs()[0].name;
-        assert!(!name.contains('\u{0007}'), "name must not contain BEL after repair: {:?}", name);
+        assert!(
+            !name.contains('\u{0007}'),
+            "name must not contain BEL after repair: {:?}",
+            name
+        );
         assert!(name.contains("bad"), "name must still contain 'bad'");
 
         // The repaired file must not contain bare 0x07 either
         let repaired = fs::read(jobs_path).expect("read repaired");
-        assert!(!repaired.contains(&0x07u8), "repaired file must not contain bare 0x07");
+        assert!(
+            !repaired.contains(&0x07u8),
+            "repaired file must not contain bare 0x07"
+        );
     }
 
     // Test 4: trigger_job by id sets next_run_at ≈ now
@@ -1206,7 +1216,11 @@ mod store_phase_32_1_tests {
         let store2 = JobStore::open(cron_dir).expect("reload");
         let updated = store2.get_job(&job.id).expect("job must exist");
         let nra = updated.next_run_at.expect("next_run_at must be Some");
-        assert!(nra >= before && nra <= after, "next_run_at={:?} not within 5s window", nra);
+        assert!(
+            nra >= before && nra <= after,
+            "next_run_at={:?} not within 5s window",
+            nra
+        );
     }
 
     // Test 5: trigger_job by name (case-insensitive)
@@ -1223,7 +1237,11 @@ mod store_phase_32_1_tests {
         let store2 = JobStore::open(cron_dir).expect("reload");
         let updated = store2.get_job(&job.id).expect("job must exist");
         let nra = updated.next_run_at.expect("next_run_at must be Some");
-        assert!(nra >= before && nra <= after, "next_run_at={:?} not within 5s window", nra);
+        assert!(
+            nra >= before && nra <= after,
+            "next_run_at={:?} not within 5s window",
+            nra
+        );
     }
 
     // Test 6: trigger_job nonexistent returns Err with "job not found"
@@ -1247,7 +1265,11 @@ mod store_phase_32_1_tests {
         store.jobs[0].next_run_at = Some(Utc::now() - Duration::seconds(200));
 
         let due = store.get_due_jobs();
-        assert_eq!(due.len(), 1, "job within dynamic grace (200s < 300s) should be due");
+        assert_eq!(
+            due.len(),
+            1,
+            "job within dynamic grace (200s < 300s) should be due"
+        );
         assert_eq!(due[0].id, job.id);
     }
 
@@ -1265,7 +1287,11 @@ mod store_phase_32_1_tests {
         // last_run_at stays None (never ran)
 
         let due = store.get_due_jobs();
-        assert_eq!(due.len(), 1, "Once job 60s past should be due within 120s grace");
+        assert_eq!(
+            due.len(),
+            1,
+            "Once job 60s past should be due within 120s grace"
+        );
         assert_eq!(due[0].id, job.id);
     }
 
@@ -1282,7 +1308,10 @@ mod store_phase_32_1_tests {
         // last_run_at stays None
 
         let due = store.get_due_jobs();
-        assert!(due.is_empty(), "Once job 200s past should NOT be due (beyond 120s grace)");
+        assert!(
+            due.is_empty(),
+            "Once job 200s past should NOT be due (beyond 120s grace)"
+        );
     }
 
     // Test 10: due recovery for recurring — None next_run_at gets recomputed
@@ -1315,7 +1344,11 @@ mod store_phase_32_1_tests {
         store.jobs[0].last_run_at = None; // never ran
 
         let due = store.get_due_jobs();
-        assert_eq!(due.len(), 1, "Once job 30s past with None next_run should be due");
+        assert_eq!(
+            due.len(),
+            1,
+            "Once job 30s past with None next_run should be due"
+        );
         assert_eq!(due[0].id, job.id);
     }
 
@@ -1338,7 +1371,11 @@ mod store_phase_32_1_tests {
         // Reload and verify
         let store2 = JobStore::open(cron_dir).expect("reload");
         assert_eq!(
-            store2.get_job(&job_b_id).unwrap().last_delivery_error.as_deref(),
+            store2
+                .get_job(&job_b_id)
+                .unwrap()
+                .last_delivery_error
+                .as_deref(),
             Some("test-err"),
             "job-b last_delivery_error must persist"
         );

@@ -254,7 +254,7 @@ mod tests {
         let line = render_status_line_ratatui(&state);
         // With empty hint, no hint span; at minimum 4 pill spans + 3 dot seps = 7 spans.
         assert!(
-            line.spans.len() >= 1,
+            !line.spans.is_empty(),
             "empty hint state still produces at least one pill span"
         );
         // No DIM spans from hint (only dot separators have DIM in this case)
@@ -320,7 +320,7 @@ mod tests {
             .map(|(_, s)| s.style.fg)
             .collect();
         assert_eq!(
-            pill_colors.get(0),
+            pill_colors.first(),
             Some(&Some(Color::Cyan)),
             "pill[0] must be Cyan"
         );

@@ -30,8 +30,8 @@
 //! - [`ProviderModelConfig`] — per-model config wrapper using raw HashMap for extras
 //! - [`resolve_extras`] — merge helper returning `HashMap<String, serde_json::Value>`
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 // =============================================================================
 // OllamaExtraOptions
@@ -260,7 +260,10 @@ mod tests {
             Some(&serde_json::json!(8192)),
             "provider-level num_ctx must appear when no per-model entry exists"
         );
-        assert!(!result.contains_key("num_predict"), "unset num_predict must not appear");
+        assert!(
+            !result.contains_key("num_predict"),
+            "unset num_predict must not appear"
+        );
     }
 
     /// Test 3: per-model key wins over provider key (D-03 shallow merge).
@@ -314,7 +317,9 @@ mod tests {
         );
 
         let result = resolve_extras(&map, "openrouter", "any-model");
-        let provider_val = result.get("provider").expect("provider key must be present");
+        let provider_val = result
+            .get("provider")
+            .expect("provider key must be present");
         let order = provider_val
             .as_object()
             .and_then(|o| o.get("order"))
@@ -346,7 +351,10 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("ollama".to_string(), ollama_provider(Some(8192), None));
         let result = resolve_extras(&map, "nonexistent_provider", "any_model");
-        assert!(result.is_empty(), "unknown provider must return empty map, not panic");
+        assert!(
+            result.is_empty(),
+            "unknown provider must return empty map, not panic"
+        );
     }
 
     /// Test 6 (compile-only): all four typed structs implement Default.

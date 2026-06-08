@@ -26,12 +26,11 @@ impl GitHubAuth {
                 .output(),
         )
         .await
+            && out.status.success()
         {
-            if out.status.success() {
-                let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if !t.is_empty() {
-                    return Self { token: Some(t) };
-                }
+            let t = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if !t.is_empty() {
+                return Self { token: Some(t) };
             }
         }
 
@@ -43,18 +42,17 @@ impl GitHubAuth {
     where
         F: Fn(&str) -> Option<String>,
     {
-        if let Some(var) = override_env {
-            if let Some(t) = getenv(var) {
-                if !t.is_empty() {
-                    return Some(t);
-                }
-            }
+        if let Some(var) = override_env
+            && let Some(t) = getenv(var)
+            && !t.is_empty()
+        {
+            return Some(t);
         }
         for var in &["HERMES_GITHUB_TOKEN", "GITHUB_TOKEN"] {
-            if let Some(t) = getenv(var) {
-                if !t.is_empty() {
-                    return Some(t);
-                }
+            if let Some(t) = getenv(var)
+                && !t.is_empty()
+            {
+                return Some(t);
             }
         }
         None

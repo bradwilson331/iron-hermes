@@ -58,10 +58,10 @@ impl GrafeoMemoryProvider {
     /// Initializes property indexes for fast duplicate detection (T-17-08).
     pub fn new(db_path: &Path) -> anyhow::Result<Self> {
         // Ensure parent directory exists.
-        if let Some(parent) = db_path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = db_path.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent)?;
         }
 
         // Open or create the database via persistent config.
@@ -219,12 +219,11 @@ impl GrafeoMemoryProvider {
         let prop_name = PropertyKey::new(PROP_ENTITY_NAME);
         // Search for existing entity with this name
         for node in self.db.iter_nodes() {
-            if node.labels.iter().any(|l| &**l == ENTITY_NODE_LABEL) {
-                if let Some(Value::String(n)) = node.properties.get(&prop_name) {
-                    if AsRef::<str>::as_ref(n) == name {
-                        return node.id;
-                    }
-                }
+            if node.labels.iter().any(|l| &**l == ENTITY_NODE_LABEL)
+                && let Some(Value::String(n)) = node.properties.get(&prop_name)
+                && AsRef::<str>::as_ref(n) == name
+            {
+                return node.id;
             }
         }
         // Create new entity node
@@ -378,7 +377,7 @@ impl MemoryProvider for GrafeoMemoryProvider {
         // D-12: Extract entity-relationship triples from memory entry content and store as graph edges.
         // GrafeoDB uses interior mutability -- all mutation methods take &self, so this works
         // from the &self sync_turn signature without needing &mut self or Mutex.
-        for (_target, contents) in &entries.entries {
+        for contents in entries.entries.values() {
             for content in contents {
                 let triples = extract_entity_triples(content);
                 if !triples.is_empty() {
@@ -754,7 +753,7 @@ struct RecallResult {
 fn extract_entity_triples(text: &str) -> Vec<(String, String, String)> {
     let mut triples = Vec::new();
     // Split text into sentences (simple heuristic: split on '. ' or newlines)
-    for sentence in text.split(|c: char| c == '.' || c == '\n') {
+    for sentence in text.split(['.', '\n']) {
         let sentence = sentence.trim();
         if sentence.len() < 5 {
             continue;
@@ -808,7 +807,7 @@ fn format_with_commas(n: usize) -> String {
     let mut result = String::with_capacity(s.len() + s.len() / 3);
     let len = bytes.len();
     for (i, &b) in bytes.iter().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
+        if i > 0 && (len - i).is_multiple_of(3) {
             result.push(',');
         }
         result.push(b as char);

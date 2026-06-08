@@ -19,11 +19,11 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::Mutex as TokioMutex;
 
-use ironhermes_kanban::{KanbanConfig, KanbanStore};
 use ironhermes_kanban::decomposer::{
-    ChildSpec, DecomposeOutput, DecomposeFn, decompose_triage_task, specify_triage_task,
+    ChildSpec, DecomposeFn, DecomposeOutput, decompose_triage_task, specify_triage_task,
 };
 use ironhermes_kanban::store::CreateTaskOptions;
+use ironhermes_kanban::{KanbanConfig, KanbanStore};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -114,8 +114,14 @@ async fn specify_promotes_triage_to_todo() {
         .await
         .expect("specify_triage_task should succeed");
 
-    assert!(result.root_promoted, "root_promoted must be true on success");
-    assert!(result.child_ids.is_empty(), "specify does not create children");
+    assert!(
+        result.root_promoted,
+        "root_promoted must be true on success"
+    );
+    assert!(
+        result.child_ids.is_empty(),
+        "specify does not create children"
+    );
 
     // Verify the task was promoted.
     let s = store.lock().await;
@@ -233,7 +239,10 @@ async fn decompose_creates_children_atomically() {
     for child_id in &result.child_ids {
         let child = s.get_task(child_id).expect("child task must exist");
         assert_eq!(child.status, "todo", "child status must be todo");
-        assert!(!child.assignee.is_empty(), "child assignee must not be empty");
+        assert!(
+            !child.assignee.is_empty(),
+            "child assignee must not be empty"
+        );
     }
 
     // 3 task_links rows must exist.
@@ -306,7 +315,10 @@ async fn decompose_double_is_noop() {
     .await
     .expect("first call should succeed");
 
-    assert!(result1.root_promoted, "first call: root_promoted must be true");
+    assert!(
+        result1.root_promoted,
+        "first call: root_promoted must be true"
+    );
     assert_eq!(result1.child_ids.len(), 2, "first call: 2 children");
 
     // Second call — should be a no-op (status guard fires).
@@ -330,7 +342,11 @@ async fn decompose_double_is_noop() {
     let links = s
         .list_links_for_parent(&task_id)
         .expect("list_links_for_parent");
-    assert_eq!(links.len(), 2, "no new task_links must be added on second call");
+    assert_eq!(
+        links.len(),
+        2,
+        "no new task_links must be added on second call"
+    );
 
     // Only one `decomposed` event total.
     let events = s.get_events(&task_id).expect("get_events");
@@ -359,7 +375,10 @@ async fn decompose_failure_retains_triage() {
 
     let result = decompose_triage_task(store.clone(), &task_id, &decompose_fn, &config).await;
 
-    assert!(result.is_err(), "decompose_triage_task must return Err on LLM failure");
+    assert!(
+        result.is_err(),
+        "decompose_triage_task must return Err on LLM failure"
+    );
 
     // Task must still be in triage (NOT promoted).
     let s = store.lock().await;
@@ -392,7 +411,9 @@ async fn decompose_failure_retains_triage() {
         Some("llm_error"),
         "event payload must contain reason=llm_error"
     );
-    let message = payload["message"].as_str().expect("payload must have message");
+    let message = payload["message"]
+        .as_str()
+        .expect("payload must have message");
     assert!(
         message.contains(error_msg),
         "event payload message must contain the error string '{error_msg}'; got: '{message}'"

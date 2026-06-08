@@ -56,9 +56,13 @@ fn levenshtein(a: &str, b: &str) -> usize {
         return m;
     }
     let mut dp = vec![vec![0usize; n + 1]; m + 1];
+    // Classic 2-D DP: both row and column indices are load-bearing (dp[i][j]
+    // references dp[i-1][j-1] etc.) — enumerate() would not simplify this.
+    #[allow(clippy::needless_range_loop)]
     for i in 0..=m {
         dp[i][0] = i;
     }
+    #[allow(clippy::needless_range_loop)]
     for j in 0..=n {
         dp[0][j] = j;
     }

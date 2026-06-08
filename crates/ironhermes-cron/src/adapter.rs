@@ -1,5 +1,5 @@
-use std::path::Path;
 use async_trait::async_trait;
+use std::path::Path;
 
 /// Minimal send trait used by the cron-runner crate to dispatch
 /// delivery payloads. Implemented by `TelegramAdapter`

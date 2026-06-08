@@ -13,8 +13,7 @@ const MAIN_RS: &str = include_str!("../src/main.rs");
 // constructs the runner (and threads the subagent registry) internally. The
 // three logical call sites are therefore split across two files: run_chat +
 // run_single in main.rs, and the gateway/runtime site in agent_runtime.rs.
-const AGENT_RUNTIME_RS: &str =
-    include_str!("../../ironhermes-agent/src/agent_runtime.rs");
+const AGENT_RUNTIME_RS: &str = include_str!("../../ironhermes-agent/src/agent_runtime.rs");
 
 #[test]
 fn invariant_21_7_01_three_agent_subagent_runner_new_sites() {
@@ -23,7 +22,9 @@ fn invariant_21_7_01_three_agent_subagent_runner_new_sites() {
     // after Phase 28.1-02). All 3 logical entry points now share the single construction
     // site inside agent_runtime.rs. Expected: 0 in main.rs, 1 in agent_runtime.rs.
     let main_sites = MAIN_RS.matches("AgentSubagentRunner::new(").count();
-    let runtime_sites = AGENT_RUNTIME_RS.matches("AgentSubagentRunner::new(").count();
+    let runtime_sites = AGENT_RUNTIME_RS
+        .matches("AgentSubagentRunner::new(")
+        .count();
     let count = main_sites + runtime_sites;
     assert_eq!(
         main_sites, 0,

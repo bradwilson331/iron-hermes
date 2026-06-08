@@ -312,7 +312,10 @@ fn d01_run_skills_section_prompts_for_each_unconfigured_skill_prereq() {
 
     // Verify FAKE_KEY=secret123 is in .env
     let env_path = tmp.path().join(".env");
-    assert!(env_path.exists(), ".env file must exist after env_var write");
+    assert!(
+        env_path.exists(),
+        ".env file must exist after env_var write"
+    );
     let env_contents = std::fs::read_to_string(&env_path).unwrap();
     assert!(
         env_contents.contains("FAKE_KEY=secret123"),
@@ -354,9 +357,8 @@ fn d02_run_terminal_section_prompts_for_cwd_and_writes_config() {
         .expect("apply_terminal_answer must succeed");
 
     // Round-trip: load config and verify terminal.cwd == "/some/dir"
-    let config =
-        ironhermes_core::config::Config::load_from(&tmp.path().join("config.yaml"))
-            .expect("config.yaml must be readable after apply_terminal_answer");
+    let config = ironhermes_core::config::Config::load_from(&tmp.path().join("config.yaml"))
+        .expect("config.yaml must be readable after apply_terminal_answer");
     assert_eq!(
         config.terminal.cwd, "/some/dir",
         "terminal.cwd must round-trip through config.yaml; got: {}",

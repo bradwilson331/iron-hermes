@@ -123,10 +123,10 @@ async fn run_export_all(since: Option<&str>) -> Result<()> {
 
     let mut exported = 0usize;
     for session in sessions {
-        if let Some(threshold) = since_unix {
-            if session.started_at < threshold {
-                continue;
-            }
+        if let Some(threshold) = since_unix
+            && session.started_at < threshold
+        {
+            continue;
         }
         let output_dir = resolve_output_dir(&session.id, None);
         let traj_src = resolve_trajectory_source(&session.id);

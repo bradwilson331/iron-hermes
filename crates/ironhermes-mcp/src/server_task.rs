@@ -80,10 +80,10 @@ pub async fn run_server_task(
                 // is a belt-and-braces guard — connect_stdio currently parks None, so
                 // the slot is typically already empty. When Option A lands and
                 // connect_stdio parks Some(child), this path becomes load-bearing.
-                if let Ok(mut slot) = child_slot.try_lock() {
-                    if let Some(mut old_child) = slot.take() {
-                        let _ = old_child.start_kill();
-                    }
+                if let Ok(mut slot) = child_slot.try_lock()
+                    && let Some(mut old_child) = slot.take()
+                {
+                    let _ = old_child.start_kill();
                 }
                 retries += 1;
                 let sanitized = sanitize_error(&e.to_string());
@@ -192,10 +192,10 @@ async fn connect_and_serve(
             let tool_name = mcp_tool.name.as_ref();
 
             // D-08: per-server enabled_tools filtering
-            if let Some(ref enabled) = config.enabled_tools {
-                if !enabled.iter().any(|e| e == tool_name) {
-                    continue;
-                }
+            if let Some(ref enabled) = config.enabled_tools
+                && !enabled.iter().any(|e| e == tool_name)
+            {
+                continue;
             }
 
             let description = mcp_tool.description.as_deref().unwrap_or("");

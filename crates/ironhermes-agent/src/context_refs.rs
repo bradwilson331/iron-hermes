@@ -64,9 +64,7 @@ fn quoted_double_re() -> &'static Regex {
     static PAT: OnceLock<Regex> = OnceLock::new();
     PAT.get_or_init(|| {
         // double-quote delimited; use concat! to avoid raw-string confusion
-        let pat = concat!(
-            "^\"(?P<path>[^\"\n]+)\"(?::(?P<start>\\d+)(?:-(?P<end>\\d+))?)?$"
-        );
+        let pat = "^\"(?P<path>[^\"\n]+)\"(?::(?P<start>\\d+)(?:-(?P<end>\\d+))?)?$";
         Regex::new(pat).expect("QUOTED_DOUBLE_RE must compile")
     })
 }
@@ -221,7 +219,11 @@ pub fn parse_context_references(message: &str) -> Vec<ContextReference> {
         let (target, line_start, line_end) = if kind == "file" {
             parse_file_reference_value(&stripped_value)
         } else {
-            (strip_reference_wrappers(&stripped_value).to_string(), None, None)
+            (
+                strip_reference_wrappers(&stripped_value).to_string(),
+                None,
+                None,
+            )
         };
 
         refs.push(ContextReference {
@@ -245,9 +247,9 @@ pub fn parse_context_references(message: &str) -> Vec<ContextReference> {
 /// `allowed_root` (fixed to cwd — no escape hatch per D-04). Returns `None`
 /// if the resolved path escapes the root.
 pub fn resolve_within_root(cwd: &Path, target: &str, allowed_root: &Path) -> Option<PathBuf> {
-    let expanded = if target.starts_with("~/") {
+    let expanded = if let Some(stripped) = target.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
-            home.join(&target[2..])
+            home.join(stripped)
         } else {
             PathBuf::from(target)
         }
@@ -429,9 +431,8 @@ pub(crate) fn remove_reference_tokens(message: &str, refs: &[ContextReference]) 
 pub type UrlFetcher = Box<
     dyn Fn(
             String,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<String, String>> + Send>,
-        >
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>
         + Send
         + Sync,
 >;
@@ -468,7 +469,10 @@ fn code_fence_language(path: &Path) -> &'static str {
 fn is_binary_file(path: &Path) -> bool {
     // Check extension against known text extensions.
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        let text_exts = ["py","md","txt","json","yaml","yml","toml","js","ts","rs","toml","sh","html","css"];
+        let text_exts = [
+            "py", "md", "txt", "json", "yaml", "yml", "toml", "js", "ts", "rs", "toml", "sh",
+            "html", "css",
+        ];
         if text_exts.contains(&ext) {
             return false;
         }
@@ -498,7 +502,7 @@ fn expand_file_reference(
             return (
                 Some(format!("{}: path is outside the allowed workspace", r.raw)),
                 None,
-            )
+            );
         }
     };
     if is_sensitive_path(&resolved, home, hermes_home) {
@@ -517,7 +521,10 @@ fn expand_file_reference(
         return (Some(format!("{}: path is not a file", r.raw)), None);
     }
     if is_binary_file(&resolved) {
-        return (Some(format!("{}: binary files are not supported", r.raw)), None);
+        return (
+            Some(format!("{}: binary files are not supported", r.raw)),
+            None,
+        );
     }
     let text = match std::fs::read_to_string(&resolved) {
         Ok(t) => t,
@@ -535,7 +542,10 @@ fn expand_file_reference(
     };
     let lang = code_fence_language(&resolved);
     let tokens = estimate_tokens_rough(&text);
-    let block = format!("📄 {} ({} tokens)\n```{}\n{}\n```", r.raw, tokens, lang, text);
+    let block = format!(
+        "📄 {} ({} tokens)\n```{}\n{}\n```",
+        r.raw, tokens, lang, text
+    );
     (None, Some(block))
 }
 
@@ -553,7 +563,7 @@ fn expand_folder_reference(
             return (
                 Some(format!("{}: path is outside the allowed workspace", r.raw)),
                 None,
-            )
+            );
         }
     };
     if is_sensitive_path(&resolved, home, hermes_home) {
@@ -614,9 +624,17 @@ fn try_rg_listing(path: &Path, cwd: &Path, limit: usize) -> Option<String> {
             lines.push(format!("{}/", rel.display()));
             for line in text.lines().take(limit) {
                 let p = std::path::Path::new(line.trim());
-                let indent_depth = p.components().count().saturating_sub(rel.components().count()).saturating_sub(1);
+                let indent_depth = p
+                    .components()
+                    .count()
+                    .saturating_sub(rel.components().count())
+                    .saturating_sub(1);
                 let indent = "  ".repeat(indent_depth);
-                lines.push(format!("{}- {}", indent, p.file_name().unwrap_or_default().to_string_lossy()));
+                lines.push(format!(
+                    "{}- {}",
+                    indent,
+                    p.file_name().unwrap_or_default().to_string_lossy()
+                ));
             }
             Some(lines.join("\n"))
         }
@@ -669,11 +687,7 @@ async fn expand_git_reference(
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
 
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        cmd.output(),
-    )
-    .await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(30), cmd.output()).await;
 
     match result {
         Err(_) => (
@@ -685,7 +699,11 @@ async fn expand_git_reference(
             if !out.status.success() {
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 let msg = stderr.trim();
-                let msg = if msg.is_empty() { "git command failed" } else { msg };
+                let msg = if msg.is_empty() {
+                    "git command failed"
+                } else {
+                    msg
+                };
                 return (Some(format!("{}: {}", r.raw, msg)), None);
             }
             let content = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -695,7 +713,10 @@ async fn expand_git_reference(
                 content
             };
             let tokens = estimate_tokens_rough(&content);
-            let block = format!("🧾 {} ({} tokens)\n```diff\n{}\n```", label, tokens, content);
+            let block = format!(
+                "🧾 {} ({} tokens)\n```diff\n{}\n```",
+                label, tokens, content
+            );
             (None, Some(block))
         }
     }
@@ -709,22 +730,17 @@ async fn expand_url_reference(
 ) -> (Option<String>, Option<String>) {
     let fetcher = match url_fetcher {
         Some(f) => f,
-        None => {
-            return (
-                Some(format!("{}: no URL fetcher configured", r.raw)),
-                None,
-            )
-        }
+        None => return (Some(format!("{}: no URL fetcher configured", r.raw)), None),
     };
     match fetcher(r.target.clone()).await {
         Ok(content) if !content.is_empty() => {
             let tokens = estimate_tokens_rough(&content);
-            (None, Some(format!("🌐 {} ({} tokens)\n{}", r.raw, tokens, content)))
+            (
+                None,
+                Some(format!("🌐 {} ({} tokens)\n{}", r.raw, tokens, content)),
+            )
         }
-        Ok(_) => (
-            Some(format!("{}: no content extracted", r.raw)),
-            None,
-        ),
+        Ok(_) => (Some(format!("{}: no content extracted", r.raw)), None),
         Err(warning) => {
             // D-02: on fetcher failure, surface a warning; never silently drop.
             (Some(format!("{}: {}", r.raw, warning)), None)
@@ -758,7 +774,7 @@ async fn expand_reference(
                             r.raw, n
                         )),
                         None,
-                    )
+                    );
                 }
                 Err(_) => {
                     return (
@@ -767,12 +783,18 @@ async fn expand_reference(
                             r.raw, count_str
                         )),
                         None,
-                    )
+                    );
                 }
             };
             // count is now a validated u32 in [1,10]. Pass it as a separate argv element.
             let count_flag = format!("-{}", count);
-            expand_git_reference(r, cwd, &["log", &count_flag, "-p"], &format!("git log -{} -p", count)).await
+            expand_git_reference(
+                r,
+                cwd,
+                &["log", &count_flag, "-p"],
+                &format!("git log -{} -p", count),
+            )
+            .await
         }
         "url" => expand_url_reference(r, url_fetcher).await,
         _ => (Some(format!("{}: unsupported reference type", r.raw)), None),
@@ -1052,7 +1074,7 @@ mod tests {
         let file = dir.path().join("hello.rs");
         std::fs::write(&file, "fn main() {}\n").unwrap();
 
-        let msg = format!("see @file:hello.rs here");
+        let msg = "see @file:hello.rs here".to_string();
         let cwd = dir.path();
         let result = preprocess_context_references_async(&msg, cwd, 100_000, None, None).await;
 
@@ -1062,10 +1084,20 @@ mod tests {
         assert!(result.message.contains("📄"), "Block header missing");
         assert!(result.message.contains("hello.rs"), "Filename missing");
         assert!(result.message.contains("fn main()"), "File content missing");
-        assert!(result.message.contains("--- Attached Context ---"), "Section missing");
+        assert!(
+            result.message.contains("--- Attached Context ---"),
+            "Section missing"
+        );
         // The inline @file: reference should be stripped from message text portion.
-        let before_context = result.message.split("--- Attached Context ---").next().unwrap_or("");
-        assert!(!before_context.contains("@file:"), "Inline ref not stripped");
+        let before_context = result
+            .message
+            .split("--- Attached Context ---")
+            .next()
+            .unwrap_or("");
+        assert!(
+            !before_context.contains("@file:"),
+            "Inline ref not stripped"
+        );
     }
 
     /// Expand @file: with line range → only lines 2-3.
@@ -1076,13 +1108,20 @@ mod tests {
         std::fs::write(&file, "line1\nline2\nline3\nline4\n").unwrap();
 
         let msg = "@file:lines.txt:2-3";
-        let result = preprocess_context_references_async(msg, dir.path(), 100_000, None, None).await;
+        let result =
+            preprocess_context_references_async(msg, dir.path(), 100_000, None, None).await;
 
         assert!(result.expanded);
         assert!(result.message.contains("line2"), "Should contain line2");
         assert!(result.message.contains("line3"), "Should contain line3");
-        assert!(!result.message.contains("line4"), "Should not contain line4");
-        assert!(!result.message.contains("line1"), "Should not contain line1");
+        assert!(
+            !result.message.contains("line4"),
+            "Should not contain line4"
+        );
+        assert!(
+            !result.message.contains("line1"),
+            "Should not contain line1"
+        );
     }
 
     /// CR-01 regression: a reversed line range must not panic on the slice bounds.
@@ -1092,7 +1131,8 @@ mod tests {
         std::fs::write(dir.path().join("lines.txt"), "line1\nline2\nline3\nline4\n").unwrap();
 
         let msg = "@file:lines.txt:20-10";
-        let result = preprocess_context_references_async(msg, dir.path(), 100_000, None, None).await;
+        let result =
+            preprocess_context_references_async(msg, dir.path(), 100_000, None, None).await;
 
         // No panic; degenerate range yields an empty selection rather than crashing.
         assert!(result.expanded);
@@ -1106,7 +1146,8 @@ mod tests {
         std::fs::write(dir.path().join("lines.txt"), "line1\nline2\n").unwrap();
 
         let msg = "@file:lines.txt:99999999999999999999999999";
-        let result = preprocess_context_references_async(msg, dir.path(), 100_000, None, None).await;
+        let result =
+            preprocess_context_references_async(msg, dir.path(), 100_000, None, None).await;
 
         // No panic; an unparseable line number is ignored and the whole file is attached.
         assert!(result.expanded);
@@ -1120,8 +1161,9 @@ mod tests {
         std::fs::write(dir.path().join("a.rs"), "").unwrap();
         std::fs::write(dir.path().join("b.rs"), "").unwrap();
 
-        let msg = format!("@folder:.");
-        let result = preprocess_context_references_async(&msg, dir.path(), 100_000, None, None).await;
+        let msg = "@folder:.".to_string();
+        let result =
+            preprocess_context_references_async(&msg, dir.path(), 100_000, None, None).await;
 
         assert!(result.expanded, "Should be expanded: {:?}", result.warnings);
         assert!(!result.blocked);
@@ -1165,9 +1207,13 @@ mod tests {
         .await;
 
         // D-02: never silently drop — warning must appear.
-        assert!(!result.warnings.is_empty(), "Warning expected on fetcher error");
         assert!(
-            result.warnings[0].contains("example.com") || result.warnings[0].contains("fetch failed"),
+            !result.warnings.is_empty(),
+            "Warning expected on fetcher error"
+        );
+        assert!(
+            result.warnings[0].contains("example.com")
+                || result.warnings[0].contains("fetch failed"),
             "Warning should mention URL or error: {:?}",
             result.warnings
         );
@@ -1217,7 +1263,11 @@ mod tests {
         let result = preprocess_context_references_async(msg, dir.path(), 400, None, None).await;
 
         // Must not be blocked.
-        assert!(!result.blocked, "Should not be blocked. injected={} result={:?}", result.injected_tokens, result.warnings);
+        assert!(
+            !result.blocked,
+            "Should not be blocked. injected={} result={:?}",
+            result.injected_tokens, result.warnings
+        );
 
         // If the block lands in the soft zone (> soft_limit = 100), warning must appear.
         if result.injected_tokens > 100 {
@@ -1253,8 +1303,14 @@ mod tests {
         if result.blocked {
             // At this context_length the content might exceed hard limit too; just verify
             // that warnings are populated and message still equals original.
-            assert!(!result.warnings.is_empty(), "Blocked result must still have warnings");
-            assert_eq!(result.message, result.original_message, "Blocked: message must equal original");
+            assert!(
+                !result.warnings.is_empty(),
+                "Blocked result must still have warnings"
+            );
+            assert_eq!(
+                result.message, result.original_message,
+                "Blocked: message must equal original"
+            );
             assert!(
                 !result.message.contains("--- Context Warnings ---"),
                 "WR-01: blocked result message must NOT contain '--- Context Warnings ---'; found in message text"
@@ -1275,7 +1331,10 @@ mod tests {
                 "WR-01: warnings block must NOT be embedded in message text (no-double-render contract)"
             );
             assert!(
-                result.warnings.iter().any(|w| w.contains("soft limit") || w.contains("exceeds")),
+                result
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("soft limit") || w.contains("exceeds")),
                 "Soft-limit warning must appear on result.warnings: {:?}",
                 result.warnings
             );
@@ -1296,20 +1355,24 @@ mod tests {
 
         // @git:0 → out of range warning (0 < 1).
         let msg0 = "@git:0";
-        let result0 =
-            preprocess_context_references_async(msg0, cwd, 100_000, None, None).await;
+        let result0 = preprocess_context_references_async(msg0, cwd, 100_000, None, None).await;
         assert!(
-            result0.warnings.iter().any(|w| w.contains("range") || w.contains("out of")),
+            result0
+                .warnings
+                .iter()
+                .any(|w| w.contains("range") || w.contains("out of")),
             "@git:0 should warn about range: {:?}",
             result0.warnings
         );
 
         // @git:11 → out of range warning (11 > 10).
         let msg11 = "@git:11";
-        let result11 =
-            preprocess_context_references_async(msg11, cwd, 100_000, None, None).await;
+        let result11 = preprocess_context_references_async(msg11, cwd, 100_000, None, None).await;
         assert!(
-            result11.warnings.iter().any(|w| w.contains("range") || w.contains("out of")),
+            result11
+                .warnings
+                .iter()
+                .any(|w| w.contains("range") || w.contains("out of")),
             "@git:11 should warn about range: {:?}",
             result11.warnings
         );
@@ -1317,10 +1380,12 @@ mod tests {
         // @git:3 is valid — it should NOT produce a range-validation warning.
         // (May produce a "git command failed" warning if not in a git repo, which is fine.)
         let msg3 = "@git:3";
-        let result3 =
-            preprocess_context_references_async(msg3, cwd, 100_000, None, None).await;
+        let result3 = preprocess_context_references_async(msg3, cwd, 100_000, None, None).await;
         assert!(
-            !result3.warnings.iter().any(|w| w.contains("range") || w.contains("out of")),
+            !result3
+                .warnings
+                .iter()
+                .any(|w| w.contains("range") || w.contains("out of")),
             "@git:3 should not warn about range: {:?}",
             result3.warnings
         );

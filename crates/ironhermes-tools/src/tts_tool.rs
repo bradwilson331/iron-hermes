@@ -87,9 +87,7 @@ impl Tool for TextToSpeechTool {
     }
 
     fn is_available(&self) -> bool {
-        self.registry
-            .get(&self.config.tts.provider)
-            .is_some()
+        self.registry.get(&self.config.tts.provider).is_some()
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {

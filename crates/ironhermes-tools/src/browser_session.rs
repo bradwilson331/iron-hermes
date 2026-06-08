@@ -164,7 +164,7 @@ impl BrowserSession {
                     "host": host,
                     "allowed": allowed_domains,
                     "hint": "Add the host to browser.allowed_domains or leave the list empty to allow all"
-                }).to_string()
+                })
             ))
         }
     }

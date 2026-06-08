@@ -109,7 +109,9 @@ fn inv_33_03_self_created_variant_in_skills_rs() {
 /// `ironhermes-tools` crate can call it from `SkillManageTool`.
 #[test]
 fn inv_33_04_validate_skill_name_is_pub() {
-    let count = SKILLS_RS_SOURCE.matches("pub fn validate_skill_name").count();
+    let count = SKILLS_RS_SOURCE
+        .matches("pub fn validate_skill_name")
+        .count();
     assert!(
         count >= 1,
         "INV-33-04: crates/ironhermes-core/src/skills.rs must expose \
@@ -160,14 +162,20 @@ const AGENT_RUNTIME_SOURCE: &str = include_str!("../src/agent_runtime.rs");
 #[test]
 fn inv_33_07_appstate_calls_build_app_runtime_bundle() {
     assert!(
-        WEB_STATE_SOURCE.matches("AgentRuntime::from_config").count() >= 1,
+        WEB_STATE_SOURCE
+            .matches("AgentRuntime::from_config")
+            .count()
+            >= 1,
         "INV-33-07: crates/iron_hermes_ui/src/server/state.rs must build the shared \
          runtime via AgentRuntime::from_config so web UI sessions wire the full \
          AppRuntimeBundle (incl. the Learning Loop skill_manage toolset). \
          See Phase 33 Plan 03 / Phase 34 D-05 / Phase 28.1-03."
     );
     assert!(
-        AGENT_RUNTIME_SOURCE.matches("build_app_runtime_bundle").count() >= 1,
+        AGENT_RUNTIME_SOURCE
+            .matches("build_app_runtime_bundle")
+            .count()
+            >= 1,
         "INV-33-07: AgentRuntime::from_config must call build_app_runtime_bundle so the \
          shared runtime used by the web UI assembles the full AppRuntimeBundle."
     );

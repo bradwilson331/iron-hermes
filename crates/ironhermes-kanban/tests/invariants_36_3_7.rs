@@ -36,7 +36,8 @@ const DISPATCHER_SOURCE: &str = include_str!("../src/dispatcher.rs");
 const WORKER_SPAWN_SOURCE: &str = include_str!("../src/worker_spawn.rs");
 
 // Plan 06 landed: `kanban` is now in `is_bypass()`.
-const RUNNING_AGENT_SOURCE: &str = include_str!("../../ironhermes-core/src/commands/running_agent.rs");
+const RUNNING_AGENT_SOURCE: &str =
+    include_str!("../../ironhermes-core/src/commands/running_agent.rs");
 
 // PID-liveness lives in this crate already (plan 01 Task 0 + Task 2). The
 // invariant is non-ignored because the file exists.
@@ -51,9 +52,7 @@ const PID_SOURCE: &str = include_str!("../src/pid.rs");
 /// invariants file exists at all vs. silently failed to compile.
 #[test]
 fn invariants_module_loads() {
-    // Intentional trivial assert. The act of compiling + running this
-    // file is the gate.
-    assert!(true);
+    // Intentional no-op. The act of compiling + running this file is the gate.
 }
 
 /// INV-PID-LIVENESS: `is_pid_alive` uses the Errno-discriminating
@@ -175,8 +174,7 @@ fn kanban_is_in_bypass_list() {
 // ---------------------------------------------------------------------------
 
 /// Source constant for the gateway runner (plan 08 embed verification).
-const GATEWAY_RUNNER_SOURCE: &str =
-    include_str!("../../ironhermes-gateway/src/runner.rs");
+const GATEWAY_RUNNER_SOURCE: &str = include_str!("../../ironhermes-gateway/src/runner.rs");
 
 // ---------------------------------------------------------------------------
 // Plan 09 invariants: cross-plan composition regression gates (INV SG-06..10)
@@ -186,8 +184,7 @@ const GATEWAY_RUNNER_SOURCE: &str =
 const CLI_MAIN_SOURCE: &str = include_str!("../../ironhermes-cli/src/main.rs");
 
 /// Command registry source for plan 09 cross-plan invariants.
-const REGISTRY_SOURCE: &str =
-    include_str!("../../ironhermes-core/src/commands/registry.rs");
+const REGISTRY_SOURCE: &str = include_str!("../../ironhermes-core/src/commands/registry.rs");
 
 /// Kanban guidance source for plan 09 cache-stability invariant.
 const KANBAN_GUIDANCE_SOURCE: &str = include_str!("../src/kanban_guidance.rs");
@@ -233,13 +230,11 @@ fn kanban_subcommand_registered_in_main() {
 #[test]
 fn kanban_commanddef_universal() {
     // Find the byte position of `CommandDef::new("kanban"` in the source.
-    let def_pos = REGISTRY_SOURCE
-        .find(r#"CommandDef::new("kanban""#)
-        .expect(
-            "INV-36.3.7-SG-07: registry.rs must contain CommandDef::new(\"kanban\" (D-36 \
+    let def_pos = REGISTRY_SOURCE.find(r#"CommandDef::new("kanban""#).expect(
+        "INV-36.3.7-SG-07: registry.rs must contain CommandDef::new(\"kanban\" (D-36 \
              /kanban slash command registration). If missing, /kanban is not accessible from \
              any gateway platform.",
-        );
+    );
 
     // Assert `Universal` appears within the next 200 bytes.
     let window = &REGISTRY_SOURCE[def_pos..std::cmp::min(def_pos + 200, REGISTRY_SOURCE.len())];

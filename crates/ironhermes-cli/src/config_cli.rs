@@ -61,10 +61,9 @@ async fn cmd_config_set(hermes_home: &Path, key: &str, value: &str) -> Result<()
 }
 
 async fn cmd_config_get(hermes_home: &Path, key: &str) -> Result<()> {
-    match config_setter::config_get(hermes_home, key)? {
-        Some(v) => println!("{}", v),
-        None => {} // missing key: silent + exit 0 (idiomatic for shell scripting)
-    }
+    if let Some(v) = config_setter::config_get(hermes_home, key)? {
+        println!("{}", v);
+    } // missing key: silent + exit 0 (idiomatic for shell scripting)
     Ok(())
 }
 
@@ -74,7 +73,7 @@ fn mask_secret(value: &str) -> String {
     if value.is_empty() {
         return String::new();
     }
-    let prefix_len = value.len().min(6).max(4).min(value.len());
+    let prefix_len = value.len().clamp(4, 6);
     format!(
         "{}***",
         ironhermes_core::truncate_on_char_boundary(value, prefix_len)
@@ -99,10 +98,10 @@ fn redact_at(doc: &mut serde_yaml::Value, keys: &[&str]) {
             None => return,
         };
         if i == keys.len() - 1 {
-            if let Some(v) = map.get_mut(&key_v) {
-                if let Some(s) = v.as_str() {
-                    *v = serde_yaml::Value::String(mask_secret(s));
-                }
+            if let Some(v) = map.get_mut(&key_v)
+                && let Some(s) = v.as_str()
+            {
+                *v = serde_yaml::Value::String(mask_secret(s));
             }
             return;
         }
@@ -172,7 +171,7 @@ async fn cmd_config_migrate(hermes_home: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let registry = SkillRegistry::load_with_paths(&[skills_dir.clone()]);
+    let registry = SkillRegistry::load_with_paths(std::slice::from_ref(&skills_dir));
 
     let mut config_gaps: Vec<(String, String)> = Vec::new(); // (skill_name, dotted_key)
     let mut env_gaps: Vec<(String, String)> = Vec::new(); // (skill_name, env_var)

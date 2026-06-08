@@ -1,7 +1,7 @@
 //! Phase 36.3.7.13 Plan 01 Task 1 — bilateral cross-profile DB resolution tests.
 //!
-//! Validates D-A1 (`open_from_env()`) and D-A2 (`open_from_env_or_board()`)
-//! + one producer-side Test 6 verifying `build_kanban_worker_env` emits
+//! Validates D-A1 (`open_from_env()`) and D-A2 (`open_from_env_or_board()`),
+//! plus one producer-side Test 6 verifying `build_kanban_worker_env` emits
 //! `HERMES_KANBAN_DB` for non-default board slugs (WARNING 6 bilateral pairing).
 //!
 //! Tests:
@@ -10,20 +10,18 @@
 //! 3. `open_from_env_err_on_unwritable_path` — D-A1: returns Err on bad path
 //! 4. `open_from_env_or_board_env_wins_over_slug` — D-A2: env wins; slug ignored
 //! 5. `open_from_env_or_board_fallback_when_env_unset_and_no_slug` — D-A2: None slug + no env → default path
-//! 6. `build_kanban_worker_env_emits_hermes_kanban_db` — producer-side (WARNING 6): build_kanban_worker_env
-//!    emits HERMES_KANBAN_DB into the child env Vec for a named board slug.
-
-use std::sync::Mutex;
+//! 6. `build_kanban_worker_env_emits_hermes_kanban_db` — producer-side (WARNING 6):
+//!    `build_kanban_worker_env` emits `HERMES_KANBAN_DB` into the child env Vec for a named board slug.
 
 use ironhermes_kanban::store::KanbanStore;
-use ironhermes_kanban::worker_spawn::build_kanban_worker_env;
 use ironhermes_kanban::types::{Task, TaskRun};
+use ironhermes_kanban::worker_spawn::build_kanban_worker_env;
 
 /// Global env mutex — process-global env mutation must be serialized.
 ///
 /// Each test that touches `HERMES_KANBAN_DB` acquires this lock first and
 /// removes the var on exit (via explicit cleanup or the guard Drop).
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// RAII guard that removes HERMES_KANBAN_DB when dropped.
 struct EnvGuard;
@@ -93,7 +91,7 @@ fn fake_run(id: &str, task_id: &str, claim_lock: &str) -> TaskRun {
 
 #[test]
 fn open_from_env_reads_hermes_kanban_db() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let _guard = EnvGuard;
 
     let dir = tempfile::tempdir().unwrap();
@@ -104,7 +102,10 @@ fn open_from_env_reads_hermes_kanban_db() {
 
     let store = KanbanStore::open_from_env().expect("open_from_env must succeed with valid path");
     // Verify the DB was created at the overridden path.
-    assert!(db_path.exists(), "DB file must be created at HERMES_KANBAN_DB path");
+    assert!(
+        db_path.exists(),
+        "DB file must be created at HERMES_KANBAN_DB path"
+    );
     drop(store);
 }
 
@@ -114,7 +115,7 @@ fn open_from_env_reads_hermes_kanban_db() {
 
 #[test]
 fn open_from_env_fallback_when_unset() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     // Ensure env is clean (no leftover from a prior test in the same process).
     // Safety: test-only; ENV_LOCK serializes env mutations.
     unsafe { std::env::remove_var("HERMES_KANBAN_DB") };
@@ -127,9 +128,16 @@ fn open_from_env_fallback_when_unset() {
     let result = KanbanStore::open_from_env();
     unsafe { std::env::remove_var("IRONHERMES_HOME") };
 
-    assert!(result.is_ok(), "open_from_env must succeed via fallback path, got: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "open_from_env must succeed via fallback path, got: {:?}",
+        result.err()
+    );
     let expected_db = dir.path().join("kanban.db");
-    assert!(expected_db.exists(), "DB must be created at fallback kanban_db_path()");
+    assert!(
+        expected_db.exists(),
+        "DB must be created at fallback kanban_db_path()"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -138,7 +146,7 @@ fn open_from_env_fallback_when_unset() {
 
 #[test]
 fn open_from_env_err_on_unwritable_path() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let _guard = EnvGuard;
 
     // Point at a path under a non-existent parent directory that cannot be created
@@ -164,7 +172,7 @@ fn open_from_env_err_on_unwritable_path() {
 
 #[test]
 fn open_from_env_or_board_env_wins_over_slug() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let _guard = EnvGuard;
 
     let dir = tempfile::tempdir().unwrap();
@@ -176,7 +184,10 @@ fn open_from_env_or_board_env_wins_over_slug() {
     let store = KanbanStore::open_from_env_or_board(Some("some-slug"))
         .expect("open_from_env_or_board must succeed");
     // The env path must have been opened — the slug-based path must NOT exist.
-    assert!(env_db.exists(), "HERMES_KANBAN_DB path must be created when env wins");
+    assert!(
+        env_db.exists(),
+        "HERMES_KANBAN_DB path must be created when env wins"
+    );
     drop(store);
 }
 
@@ -186,7 +197,7 @@ fn open_from_env_or_board_env_wins_over_slug() {
 
 #[test]
 fn open_from_env_or_board_fallback_when_env_unset_and_no_slug() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     // Ensure env is clean.
     // Safety: test-only; ENV_LOCK serializes env mutations.
     unsafe { std::env::remove_var("HERMES_KANBAN_DB") };
@@ -196,9 +207,16 @@ fn open_from_env_or_board_fallback_when_env_unset_and_no_slug() {
     let result = KanbanStore::open_from_env_or_board(None);
     unsafe { std::env::remove_var("IRONHERMES_HOME") };
 
-    assert!(result.is_ok(), "open_from_env_or_board(None) must succeed via default path, got: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "open_from_env_or_board(None) must succeed via default path, got: {:?}",
+        result.err()
+    );
     let expected_db = dir.path().join("kanban.db");
-    assert!(expected_db.exists(), "DB must be created at kanban_db_path() when env unset and slug is None");
+    assert!(
+        expected_db.exists(),
+        "DB must be created at kanban_db_path() when env unset and slug is None"
+    );
 }
 
 // ---------------------------------------------------------------------------

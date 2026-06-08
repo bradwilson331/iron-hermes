@@ -60,14 +60,15 @@ fn clap_parses_goal_flag() {
 
     match parsed.cmd {
         TestSub::Kanban {
-            sub: KanbanCommands::Create {
-                title,
-                assignee,
-                body,
-                goal,
-                goal_max_turns,
-                ..
-            },
+            sub:
+                KanbanCommands::Create {
+                    title,
+                    assignee,
+                    body,
+                    goal,
+                    goal_max_turns,
+                    ..
+                },
         } => {
             assert_eq!(title, "Translate docs");
             assert_eq!(assignee, "alice");
@@ -96,11 +97,12 @@ fn clap_default_max_turns_is_twenty() {
 
     match parsed.cmd {
         TestSub::Kanban {
-            sub: KanbanCommands::Create {
-                goal,
-                goal_max_turns,
-                ..
-            },
+            sub:
+                KanbanCommands::Create {
+                    goal,
+                    goal_max_turns,
+                    ..
+                },
         } => {
             assert!(goal, "--goal flag should set goal=true");
             assert_eq!(
@@ -127,11 +129,12 @@ fn clap_no_goal_default_is_false() {
 
     match parsed.cmd {
         TestSub::Kanban {
-            sub: KanbanCommands::Create {
-                goal,
-                goal_max_turns,
-                ..
-            },
+            sub:
+                KanbanCommands::Create {
+                    goal,
+                    goal_max_turns,
+                    ..
+                },
         } => {
             assert!(!goal, "absent --goal should leave goal=false");
             // goal_max_turns is still parseable but unused when goal=false.
@@ -158,8 +161,8 @@ fn clap_no_goal_default_is_false() {
 
 #[test]
 fn cli_create_with_goal_lands_in_db() {
-    use ironhermes_kanban::store::CreateTaskOptions;
     use ironhermes_kanban::KanbanStore;
+    use ironhermes_kanban::store::CreateTaskOptions;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = KanbanStore::new(dir.path().join("kanban.db")).expect("open store");
@@ -195,8 +198,8 @@ fn cli_create_with_goal_lands_in_db() {
 #[test]
 fn show_formatter_prints_goal_lines_for_goal_card() {
     use ironhermes_cli::kanban::format::format_task_detail;
-    use ironhermes_kanban::store::CreateTaskOptions;
     use ironhermes_kanban::KanbanStore;
+    use ironhermes_kanban::store::CreateTaskOptions;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = KanbanStore::new(dir.path().join("kanban.db")).expect("open store");
@@ -230,8 +233,8 @@ fn show_formatter_prints_goal_lines_for_goal_card() {
 #[test]
 fn show_formatter_omits_goal_lines_for_non_goal_card() {
     use ironhermes_cli::kanban::format::format_task_detail;
-    use ironhermes_kanban::store::CreateTaskOptions;
     use ironhermes_kanban::KanbanStore;
+    use ironhermes_kanban::store::CreateTaskOptions;
 
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = KanbanStore::new(dir.path().join("kanban.db")).expect("open store");

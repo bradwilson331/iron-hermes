@@ -224,10 +224,7 @@ impl RecordingMediaAdapter {
         }
     }
 
-    fn maybe_fail_path(
-        &self,
-        source: &MediaSource,
-    ) -> Option<anyhow::Error> {
+    fn maybe_fail_path(&self, source: &MediaSource) -> Option<anyhow::Error> {
         let path = Self::path_str(source)?;
         if self.oversize_fail_paths.lock().unwrap().contains(&path) {
             return Some(anyhow::anyhow!(
@@ -498,10 +495,7 @@ async fn dispatch_media_d19(
 
     let mut failed_tags: Vec<String> = Vec::new();
     for media_ref in media_refs {
-        match media_sender
-            .send_media(chat_id, &media_ref, None)
-            .await
-        {
+        match media_sender.send_media(chat_id, &media_ref, None).await {
             Ok(_) => {}
             Err(_e) => {
                 failed_tags.push(media_ref.original_tag_text.clone());
@@ -613,7 +607,10 @@ async fn text_only_v2_edit_renders_with_escape() {
     // Single source of truth: compute expected via the imported escape fn.
     assert_eq!(edits[0].content, escape_outside_code_blocks(body));
 
-    assert!(adapter.media_log.lock().unwrap().is_empty(), "no attachments");
+    assert!(
+        adapter.media_log.lock().unwrap().is_empty(),
+        "no attachments"
+    );
 }
 
 /// Test 2 (D-07 + D-06 photo dispatch): text-first then attachment, in
@@ -745,8 +742,7 @@ async fn missing_path_reinserts_tag() {
     assert_eq!(out.extracted_refs.len(), 1);
     let expected_literal = format!("<MEDIA: {missing_path}>");
     assert_eq!(
-        out.extracted_refs[0].original_tag_text,
-        expected_literal,
+        out.extracted_refs[0].original_tag_text, expected_literal,
         "original_tag_text MUST preserve the literal for D-10 reinsert"
     );
 
@@ -776,8 +772,7 @@ async fn missing_path_reinserts_tag() {
     );
     // The second edit (D-10 reinsert) contains the tag literal.
     assert!(
-        edits[1].content.contains("MEDIA")
-            && edits[1].content.contains("does_not_exist_xxxxxx"),
+        edits[1].content.contains("MEDIA") && edits[1].content.contains("does_not_exist_xxxxxx"),
         "reinsert content must contain the tag literal path: {:?}",
         edits[1].content
     );
@@ -831,8 +826,7 @@ async fn oversize_path_reinserts_without_upload() {
     // edit_log entries: initial final-flush (empty body) + D-10 reinsert.
     assert_eq!(edits.len(), 2);
     assert!(
-        edits[1].content.contains("MEDIA")
-            && edits[1].content.contains("oversize"),
+        edits[1].content.contains("MEDIA") && edits[1].content.contains("oversize"),
         "reinsert content must contain oversize tag literal: {:?}",
         edits[1].content
     );
@@ -847,8 +841,7 @@ async fn tag_inside_fence_passes_through_no_attachment() {
     // reads the file because it never extracts the tag.
     let _fix = FileFixture::new_small("/tmp/telegram_media_test_fence.png").await;
 
-    let chunk =
-        "Use the convention:\n```\nemit <MEDIA: /tmp/telegram_media_test_fence.png> for media\n```\ndone.";
+    let chunk = "Use the convention:\n```\nemit <MEDIA: /tmp/telegram_media_test_fence.png> for media\n```\ndone.";
     let out = drive_synthetic_stream(&[chunk]);
 
     let visible: String = out.visible_chunks.join("");
@@ -878,11 +871,17 @@ async fn tag_inside_fence_passes_through_no_attachment() {
         "no attachment dispatched for fenced tag"
     );
     let edits = adapter.edit_log.lock().unwrap();
-    assert_eq!(edits.len(), 1, "exactly one V2 edit (no D-10 reinsert needed)");
+    assert_eq!(
+        edits.len(),
+        1,
+        "exactly one V2 edit (no D-10 reinsert needed)"
+    );
     // The escape function preserves fence interior verbatim, so the
     // <MEDIA: ...> literal survives in the edit body.
     assert!(
-        edits[0].content.contains("<MEDIA: /tmp/telegram_media_test_fence.png>"),
+        edits[0]
+            .content
+            .contains("<MEDIA: /tmp/telegram_media_test_fence.png>"),
         "edited body must contain the fenced tag literal: {:?}",
         edits[0].content
     );

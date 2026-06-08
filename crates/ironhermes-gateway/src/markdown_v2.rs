@@ -370,7 +370,8 @@ mod tests {
         // Rule 1 (test asserts incorrect behavior).
         let input = "Hello *world*. Visit [docs](https://x.com/a.b) or run `cat file.txt` — done.";
         let out = escape_outside_code_blocks(input);
-        let expected = "Hello *world*\\. Visit [docs](https://x.com/a.b) or run `cat file.txt` — done\\.";
+        let expected =
+            "Hello *world*\\. Visit [docs](https://x.com/a.b) or run `cat file.txt` — done\\.";
         assert_eq!(out, expected);
     }
 }

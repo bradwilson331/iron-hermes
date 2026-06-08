@@ -49,24 +49,15 @@ pub fn ScreenSettings(is_active: bool) -> Element {
     // spec references). D-02 makes api.rs the source of truth, so this
     // file matches the real field names.
     let summary_resource = use_server_future(crate::server::api::get_config_summary)?;
-    let (model_name, provider_name, context_length, memory_enabled) =
-        match summary_resource() {
-            Some(Ok(c)) => (c.model, c.provider, c.context_length, c.memory_enabled),
-            _ => ("loading…".to_string(), "…".to_string(), 0_u32, false),
-        };
+    let (model_name, provider_name, context_length, memory_enabled) = match summary_resource() {
+        Some(Ok(c)) => (c.model, c.provider, c.context_length, c.memory_enabled),
+        _ => ("loading…".to_string(), "…".to_string(), 0_u32, false),
+    };
 
     // Drop all signal borrows into Copy/Clone locals before constructing
     // event closures (clippy.toml signal-borrow safety — never hold a
     // read borrow across a `.set()` or `.with_mut()` in the same closure).
-    let (
-        cur_theme,
-        cur_accent,
-        cur_wheel_size,
-        cur_breadcrumb,
-        cur_footer,
-        cur_rail,
-        cur_density,
-    ) = {
+    let (cur_theme, cur_accent, cur_wheel_size, cur_breadcrumb, cur_footer, cur_rail, cur_density) = {
         let p = prefs.read();
         let t = theme.read();
         (

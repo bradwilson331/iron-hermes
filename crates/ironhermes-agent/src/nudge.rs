@@ -44,8 +44,7 @@ use crate::memory::MemoryManager;
 ///
 /// Source: Python `run_agent.py` `AIAgent._MEMORY_REVIEW_PROMPT`
 /// (lines 3984-3996), adapted verbatim.
-pub const MEMORY_REVIEW_PROMPT: &str =
-    "Review the conversation above and consider saving to memory if appropriate.\n\n\
+pub const MEMORY_REVIEW_PROMPT: &str = "Review the conversation above and consider saving to memory if appropriate.\n\n\
      Focus on:\n\
      1. Has the user revealed things about themselves — their persona, desires, \
      preferences, or personal details worth remembering?\n\
@@ -138,6 +137,7 @@ pub async fn spawn_nudge_review(
 /// REPL / gateway machinery. Both call sites (CLI `run_chat`, gateway
 /// `run_agent`) inline the same shape — this helper is the canonical reference
 /// for the counter contract.
+#[cfg(test)] // used only in tests within this module; production call sites inline the same logic
 pub(crate) fn should_nudge(interval: u32, counter: &mut u32) -> bool {
     if interval == 0 {
         return false;
@@ -220,7 +220,10 @@ mod tests {
                 "should_nudge must return false when interval==0"
             );
         }
-        assert_eq!(c, 0, "counter must stay at 0 when interval==0 (no side effect)");
+        assert_eq!(
+            c, 0,
+            "counter must stay at 0 when interval==0 (no side effect)"
+        );
     }
 
     /// interval=2 fires at turn 2, resets, and fires again at turn 2 of the

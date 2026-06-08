@@ -242,8 +242,10 @@ mod tests {
     }
 
     fn dummy_console_tool(yolo: bool) -> BrowserConsoleTool {
-        let mut config = Config::default();
-        config.autonomous = AutonomousConfig { yolo };
+        let config = Config {
+            autonomous: AutonomousConfig { yolo },
+            ..Default::default()
+        };
         BrowserConsoleTool::new(dummy_session(), Arc::new(config))
     }
 

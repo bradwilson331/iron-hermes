@@ -156,6 +156,7 @@ pub fn KanbanBoard(
 ///      remove from `pending_task_ids` + set toast (UI-SPEC §7.5).
 /// 5. Always: clear `dragged_task_id` as a safety net.
 #[allow(clippy::too_many_arguments)] // 8 signals threaded through the DnD chain by design
+#[allow(dead_code)] // called from column.rs ondrop handler; dead_code fires on test target
 pub fn move_task_optimistic(
     task_id: String,
     target: KanbanStatus,
@@ -177,8 +178,7 @@ pub fn move_task_optimistic(
     let snapshot: Option<(KanbanStatus, String)> = {
         let read = tasks.read();
         read.iter().find(|t| t.id == task_id).map(|t| {
-            let parsed = KanbanStatus::from_wire_str(&t.status)
-                .unwrap_or(KanbanStatus::Triage);
+            let parsed = KanbanStatus::from_wire_str(&t.status).unwrap_or(KanbanStatus::Triage);
             (parsed, t.title.clone())
         })
     };

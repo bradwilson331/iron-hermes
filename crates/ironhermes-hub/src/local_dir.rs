@@ -221,7 +221,10 @@ mod tests {
     #[tokio::test]
     async fn local_dir_fetch_missing_dir_returns_local_source_missing() {
         let src = LocalDirSource;
-        let err = src.fetch("/nonexistent/path/that/does/not/exist").await.unwrap_err();
+        let err = src
+            .fetch("/nonexistent/path/that/does/not/exist")
+            .await
+            .unwrap_err();
         match err {
             HubError::Typed {
                 kind: HubErrorKind::LocalSourceMissing,
@@ -282,18 +285,17 @@ mod tests {
         std::fs::create_dir(dir.path().join("helpers")).unwrap();
         std::fs::write(dir.path().join("helpers").join("script.sh"), b"#!/bin/sh").unwrap();
         std::fs::create_dir(dir.path().join("references")).unwrap();
-        std::fs::write(
-            dir.path().join("references").join("note.md"),
-            b"# notes",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("references").join("note.md"), b"# notes").unwrap();
 
         let src = LocalDirSource;
         let bundle = src.fetch(dir.path().to_str().unwrap()).await.unwrap();
         assert_eq!(bundle.files.len(), 3);
         // Verify alphabetical order
         let paths: Vec<&str> = bundle.files.iter().map(|f| f.path.as_str()).collect();
-        assert_eq!(paths, vec!["SKILL.md", "helpers/script.sh", "references/note.md"]);
+        assert_eq!(
+            paths,
+            vec!["SKILL.md", "helpers/script.sh", "references/note.md"]
+        );
     }
 
     #[cfg(unix)]
@@ -316,7 +318,11 @@ mod tests {
         std::fs::write(dir.path().join("SKILL.md"), make_valid_skill_md()).unwrap();
         // Create the skip directories with files inside
         std::fs::create_dir(dir.path().join(".git")).unwrap();
-        std::fs::write(dir.path().join(".git").join("HEAD"), b"ref: refs/heads/main").unwrap();
+        std::fs::write(
+            dir.path().join(".git").join("HEAD"),
+            b"ref: refs/heads/main",
+        )
+        .unwrap();
         std::fs::create_dir(dir.path().join("node_modules")).unwrap();
         std::fs::write(dir.path().join("node_modules").join("foo.js"), b"var x=1").unwrap();
         std::fs::create_dir(dir.path().join("target")).unwrap();
@@ -335,7 +341,10 @@ mod tests {
         std::fs::write(dir.path().join("SKILL.md"), make_valid_skill_md()).unwrap();
         let src = LocalDirSource;
         let bundle = src.fetch(dir.path().to_str().unwrap()).await.unwrap();
-        assert_eq!(bundle.snapshot_hash, None, "D-C1: no remote snapshot for local installs");
+        assert_eq!(
+            bundle.snapshot_hash, None,
+            "D-C1: no remote snapshot for local installs"
+        );
     }
 
     #[tokio::test]

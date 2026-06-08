@@ -106,11 +106,10 @@ async fn test_shrike_kill_aborts_handle_and_returns_kill_result() {
     // Call kill — must run in spawn_blocking because it uses block_in_place
     // inside an outer multi_thread runtime.
     let shrike_for_blocking = shrike.clone();
-    let kill_result: Option<KillResult> = tokio::task::spawn_blocking(move || {
-        shrike_for_blocking.kill("sub_kill0001")
-    })
-    .await
-    .expect("spawn_blocking failed");
+    let kill_result: Option<KillResult> =
+        tokio::task::spawn_blocking(move || shrike_for_blocking.kill("sub_kill0001"))
+            .await
+            .expect("spawn_blocking failed");
 
     // Assertion 1: KillResult returned with the expected id.
     let kr = kill_result.expect("kill must return Some for a present id");
@@ -269,7 +268,10 @@ async fn test_shrike_status_returns_struct() {
     let info = result.expect("status must return Some for a present id");
     assert_eq!(info.id, "sub_stat0001");
     assert_eq!(info.task_summary, "task-sub_stat0001");
-    assert!(info.uptime_secs >= 10, "uptime should reflect started_at offset");
+    assert!(
+        info.uptime_secs >= 10,
+        "uptime should reflect started_at offset"
+    );
     assert_eq!(
         info.last_activity_secs,
         Some(info.last_activity_secs.unwrap_or(0))
@@ -289,5 +291,8 @@ async fn test_shrike_status_returns_struct() {
     let missing = tokio::task::spawn_blocking(move || shrike_for_blocking_2.status("sub_nope"))
         .await
         .expect("spawn_blocking failed");
-    assert!(missing.is_none(), "status must return None for an absent id");
+    assert!(
+        missing.is_none(),
+        "status must return None for an absent id"
+    );
 }

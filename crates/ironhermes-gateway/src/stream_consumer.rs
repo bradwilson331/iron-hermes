@@ -286,6 +286,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[derive(Debug)]
+    #[allow(dead_code)] // test-recording enum; fields constructed for Debug output and future assertion patterns
     enum AdapterCall {
         EditMessage {
             chat_id: String,
@@ -535,7 +536,10 @@ mod tests {
         let para1 = "A".repeat(2500);
         let para2 = "B".repeat(2500);
         let big_content = format!("{}\n\n{}", para1, para2);
-        assert!(big_content.len() > MAX_MESSAGE_LEN, "test content must exceed limit");
+        assert!(
+            big_content.len() > MAX_MESSAGE_LEN,
+            "test content must exceed limit"
+        );
 
         sc.push(&big_content);
         sc.flush(true).await.unwrap();

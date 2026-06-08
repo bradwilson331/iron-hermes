@@ -420,12 +420,7 @@ async fn cmd_test(name: String) -> anyhow::Result<()> {
                 // colored strings don't implement Display with width padding;
                 // pad the raw name first, then color the padded string
                 let padded_name = format!("{:<30}", tool_name);
-                println!(
-                    "  {} {} {}",
-                    padded_name.yellow(),
-                    "\u{2014}",
-                    truncated_desc
-                );
+                println!("  {} \u{2014} {}", padded_name.yellow(), truncated_desc);
             }
         }
         Err(e) => {
@@ -616,14 +611,11 @@ fn remove_mcp_server_config(name: &str) -> anyhow::Result<()> {
     }
     let content = std::fs::read_to_string(&config_path)?;
     let mut doc: serde_yaml::Value = serde_yaml::from_str(&content)?;
-    if let Some(mapping) = doc.as_mapping_mut() {
-        if let Some(servers) =
-            mapping.get_mut(&serde_yaml::Value::String("mcp_servers".to_string()))
-        {
-            if let Some(s) = servers.as_mapping_mut() {
-                s.remove(&serde_yaml::Value::String(name.to_string()));
-            }
-        }
+    if let Some(mapping) = doc.as_mapping_mut()
+        && let Some(servers) = mapping.get_mut(serde_yaml::Value::String("mcp_servers".to_string()))
+        && let Some(s) = servers.as_mapping_mut()
+    {
+        s.remove(serde_yaml::Value::String(name.to_string()));
     }
     std::fs::write(&config_path, serde_yaml::to_string(&doc)?)?;
     Ok(())
@@ -711,7 +703,7 @@ mod tests {
         // default_yes=true, empty input -> true
         // default_yes=false, empty input -> false
         // This is a compile-time reachability test for the helpers
-        assert!(true); // functions are in scope
+        // functions are in scope — compile-time reachability verified by the test existing
     }
 
     #[test]
@@ -796,10 +788,12 @@ mod tests {
         // A config with connect_timeout=0 and a stdio command that will never produce an
         // MCP initialize response fast enough. We don't need it to be reachable — the
         // 0-second timeout fires before transport has a chance to complete.
-        let mut cfg = McpServerConfig::default();
-        cfg.command = Some("sleep".to_string());
-        cfg.args = vec!["30".to_string()];
-        cfg.connect_timeout = 0;
+        let cfg = McpServerConfig {
+            command: Some("sleep".to_string()),
+            args: vec!["30".to_string()],
+            connect_timeout: 0,
+            ..McpServerConfig::default()
+        };
         let result = attempt_connect_and_list_with_timeout(&cfg).await;
         assert!(result.is_err(), "zero-timeout must surface an error");
         let msg = result.unwrap_err().to_string();
@@ -825,14 +819,12 @@ mcp_servers:
     url: http://localhost:8000
 "#;
         let mut doc: serde_yaml::Value = serde_yaml::from_str(content).unwrap();
-        if let Some(mapping) = doc.as_mapping_mut() {
-            if let Some(servers) =
-                mapping.get_mut(&serde_yaml::Value::String("mcp_servers".to_string()))
-            {
-                if let Some(s) = servers.as_mapping_mut() {
-                    s.remove(&serde_yaml::Value::String("github".to_string()));
-                }
-            }
+        if let Some(mapping) = doc.as_mapping_mut()
+            && let Some(servers) =
+                mapping.get_mut(serde_yaml::Value::String("mcp_servers".to_string()))
+            && let Some(s) = servers.as_mapping_mut()
+        {
+            s.remove(serde_yaml::Value::String("github".to_string()));
         }
         let serialized = serde_yaml::to_string(&doc).unwrap();
         assert!(!serialized.contains("github"), "github should be removed");

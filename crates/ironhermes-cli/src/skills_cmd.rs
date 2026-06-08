@@ -414,7 +414,15 @@ pub async fn cmd_install(cfg: &Config, identifier: &str, skip_audit: bool) -> an
     // Phase 21.8.1: for local: installs, pass the canonical absolute path as the
     // identifier to LocalDirSource::fetch — NOT the raw "local:<path>" string.
     let install_identifier = canonical_local_identifier.as_deref().unwrap_or(identifier);
-    match hub_install(source, install_identifier, &scanner, &skills_root, skip_audit).await {
+    match hub_install(
+        source,
+        install_identifier,
+        &scanner,
+        &skills_root,
+        skip_audit,
+    )
+    .await
+    {
         Ok(outcome) => {
             // D-21 line 5: final install line (trust + 12-char hash prefix).
             let name = strip_terminal_escapes(&outcome.name);
@@ -867,8 +875,7 @@ where
 /// previously loaded registry (always empty at CLI invocation time — shows all
 /// currently installed skills as "loaded"), and reports invalid_skipped count.
 pub fn cmd_reload(cfg: &Config) -> anyhow::Result<i32> {
-    let cwd = std::env::current_dir()
-        .map_err(|e| anyhow::anyhow!("cannot resolve cwd: {e}"))?;
+    let cwd = std::env::current_dir().map_err(|e| anyhow::anyhow!("cannot resolve cwd: {e}"))?;
 
     let registry = ironhermes_core::SkillRegistry::load_with_config(&cwd, &cfg.skills);
     let loaded: Vec<String> = registry.list().iter().map(|r| r.name.clone()).collect();
@@ -887,7 +894,10 @@ pub fn cmd_reload(cfg: &Config) -> anyhow::Result<i32> {
         .saturating_sub(loaded_count);
 
     if loaded_count == 0 {
-        println!("Skills reloaded: 0 loaded, {} invalid skipped.", invalid_skipped);
+        println!(
+            "Skills reloaded: 0 loaded, {} invalid skipped.",
+            invalid_skipped
+        );
     } else {
         println!(
             "Skills reloaded: {} loaded, {} invalid skipped.",

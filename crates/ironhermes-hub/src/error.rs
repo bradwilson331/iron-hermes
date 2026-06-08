@@ -120,7 +120,10 @@ mod tests_21_8 {
         assert_ne!(HubErrorKind::ShaMismatch, HubErrorKind::ScanHit);
         assert_ne!(HubErrorKind::PathTraversal, HubErrorKind::Audit);
         // Phase 21.8.1: LocalSourceMissing identity and inequality
-        assert_eq!(HubErrorKind::LocalSourceMissing, HubErrorKind::LocalSourceMissing);
+        assert_eq!(
+            HubErrorKind::LocalSourceMissing,
+            HubErrorKind::LocalSourceMissing
+        );
         assert_ne!(HubErrorKind::LocalSourceMissing, HubErrorKind::Audit);
     }
 

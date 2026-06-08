@@ -74,10 +74,7 @@ fn fake_info(id: &str, summary: &str) -> SubagentInfo {
 /// is detached (`std::mem::forget`) so these tests retain their original
 /// "registered until kill or test end" semantics. Lifecycle coverage is in
 /// `ironhermes-agent/tests/registration_guard.rs`.
-async fn register_for_test(
-    reg: &Arc<RwLock<SubagentRegistry>>,
-    info: SubagentInfo,
-) {
+async fn register_for_test(reg: &Arc<RwLock<SubagentRegistry>>, info: SubagentInfo) {
     let weak = Arc::downgrade(reg);
     let guard = reg.write().await.register_guarded(info, weak);
     std::mem::forget(guard);

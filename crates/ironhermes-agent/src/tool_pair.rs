@@ -35,6 +35,8 @@ pub fn detect_tool_pairs(messages: &[ChatMessage]) -> Vec<ToolPair> {
         }
         let ids: Vec<String> = calls.iter().map(|c| c.id.clone()).collect();
         let mut found: Vec<usize> = Vec::with_capacity(ids.len());
+        #[allow(clippy::needless_range_loop)]
+        // j is used as an index to push into found; enumerate() would lose the j value
         for j in (i + 1)..messages.len() {
             let m = &messages[j];
             if m.role != Role::Tool {

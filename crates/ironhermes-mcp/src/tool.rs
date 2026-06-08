@@ -74,10 +74,7 @@ impl McpTool {
 /// MUST be the single source of truth for this transformation — both
 /// sides of the lifecycle depend on byte-for-byte agreement.
 pub fn sanitize_server_name(name: &str) -> String {
-    name.replace('-', "_")
-        .replace('.', "_")
-        .replace('@', "_")
-        .replace('/', "_")
+    name.replace(['-', '.', '@', '/'], "_")
 }
 
 /// D-06: Build the prefixed name `server__tool` with sanitization.

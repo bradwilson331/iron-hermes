@@ -294,12 +294,9 @@ impl Tool for KanbanSwarmTool {
             .get("idempotency_key")
             .and_then(|v| v.as_str())
             .map(String::from);
-        let max_runtime_seconds: Option<i64> =
-            args.get("max_runtime").and_then(parse_max_runtime);
-        let skills: Option<Vec<String>> = args
-            .get("skills")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
+        let max_runtime_seconds: Option<i64> = args.get("max_runtime").and_then(parse_max_runtime);
+        let skills: Option<Vec<String>> =
+            args.get("skills").and_then(|v| v.as_array()).map(|arr| {
                 arr.iter()
                     .filter_map(|v| v.as_str().map(String::from))
                     .collect()
@@ -328,23 +325,23 @@ impl Tool for KanbanSwarmTool {
                 ));
             }
         }
-        if let Some(ref v) = verifier {
-            if let Err(e) = ironhermes_core::profile::validate_profile_name(v) {
-                return Ok(crate::tools::common::reject_with_board(
-                    "invalid_assignee",
-                    &format!("{e}"),
-                    Some(&board_ctx),
-                ));
-            }
+        if let Some(ref v) = verifier
+            && let Err(e) = ironhermes_core::profile::validate_profile_name(v)
+        {
+            return Ok(crate::tools::common::reject_with_board(
+                "invalid_assignee",
+                &format!("{e}"),
+                Some(&board_ctx),
+            ));
         }
-        if let Some(ref s) = synthesizer {
-            if let Err(e) = ironhermes_core::profile::validate_profile_name(s) {
-                return Ok(crate::tools::common::reject_with_board(
-                    "invalid_assignee",
-                    &format!("{e}"),
-                    Some(&board_ctx),
-                ));
-            }
+        if let Some(ref s) = synthesizer
+            && let Err(e) = ironhermes_core::profile::validate_profile_name(s)
+        {
+            return Ok(crate::tools::common::reject_with_board(
+                "invalid_assignee",
+                &format!("{e}"),
+                Some(&board_ctx),
+            ));
         }
         if let Err(e) = ironhermes_core::profile::validate_profile_name(&created_by) {
             return Ok(crate::tools::common::reject_with_board(
@@ -410,13 +407,16 @@ impl Tool for KanbanSwarmTool {
         };
 
         // 11. success envelope with board provenance.
-        crate::tools::common::ok_with_board(json!({
-            "root_id": ids.root_id,
-            "worker_ids": ids.worker_ids,
-            "verifier_id": ids.verifier_id,
-            "synthesizer_id": ids.synthesizer_id,
-            "blackboard_event_id": ids.blackboard_event_id,
-        }), &board_ctx)
+        crate::tools::common::ok_with_board(
+            json!({
+                "root_id": ids.root_id,
+                "worker_ids": ids.worker_ids,
+                "verifier_id": ids.verifier_id,
+                "synthesizer_id": ids.synthesizer_id,
+                "blackboard_event_id": ids.blackboard_event_id,
+            }),
+            &board_ctx,
+        )
     }
 }
 
@@ -449,6 +449,9 @@ mod tests {
         let store = make_store();
         let tool = KanbanSwarmTool::new(store, true);
         let schema_str = serde_json::to_string(&tool.schema()).unwrap();
-        assert!(schema_str.contains("\"board\""), "schema missing board property: {schema_str}");
+        assert!(
+            schema_str.contains("\"board\""),
+            "schema missing board property: {schema_str}"
+        );
     }
 }

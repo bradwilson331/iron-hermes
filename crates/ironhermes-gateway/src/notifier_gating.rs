@@ -61,11 +61,7 @@ pub fn compute_notifier_gate(
     };
     let overlap: Vec<String> = sources
         .iter()
-        .filter(|s| {
-            enabled_platforms
-                .iter()
-                .any(|e| e.eq_ignore_ascii_case(s))
-        })
+        .filter(|s| enabled_platforms.iter().any(|e| e.eq_ignore_ascii_case(s)))
         .cloned()
         .collect();
     if overlap.is_empty() {

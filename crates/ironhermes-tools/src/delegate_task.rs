@@ -42,6 +42,10 @@ pub type SubagentProgressCallback = Arc<dyn Fn(usize, SubagentProgress) + Send +
 pub type ChildToolProgressCallback = Box<dyn Fn(&str, &str) + Send + Sync + 'static>;
 
 /// Default tools available to subagents when no explicit allowlist is provided (D-02).
+/// Currently referenced only by the test module; the D-02 production wiring is still
+/// pending, so `#[allow(dead_code)]` keeps the documented default available without
+/// tripping the `-D warnings` CI gate.
+#[allow(dead_code)]
 const DEFAULT_SAFE_TOOLS: &[&str] = &[
     "read_file",
     "write_file",
@@ -92,6 +96,9 @@ pub fn resolve_toolsets(toolsets: &[String]) -> anyhow::Result<Vec<String>> {
 /// ironhermes-agent depends on ironhermes-tools, so ironhermes-tools
 /// cannot import AgentLoop directly. Instead, ironhermes-agent implements
 /// this trait and passes it as `Arc<dyn SubagentRunner>`.
+#[allow(clippy::too_many_arguments)]
+// run_child requires 7 params (registry, prompt, max_iter, model, cancel, progress, stale_warn);
+// a builder struct would add indirection with no clarity benefit for a single-method trait.
 #[async_trait]
 pub trait SubagentRunner: Send + Sync {
     /// Run a child agent with the given registry, system prompt, and max iterations.
@@ -133,15 +140,11 @@ pub trait SubagentRunner: Send + Sync {
 ///   `tracing::warn!` records the reason (D-02/D-03).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum ChildRole {
+    #[default]
     Leaf,
     Orchestrator,
-}
-
-impl Default for ChildRole {
-    fn default() -> Self {
-        Self::Leaf
-    }
 }
 
 /// Phase 32.3 Plan 03 (D-08): handle map populated by `execute_batch` after
@@ -275,10 +278,10 @@ impl DelegateTaskTool {
             // D-21/D-22: Create child cancel token based on detach flag
             let child_cancel_token = if detach {
                 None
-            } else if let Some(ref parent_token) = self.parent_cancel_token {
-                Some(parent_token.child_token())
             } else {
-                None
+                self.parent_cancel_token
+                    .as_ref()
+                    .map(|parent_token| parent_token.child_token())
             };
 
             // D-19: Create per-child tool progress callback
@@ -466,10 +469,10 @@ impl DelegateTaskTool {
                 // already deregisters the registry entry (Plan 01); this
                 // separate hook removes the batch-task-keyed JoinHandle so
                 // the map doesn't grow unbounded across the session.
-                if let Some(ref h) = shrike_handles_for_spawn {
-                    if let Ok(mut m) = h.lock() {
-                        m.remove(&batch_task_key_for_spawn);
-                    }
+                if let Some(ref h) = shrike_handles_for_spawn
+                    && let Ok(mut m) = h.lock()
+                {
+                    m.remove(&batch_task_key_for_spawn);
                 }
 
                 Ok::<(usize, String), anyhow::Error>((index, response))
@@ -601,7 +604,8 @@ pub fn build_child_registry(
             "skills" => { /* D-05: not available to subagents */ }
             "execute_code" => { /* not available to subagents */ }
             "cronjob" => { /* not available to subagents */ }
-            "clarify" => { /* no clarify_callback channel in children (Python: NEVER_PARALLEL_TOOLS) */ }
+            "clarify" => { /* no clarify_callback channel in children (Python: NEVER_PARALLEL_TOOLS) */
+            }
             "send_message" => { /* no platform session in children (Python: toolsets.py) */ }
 
             // File tools
@@ -860,11 +864,10 @@ impl Tool for DelegateTaskTool {
         let child_cancel_token = if detach {
             // D-22: independent token — parent interrupt does not cancel this child
             None
-        } else if let Some(ref parent_token) = self.parent_cancel_token {
-            // D-21: child token derived from parent — cancelling parent cascades
-            Some(parent_token.child_token())
         } else {
-            None
+            self.parent_cancel_token
+                .as_ref()
+                .map(|parent_token| parent_token.child_token())
         };
 
         // D-19: Emit Started progress event
@@ -1239,14 +1242,32 @@ mod tests {
         );
 
         let props = &params["properties"];
-        assert!(props.get("task").is_some(), "schema should expose 'task' property");
-        assert!(props.get("tasks").is_some(), "schema should expose 'tasks' property");
+        assert!(
+            props.get("task").is_some(),
+            "schema should expose 'task' property"
+        );
+        assert!(
+            props.get("tasks").is_some(),
+            "schema should expose 'tasks' property"
+        );
 
-        let task_desc = props["task"]["description"].as_str().expect("task description must be a string");
-        assert!(task_desc.contains("Mutually exclusive"), "task description must mention mutual exclusion; got: {}", task_desc);
+        let task_desc = props["task"]["description"]
+            .as_str()
+            .expect("task description must be a string");
+        assert!(
+            task_desc.contains("Mutually exclusive"),
+            "task description must mention mutual exclusion; got: {}",
+            task_desc
+        );
 
-        let tasks_desc = props["tasks"]["description"].as_str().expect("tasks description must be a string");
-        assert!(tasks_desc.contains("Mutually exclusive"), "tasks description must mention mutual exclusion; got: {}", tasks_desc);
+        let tasks_desc = props["tasks"]["description"]
+            .as_str()
+            .expect("tasks description must be a string");
+        assert!(
+            tasks_desc.contains("Mutually exclusive"),
+            "tasks description must mention mutual exclusion; got: {}",
+            tasks_desc
+        );
     }
 
     #[tokio::test]
@@ -2152,7 +2173,10 @@ mod tests {
             .execute(json!({"task": "test task", "max_iterations": 99}))
             .await
             .unwrap();
-        let seen_a = captured_a.lock().unwrap().expect("runner was called (case a)");
+        let seen_a = captured_a
+            .lock()
+            .unwrap()
+            .expect("runner was called (case a)");
         assert_eq!(
             seen_a, 5,
             "per-call max_iterations=99 exceeds ceiling=5 and must be clamped to 5"
@@ -2176,7 +2200,10 @@ mod tests {
             .execute(json!({"task": "test task", "max_iterations": 3}))
             .await
             .unwrap();
-        let seen_b = captured_b.lock().unwrap().expect("runner was called (case b)");
+        let seen_b = captured_b
+            .lock()
+            .unwrap()
+            .expect("runner was called (case b)");
         assert_eq!(
             seen_b, 3,
             "per-call max_iterations=3 is at or below ceiling=99 and must be honored verbatim"

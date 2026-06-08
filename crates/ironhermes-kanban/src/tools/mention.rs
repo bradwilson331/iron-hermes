@@ -236,10 +236,8 @@ impl Tool for KanbanMentionTool {
             let rows = stmt
                 .query_map(rusqlite::params![], |row| row.get::<_, String>(0))
                 .map_err(|e| anyhow::anyhow!("query known_assignees: {e}"))?;
-            for r in rows {
-                if let Ok(a) = r {
-                    set.insert(a.to_lowercase());
-                }
+            for a in rows.flatten() {
+                set.insert(a.to_lowercase());
             }
             set
         };
@@ -386,13 +384,16 @@ impl Tool for KanbanMentionTool {
         // WR-08 (Phase 36.3.7.8 code review): include "status":"ok" so the
         // tool's success envelope can be disambiguated from the reject()
         // envelope by a single discriminator field.
-        crate::tools::common::ok_with_board(json!({
-            "status": "ok",
-            "task_id": task_id,
-            "mentions_parsed": spans.len(),
-            "children_created": children_created,
-            "skipped": skipped
-        }), &board_ctx)
+        crate::tools::common::ok_with_board(
+            json!({
+                "status": "ok",
+                "task_id": task_id,
+                "mentions_parsed": spans.len(),
+                "children_created": children_created,
+                "skipped": skipped
+            }),
+            &board_ctx,
+        )
     }
 }
 
@@ -443,7 +444,10 @@ mod tests {
     fn schema_contains_board_property() {
         let tool = KanbanMentionTool::new(make_store(), false);
         let schema_str = serde_json::to_string(&tool.schema()).unwrap();
-        assert!(schema_str.contains("\"board\""), "schema missing board property: {schema_str}");
+        assert!(
+            schema_str.contains("\"board\""),
+            "schema missing board property: {schema_str}"
+        );
     }
 
     /// Test `is_available` logic.

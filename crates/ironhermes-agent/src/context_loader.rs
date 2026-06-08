@@ -25,10 +25,10 @@ pub fn find_git_root(start: &Path) -> Option<PathBuf> {
         }
 
         // Stop at $HOME (do not check $HOME itself for .git, just stop)
-        if let Some(ref h) = home {
-            if &current == h {
-                return None;
-            }
+        if let Some(ref h) = home
+            && &current == h
+        {
+            return None;
         }
 
         match current.parent() {

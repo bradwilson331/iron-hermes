@@ -4,8 +4,8 @@
 //! call these after fetching data from `KanbanStore`.
 
 use ironhermes_kanban::dispatcher::{StrandedReport, StrandedSeverity};
-use ironhermes_kanban::types::{Task, TaskComment, TaskRun};
 use ironhermes_kanban::events::KanbanEvent;
+use ironhermes_kanban::types::{Task, TaskComment, TaskRun};
 use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
@@ -180,7 +180,12 @@ pub fn format_task_detail(
     if !comments.is_empty() {
         out.push_str("\n--- COMMENTS ---\n");
         for c in comments {
-            out.push_str(&format!("[{}] {}: {}\n", format_ts(c.created_at), c.author, c.body));
+            out.push_str(&format!(
+                "[{}] {}: {}\n",
+                format_ts(c.created_at),
+                c.author,
+                c.body
+            ));
         }
     }
 
@@ -191,7 +196,14 @@ pub fn format_task_detail(
 
     if !events.is_empty() {
         out.push_str("\n--- EVENTS (last 10) ---\n");
-        for e in events.iter().rev().take(10).collect::<Vec<_>>().into_iter().rev() {
+        for e in events
+            .iter()
+            .rev()
+            .take(10)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
             let payload_str = e.payload.as_deref().unwrap_or("");
             out.push_str(&format!(
                 "[{}] {} {}\n",
@@ -234,7 +246,10 @@ pub fn format_runs_table(runs: &[TaskRun]) -> String {
         "{:<20}  {:<12}  {:<10}  SUMMARY\n",
         "RUN_ID", "OUTCOME", "DURATION"
     ));
-    out.push_str(&format!("{:-<20}  {:-<12}  {:-<10}  {:-<40}\n", "", "", "", ""));
+    out.push_str(&format!(
+        "{:-<20}  {:-<12}  {:-<10}  {:-<40}\n",
+        "", "", "", ""
+    ));
 
     for r in runs {
         let outcome = r.outcome.as_deref().unwrap_or("running");
@@ -249,7 +264,13 @@ pub fn format_runs_table(runs: &[TaskRun]) -> String {
             }
             _ => "ongoing".to_string(),
         };
-        let summary = r.summary.as_deref().unwrap_or("").chars().take(40).collect::<String>();
+        let summary = r
+            .summary
+            .as_deref()
+            .unwrap_or("")
+            .chars()
+            .take(40)
+            .collect::<String>();
         // Use last 20 chars of run id for brevity
         let run_id_short = if r.id.len() > 20 {
             &r.id[r.id.len() - 20..]

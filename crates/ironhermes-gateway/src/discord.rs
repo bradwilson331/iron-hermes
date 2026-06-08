@@ -212,7 +212,10 @@ impl EventHandler for DiscordEventHandler {
 
         let adapter = Arc::new(DiscordAdapter { ctx: ctx.clone() });
         let event = discord_message_to_event(&msg);
-        let processed = ProcessedAttachments { text_prefix: None, image_data_uri: None };
+        let processed = ProcessedAttachments {
+            text_prefix: None,
+            image_data_uri: None,
+        };
         if let Err(e) = self
             .handler
             .handle_with_multimodal(&event, adapter, self.cancel.child_token(), processed)
@@ -284,10 +287,7 @@ mod tests {
     #[test]
     fn discord_chat_type_classification() {
         assert_eq!(classify_chat_type(None), "dm");
-        assert_eq!(
-            classify_chat_type(Some(GuildId::new(123_456_789))),
-            "group"
-        );
+        assert_eq!(classify_chat_type(Some(GuildId::new(123_456_789))), "group");
     }
 
     /// Smoke test: CancellationToken constructs, child_token works, both drop cleanly.

@@ -1,19 +1,21 @@
-use std::path::PathBuf;
-use std::sync::Arc;
-use anyhow::{anyhow, Result};
-use ironhermes_agent::{AgentLoop, MemoryManager, PromptBuilder, build_main_client, wire_fallback_if_configured};
+use anyhow::{Result, anyhow};
 use ironhermes_agent::budget::BudgetHandle;
+use ironhermes_agent::{
+    AgentLoop, MemoryManager, PromptBuilder, build_main_client, wire_fallback_if_configured,
+};
 use ironhermes_core::{ChatMessage, Config, ProviderResolver, SkillRegistry};
-use ironhermes_cron::{complete_job_run, resolve_delivery_targets, CronJob, JobStore, TgSendApi};
+use ironhermes_cron::{CronJob, JobStore, TgSendApi, complete_job_run, resolve_delivery_targets};
 use ironhermes_hooks::HookRegistry;
 use ironhermes_mcp::McpManager;
 use ironhermes_tools::ToolRegistry;
+use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::delivery::dispatch_all_targets;
-use crate::prompt_builder::{build_job_prompt, AssembledPrompt};
+use crate::prompt_builder::{AssembledPrompt, build_job_prompt};
 use crate::script_runner::run_job_script;
 use crate::timeout::{run_with_inactivity_timeout, run_with_wall_clock};
 use crate::{CRON_AUTO_DELIVER_CHAT_ID, CRON_AUTO_DELIVER_PLATFORM, CRON_AUTO_DELIVER_THREAD_ID};
@@ -60,9 +62,7 @@ impl Drop for WorkdirGuard {
                 // SAFETY: guarded by job serialisation in the tick loop
                 unsafe { std::env::set_var("TERMINAL_CWD", v) }
             }
-            None => {
-                unsafe { std::env::remove_var("TERMINAL_CWD") }
-            }
+            None => unsafe { std::env::remove_var("TERMINAL_CWD") },
         }
     }
 }
@@ -78,10 +78,7 @@ fn apply_workdir(workdir: Option<&str>) -> WorkdirGuard {
 }
 
 /// Scope task-local delivery context from the primary target around `fut`.
-async fn with_first_target_locals<T, F>(
-    targets: &[ironhermes_cron::DeliveryTarget],
-    fut: F,
-) -> T
+async fn with_first_target_locals<T, F>(targets: &[ironhermes_cron::DeliveryTarget], fut: F) -> T
 where
     F: std::future::Future<Output = T>,
 {
@@ -97,10 +94,8 @@ where
     CRON_AUTO_DELIVER_PLATFORM
         .scope(
             platform,
-            CRON_AUTO_DELIVER_CHAT_ID.scope(
-                chat_id,
-                CRON_AUTO_DELIVER_THREAD_ID.scope(thread_id, fut),
-            ),
+            CRON_AUTO_DELIVER_CHAT_ID
+                .scope(chat_id, CRON_AUTO_DELIVER_THREAD_ID.scope(thread_id, fut)),
         )
         .await
 }
@@ -304,10 +299,7 @@ pub async fn run_cron_job(job: &CronJob, ctx: &CronRunnerContext) -> Result<()> 
         agent = agent.with_hook_registry(registry.clone());
     }
 
-    let messages = vec![
-        system_msg,
-        ChatMessage::user(user_prompt),
-    ];
+    let messages = vec![system_msg, ChatMessage::user(user_prompt)];
 
     // -----------------------------------------------------------------------
     // (5) Run agent with task-locals + dual-timeout wrapping
@@ -400,24 +392,27 @@ pub async fn run_cron_job(job: &CronJob, ctx: &CronRunnerContext) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::{env_lock, env_lock_sync};
     use async_trait::async_trait;
     use chrono::Utc;
     use ironhermes_cron::job::{JobState, RepeatConfig, ScheduleParsed};
     use ironhermes_cron::store::JobStore;
-    use crate::test_util::env_lock;
     use std::sync::{Mutex, MutexGuard};
     use tempfile::TempDir;
 
-    // Crate-wide env lock — serialises against prompt_builder + script_runner
-    // tests that also mutate IRONHERMES_HOME / BASH_PATH / TERMINAL_CWD.
+    // Crate-wide env lock for sync tests — serialises against other tests
+    // that mutate IRONHERMES_HOME / BASH_PATH / TERMINAL_CWD.
+    // Sync tests (no .await) use the std::sync::Mutex variant; async tests
+    // call env_lock().lock().await to avoid clippy::await_holding_lock.
     fn env_guard() -> MutexGuard<'static, ()> {
-        env_lock().lock().unwrap_or_else(|e| e.into_inner())
+        env_lock_sync().lock().unwrap_or_else(|e| e.into_inner())
     }
 
     // -----------------------------------------------------------------------
     // FakeTg
     // -----------------------------------------------------------------------
 
+    #[allow(dead_code)] // test mock retained for future runner integration tests; no test currently instantiates it
     #[derive(Default)]
     struct FakeTg {
         calls: Mutex<Vec<(String, String, Option<String>)>>,
@@ -439,16 +434,45 @@ mod tests {
             Ok(())
         }
 
-        async fn send_voice(&self, _: &str, _: &std::path::Path, _: Option<&str>) -> anyhow::Result<()> { Ok(()) }
-        async fn send_image_file(&self, _: &str, _: &std::path::Path, _: Option<&str>) -> anyhow::Result<()> { Ok(()) }
-        async fn send_video(&self, _: &str, _: &std::path::Path, _: Option<&str>) -> anyhow::Result<()> { Ok(()) }
-        async fn send_document(&self, _: &str, _: &std::path::Path, _: Option<&str>) -> anyhow::Result<()> { Ok(()) }
+        async fn send_voice(
+            &self,
+            _: &str,
+            _: &std::path::Path,
+            _: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn send_image_file(
+            &self,
+            _: &str,
+            _: &std::path::Path,
+            _: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn send_video(
+            &self,
+            _: &str,
+            _: &std::path::Path,
+            _: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn send_document(
+            &self,
+            _: &str,
+            _: &std::path::Path,
+            _: Option<&str>,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
     }
 
     // -----------------------------------------------------------------------
     // Job fixture helpers
     // -----------------------------------------------------------------------
 
+    #[allow(dead_code)] // test fixture retained for future job dispatch tests; no test currently calls it
     fn make_job(deliver: &str) -> CronJob {
         CronJob {
             id: "test-job".to_string(),
@@ -566,17 +590,26 @@ mod tests {
 
     #[test]
     fn test_scope_to_filters_toolsets() {
-        use ironhermes_tools::registry::Tool;
-        use ironhermes_core::ToolSchema;
         use async_trait::async_trait;
+        use ironhermes_core::ToolSchema;
+        use ironhermes_tools::registry::Tool;
 
-        struct MockTool { name: String, toolset: String }
+        struct MockTool {
+            name: String,
+            toolset: String,
+        }
 
         #[async_trait]
         impl Tool for MockTool {
-            fn name(&self) -> &str { &self.name }
-            fn toolset(&self) -> &str { &self.toolset }
-            fn description(&self) -> &str { "mock" }
+            fn name(&self) -> &str {
+                &self.name
+            }
+            fn toolset(&self) -> &str {
+                &self.toolset
+            }
+            fn description(&self) -> &str {
+                "mock"
+            }
             fn schema(&self) -> ToolSchema {
                 ToolSchema::new(self.name.clone(), "mock tool", serde_json::json!({}))
             }
@@ -586,14 +619,32 @@ mod tests {
         }
 
         let mut reg = ToolRegistry::new();
-        reg.register(Box::new(MockTool { name: "mem1".to_string(), toolset: "memory".to_string() }));
-        reg.register(Box::new(MockTool { name: "sh1".to_string(), toolset: "shell".to_string() }));
-        reg.register(Box::new(MockTool { name: "rf1".to_string(), toolset: "read_file".to_string() }));
+        reg.register(Box::new(MockTool {
+            name: "mem1".to_string(),
+            toolset: "memory".to_string(),
+        }));
+        reg.register(Box::new(MockTool {
+            name: "sh1".to_string(),
+            toolset: "shell".to_string(),
+        }));
+        reg.register(Box::new(MockTool {
+            name: "rf1".to_string(),
+            toolset: "read_file".to_string(),
+        }));
 
         let scoped = reg.scope_to(&["memory".to_string()]);
-        assert!(scoped.get("mem1").is_some(), "memory tool should be in scoped registry");
-        assert!(scoped.get("sh1").is_none(), "shell tool should NOT be in scoped registry");
-        assert!(scoped.get("rf1").is_none(), "read_file tool should NOT be in scoped registry");
+        assert!(
+            scoped.get("mem1").is_some(),
+            "memory tool should be in scoped registry"
+        );
+        assert!(
+            scoped.get("sh1").is_none(),
+            "shell tool should NOT be in scoped registry"
+        );
+        assert!(
+            scoped.get("rf1").is_none(),
+            "read_file tool should NOT be in scoped registry"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -818,7 +869,7 @@ mod tests {
     #[tokio::test]
     async fn test_complete_and_dispatch_local_no_delivery() {
         let tmp = TempDir::new().expect("tmpdir");
-        let _guard = env_guard();
+        let _guard = env_lock().lock().await;
         unsafe {
             std::env::set_var("IRONHERMES_HOME", tmp.path());
         }
@@ -827,18 +878,20 @@ mod tests {
         // Add job via add_job so complete_job_run can mark it
         let job = {
             let mut store = ctx.job_store.lock().unwrap();
-            store.add_job(
-                "Test Job",
-                "do something",
-                ironhermes_cron::job::ScheduleParsed::Interval {
-                    minutes: 60,
-                    display: "every 60m".to_string(),
-                },
-                "every 60m",
-                "local",
-                vec![],
-                None,
-            ).expect("add job")
+            store
+                .add_job(
+                    "Test Job",
+                    "do something",
+                    ironhermes_cron::job::ScheduleParsed::Interval {
+                        minutes: 60,
+                        display: "every 60m".to_string(),
+                    },
+                    "every 60m",
+                    "local",
+                    vec![],
+                    None,
+                )
+                .expect("add job")
         };
 
         let result = complete_and_dispatch(&ctx, &job, "test output", true).await;
@@ -847,6 +900,10 @@ mod tests {
             std::env::remove_var("IRONHERMES_HOME");
         }
 
-        assert!(result.is_ok(), "complete_and_dispatch should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "complete_and_dispatch should succeed: {:?}",
+            result
+        );
     }
 }

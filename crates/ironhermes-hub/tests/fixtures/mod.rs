@@ -2,6 +2,10 @@
 //!
 //! Provides helpers to build in-memory tarballs and fixture JSON files
 //! so no binary blobs need to be committed to the repo.
+// Each fixture function is consumed by a subset of test files; not all are
+// called from every test binary so dead_code fires per-binary. Suppressed
+// module-wide since every item here is a test fixture by design.
+#![allow(dead_code)]
 
 use std::io::Write;
 
@@ -99,11 +103,11 @@ pub fn traversal_tarball() -> Vec<u8> {
     // Pad to 512-byte block
     let padding = 512 - (content.len() % 512);
     if padding < 512 {
-        raw.extend(std::iter::repeat(0u8).take(padding));
+        raw.extend(std::iter::repeat_n(0u8, padding));
     }
 
     // End-of-archive: two 512-byte zero blocks
-    raw.extend(std::iter::repeat(0u8).take(1024));
+    raw.extend(std::iter::repeat_n(0u8, 1024));
 
     // Compress
     let mut enc = GzEncoder::new(Vec::new(), Compression::default());

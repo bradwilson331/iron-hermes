@@ -34,6 +34,7 @@ use crate::protocol::ChatStreamEvent;
 /// forwards them to the browser client as binary WebSocket frames.
 pub struct WebAudioDispatcher {
     tx: UnboundedSender<ChatStreamEvent>,
+    #[allow(dead_code)] // reserved for audio file serving path; TTS pipeline wiring pending
     audio_cache_dir: PathBuf,
 }
 
@@ -45,7 +46,10 @@ impl WebAudioDispatcher {
     /// `audio_cache_dir` — the directory where TTS mp3 files are written
     ///                     (typically `$IRONHERMES_HOME/audio_cache/`).
     pub fn new(tx: UnboundedSender<ChatStreamEvent>, audio_cache_dir: PathBuf) -> Self {
-        Self { tx, audio_cache_dir }
+        Self {
+            tx,
+            audio_cache_dir,
+        }
     }
 }
 
@@ -58,7 +62,7 @@ impl ironhermes_tools::AudioDispatcher for WebAudioDispatcher {
     async fn send_voice_file(
         &self,
         chat_id: &str,
-        path: &PathBuf,
+        path: &std::path::Path,
         thread_id: Option<&str>,
     ) -> anyhow::Result<()> {
         self.send_audio_file(chat_id, path, thread_id).await
@@ -71,7 +75,7 @@ impl ironhermes_tools::AudioDispatcher for WebAudioDispatcher {
     async fn send_audio_file(
         &self,
         _chat_id: &str,
-        path: &PathBuf,
+        path: &std::path::Path,
         _thread_id: Option<&str>,
     ) -> anyhow::Result<()> {
         // Read mp3 bytes from disk. TextToSpeechTool already persisted;
@@ -141,7 +145,10 @@ mod tests {
                 uuid: got_uuid,
                 bytes,
             } => {
-                assert_eq!(mime, "audio/mpeg", "D-02-a: AudioOut mime must be audio/mpeg");
+                assert_eq!(
+                    mime, "audio/mpeg",
+                    "D-02-a: AudioOut mime must be audio/mpeg"
+                );
                 assert_eq!(got_uuid, uuid, "D-02-a: AudioOut uuid must match file stem");
                 assert_eq!(
                     bytes, expected_bytes,

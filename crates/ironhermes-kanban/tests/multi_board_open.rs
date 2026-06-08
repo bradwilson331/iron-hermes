@@ -9,8 +9,6 @@
 //! D-06 migration banner format is locked by tests on the pure helper
 //! `KanbanStore::format_migration_banner` — no stderr capture required.
 
-use std::sync::Mutex;
-
 use rusqlite::Connection;
 
 use ironhermes_kanban::store::KanbanStore;
@@ -21,7 +19,7 @@ use ironhermes_kanban::store::KanbanStore;
 
 /// Serialises tests that mutate `IRONHERMES_HOME` to prevent env-var races
 /// between parallel test threads.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Seed a SQLite DB at `path` with a specific schema_version row.
 /// The DB must already have the schema tables created.
@@ -88,7 +86,8 @@ fn open_for_board_default_uses_legacy_path() {
     unsafe { std::env::set_var("IRONHERMES_HOME", dir.path()) };
 
     let expected = ironhermes_kanban::paths::kanban_db_path();
-    let _store = KanbanStore::open_for_board("default").expect("open_for_board('default') must succeed");
+    let _store =
+        KanbanStore::open_for_board("default").expect("open_for_board('default') must succeed");
 
     unsafe { std::env::remove_var("IRONHERMES_HOME") };
 
@@ -124,7 +123,8 @@ fn open_for_board_named_uses_boards_layout() {
     );
     let path_str = expected_path.to_string_lossy();
     assert!(
-        path_str.contains("/boards/alpha/kanban.db") || path_str.ends_with("boards/alpha/kanban.db"),
+        path_str.contains("/boards/alpha/kanban.db")
+            || path_str.ends_with("boards/alpha/kanban.db"),
         "named board path should contain '/boards/alpha/kanban.db', got {:?}",
         expected_path
     );
@@ -142,7 +142,9 @@ fn fresh_db_inserts_schema_version_no_banner() {
     // Confirm schema_version row was inserted correctly.
     let conn = Connection::open(&path).expect("verify conn");
     let v: i64 = conn
-        .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0))
+        .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
+            r.get(0)
+        })
         .expect("schema_version row must exist after fresh open");
     assert_eq!(
         v,
@@ -168,9 +170,14 @@ fn same_version_open_does_not_run_update() {
     {
         let conn = Connection::open(&path).expect("verify conn pre");
         let v: i64 = conn
-            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0))
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
+                r.get(0)
+            })
             .expect("row must exist");
-        assert_eq!(v, SCHEMA_VERSION, "version must equal SCHEMA_VERSION before second open");
+        assert_eq!(
+            v, SCHEMA_VERSION,
+            "version must equal SCHEMA_VERSION before second open"
+        );
     }
 
     // Second open on same-version DB must succeed without mutation.
@@ -181,9 +188,14 @@ fn same_version_open_does_not_run_update() {
     {
         let conn = Connection::open(&path).expect("verify conn post");
         let v: i64 = conn
-            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| r.get(0))
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
+                r.get(0)
+            })
             .expect("row must still exist");
-        assert_eq!(v, SCHEMA_VERSION, "version must still equal SCHEMA_VERSION after same-version open");
+        assert_eq!(
+            v, SCHEMA_VERSION,
+            "version must still equal SCHEMA_VERSION after same-version open"
+        );
     }
 }
 
@@ -203,7 +215,10 @@ fn newer_version_open_returns_error() {
 
     // Attempt to reopen — must fail.
     let result = KanbanStore::open(&path);
-    assert!(result.is_err(), "opening a newer-version DB must return Err");
+    assert!(
+        result.is_err(),
+        "opening a newer-version DB must return Err"
+    );
 
     let display = match result {
         Err(e) => format!("{}", e),
@@ -228,8 +243,7 @@ fn newer_version_open_returns_error() {
 fn migration_banner_format_named_board() {
     let banner = KanbanStore::format_migration_banner(Some("alpha"), 1, 2);
     assert_eq!(
-        banner,
-        "[kanban] migrated board 'alpha' from v1 to v2",
+        banner, "[kanban] migrated board 'alpha' from v1 to v2",
         "banner format must be byte-stable per D-06"
     );
 }
@@ -239,8 +253,7 @@ fn migration_banner_format_named_board() {
 fn migration_banner_format_none_slug_uses_default() {
     let banner = KanbanStore::format_migration_banner(None, 1, 2);
     assert_eq!(
-        banner,
-        "[kanban] migrated board 'default' from v1 to v2",
+        banner, "[kanban] migrated board 'default' from v1 to v2",
         "None slug must produce 'default' label in banner"
     );
 }

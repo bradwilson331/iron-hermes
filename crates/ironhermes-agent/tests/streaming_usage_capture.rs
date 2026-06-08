@@ -234,7 +234,10 @@ async fn natural_stream_end_without_done_sentinel_still_emits_done() {
              but Done is the explicit contract)",
         );
 
-    assert!(usage_pos < done_pos, "Usage must precede Done at stream end");
+    assert!(
+        usage_pos < done_pos,
+        "Usage must precede Done at stream end"
+    );
 
     if let StreamEvent::Done(reason) = &events[done_pos] {
         assert_eq!(

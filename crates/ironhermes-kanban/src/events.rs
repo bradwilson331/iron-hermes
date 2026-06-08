@@ -212,7 +212,10 @@ mod tests {
         );
         assert_eq!(KanbanEventKind::Decomposed.as_str(), "decomposed");
         assert_eq!(KanbanEventKind::Specified.as_str(), "specified");
-        assert_eq!(KanbanEventKind::DecomposeFailed.as_str(), "decompose_failed");
+        assert_eq!(
+            KanbanEventKind::DecomposeFailed.as_str(),
+            "decompose_failed"
+        );
     }
 
     #[test]

@@ -214,9 +214,6 @@ mod tests {
     }
 
     #[tokio::test]
-    // Holds the shared env lock across `.await` to pin IRONHERMES_HOME; safe under
-    // the current-thread tokio runtime (see body comment).
-    #[allow(clippy::await_holding_lock)]
     async fn tick_observes_external_job_writes() {
         use crate::store::JobStore;
         use chrono::{Duration, Utc};
@@ -230,13 +227,10 @@ mod tests {
             JobStore::open(cron_dir.clone()).expect("open store"),
         ));
 
-        // Force tick lock to a distinct location so this test doesn't stomp on a
-        // real hermes home. The tick lock uses get_hermes_home() — to isolate,
-        // set IRONHERMES_HOME for the duration of the test.
-        // Hold the shared env lock for the whole test so concurrent tests in
-        // other modules can't stomp IRONHERMES_HOME mid-tick. Held across `.await`
-        // intentionally (current-thread tokio runtime makes it deadlock-free).
-        let _env_guard = crate::test_env_lock();
+        // Hold the tokio::sync::Mutex guard across `.await` to pin IRONHERMES_HOME
+        // for the whole test. Safe — tokio::sync::Mutex is designed for async tasks
+        // and does not deadlock when held across suspension points.
+        let _env_guard = crate::test_env_lock().lock().await;
         let original_home = std::env::var("IRONHERMES_HOME").ok();
         // SAFETY: test harness, single-threaded tokio runtime
         unsafe {

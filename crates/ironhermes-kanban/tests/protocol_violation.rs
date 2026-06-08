@@ -121,7 +121,10 @@ fn crashed_and_protocol_violation_are_distinct_event_kinds() {
     let crashed_str = KanbanEventKind::Crashed.as_str();
     let pv_str = KanbanEventKind::ProtocolViolation.as_str();
 
-    assert_eq!(crashed_str, "crashed", "Crashed kind must serialize to 'crashed'");
+    assert_eq!(
+        crashed_str, "crashed",
+        "Crashed kind must serialize to 'crashed'"
+    );
     assert_eq!(
         pv_str, "protocol_violation",
         "ProtocolViolation kind must serialize to 'protocol_violation'"
@@ -198,7 +201,10 @@ async fn impostor_worker_run_id_mismatch_emits_rejection() {
     // Task must still be running (not completed by the impostor).
     let store = store_arc.lock().await;
     let task = store.get_task(&task_id).unwrap();
-    assert_eq!(task.status, "running", "task must remain running after impostor rejection");
+    assert_eq!(
+        task.status, "running",
+        "task must remain running after impostor rejection"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +220,12 @@ async fn phantom_created_cards_emits_completion_rejected_event() {
 
     let (task_id, run_id) = {
         let mut store = store_arc.lock().await;
-        seed_running(&mut store, "phantom-cards task", "bot-worker", Some("bot-worker"))
+        seed_running(
+            &mut store,
+            "phantom-cards task",
+            "bot-worker",
+            Some("bot-worker"),
+        )
     };
 
     // Set the profile env so the tool reads the right profile.
@@ -292,7 +303,12 @@ async fn wrong_profile_created_cards_emits_completion_rejected_event() {
     // Create and seed the worker's own task.
     let (task_id, run_id) = {
         let mut store = store_arc.lock().await;
-        seed_running(&mut store, "wrong-profile-cards task", "bot-worker", Some("bot-worker"))
+        seed_running(
+            &mut store,
+            "wrong-profile-cards task",
+            "bot-worker",
+            Some("bot-worker"),
+        )
     };
 
     unsafe {
@@ -366,8 +382,12 @@ async fn idempotency_key_dedup_prevents_duplicate_tasks() {
     let parsed1: serde_json::Value = serde_json::from_str(&result1).unwrap();
     let parsed2: serde_json::Value = serde_json::from_str(&result2).unwrap();
 
-    let id1 = parsed1["task_id"].as_str().expect("task_id in first response");
-    let id2 = parsed2["task_id"].as_str().expect("task_id in second response");
+    let id1 = parsed1["task_id"]
+        .as_str()
+        .expect("task_id in first response");
+    let id2 = parsed2["task_id"]
+        .as_str()
+        .expect("task_id in second response");
 
     assert_eq!(
         id1, id2,
@@ -384,7 +404,10 @@ async fn idempotency_key_dedup_prevents_duplicate_tasks() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(count, 1, "exactly one task row must exist for the idempotency key");
+    assert_eq!(
+        count, 1,
+        "exactly one task row must exist for the idempotency key"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -401,7 +424,11 @@ async fn claim_lock_gated_write_emits_claim_expired() {
     let task_id = {
         let mut store = store_arc.lock().await;
         let task = store
-            .create_task("claim-lock-gated task", "bot-worker", CreateTaskOptions::default())
+            .create_task(
+                "claim-lock-gated task",
+                "bot-worker",
+                CreateTaskOptions::default(),
+            )
             .unwrap();
         let task_id = task.id.clone();
 
@@ -510,8 +537,7 @@ fn protocol_violation_distinguished_from_crashed_requires_state_file() {
     // 5. Assert task_events contains kind="protocol_violation" (NOT "crashed").
     //
     // This is the canonical test for INV-36.3.7-10.
-    assert!(
-        false,
+    panic!(
         "This test is intentionally ignored in v1. Remove #[ignore] when \
          dispatcher_state.json reconciliation is implemented."
     );

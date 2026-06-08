@@ -32,6 +32,7 @@ use crate::summarizing_engine::{AnyClientSummarizer, SummarizationClient, Summar
 /// Both engine types receive optional `HookRegistry` and `PressureTracker` when
 /// provided so pre-compress hook emission (D-20) and three-channel pressure warnings
 /// (D-23/D-24) are active end-to-end.
+#[allow(clippy::too_many_arguments)] // factory fn: each arg is a distinct dependency; params-struct would require widespread call-site changes
 pub fn build_context_engine(
     config: &Config,
     engine_kind: &str,
@@ -283,12 +284,14 @@ mod tests {
     fn compression_cascade_uses_auxiliary_when_no_per_role_set() {
         use ironhermes_core::config::AuxiliaryConfig;
 
-        let mut config = Config::default();
         // Main provider is "openrouter" by default.
         // Set auxiliary to openai — no per-role compression override.
-        config.auxiliary = AuxiliaryConfig {
-            provider: "openai".to_string(),
-            model: "gpt-4o-mini".to_string(),
+        let mut config = Config {
+            auxiliary: AuxiliaryConfig {
+                provider: "openai".to_string(),
+                model: "gpt-4o-mini".to_string(),
+            },
+            ..Default::default()
         };
         // Ensure model.roles has no "compression" entry (cascade level 1 must miss).
         config.model.roles.remove("compression");

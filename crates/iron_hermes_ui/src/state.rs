@@ -19,6 +19,7 @@ use dioxus::prelude::Signal;
 /// One terminal block. Six variants cover the prototype's block kinds:
 /// `is-cmd`, `is-out`, `is-ai`, `is-ok`, `is-err`, plus the agent-side
 /// `is-tool` block (D-13).
+#[allow(dead_code)] // Audio variant: Phase 36.17 TTS wiring; other variants used in block_stream
 #[derive(Clone, PartialEq, Debug)]
 pub enum Block {
     Cmd {
@@ -127,6 +128,7 @@ pub struct ToolCall {
 }
 
 /// Four-state tool lifecycle (D-13).
+#[allow(dead_code)] // Pending: tool lifecycle start state; wired when tool-call display lands
 #[derive(Clone, PartialEq, Debug)]
 pub enum ToolStatus {
     Pending,
@@ -329,6 +331,7 @@ pub fn now_time() -> String {
 /// Source-of-truth: `warp2ironhermes/project/app/app.jsx` `seedBlocks`
 /// lines 50-108 plus the four `is-tool` extension entries from CONTEXT D-18.
 #[cfg(any(test, feature = "demo"))]
+#[allow(dead_code)] // demo seed data; no test currently calls this directly
 pub fn demo_block_entries() -> Vec<BlockEntry> {
     vec![
         // b1 — `ironhermes doctor`
@@ -433,6 +436,7 @@ pub fn demo_block_entries() -> Vec<BlockEntry> {
 /// 5-message side-panel seed (UI-SPEC lines 237-247; app.jsx `seedMessages`
 /// lines 109-118).
 #[cfg(any(test, feature = "demo"))]
+#[allow(dead_code)] // demo seed data; no test currently calls this directly
 pub fn demo_messages() -> Vec<Message> {
     vec![
         Message {
@@ -483,6 +487,7 @@ pub fn demo_messages() -> Vec<Message> {
 /// Gated behind `cfg(test)` or `feature = "demo"` — production code fetches
 /// real commands from the server via `list_slash_commands()` (Plan 03).
 #[cfg(any(test, feature = "demo"))]
+#[allow(dead_code)] // demo seed data; no test currently calls this directly
 pub fn demo_palette_items() -> Vec<PaletteItem> {
     vec![
         // Slash commands
@@ -555,6 +560,7 @@ pub fn demo_palette_items() -> Vec<PaletteItem> {
 /// Gated behind `cfg(test)` or `feature = "demo"` — production code fetches
 /// real sessions from the server via `list_sessions()` (Plan 03).
 #[cfg(any(test, feature = "demo"))]
+#[allow(dead_code)] // demo seed data; no test currently calls this directly
 pub fn demo_tabs() -> Vec<Tab> {
     vec![
         Tab {
@@ -632,6 +638,7 @@ pub enum Screen {
 /// the `WheelWedge::label` / `sub` / `glyph` helpers below emit the exact
 /// strings from those 12 JS lines so the wheel SVG matches the prototype
 /// byte-for-byte. The Kanban wedge's strings come from UI-SPEC §3.3.
+#[allow(dead_code)] // Phase 36.3.7.11 wheel SVG; variants and methods wired in WheelComponent
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum WheelWedge {
     #[default]
@@ -648,6 +655,7 @@ pub enum WheelWedge {
     Kanban,
 }
 
+#[allow(dead_code)] // methods wired in wheel SVG component; dead_code fires on test target
 impl WheelWedge {
     /// Wedge index in CONTEXT D-10 + Phase 36.3.7.11 D-02 order (0..=10).
     pub fn index(self) -> usize {
@@ -777,6 +785,7 @@ impl WheelWedge {
 /// (the JS prototype reads from `--wheel-size: 240px` in `tokens.css`).
 /// `Copy` is intentionally NOT derived — the tuple position field plus
 /// future drag-velocity extensions are cheaper to share by reference.
+#[allow(dead_code)] // Phase 36.3.7.11 wheel state; no signal consumer wired yet
 #[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
 pub struct WheelState {
     pub position: (f64, f64),
@@ -812,9 +821,11 @@ impl Default for WheelState {
 // (The `Signal` import lives at the top of this file alongside the
 // `ShellSettings` use.)
 
+#[allow(dead_code)] // context-provider newtype for theme switching; Phase 36.x wiring pending
 #[derive(Clone, Copy)]
 pub struct ThemeContext(pub Signal<String>);
 
+#[allow(dead_code)] // context-provider newtype; consumed via use_context::<SessionIdContext>() in ScreenChat
 #[derive(Clone, Copy)]
 pub struct SessionIdContext(pub Signal<String>);
 

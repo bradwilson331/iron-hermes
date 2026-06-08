@@ -19,6 +19,12 @@ pub struct SubdirDiscovery {
     visited: HashSet<PathBuf>,
 }
 
+impl Default for SubdirDiscovery {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SubdirDiscovery {
     pub fn new() -> Self {
         Self {

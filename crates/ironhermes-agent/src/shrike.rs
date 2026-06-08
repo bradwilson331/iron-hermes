@@ -122,7 +122,7 @@ impl ShrikeService {
     pub fn kill(&self, id: &str) -> Option<KillResult> {
         let kill_result: Option<KillResult> = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let mut guard = self.registry.write().await;
+                let guard = self.registry.write().await;
                 let info = guard.get(id)?.clone();
                 let uptime_secs = info.started_at.elapsed().as_secs();
                 // W3: cancel the token. The bare registry kill removes the
@@ -144,10 +144,10 @@ impl ShrikeService {
         // that ignores its CancellationToken is force-aborted via tokio's
         // task-level abort.
         if let Some(ref kr) = kill_result {
-            if let Ok(mut handles) = self.active_handles.lock() {
-                if let Some(handle) = handles.remove(&kr.id) {
-                    handle.abort();
-                }
+            if let Ok(mut handles) = self.active_handles.lock()
+                && let Some(handle) = handles.remove(&kr.id)
+            {
+                handle.abort();
             }
             tracing::info!(
                 target: "ironhermes_agent::shrike",
@@ -243,10 +243,10 @@ impl ShrikeService {
                     }
                 })
             });
-            if let Ok(mut handles) = self.active_handles.lock() {
-                if let Some(handle) = handles.remove(id) {
-                    handle.abort();
-                }
+            if let Ok(mut handles) = self.active_handles.lock()
+                && let Some(handle) = handles.remove(id)
+            {
+                handle.abort();
             }
         }
 

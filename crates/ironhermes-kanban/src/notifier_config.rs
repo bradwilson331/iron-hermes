@@ -209,7 +209,10 @@ mod tests {
             parsed.subscribe_boards,
             vec!["alpha".to_string(), "beta".to_string()]
         );
-        assert_eq!(parsed.resolve(), SubscribeBoardsConfig::Explicit(vec!["alpha".to_string(), "beta".to_string()]));
+        assert_eq!(
+            parsed.resolve(),
+            SubscribeBoardsConfig::Explicit(vec!["alpha".to_string(), "beta".to_string()])
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -258,7 +261,11 @@ mod tests {
 
         assert_eq!(
             result,
-            vec!["default".to_string(), "alpha".to_string(), "beta".to_string()],
+            vec![
+                "default".to_string(),
+                "alpha".to_string(),
+                "beta".to_string()
+            ],
             "All must produce [default, alpha, beta] (Pitfall 2)"
         );
     }

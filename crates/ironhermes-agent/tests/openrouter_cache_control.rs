@@ -157,12 +157,8 @@ fn non_openrouter_request_attaches_zero_cache_control_markers() {
     // attach markers on the ChatCompletions arm. The AnthropicMessages arm
     // (Plan 05) handles native Anthropic; OpenAI/Nous/custom endpoints don't
     // support the field.
-    let request = build_openrouter_chat_request_for_test(
-        "openai",
-        "claude-opus-4-7",
-        &messages,
-        &cfg,
-    );
+    let request =
+        build_openrouter_chat_request_for_test("openai", "claude-opus-4-7", &messages, &cfg);
     let json = serialize_openrouter_request_for_test(&request).expect("serialize");
     assert_eq!(
         json.matches("cache_control").count(),

@@ -51,12 +51,11 @@ pub fn current_profile() -> String {
     let home = ironhermes_core::get_hermes_home();
     let components: Vec<_> = home.components().collect();
     for window in components.windows(2) {
-        if let std::path::Component::Normal(name) = window[0] {
-            if name == ironhermes_core::PROFILES_SUBDIR {
-                if let std::path::Component::Normal(slug) = window[1] {
-                    return slug.to_string_lossy().to_string();
-                }
-            }
+        if let std::path::Component::Normal(name) = window[0]
+            && name == ironhermes_core::PROFILES_SUBDIR
+            && let std::path::Component::Normal(slug) = window[1]
+        {
+            return slug.to_string_lossy().to_string();
         }
     }
     "default".to_string()
@@ -746,14 +745,14 @@ fn resolve_yolo_from_config(config_yolo: bool) -> (bool, &'static str) {
 fn resolve_api_mode(config: &ironhermes_core::Config, provider_name: &str) -> String {
     // Prefer provider-specific override; fall back to a sensible label per
     // provider name. The ApiMode enum serializes in snake_case.
-    if let Some(pc) = config.providers.get(provider_name) {
-        if let Some(ref mode) = pc.api_mode {
-            return match mode {
-                ironhermes_core::ApiMode::ChatCompletions => "chat_completions".into(),
-                ironhermes_core::ApiMode::AnthropicMessages => "anthropic_messages".into(),
-                ironhermes_core::ApiMode::CodexResponses => "codex_responses".into(),
-            };
-        }
+    if let Some(pc) = config.providers.get(provider_name)
+        && let Some(ref mode) = pc.api_mode
+    {
+        return match mode {
+            ironhermes_core::ApiMode::ChatCompletions => "chat_completions".into(),
+            ironhermes_core::ApiMode::AnthropicMessages => "anthropic_messages".into(),
+            ironhermes_core::ApiMode::CodexResponses => "codex_responses".into(),
+        };
     }
     match provider_name {
         "anthropic" => "anthropic_messages".into(),
@@ -763,12 +762,12 @@ fn resolve_api_mode(config: &ironhermes_core::Config, provider_name: &str) -> St
 }
 
 fn resolve_fallback_chain(config: &ironhermes_core::Config, provider_name: &str) -> Vec<String> {
-    if let Some(pc) = config.providers.get(provider_name) {
-        if !pc.fallback_providers.is_empty() {
-            let mut chain = vec![provider_name.to_string()];
-            chain.extend(pc.fallback_providers.clone());
-            return chain;
-        }
+    if let Some(pc) = config.providers.get(provider_name)
+        && !pc.fallback_providers.is_empty()
+    {
+        let mut chain = vec![provider_name.to_string()];
+        chain.extend(pc.fallback_providers.clone());
+        return chain;
     }
     vec![provider_name.to_string()]
 }
@@ -888,12 +887,11 @@ mod tests {
         let mut last: Option<&std::ffi::OsStr> = None;
         let comps: Vec<_> = bare.components().collect();
         for w in comps.windows(2) {
-            if let std::path::Component::Normal(n) = w[0] {
-                if n == "profiles" {
-                    if let std::path::Component::Normal(slug) = w[1] {
-                        last = Some(slug);
-                    }
-                }
+            if let std::path::Component::Normal(n) = w[0]
+                && n == "profiles"
+                && let std::path::Component::Normal(slug) = w[1]
+            {
+                last = Some(slug);
             }
         }
         let result = last
@@ -908,12 +906,11 @@ mod tests {
         let mut last: Option<&std::ffi::OsStr> = None;
         let comps: Vec<_> = p.components().collect();
         for w in comps.windows(2) {
-            if let std::path::Component::Normal(n) = w[0] {
-                if n == "profiles" {
-                    if let std::path::Component::Normal(slug) = w[1] {
-                        last = Some(slug);
-                    }
-                }
+            if let std::path::Component::Normal(n) = w[0]
+                && n == "profiles"
+                && let std::path::Component::Normal(slug) = w[1]
+            {
+                last = Some(slug);
             }
         }
         let result = last

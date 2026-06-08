@@ -7,8 +7,8 @@ use clap::{Parser, Subcommand};
 use colored::Colorize;
 use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_agent::{
-    AnyClient, PressureTracker, PromptBuilder,
-    build_client as build_provider_client, build_main_client,
+    AnyClient, PressureTracker, PromptBuilder, build_client as build_provider_client,
+    build_main_client,
 };
 use ironhermes_core::commands::CommandRouter;
 use ironhermes_core::commands::context::CommandContext;
@@ -30,8 +30,8 @@ use tracing::info;
 // Phase 36.3.7 Plan 05 (D-26/D-20): Kanban worker prompt injection + tool registration.
 // When HERMES_KANBAN_TASK is present at process start, inject KANBAN_GUIDANCE into the
 // PromptBuilder and register the 6 kanban_* tools on the session's ToolRegistry.
-use ironhermes_kanban::{KANBAN_GUIDANCE, KanbanStore};
 use ironhermes_kanban::tools::register_kanban_tools;
+use ironhermes_kanban::{KANBAN_GUIDANCE, KanbanStore};
 
 mod batch;
 mod config_cli;
@@ -54,6 +54,9 @@ mod tui;
 /// independent per-module mutexes do NOT serialize against each other, so
 /// concurrent tests in different modules otherwise stomp each other's
 /// `IRONHERMES_HOME` and produce flaky cross-module failures.
+///
+/// For sync (#[test]) callers use `test_env_lock()`.
+/// For async (#[tokio::test]) callers use `test_env_lock_async().await`.
 #[cfg(test)]
 pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     use std::sync::{Mutex, OnceLock};
@@ -61,6 +64,16 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.get_or_init(|| Mutex::new(()))
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Async variant of the process-global env lock for `#[tokio::test]` callers.
+/// Uses `tokio::sync::Mutex` so the guard can be held across `.await` points
+/// without triggering `clippy::await_holding_lock`.
+#[cfg(test)]
+pub(crate) fn test_env_lock_async() -> &'static tokio::sync::Mutex<()> {
+    use std::sync::OnceLock;
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 use ironhermes_cli::skills_cmd;
 // Phase 25.3 Plan 11: `hermes session export[-all]` (D-F-1 / D-F-2).
@@ -126,6 +139,10 @@ struct Cli {
     profile: Option<String>,
 }
 
+// Allow: the Kanban variant holds KanbanCommands which is intentionally large
+// (deep subcommand tree); boxing would require pervasive match-arm unwrapping
+// across all CLI dispatch paths for negligible benefit in a CLI binary.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Commands {
     /// Interactive chat mode (default)
@@ -386,9 +403,9 @@ const GOAL_TOOLSET_RESTRICTED: &[&str] = &[
     "kanban_swarm",
     "kanban_mention",
     "kanban_decompose",
-    "kanban_specify",  // 13 kanban_*
+    "kanban_specify", // 13 kanban_*
     "read_file",
-    "write_file",      // +2 file I/O
+    "write_file", // +2 file I/O
 ];
 
 const GOAL_TOOLSET_EXTENDED: &[&str] = &[
@@ -404,12 +421,12 @@ const GOAL_TOOLSET_EXTENDED: &[&str] = &[
     "kanban_swarm",
     "kanban_mention",
     "kanban_decompose",
-    "kanban_specify",  // 13 kanban_*
+    "kanban_specify", // 13 kanban_*
     "read_file",
-    "write_file",      // +2 file I/O
+    "write_file", // +2 file I/O
     "memory",
     "skills",
-    "skill_manage",    // +3 memory / skill tools
+    "skill_manage", // +3 memory / skill tools
 ];
 
 /// Apply goal-mode toolset filtering to the tool registry.
@@ -491,7 +508,10 @@ async fn filter_for_goal_mode_if_applicable(
                     "goal-mode: unrecognized toolset preset — falling back to \"restricted\""
                 );
             }
-            let n = registry.write().await.retain_by_name(GOAL_TOOLSET_RESTRICTED);
+            let n = registry
+                .write()
+                .await
+                .retain_by_name(GOAL_TOOLSET_RESTRICTED);
             tracing::info!(
                 target: "kanban.goal_mode",
                 preset = "restricted",
@@ -604,16 +624,13 @@ async fn main() -> Result<()> {
     // and at the sibling `is_interactive_repl` gate below so both paths
     // (preflight wizard + interactive-log-filter) correctly recognize
     // `chat -q` as a non-interactive entry.
-    let chat_has_query = matches!(
-        &cli.command,
-        Some(Commands::Chat { query: Some(_), .. })
-    );
+    let chat_has_query = matches!(&cli.command, Some(Commands::Chat { query: Some(_), .. }));
     // Phase 26.4.1 CFG-03: run_preflight gate widening — see doc-comment block above for full rationale.
     let run_preflight = matches!(
         cli.command,
         Some(Commands::Chat { .. }) | Some(Commands::Gateway { .. }) | None
     ) && cli.execute.is_none()
-      && !chat_has_query;
+        && !chat_has_query;
     if run_preflight {
         preflight::run_preflight_check(&cli).await?;
     }
@@ -627,8 +644,7 @@ async fn main() -> Result<()> {
     // Interactive = `hermes chat` subcommand, OR bare `hermes` with no `-e/--execute` flag.
     // `hermes -e "prompt"` enters `run_single` via the `None` arm — that's batch, NOT interactive.
     // Phase 36.3.7.0 Plan 05 (BUG-36.3.7-04): `chat -q "..."` is ALSO non-interactive.
-    let is_interactive_repl =
-        matches!(cli.command, Some(Commands::Chat { .. }) | None)
+    let is_interactive_repl = matches!(cli.command, Some(Commands::Chat { .. }) | None)
         && cli.execute.is_none()
         && !chat_has_query;
     let env_filter = match std::env::var("RUST_LOG") {
@@ -791,11 +807,12 @@ async fn main() -> Result<()> {
         // These bypass the Tool trait and call build_tts_registry directly.
         // They are NOT LLM tools — `text_to_speech` / `send_audio` are the LLM surface.
         Some(Commands::Tts {
-            command: TtsCommands::Test {
-                provider,
-                text,
-                output_path,
-            },
+            command:
+                TtsCommands::Test {
+                    provider,
+                    text,
+                    output_path,
+                },
         }) => match cmd_tts_test(provider, text, output_path).await {
             Ok(()) => Ok(()),
             Err(e) => {
@@ -921,8 +938,8 @@ async fn cmd_tts_test(
 /// device is present — never panics.
 async fn cmd_tts_play(path: String) -> anyhow::Result<()> {
     use ironhermes_core::{SessionKey, types::Platform};
-    use ironhermes_tools::send_audio_tool::SendAudioTool;
     use ironhermes_tools::registry::Tool;
+    use ironhermes_tools::send_audio_tool::SendAudioTool;
     use std::sync::Arc;
 
     // 1. Construct SessionKey for Platform::Local (hardcoded — diagnostic path only).
@@ -1005,7 +1022,9 @@ fn ensure_home_dirs() -> Result<()> {
     // first run.  Non-fatal — a warn is intentional so the operator can still
     // use the CLI even if the skills sync fails (e.g. disk full).
     let skills_root = home.join("skills");
-    if let Err(e) = ironhermes_kanban::sync_bundled_kanban_skills(&skills_root, /*force=*/ false) {
+    if let Err(e) =
+        ironhermes_kanban::sync_bundled_kanban_skills(&skills_root, /*force=*/ false)
+    {
         tracing::warn!(error = %e, "Failed to sync bundled kanban skills (non-fatal)");
     }
     Ok(())
@@ -1024,7 +1043,10 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     // Phase 36.3.7.13 D-F1: clamp inner-loop iteration cap for goal-mode workers.
     // Applied HERE (before AgentRuntime::from_config captures the config) so the
     // clamped value is baked into the runtime's budget handle from the start.
-    if std::env::var("HERMES_KANBAN_GOAL_MODE").map(|v| v == "1").unwrap_or(false) {
+    if std::env::var("HERMES_KANBAN_GOAL_MODE")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
         let kanban_cfg = crate::kanban::commands::load_kanban_config(&config);
         let clamped = clamp_goal_inner_iterations(
             config.agent.max_iterations,
@@ -1152,21 +1174,22 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     // gets its own fresh BudgetHandle (D-01/D-04, Phase 35), and assembles the
     // tool registry/skills/browser bundle.
     // run_turn resets the budget at every turn boundary, fixing any Stop100 latch.
-    let runtime = ironhermes_agent::AgentRuntime::from_config(ironhermes_agent::AgentRuntimeInput {
-        config: Arc::new(config.clone()),
-        resolver: Arc::new(resolver.clone()),
-        cwd: cwd.clone(),
-        process_registry: process_registry.clone(),
-        memory_manager: memory_manager.clone(),
-        hooks_config,
-        emit_mcp_startup_logs: true,
-        subagent_registry: subagent_registry.clone(),
-        transcript_scope: (hermes_home.clone(), session_id.clone()),
-        subagent_progress_callback: None,
-        subagent_cancel_token: None,
-    })
-    .await
-    .context("building AgentRuntime for run_single")?;
+    let runtime =
+        ironhermes_agent::AgentRuntime::from_config(ironhermes_agent::AgentRuntimeInput {
+            config: Arc::new(config.clone()),
+            resolver: Arc::new(resolver.clone()),
+            cwd: cwd.clone(),
+            process_registry: process_registry.clone(),
+            memory_manager: memory_manager.clone(),
+            hooks_config,
+            emit_mcp_startup_logs: true,
+            subagent_registry: subagent_registry.clone(),
+            transcript_scope: (hermes_home.clone(), session_id.clone()),
+            subagent_progress_callback: None,
+            subagent_cancel_token: None,
+        })
+        .await
+        .context("building AgentRuntime for run_single")?;
 
     let skill_registry = runtime.skill_registry().clone();
 
@@ -1479,7 +1502,11 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     // per D-14) get a chance to clean up. Best-effort, log-and-continue --
     // matches the surrounding memory_manager.on_session_end pattern.
     // Read lock only; do NOT hold a write lock here (see RESEARCH Pitfall 6).
-    runtime_handle.registry().read().await.call_session_end_hooks();
+    runtime_handle
+        .registry()
+        .read()
+        .await
+        .call_session_end_hooks();
 
     // Persist assistant response messages to SQLite
     for msg in &result.messages {
@@ -1514,6 +1541,7 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
 /// registry handle identity (INV-21.7-08 / D-03 / D-04). Extracting this
 /// fixes the duplication that previously existed between the single
 /// prompt-time builder and the (now added) mid-turn builder.
+#[allow(clippy::too_many_arguments)] // command context builder: each arg is a distinct session dependency; params-struct would add indirection with no clarity gain
 fn build_cmd_ctx(
     session_id: &str,
     agent_running: Arc<AtomicBool>,
@@ -1650,7 +1678,10 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     // Phase 36.3.7.13 D-F1: clamp inner-loop iteration cap for goal-mode workers.
     // Applied HERE (before AgentRuntime::from_config captures the config) so the
     // clamped value is baked into the runtime's budget handle from the start.
-    if std::env::var("HERMES_KANBAN_GOAL_MODE").map(|v| v == "1").unwrap_or(false) {
+    if std::env::var("HERMES_KANBAN_GOAL_MODE")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+    {
         let kanban_cfg = crate::kanban::commands::load_kanban_config(&config);
         let clamped = clamp_goal_inner_iterations(
             config.agent.max_iterations,
@@ -1981,11 +2012,8 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     // Phase 36.3.7 Plan 05 (D-26): Inject KANBAN_GUIDANCE when worker-spawned.
     inject_kanban_guidance_if_worker(&mut prompt_builder);
     // Phase 36.3.7 Plan 05 (D-20): Register kanban tools when worker/orchestrator mode.
-    register_kanban_tools_if_applicable(
-        &registry,
-        &runtime.merged_tools().enabled_toolset_names(),
-    )
-    .await?;
+    register_kanban_tools_if_applicable(&registry, &runtime.merged_tools().enabled_toolset_names())
+        .await?;
     // Phase 36.3.7.13 F-03 / D-B2: apply goal-mode toolset filter (second call site).
     // Mirrors the run_single site above — both must call this per D-B2 requirement.
     filter_for_goal_mode_if_applicable(&registry).await?;
@@ -2000,14 +2028,20 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02): open KanbanStore once at session start
     // for /kanban slash dispatch. Best-effort — failure logs a warning and leaves the
     // field None (cmd_kanban returns "not configured" in that case, matching cmd_cron).
-    let kanban_store_handle: Option<Arc<dyn ironhermes_core::commands::context::KanbanStoreReader>> =
-        match crate::kanban::KanbanStoreReaderImpl::open_default() {
-            Ok(imp) => Some(Arc::new(imp) as Arc<dyn ironhermes_core::commands::context::KanbanStoreReader>),
-            Err(e) => {
-                tracing::warn!(error = %e, "kanban store unavailable for /kanban slash dispatch");
-                None
-            }
-        };
+    let kanban_store_handle: Option<
+        Arc<dyn ironhermes_core::commands::context::KanbanStoreReader>,
+    > = match crate::kanban::KanbanStoreReaderImpl::open_default() {
+        Ok(imp) => {
+            Some(Arc::new(imp)
+                as Arc<
+                    dyn ironhermes_core::commands::context::KanbanStoreReader,
+                >)
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "kanban store unavailable for /kanban slash dispatch");
+            None
+        }
+    };
 
     // Plan 11 spawn relocated earlier in run_chat (before the
     // SubagentProgressCallback construction) so the ExternalPrinterHandle
@@ -2088,18 +2122,18 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
         // registered. This avoids consuming (and losing) unmatched key events when
         // no extensions are active (the current default).
         let has_idle_bindings = !keybinding_registry.help_entries().is_empty();
-        if has_idle_bindings && crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false) {
-            if let Ok(crossterm::event::Event::Key(key_event)) = crossterm::event::read() {
-                if let Some(action) = keybinding_registry.match_key(&key_event, &KeyContext::Idle) {
-                    // Dispatch keybinding action -- for now, actions are logged.
-                    // Future extensions will handle actions via their own callbacks.
-                    tracing::debug!("tui: keybinding dispatched: {}", action);
-                    continue; // Skip readline for this iteration
-                }
-                // Key didn't match any binding -- it's consumed and lost.
-                // Acceptable for modifier-key combos that rustyline wouldn't process.
-            }
+        if has_idle_bindings
+            && crossterm::event::poll(std::time::Duration::ZERO).unwrap_or(false)
+            && let Ok(crossterm::event::Event::Key(key_event)) = crossterm::event::read()
+            && let Some(action) = keybinding_registry.match_key(&key_event, &KeyContext::Idle)
+        {
+            // Dispatch keybinding action -- for now, actions are logged.
+            // Future extensions will handle actions via their own callbacks.
+            tracing::debug!("tui: keybinding dispatched: {}", action);
+            continue; // Skip readline for this iteration
         }
+        // Key didn't match any binding -- it's consumed and lost.
+        // Acceptable for modifier-key combos that rustyline wouldn't process.
 
         // Plan 21.7-12 (GAP-21.7-02): close the floating-prompt race
         // introduced by Plan 11. The main-task `prepare_prompt_with_reserve`
@@ -2151,8 +2185,8 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                 }
 
                 // Phase 21.1 D-06/D-07/D-08: extension-first command dispatch via CommandRouter.
-                if input.starts_with('/') {
-                    let parts: Vec<&str> = input[1..].split_whitespace().collect();
+                if let Some(slash_rest) = input.strip_prefix('/') {
+                    let parts: Vec<&str> = slash_rest.split_whitespace().collect();
                     if parts.is_empty() {
                         continue;
                     }
@@ -2299,11 +2333,8 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                                 .iter()
                                 .map(|s| s.name.clone())
                                 .collect();
-                            let new_names: HashSet<String> = new_registry
-                                .list()
-                                .iter()
-                                .map(|s| s.name.clone())
-                                .collect();
+                            let new_names: HashSet<String> =
+                                new_registry.list().iter().map(|s| s.name.clone()).collect();
                             let mut added: Vec<&String> =
                                 new_names.difference(&old_names).collect();
                             let mut removed: Vec<&String> =
@@ -2392,7 +2423,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                     compression_count.clone(),
                     tui.clone(),
                     chat_cancel_token.clone(),
-                    state_store.clone(),       // Phase 25: session_search intercept
+                    state_store.clone(), // Phase 25: session_search intercept
                     trajectory_writer.clone(), // Phase 25.3 D-T-3
                 ));
 
@@ -2562,9 +2593,9 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                                 );
                                 continue 'turn;
                             }
-                            if input.starts_with('/') {
+                            if let Some(slash_rest) = input.strip_prefix('/') {
                                 let parts: Vec<&str> =
-                                    input[1..].split_whitespace().collect();
+                                    slash_rest.split_whitespace().collect();
                                 if !parts.is_empty() {
                                     let cmd = parts[0];
                                     let args = &parts[1..];
@@ -2876,6 +2907,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
 ///   - `AgentResult::compression_count_after` carries the post-turn value BACK.
 ///     We store it into the shared `Arc<AtomicUsize>` so the next turn seeds the
 ///     correct value. This is a full round-trip — seed-in + write-back.
+#[allow(clippy::too_many_arguments)] // per-turn orchestrator: each arg is a distinct session resource; params-struct would require changes across all call sites
 async fn run_agent_turn(
     runtime: &Arc<ironhermes_agent::AgentRuntime>,
     messages: &mut Vec<ChatMessage>,
@@ -3213,6 +3245,7 @@ fn build_client(cli: &Cli) -> Result<(AnyClient, Config, ProviderResolver)> {
 /// Returns `Some(Arc<McpManager>)` when at least one enabled server is configured.
 /// Background tasks are spawned via `start_all()` (D-07 fire-and-forget).
 /// Prints startup messages to stderr per UI-SPEC (dimmed).
+#[allow(dead_code)] // planned MCP manager bootstrap for future run_chat MCP wiring
 async fn build_mcp_manager(
     config: &Config,
     registry: Arc<RwLock<ToolRegistry>>,
@@ -3293,6 +3326,7 @@ fn print_banner() {
     println!();
 }
 
+#[allow(dead_code)] // planned --help dispatch entry point; currently callers use dispatch_command directly
 fn print_help() {
     // Phase 21.1 Plan 02: delegate to format_help via CommandRouter (no keybinding registry at startup).
     // When run_chat wires extensions, it uses dispatch_command which calls format_help directly.
@@ -3803,9 +3837,7 @@ mod agent_runtime_migration_gate_28_1_04 {
         // String-literal occurrences (in test assertion messages) contain a `"`.
         let budget_new_violations: Vec<&str> = stripped
             .lines()
-            .filter(|line| {
-                line.contains("BudgetHandle::new(") && !line.contains('"')
-            })
+            .filter(|line| line.contains("BudgetHandle::new(") && !line.contains('"'))
             .collect();
 
         assert!(

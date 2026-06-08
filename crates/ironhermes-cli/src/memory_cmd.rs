@@ -165,7 +165,7 @@ pub async fn handle_memory_off() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
     use ironhermes_core::config::Config;
     use tempfile::TempDir;
 

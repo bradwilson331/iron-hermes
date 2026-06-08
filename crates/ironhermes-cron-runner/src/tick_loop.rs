@@ -1,9 +1,9 @@
+use crate::runner::{CronRunnerContext, run_cron_job};
+use ironhermes_cron::run_tick_check;
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
-use ironhermes_cron::run_tick_check;
-use crate::runner::{run_cron_job, CronRunnerContext};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -29,17 +29,14 @@ fn parse_env_usize(name: &str) -> Option<usize> {
 ///
 /// Single-job failures NEVER panic the tick loop — errors are logged and the
 /// loop continues. Cancels cleanly via `cancel`.
-pub async fn run_tick_loop(
-    ctx: Arc<CronRunnerContext>,
-    cancel: CancellationToken,
-) {
+pub async fn run_tick_loop(ctx: Arc<CronRunnerContext>, cancel: CancellationToken) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut first_tick = true;
 
     // Optional concurrency cap for parallel jobs
-    let semaphore = parse_env_usize("IRONHERMES_CRON_MAX_PARALLEL")
-        .map(|n| Arc::new(Semaphore::new(n)));
+    let semaphore =
+        parse_env_usize("IRONHERMES_CRON_MAX_PARALLEL").map(|n| Arc::new(Semaphore::new(n)));
 
     loop {
         tokio::select! {
@@ -78,23 +75,19 @@ pub fn prepare_mcp_for_tick(_mcp: &ironhermes_mcp::McpManager) {
 // Private tick implementation
 // ---------------------------------------------------------------------------
 
-async fn run_one_tick(
-    ctx: &Arc<CronRunnerContext>,
-    semaphore: Option<&Arc<Semaphore>>,
-) {
+async fn run_one_tick(ctx: &Arc<CronRunnerContext>, semaphore: Option<&Arc<Semaphore>>) {
     // MCP discovery per tick (non-fatal) — calls the public stub above
     if let Some(mcp) = &ctx.mcp_manager {
         prepare_mcp_for_tick(mcp);
     }
 
-    let (due_jobs, _tick_result, _lock_guard) =
-        match run_tick_check(&ctx.job_store).await {
-            Ok(v) => v,
-            Err(e) => {
-                error!("tick check failed: {}", e);
-                return;
-            }
-        };
+    let (due_jobs, _tick_result, _lock_guard) = match run_tick_check(&ctx.job_store).await {
+        Ok(v) => v,
+        Err(e) => {
+            error!("tick check failed: {}", e);
+            return;
+        }
+    };
 
     // Partition due jobs: workdir jobs run serially (TERMINAL_CWD is
     // process-global); non-workdir jobs run in a JoinSet (bounded by semaphore
@@ -154,9 +147,7 @@ mod tests {
 
     fn make_ctx(tmpdir: &TempDir) -> Arc<CronRunnerContext> {
         let cron_dir = tmpdir.path().join("cron");
-        let store = Arc::new(Mutex::new(
-            JobStore::open(cron_dir).expect("open store"),
-        ));
+        let store = Arc::new(Mutex::new(JobStore::open(cron_dir).expect("open store")));
         Arc::new(CronRunnerContext {
             job_store: store,
             skill_registry: None,
@@ -188,13 +179,12 @@ mod tests {
         cancel.cancel();
 
         // Should resolve within 100ms
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            handle,
-        )
-        .await;
+        let result = tokio::time::timeout(std::time::Duration::from_millis(200), handle).await;
 
-        assert!(result.is_ok(), "tick loop should exit promptly after cancel");
+        assert!(
+            result.is_ok(),
+            "tick loop should exit promptly after cancel"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -220,11 +210,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         cancel.cancel();
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            handle,
-        )
-        .await;
+        let result = tokio::time::timeout(std::time::Duration::from_millis(200), handle).await;
         assert!(result.is_ok(), "loop should exit after cancel");
         // No panic = first tick handled without error
     }
@@ -266,15 +252,18 @@ mod tests {
     #[test]
     fn test_workdir_partition_logic() {
         // Verify the partition predicate: jobs with workdir go serial
-        use ironhermes_cron::job::{CronJob, JobState, RepeatConfig, ScheduleParsed};
         use chrono::Utc;
+        use ironhermes_cron::job::{CronJob, JobState, RepeatConfig, ScheduleParsed};
 
         let make_job = |id: &str, workdir: Option<String>| CronJob {
             id: id.to_string(),
             name: id.to_string(),
             prompt: "x".to_string(),
             skills: vec![],
-            schedule: ScheduleParsed::Interval { minutes: 5, display: "every 5m".to_string() },
+            schedule: ScheduleParsed::Interval {
+                minutes: 5,
+                display: "every 5m".to_string(),
+            },
             schedule_display: "every 5m".to_string(),
             repeat: RepeatConfig::default(),
             enabled: true,

@@ -38,10 +38,10 @@ pub mod store;
 // consumed by the gateway's handle_slash_command attach site (handler.rs:430).
 // Lives in ironhermes-kanban (not ironhermes-cli) because ironhermes-cli
 // depends on ironhermes-gateway — reverse dep would be circular.
-pub mod store_writer_impl;
 pub mod decomposer;
 pub mod judge;
 pub mod mention;
+pub mod store_writer_impl;
 pub mod tools;
 pub mod types;
 pub mod worker_spawn;
@@ -52,30 +52,30 @@ pub use cas::{
     release_claim, worker_write_gated,
 };
 pub use config::KanbanConfig;
-pub use error::{KanbanError, Result};
 pub use decomposer::{
     ChildSpec, DecomposeFn, DecomposeOutput, DecomposeRequest, DecomposedIds,
     decompose_triage_task, specify_triage_task,
-};
-pub use judge::{JudgeFn, JudgeOutput, JudgeRequest, JudgeVerdict};
-pub use events::{
-    GOAL_SUBKIND_BUDGET_EXHAUSTED, GOAL_SUBKIND_JUDGE_ERROR, GOAL_SUBKIND_JUDGE_VERDICT,
-    GOAL_SUBKIND_TURN_ADVANCED, KanbanEvent, KanbanEventKind, insert_event_sql,
-};
-pub use paths::{
-    kanban_db_path, kanban_log_stderr, kanban_log_stdout, kanban_logs_dir, kanban_skills_dir,
-    kanban_workspace_for, kanban_workspaces_root, validate_dir_workspace,
 };
 pub use dispatcher::{
     DispatcherContext, StrandedReport, StrandedSeverity, diagnose_stranded, run_dispatch_loop,
     run_dispatch_tick, run_dispatch_tick_for_board,
 };
+pub use error::{KanbanError, Result};
+pub use events::{
+    GOAL_SUBKIND_BUDGET_EXHAUSTED, GOAL_SUBKIND_JUDGE_ERROR, GOAL_SUBKIND_JUDGE_VERDICT,
+    GOAL_SUBKIND_TURN_ADVANCED, KanbanEvent, KanbanEventKind, insert_event_sql,
+};
+pub use judge::{JudgeFn, JudgeOutput, JudgeRequest, JudgeVerdict};
 pub use notifier::{
     BoardTickStats, NotifierContext, NotifierTickReport, SendFn, run_notifier_loop,
     run_notifier_tick,
 };
 pub use notifier_config::{
     NotifierToml, SubscribeBoardsConfig, load_notifier_toml, resolve_subscribe_boards,
+};
+pub use paths::{
+    kanban_db_path, kanban_log_stderr, kanban_log_stdout, kanban_logs_dir, kanban_skills_dir,
+    kanban_workspace_for, kanban_workspaces_root, validate_dir_workspace,
 };
 pub use pid::is_pid_alive;
 pub use skills_bundle::{
@@ -86,12 +86,15 @@ pub use skills_bundle::{
 pub use store::{CreateTaskOptions, KanbanStore, ListFilters};
 // Phase 36.3.7.5 BUG-36.3.7.5-06.
 pub use store_writer_impl::KanbanStoreWriterImpl;
+pub use tools::{KanbanSwarmTool, register_kanban_tools};
 pub use types::{
-    KanbanStatus, KanbanWorkerSpec, Subscription, SwarmGraphIds, SwarmGraphSpec, Task,
-    TaskComment, TaskLink, TaskRun,
+    KanbanStatus, KanbanWorkerSpec, Subscription, SwarmGraphIds, SwarmGraphSpec, Task, TaskComment,
+    TaskLink, TaskRun,
 };
-pub use worker_spawn::{SAFE_SYSTEM_VARS, build_kanban_worker_env, resolve_worker_bin, spawn_worker, spawn_worker_for_board};
-pub use tools::{register_kanban_tools, KanbanSwarmTool};
+pub use worker_spawn::{
+    SAFE_SYSTEM_VARS, build_kanban_worker_env, resolve_worker_bin, spawn_worker,
+    spawn_worker_for_board,
+};
 
 /// Canonical KANBAN_GUIDANCE system-prompt block injected into worker
 /// prompts when `HERMES_KANBAN_TASK` is set at process start (D-26).

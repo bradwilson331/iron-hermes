@@ -205,9 +205,15 @@ async fn local_dir_relative_path() {
     let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
     let scanner = AlwaysCleanScanner;
 
-    let outcome = ironhermes_hub::install(&LocalDirSource, &canonical_str, &scanner, &skills_root, false)
-        .await
-        .expect("relative-path install must succeed after CLI-side canonicalization");
+    let outcome = ironhermes_hub::install(
+        &LocalDirSource,
+        &canonical_str,
+        &scanner,
+        &skills_root,
+        false,
+    )
+    .await
+    .expect("relative-path install must succeed after CLI-side canonicalization");
 
     assert_eq!(outcome.name, "my-skill");
     assert!(outcome.install_path.exists());
@@ -239,10 +245,7 @@ async fn local_dir_missing_path_hard_fails() {
             kind: HubErrorKind::LocalSourceMissing,
             ..
         } => {} // correct
-        other => panic!(
-            "expected HubErrorKind::LocalSourceMissing, got {:?}",
-            other
-        ),
+        other => panic!("expected HubErrorKind::LocalSourceMissing, got {:?}", other),
     }
 }
 
@@ -580,8 +583,13 @@ async fn local_dir_update_recopies_all_files() {
     .expect("update must succeed");
 
     // Verify modified script.sh content reflects v2
-    let script = std::fs::read(update_outcome.install_path.join("helpers").join("script.sh"))
-        .expect("helpers/script.sh must exist after update");
+    let script = std::fs::read(
+        update_outcome
+            .install_path
+            .join("helpers")
+            .join("script.sh"),
+    )
+    .expect("helpers/script.sh must exist after update");
     assert!(
         std::str::from_utf8(&script)
             .unwrap()
@@ -655,10 +663,7 @@ async fn local_dir_update_missing_source_hard_fails() {
             kind: HubErrorKind::LocalSourceMissing,
             ..
         } => {} // correct
-        other => panic!(
-            "expected HubErrorKind::LocalSourceMissing, got {:?}",
-            other
-        ),
+        other => panic!("expected HubErrorKind::LocalSourceMissing, got {:?}", other),
     }
 }
 
@@ -676,11 +681,7 @@ async fn local_dir_symlink_skipped_in_walk() {
     write_skill_dir(source_tmp.path(), &[("SKILL.md", VALID_SKILL_MD)]).unwrap();
 
     // Create a symlink inside the source dir pointing to /etc/passwd
-    std::os::unix::fs::symlink(
-        "/etc/passwd",
-        source_tmp.path().join("outside_link"),
-    )
-    .unwrap();
+    std::os::unix::fs::symlink("/etc/passwd", source_tmp.path().join("outside_link")).unwrap();
 
     let canonical = std::fs::canonicalize(source_tmp.path()).unwrap();
     let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
@@ -918,11 +919,7 @@ async fn local_dir_perms_denied() {
 
     // Chmod source dir to 000 — no read/execute permissions
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(
-        source_tmp.path(),
-        std::fs::Permissions::from_mode(0o000),
-    )
-    .unwrap();
+    std::fs::set_permissions(source_tmp.path(), std::fs::Permissions::from_mode(0o000)).unwrap();
 
     let canonical = std::fs::canonicalize(source_tmp.path()).unwrap();
     let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
@@ -938,11 +935,7 @@ async fn local_dir_perms_denied() {
     .expect_err("mode-000 dir must fail with I/O error");
 
     // Restore permissions so tempdir cleanup can succeed
-    std::fs::set_permissions(
-        source_tmp.path(),
-        std::fs::Permissions::from_mode(0o755),
-    )
-    .ok();
+    std::fs::set_permissions(source_tmp.path(), std::fs::Permissions::from_mode(0o755)).ok();
 
     // Any I/O-related error is acceptable here
     match err {

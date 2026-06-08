@@ -160,7 +160,11 @@ fn queue_fifo_ordering() {
     assert_eq!(q.pop(&k), Some("A".to_string()), "D-01: FIFO pop 1");
     assert_eq!(q.pop(&k), Some("B".to_string()), "D-01: FIFO pop 2");
     assert_eq!(q.pop(&k), Some("C".to_string()), "D-01: FIFO pop 3");
-    assert_eq!(q.pop(&k), None, "D-01: 4th pop on drained queue returns None");
+    assert_eq!(
+        q.pop(&k),
+        None,
+        "D-01: 4th pop on drained queue returns None"
+    );
     assert_eq!(q.len(&k), 0, "D-01: drained queue len == 0");
 }
 

@@ -42,7 +42,7 @@ fn mirror_requires_confirm(subcommand: &str, args: &[&str]) -> bool {
     if !is_destructive {
         return false;
     }
-    !args.iter().any(|a| *a == "confirm")
+    !args.contains(&"confirm")
 }
 
 #[test]
@@ -73,7 +73,10 @@ fn test_kill_requires_confirm_on_gateway() {
 #[test]
 fn test_kill_with_confirm_on_gateway() {
     // Positive path: confirm token present in ANY position — gate must pass.
-    assert!(!mirror_requires_confirm("kill", &["sub_aaaaaaaa", "confirm"]));
+    assert!(!mirror_requires_confirm(
+        "kill",
+        &["sub_aaaaaaaa", "confirm"]
+    ));
     assert!(!mirror_requires_confirm("kill", &["confirm"]));
     assert!(!mirror_requires_confirm(
         "kill",

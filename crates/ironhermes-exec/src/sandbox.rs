@@ -296,7 +296,7 @@ impl Sandbox {
             // D-35: strip vars containing secret patterns (case-insensitive)
             let is_secret = SECRET_PATTERNS.iter().any(|p| upper.contains(p));
             // D-05: skill-declared names bypass the strip
-            let is_whitelisted = whitelist_upper.iter().any(|w| upper == *w);
+            let is_whitelisted = whitelist_upper.contains(&upper);
 
             if is_safe || is_whitelisted || !is_secret {
                 env.push((name, value));
@@ -600,6 +600,8 @@ print(repr(env))
 
     use std::sync::Mutex as StdMutex;
     static BUILD_ENV_LOCK: StdMutex<()> = StdMutex::new(());
+    // Tokio variant for async (#[tokio::test]) callers — guard can cross .await.
+    static BUILD_ENV_LOCK_ASYNC: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn test_build_env_whitelisted_secret_var_kept() {
@@ -717,8 +719,8 @@ print(repr(env))
         // Integration test proving a Python child process reads a skill-declared
         // API key from os.environ when the parent has that key set AND the
         // whitelist is passed through to build_env via Sandbox::run.
-        let _guard = BUILD_ENV_LOCK.lock().unwrap();
-        // SAFETY: tests serialized via BUILD_ENV_LOCK.
+        let _guard = BUILD_ENV_LOCK_ASYNC.lock().await;
+        // SAFETY: tests serialized via BUILD_ENV_LOCK_ASYNC (tokio mutex, safe across .await).
         unsafe {
             std::env::set_var("HERMES_TEST_SKILL_KEY", "integrationval");
         }

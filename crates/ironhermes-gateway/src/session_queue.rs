@@ -89,11 +89,7 @@ impl SessionQueue {
     /// `_enqueue_fifo` (gateway/run.py:2315). The two-layer split — slot vs
     /// overflow — collapses to a single `VecDeque::push_back`. Observable
     /// behavior is identical (proven by `mod parity` proptest in Task 3).
-    pub fn try_push(
-        &self,
-        key: &SessionKey,
-        event: MessageEvent,
-    ) -> Result<(), QueueError> {
+    pub fn try_push(&self, key: &SessionKey, event: MessageEvent) -> Result<(), QueueError> {
         let mut map = self.queues.lock().unwrap();
         let q = map.entry(key.clone()).or_default();
         if q.len() >= MAX_QUEUE_DEPTH {
@@ -395,7 +391,8 @@ mod tests {
         // Alternate KEEP / DROP contents.
         for i in 0..5 {
             let tag = if i % 2 == 0 { "KEEP" } else { "DROP" };
-            q.try_push(&k, fixture_event(&format!("{tag}-{i}"))).unwrap();
+            q.try_push(&k, fixture_event(&format!("{tag}-{i}")))
+                .unwrap();
         }
         assert_eq!(q.len(&k), 5);
         q.retain(&k, |e| e.content.starts_with("KEEP"));

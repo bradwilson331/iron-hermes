@@ -324,10 +324,10 @@ pub async fn cmd_run(
         status: final_status.to_string(),
     };
     // Preserve started_at from original record
-    if let Ok(records) = load_run_records().await {
-        if let Some(orig) = records.iter().find(|r| r.id == final_record.id) {
-            final_record.started_at = orig.started_at.clone();
-        }
+    if let Ok(records) = load_run_records().await
+        && let Some(orig) = records.iter().find(|r| r.id == final_record.id)
+    {
+        final_record.started_at = orig.started_at.clone();
     }
     save_run_record(&final_record).await?;
 
@@ -448,23 +448,24 @@ pub async fn cmd_list() -> Result<()> {
 /// If mtime is unreadable (some platforms) the file is removed to avoid stuck state.
 /// Extracted as a public fn so unit tests can call it directly without spawning a full run.
 pub fn clean_stale_sentinel(cancel_path: &std::path::Path, run_start: std::time::SystemTime) {
-    if cancel_path.exists() {
-        if let Ok(meta) = std::fs::metadata(cancel_path) {
-            if let Ok(mtime) = meta.modified() {
-                if mtime < run_start {
-                    // Stale sentinel from a previous run — safe to remove
-                    let _ = std::fs::remove_file(cancel_path);
-                }
-                // else: fresh sentinel (created after/at process start) — honor it, leave in place
-            } else {
-                // Cannot read mtime (some platforms) — remove to avoid stuck state
+    if cancel_path.exists()
+        && let Ok(meta) = std::fs::metadata(cancel_path)
+    {
+        if let Ok(mtime) = meta.modified() {
+            if mtime < run_start {
+                // Stale sentinel from a previous run — safe to remove
                 let _ = std::fs::remove_file(cancel_path);
             }
+            // else: fresh sentinel (created after/at process start) — honor it, leave in place
+        } else {
+            // Cannot read mtime (some platforms) — remove to avoid stuck state
+            let _ = std::fs::remove_file(cancel_path);
         }
     }
 }
 
 /// Derive reject file path from output path: foo.jsonl -> foo_rejected.jsonl (D-11).
+#[allow(dead_code)] // called only from batch/tests.rs; production batch writer wiring pending
 pub fn reject_file_path(output: &std::path::Path) -> std::path::PathBuf {
     let stem = output.file_stem().unwrap_or_default().to_string_lossy();
     let parent = output.parent().unwrap_or(std::path::Path::new("."));

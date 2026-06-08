@@ -1,9 +1,9 @@
 //! WebSocket endpoint for streaming agent chat responses.
 
 use dioxus::prelude::*;
-use dioxus_fullstack::{WebSocketOptions, Websocket};
 #[cfg(feature = "server")]
 use dioxus_fullstack::{body::Bytes, CloseCode, Message, TypedWebsocket};
+use dioxus_fullstack::{WebSocketOptions, Websocket};
 #[cfg(feature = "server")]
 use std::time::Duration;
 #[cfg(feature = "server")]
@@ -18,9 +18,9 @@ pub use crate::protocol::{ChatRequest, ChatStreamEvent};
 // Phase 36.1 D-04/D-05/D-06/D-07: slash interception + running-agent guard
 // imports. Used inside the #[cfg(feature = "server")] WebSocket select! loop.
 #[cfg(feature = "server")]
-use ironhermes_core::commands::{CommandResult, ResolveResult};
-#[cfg(feature = "server")]
 use ironhermes_core::commands::running_agent::{is_bypass, AGENT_RUNNING_REJECT_MSG};
+#[cfg(feature = "server")]
+use ironhermes_core::commands::{CommandResult, ResolveResult};
 
 /// Phase 26.7.1 Plan 02 (D-06 / Path A): RAII guard that clears the per-turn
 /// callback slot on drop. Ensures the slot is reset to None even if
@@ -301,7 +301,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                         // D-06: non-bypass slash rejected while turn in flight.
                                         if running_flag
                                             .load(std::sync::atomic::Ordering::SeqCst)
-                                            && !is_bypass(&def.name)
+                                            && !is_bypass(def.name)
                                         {
                                             // Phase 36.1 D-05: deliver as Delta + Finished —
                                             // no new protocol variant needed.
@@ -403,7 +403,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                         }
 
                                         let result = ironhermes_core::commands::handlers::dispatch(
-                                            &def,
+                                            def,
                                             &args,
                                             &ctx,
                                             &app_state.command_router,
@@ -696,7 +696,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                     ),
                                 );
                                 let tts_wiring = Some(ironhermes_agent::TtsPerTurnWiring {
-                                    session_key: Some(web_key(&session_id_for_turn)).unwrap(), // explicit Some() literal for D-05 source-grep
+                                    session_key: web_key(&session_id_for_turn), // D-05 session key
                                     audio_dispatcher: Some(
                                         web_audio_dispatcher
                                             as std::sync::Arc<
@@ -928,7 +928,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                         );
                                                     let tts_wiring_drain =
                                                         Some(ironhermes_agent::TtsPerTurnWiring {
-                                                            session_key: Some(web_key(&session_id_spawn)).unwrap(), // explicit Some() literal for D-05 source-grep
+                                                            session_key: web_key(&session_id_spawn), // D-05 session key
                                                             audio_dispatcher: Some(
                                                                 web_audio_dispatcher_drain
                                                                     as std::sync::Arc<
@@ -1045,7 +1045,6 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
 #[cfg(test)]
 #[cfg(feature = "server")]
 mod plan_26_7_1_02_tests {
-    use super::*;
     use crate::protocol::ChatStreamEvent;
     use ironhermes_tools::delegate_task::{SubagentProgress, SubagentProgressCallback};
     use std::sync::Arc;
@@ -1060,13 +1059,14 @@ mod plan_26_7_1_02_tests {
         let slot: Arc<Mutex<Option<mpsc::UnboundedSender<ChatStreamEvent>>>> =
             Arc::new(Mutex::new(Some(tx)));
         let cb_slot = slot.clone();
-        let cb: SubagentProgressCallback = Arc::new(move |_index: usize, _event: SubagentProgress| {
-            if let Ok(guard) = cb_slot.try_lock() {
-                if let Some(s) = guard.as_ref() {
-                    let _ = s.send(ChatStreamEvent::SubagentEvent {});
+        let cb: SubagentProgressCallback =
+            Arc::new(move |_index: usize, _event: SubagentProgress| {
+                if let Ok(guard) = cb_slot.try_lock() {
+                    if let Some(s) = guard.as_ref() {
+                        let _ = s.send(ChatStreamEvent::SubagentEvent {});
+                    }
                 }
-            }
-        });
+            });
 
         // Invoke the callback as the delegate-task runner would.
         cb(0, SubagentProgress::Completed);
@@ -1089,10 +1089,13 @@ mod plan_26_7_1_02_tests {
         // Both mean no SubagentEvent was sent by the second cb invocation.
         let timed = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
         let no_spurious_event = match timed {
-            Err(_) => true,          // timeout — nothing in channel
-            Ok(None) => true,        // channel closed — all senders dropped
-            Ok(Some(_)) => false,    // unexpected event sent after slot was cleared
+            Err(_) => true,       // timeout — nothing in channel
+            Ok(None) => true,     // channel closed — all senders dropped
+            Ok(Some(_)) => false, // unexpected event sent after slot was cleared
         };
-        assert!(no_spurious_event, "no events should be received after slot is cleared");
+        assert!(
+            no_spurious_event,
+            "no events should be received after slot is cleared"
+        );
     }
 }

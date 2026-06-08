@@ -29,38 +29,49 @@
 //! where the wheel is dragged.
 
 use crate::state::{Screen, WheelState, WheelWedge};
-use dioxus::html::input_data::MouseButton;
-use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use dioxus::core::use_drop;
+use dioxus::html::input_data::MouseButton;
+use dioxus::prelude::*;
 
 // ---------------------------------------------------------------------------
 // Module-level geometry — values mirror wheel-v2.js lines 26-37 verbatim.
 // ---------------------------------------------------------------------------
 
 /// SVG-space wheel diameter. Visible size is driven by `--wheel-size` CSS.
+#[allow(dead_code)] // wheel geometry constants used in SVG rendering; dead_code fires on test target
 pub const SIZE: f64 = 380.0;
 /// Outer rim radius — `SIZE / 2`.
+#[allow(dead_code)] // wheel geometry constant; dead_code fires on test target
 pub const R_OUTER: f64 = 190.0;
 /// Inner hub radius.
+#[allow(dead_code)] // wheel geometry constant; dead_code fires on test target
 pub const R_INNER: f64 = 78.0;
 /// Radius of label text ring.
+#[allow(dead_code)] // wheel geometry constant; dead_code fires on test target
 pub const R_LABEL: f64 = 148.0;
 /// Radius of glyph ring.
+#[allow(dead_code)] // wheel geometry constant; dead_code fires on test target
 pub const R_GLYPH: f64 = 118.0;
 /// Gap between rim and the floating resize ring.
+#[allow(dead_code)] // wheel geometry constant; dead_code fires on test target
 pub const RING_GAP: f64 = 14.0;
 /// Resize ring stroke width.
+#[allow(dead_code)] // wheel geometry constant; dead_code fires on test target
 pub const RING_W: f64 = 4.0;
 /// Extra SVG viewBox padding so the resize ring isn't clipped.
+#[allow(dead_code)] // wheel geometry constant; dead_code fires on test target
 pub const PAD: f64 = 22.0;
 /// Total viewBox extent — `SIZE + PAD * 2`.
+#[allow(dead_code)] // wheel geometry constant; dead_code fires on test target
 pub const VB: f64 = SIZE + PAD * 2.0;
 /// Number of wedges — 10 canonical (CONTEXT D-10 / wheel-v2.js DEFAULT_SECTIONS:
 /// chat, agents, models, tools, skills, memory, sessions, providers, gateway, settings)
 /// plus `kanban` (Phase 36.3.7.11 D-02 wheel-nav addition).
+#[allow(dead_code)] // wheel geometry constant; dead_code fires on test target
 pub const N: usize = 11;
 /// Per-wedge angular step — `360 / N`.
+#[allow(dead_code)] // wheel geometry constant; dead_code fires on test target
 pub const STEP: f64 = 360.0 / N as f64;
 /// Minimum allowed wheel size in CSS px (wheel-v2.js line 426 + Pitfall 4).
 ///
@@ -83,6 +94,7 @@ pub const DRAG_MARGIN: f64 = 33.0;
 
 /// Convert polar coordinates `(angle_deg, r)` to Cartesian, with -90° rotation
 /// so angle 0 points up (north). Mirrors wheel-v2.js `polar(angDeg, r)`.
+#[allow(dead_code)] // called from wedge_path in wheel SVG rendering; dead_code fires on test target
 pub fn polar(ang_deg: f64, r: f64) -> (f64, f64) {
     let a = (ang_deg - 90.0).to_radians();
     (a.cos() * r, a.sin() * r)
@@ -91,6 +103,7 @@ pub fn polar(ang_deg: f64, r: f64) -> (f64, f64) {
 /// Build the SVG path `d` attribute for one wedge — an annular sector between
 /// `r_inner` and `r_outer`, sweeping from `ang_a` to `ang_b` degrees.
 /// Mirrors wheel-v2.js `wedgePath(angA, angB, rInner, rOuter)`.
+#[allow(dead_code)] // called in wheel SVG rsx! rendering; dead_code fires on test target
 pub fn wedge_path(ang_a: f64, ang_b: f64, r_inner: f64, r_outer: f64) -> String {
     let (x1, y1) = polar(ang_a, r_outer);
     let (x2, y2) = polar(ang_b, r_outer);
@@ -802,7 +815,10 @@ mod tests {
     fn wedge_path_starts_with_m() {
         // One full wedge sweep at STEP=36° (Plan 04 wedge geometry).
         let p = wedge_path(0.0, STEP, R_INNER, R_OUTER);
-        assert!(p.starts_with("M "), "wedge path should start with 'M ', got: {p}");
+        assert!(
+            p.starts_with("M "),
+            "wedge path should start with 'M ', got: {p}"
+        );
         assert!(p.contains(" A "), "wedge path should contain arc segments");
         assert!(p.contains(" L "), "wedge path should contain line segment");
         assert!(p.ends_with(" Z"), "wedge path should close with Z");
@@ -832,9 +848,10 @@ mod tests {
         // VALIDATION.md Wave 0 can grep for the safety bound by name.
         assert_eq!(MIN_SIZE, 240.0);
         assert_eq!(MAX_SIZE, 640.0);
-        assert!(
+        // Compile-time guard: MIN_SIZE < MAX_SIZE must always hold.
+        const _: () = assert!(
             MIN_SIZE < MAX_SIZE,
-            "MIN_SIZE ({MIN_SIZE}) must be strictly less than MAX_SIZE ({MAX_SIZE})"
+            "MIN_SIZE must be strictly less than MAX_SIZE"
         );
     }
 
@@ -844,10 +861,8 @@ mod tests {
         // The margin must exceed RING_GAP so the resize ring stays inside
         // the viewport during translate.
         assert_eq!(DRAG_MARGIN, 33.0);
-        assert!(
-            DRAG_MARGIN > RING_GAP,
-            "DRAG_MARGIN ({DRAG_MARGIN}) must exceed RING_GAP ({RING_GAP}) so the resize ring stays inside the viewport"
-        );
+        // Compile-time guard: DRAG_MARGIN must exceed RING_GAP.
+        const _: () = assert!(DRAG_MARGIN > RING_GAP, "DRAG_MARGIN must exceed RING_GAP");
     }
 
     #[test]

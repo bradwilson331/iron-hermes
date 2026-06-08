@@ -23,7 +23,7 @@ fn make_tool_with_hub_config(hub_config: HubConfig) -> SkillsTool {
     let skills_dir = dir.path().join("skills");
     std::fs::create_dir_all(&skills_dir).unwrap();
 
-    let registry = SkillRegistry::load_with_paths(&[skills_dir.clone()]);
+    let registry = SkillRegistry::load_with_paths(std::slice::from_ref(&skills_dir));
     let active_skills: Arc<Mutex<Vec<ironhermes_core::SkillRecord>>> =
         Arc::new(Mutex::new(Vec::new()));
     let cred_dir = dir.path().join("credentials");
@@ -187,7 +187,7 @@ async fn hub_search_hard_cap_20() {
     let tool = default_tool();
     // Use a very broad query likely to return many results on a live network,
     // but in offline CI it returns 0 which also satisfies <= 20.
-    let result_str = tool
+    let _result_str = tool
         .execute(json!({"action": "hub_search", "query": ""}))
         .await
         .expect("execute should not error");
@@ -237,11 +237,10 @@ fn hub_search_no_hub_install_action_in_schema() {
 #[tokio::test]
 async fn hub_search_no_filesystem_mutation() {
     use ironhermes_tools::registry::Tool;
-    use std::sync::Mutex;
 
     // Set up an isolated HERMES_HOME
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = ENV_LOCK.lock().await;
 
     let tmp = tempfile::tempdir().unwrap();
     let prev = std::env::var("HERMES_HOME").ok();

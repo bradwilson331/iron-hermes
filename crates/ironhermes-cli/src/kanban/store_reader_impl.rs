@@ -29,6 +29,7 @@ pub struct KanbanStoreReaderImpl {
 
 impl KanbanStoreReaderImpl {
     /// Construct from a pre-existing shared store handle.
+    #[allow(dead_code)] // injection constructor for future test/DI wiring; production uses open_default()
     pub fn new(store: Arc<Mutex<KanbanStore>>) -> Self {
         Self { store }
     }

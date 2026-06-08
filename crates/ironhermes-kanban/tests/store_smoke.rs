@@ -161,7 +161,7 @@ fn tenant_link_both_none_allowed() {
 /// a `reclaimed` event — reference.md "Reclaimed runs from status changes".
 #[test]
 fn archive_running_emits_reclaimed_event() {
-    use ironhermes_kanban::cas::{atomic_claim, build_claim_lock, DEFAULT_CLAIM_TTL_SECONDS};
+    use ironhermes_kanban::cas::{DEFAULT_CLAIM_TTL_SECONDS, atomic_claim, build_claim_lock};
     use rusqlite::Connection;
 
     let dir = tempfile::tempdir().unwrap();
@@ -204,9 +204,10 @@ fn archive_running_emits_reclaimed_event() {
     assert_eq!(archived.status, "archived");
 
     // Verify a reclaimed event was written.
-    let events = store2
-        .get_events(&task.id)
-        .expect("get_events");
+    let events = store2.get_events(&task.id).expect("get_events");
     let has_reclaimed = events.iter().any(|e| e.kind == "reclaimed");
-    assert!(has_reclaimed, "archive of running task must emit 'reclaimed' event");
+    assert!(
+        has_reclaimed,
+        "archive of running task must emit 'reclaimed' event"
+    );
 }

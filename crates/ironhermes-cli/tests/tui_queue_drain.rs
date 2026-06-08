@@ -69,7 +69,10 @@ fn tui_queue_drain_fifo() {
     let queue = make_queue();
     let key = make_key();
     let mut app = App::new_test_with_queue(queue.clone() as Arc<dyn MessageQueue<SessionKey>>);
-    assert_eq!(app.queue_key, key, "constructor uses Plan 03 fixed local key");
+    assert_eq!(
+        app.queue_key, key,
+        "constructor uses Plan 03 fixed local key"
+    );
 
     // Simulate turn 1 in flight — must be set BEFORE any drain attempt so the
     // T-04 `pending_tx.is_some()` guard short-circuits any incidental drain.

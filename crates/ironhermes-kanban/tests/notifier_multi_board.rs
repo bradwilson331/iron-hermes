@@ -28,7 +28,7 @@ use tokio::sync::Mutex as TokioMutex;
 // Serialise env-mutating tests
 // ---------------------------------------------------------------------------
 
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ---------------------------------------------------------------------------
 // RAII env guard
@@ -44,7 +44,10 @@ impl ScopedEnv {
         let prev = std::env::var(key).ok();
         // SAFETY: guarded by ENV_LOCK in all callers.
         unsafe { std::env::set_var(key, value) };
-        Self { key: key.to_string(), prev }
+        Self {
+            key: key.to_string(),
+            prev,
+        }
     }
 }
 
@@ -122,7 +125,7 @@ async fn seed_completed_with_sub(
 /// Events on the default board are delivered; tick.per_board has exactly one entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn tick_sweeps_default_only_when_no_named_boards() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     // Set IRONHERMES_HOME to a dir with no boards/ subdirectory.
     let _env = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
@@ -131,12 +134,8 @@ async fn tick_sweeps_default_only_when_no_named_boards() {
     let _task = seed_completed_with_sub(&default_store, "task-A", "telegram", "100").await;
 
     let (send_fn, log) = make_recording_send_fn();
-    let ctx = NotifierContext::new_multi_board(
-        default_store,
-        1,
-        send_fn,
-        SubscribeBoardsConfig::All,
-    );
+    let ctx =
+        NotifierContext::new_multi_board(default_store, 1, send_fn, SubscribeBoardsConfig::All);
     let report = run_notifier_tick(&ctx).await.expect("tick");
 
     assert_eq!(
@@ -158,7 +157,7 @@ async fn tick_sweeps_default_only_when_no_named_boards() {
 /// Events on both boards are delivered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn tick_sweeps_default_plus_named_under_subscribe_all() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
 
     // Create the boards/alpha/ directory so list_boards() discovers it.
@@ -170,7 +169,8 @@ async fn tick_sweeps_default_plus_named_under_subscribe_all() {
 
     // Open and seed the default board (passed via ctx.store).
     let default_store = open_store_at(&dir, "kanban.db");
-    let _default_task = seed_completed_with_sub(&default_store, "default-task", "telegram", "10").await;
+    let _default_task =
+        seed_completed_with_sub(&default_store, "default-task", "telegram", "10").await;
 
     // Open and seed the alpha board (will be opened via open_for_board("alpha")).
     {
@@ -182,12 +182,8 @@ async fn tick_sweeps_default_plus_named_under_subscribe_all() {
     }
 
     let (send_fn, log) = make_recording_send_fn();
-    let ctx = NotifierContext::new_multi_board(
-        default_store,
-        1,
-        send_fn,
-        SubscribeBoardsConfig::All,
-    );
+    let ctx =
+        NotifierContext::new_multi_board(default_store, 1, send_fn, SubscribeBoardsConfig::All);
     let report = run_notifier_tick(&ctx).await.expect("tick");
 
     assert_eq!(
@@ -212,7 +208,7 @@ async fn tick_sweeps_default_plus_named_under_subscribe_all() {
 /// The default board's events are still delivered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn tick_skips_corrupt_board_logs_warn_continues_sweeping() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
 
     // Create boards/broken/ with non-SQLite bytes.
@@ -228,13 +224,11 @@ async fn tick_skips_corrupt_board_logs_warn_continues_sweeping() {
 
     let (send_fn, log) = make_recording_send_fn();
     // Sweep All: default + broken (broken will fail to open).
-    let ctx = NotifierContext::new_multi_board(
-        default_store,
-        1,
-        send_fn,
-        SubscribeBoardsConfig::All,
-    );
-    let report = run_notifier_tick(&ctx).await.expect("tick should not return Err even with corrupt board");
+    let ctx =
+        NotifierContext::new_multi_board(default_store, 1, send_fn, SubscribeBoardsConfig::All);
+    let report = run_notifier_tick(&ctx)
+        .await
+        .expect("tick should not return Err even with corrupt board");
 
     // Corrupt board was skipped — not in per_board.
     let swept_slugs: Vec<&str> = report.per_board.iter().map(|s| s.slug.as_str()).collect();
@@ -265,7 +259,7 @@ async fn tick_skips_corrupt_board_logs_warn_continues_sweeping() {
 /// watermarks advance to their own MAX(id), not each other's.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn per_board_watermark_advances_independently() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
 
     let alpha_board_dir = dir.path().join("kanban").join("boards").join("alpha");
@@ -298,18 +292,20 @@ async fn per_board_watermark_advances_independently() {
     };
 
     let (send_fn, _log) = make_recording_send_fn();
-    let ctx = NotifierContext::new_multi_board(
-        default_store,
-        1,
-        send_fn,
-        SubscribeBoardsConfig::All,
-    );
+    let ctx =
+        NotifierContext::new_multi_board(default_store, 1, send_fn, SubscribeBoardsConfig::All);
     let _report = run_notifier_tick(&ctx).await.expect("tick");
 
     // Check watermarks advanced independently.
     let map = ctx.board_watermarks.lock().unwrap();
-    let wm_default = map.get("default").expect("default watermark must exist").load(std::sync::atomic::Ordering::SeqCst);
-    let wm_alpha = map.get("alpha").expect("alpha watermark must exist").load(std::sync::atomic::Ordering::SeqCst);
+    let wm_default = map
+        .get("default")
+        .expect("default watermark must exist")
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let wm_alpha = map
+        .get("alpha")
+        .expect("alpha watermark must exist")
+        .load(std::sync::atomic::Ordering::SeqCst);
 
     assert_eq!(
         wm_default, default_max_id,
@@ -334,7 +330,7 @@ async fn per_board_watermark_advances_independently() {
 /// This test proves the explicit codepath ships and filters correctly.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn subscribe_explicit_filters_out_unlisted_boards() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
 
     let alpha_board_dir = dir.path().join("kanban").join("boards").join("alpha");
@@ -345,7 +341,8 @@ async fn subscribe_explicit_filters_out_unlisted_boards() {
 
     // Seed default board with a Completed event + sub.
     let default_store = open_store_at(&dir, "kanban.db");
-    let _default_task = seed_completed_with_sub(&default_store, "default-task", "telegram", "99").await;
+    let _default_task =
+        seed_completed_with_sub(&default_store, "default-task", "telegram", "99").await;
 
     // Seed alpha board with a Completed event + sub.
     {
@@ -373,8 +370,7 @@ async fn subscribe_explicit_filters_out_unlisted_boards() {
     );
     // Verify it came from chat_id "77" (alpha's sub), not "99" (default's sub).
     assert_eq!(
-        calls[0].1,
-        "77",
+        calls[0].1, "77",
         "delivered event must be from alpha (chat_id=77), not default (chat_id=99)"
     );
 
@@ -384,10 +380,7 @@ async fn subscribe_explicit_filters_out_unlisted_boards() {
         !swept_slugs.contains(&"default"),
         "default must NOT be swept when Explicit([alpha])"
     );
-    assert!(
-        swept_slugs.contains(&"alpha"),
-        "alpha must be swept"
-    );
+    assert!(swept_slugs.contains(&"alpha"), "alpha must be swept");
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +391,7 @@ async fn subscribe_explicit_filters_out_unlisted_boards() {
 /// only "default" and delivers its events.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn subscribe_all_with_zero_boards_returns_default_only_tick() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = ENV_LOCK.lock().await;
     let dir = TempDir::new().unwrap();
     // No boards/ directory — list_boards() returns empty.
     let _env = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
@@ -407,12 +400,8 @@ async fn subscribe_all_with_zero_boards_returns_default_only_tick() {
     let _task = seed_completed_with_sub(&default_store, "only-task", "discord", "55").await;
 
     let (send_fn, log) = make_recording_send_fn();
-    let ctx = NotifierContext::new_multi_board(
-        default_store,
-        1,
-        send_fn,
-        SubscribeBoardsConfig::All,
-    );
+    let ctx =
+        NotifierContext::new_multi_board(default_store, 1, send_fn, SubscribeBoardsConfig::All);
     let report = run_notifier_tick(&ctx).await.expect("tick");
 
     assert_eq!(

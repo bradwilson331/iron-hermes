@@ -9,9 +9,9 @@
 //!
 //! Implementation note: `result_or_error` is flattened to `result: Option<String>`
 //! + `error: Option<String>` (mutually exclusive) so the wire shape derives via
-//! standard serde — no custom impl. The golden-file test in tests/format.rs locks
-//! the on-disk shape; future changes must intentionally update both that test and
-//! any downstream consumers (Phase 25.4 Curator, RL pipelines).
+//!   standard serde — no custom impl. The golden-file test in tests/format.rs locks
+//!   the on-disk shape; future changes must intentionally update both that test and
+//!   any downstream consumers (Phase 25.4 Curator, RL pipelines).
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

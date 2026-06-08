@@ -25,19 +25,19 @@ pub mod send_audio_tool; // Phase 36.17.5 D-14/D-15 — SendAudioTool + AudioDis
 pub mod skill_manage; // Phase 33 — learning toolset (LEARN-04, LEARN-05)
 pub mod skills_tool;
 pub mod terminal;
+pub mod toolset_session; // Phase 25.2 Plan 15 — production ToolsetSessionHandle impl (UAT Issue 2)
 pub mod tts; // Phase 36.17.5 — TTS provider impls (edge, elevenlabs)
 pub mod tts_tool; // Phase 36.17.5 D-05/D-06/D-07 — TextToSpeechTool LLM tool
-pub mod toolset_session; // Phase 25.2 Plan 15 — production ToolsetSessionHandle impl (UAT Issue 2)
 pub mod web_extract; // Phase 25.2
 pub mod web_local; // Phase 25.2 — shared HTML→Markdown helpers (extract_content_local target)
 pub mod web_read;
 pub mod web_search;
 
 pub use memory_manager_handle::MemoryManagerHandle;
+pub use not_supported_dispatcher::NotSupportedAudioDispatcher;
 pub use registry::{
     InterceptHandler, Prerequisite, Tool, ToolRegistry, todo_read_schema, todo_write_schema,
 };
-pub use not_supported_dispatcher::NotSupportedAudioDispatcher;
 pub use send_audio_tool::{AudioDispatcher, SendAudioTool};
 pub use toolset_session::RegistryToolsetSession;
 pub use tts_tool::TextToSpeechTool;
@@ -51,6 +51,6 @@ pub use web_extract::WebExtractTool;
 ///
 /// Replaces the per-module `static ENV_LOCK` in `hexapod_tcp::tests` and
 /// `hexapod_video::tests`, which raced on `HEXAPOD_IP` across modules.
-/// All call sites use: `ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())`
+/// All call sites use: `ENV_LOCK.lock().await`
 #[cfg(test)]
-pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

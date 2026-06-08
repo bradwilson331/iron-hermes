@@ -21,17 +21,18 @@ pub mod session;
 pub mod skills;
 pub mod ssrf;
 pub mod token_estimator;
-pub mod tts;                                                   // Phase 36.17.5
+pub mod tts; // Phase 36.17.5
 pub mod types;
 pub mod wizard;
 pub mod workspace;
 
+pub use browser_profile::{SingletonOutcome, reconcile_singleton_lock};
 pub use commands::context::CommandContext;
+pub use commands::running_agent::{AGENT_RUNNING_REJECT_MSG, RunningAgentGuard, is_bypass};
 pub use commands::{
     CommandCategory, CommandDef, CommandResult as SlashCommandResult, CommandRouter,
     PlatformFilter, ResolveResult,
 };
-pub use commands::running_agent::{RunningAgentGuard, is_bypass, AGENT_RUNNING_REJECT_MSG};
 pub use config::{
     ApiMode, BatchConfig, Config, CustomProviderConfig, ExecConfig, ExtraTap, ExtractConfig,
     HubConfig, MemoryConfig, ModelRoleConfig, ProviderConfig, SkillsConfig, SubagentConfig,
@@ -55,19 +56,18 @@ pub use pricing_cache::{PricingCache, PricingCacheEntry};
 pub use provider::{ProviderResolver, ResolvedEndpoint, SummarizationClientHandle};
 pub use queue::{MAX_QUEUE_DEPTH, MessageQueue, QueueError, WARN_QUEUE_DEPTH};
 pub use session::SessionKey;
+/// Phase 21.8.2 D-05: expose path-scan helper for D-05 WARN-BUT-LOAD invalid_skipped reporting.
+pub use skills::build_skill_search_paths;
 pub use skills::{
     CredentialFileEntry, EnvVarEntry, HermesMetadata, SkillConfigField, SkillRecord, SkillRegistry,
     SkillSource,
 };
-/// Phase 21.8.2 D-05: expose path-scan helper for D-05 WARN-BUT-LOAD invalid_skipped reporting.
-pub use skills::build_skill_search_paths;
-pub use browser_profile::{SingletonOutcome, reconcile_singleton_lock};
 pub use ssrf::is_safe_url;
 pub use token_estimator::{
     TiktokenEncoding, TokenEstimator, global_estimate_tokens, init_global_estimator,
     warm_tiktoken_singletons,
 };
-pub use tts::{TtsProvider, TtsRegistry, BUILTIN_TTS_NAMES};   // Phase 36.17.5
+pub use tts::{BUILTIN_TTS_NAMES, TtsProvider, TtsRegistry}; // Phase 36.17.5
 pub use types::*;
 
 // Phase 25.3 D-W-1 — Workspace newtype + cwd walk-up resolution helper.

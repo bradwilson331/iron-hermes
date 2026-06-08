@@ -35,11 +35,13 @@ use std::collections::{HashMap, HashSet};
 /// Phase 36.3.7.11 Plan 01: stylesheet for the kanban dashboard. Defines
 /// the `.kn-card` cyan-glow rules, `.kn-board` layout, chip styles, and
 /// `@media (prefers-reduced-motion: reduce)` overrides (UI-SPEC §6.6).
+#[allow(dead_code)] // used in ScreenKanban rsx! document::Link; dead_code fires on test target
 const KANBAN_CSS: Asset = asset!("/assets/kanban.css");
 
 /// Phase 36.3.7.11 Plan 01: WS lifecycle state — drives a small status
 /// dot in the toolbar. Plan 01 keeps the indicator minimal; richer
 /// reconnect surfacing lands in Plan 04.
+#[allow(dead_code)] // variants set/matched in ScreenKanban; dead_code fires on test target
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WsState {
     Connecting,
@@ -70,7 +72,9 @@ pub fn ScreenKanban(is_active: bool) -> Element {
     // The `.read()` is a Copy-out (bool) — no borrow held across the
     // await, clippy-safe.
     let mut board_resource = use_resource(move || async move {
-        crate::server::kanban_api::fetch_board(None, *archived_visible.read()).await
+        // Copy the bool out before await — GenerationalRef must not be held across await points.
+        let show_archived: bool = *archived_visible.read();
+        crate::server::kanban_api::fetch_board(None, show_archived).await
     });
 
     // Local Signal<Vec<TaskRow>> — Plan 02 mutates this optimistically
@@ -101,8 +105,7 @@ pub fn ScreenKanban(is_active: bool) -> Element {
     // task — drives the drawer's `use_resource` re-fetch (UI-SPEC §8.4).
     // 200ms debounce is applied below. Mutations go through `.write()`;
     // the signal handle itself is Copy so no `mut` binding is required.
-    let per_task_event_counter: Signal<HashMap<String, u64>> =
-        use_signal(HashMap::new);
+    let per_task_event_counter: Signal<HashMap<String, u64>> = use_signal(HashMap::new);
 
     // Drawer open state — Plan 03 wires this end-to-end.
     let mut open_drawer_task_id: Signal<Option<String>> = use_signal(|| None);
@@ -144,11 +147,10 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                         // Parse a KanbanWsEvent. Malformed frames are
                         // silently skipped so a single bad payload does
                         // not break the stream.
-                        let event: crate::protocol::KanbanWsEvent =
-                            match serde_json::from_str(&t) {
-                                Ok(e) => e,
-                                Err(_) => continue,
-                            };
+                        let event: crate::protocol::KanbanWsEvent = match serde_json::from_str(&t) {
+                            Ok(e) => e,
+                            Err(_) => continue,
+                        };
                         match event {
                             crate::protocol::KanbanWsEvent::TaskEventBatch { events, .. } => {
                                 // Plan 01 behavior preserved: full re-fetch.
@@ -160,10 +162,8 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                                 // until the next event-loop tick. With
                                 // gloo-timers on WASM and tokio::time on
                                 // native, schedule the increment after 200ms.
-                                let task_ids: Vec<String> = events
-                                    .iter()
-                                    .map(|e| e.task_id.clone())
-                                    .collect();
+                                let task_ids: Vec<String> =
+                                    events.iter().map(|e| e.task_id.clone()).collect();
                                 if !task_ids.is_empty() {
                                     let mut counter = per_task_event_counter;
                                     #[cfg(target_arch = "wasm32")]
@@ -283,7 +283,10 @@ pub fn ScreenKanban(is_active: bool) -> Element {
             )
             .await
             {
-                Ok(crate::protocol::DecomposeResult::Ok { children_count, summary }) => {
+                Ok(crate::protocol::DecomposeResult::Ok {
+                    children_count,
+                    summary,
+                }) => {
                     tm.set(Some(format!(
                         "Decomposed into {children_count} children: {summary}"
                     )));
@@ -305,7 +308,10 @@ pub fn ScreenKanban(is_active: bool) -> Element {
             )
             .await
             {
-                Ok(crate::protocol::DecomposeResult::Ok { children_count, summary }) => {
+                Ok(crate::protocol::DecomposeResult::Ok {
+                    children_count,
+                    summary,
+                }) => {
                     tm.set(Some(format!(
                         "Specified ({children_count} children): {summary}"
                     )));
@@ -334,12 +340,13 @@ pub fn ScreenKanban(is_active: bool) -> Element {
         move |(task_id, action): (String, crate::protocol::DecomposeOrSpecify)| {
             let mut tm = toast_msg;
             spawn(async move {
-                match crate::server::kanban_api::run_decompose_or_specify(
-                    task_id, None, action,
-                )
-                .await
+                match crate::server::kanban_api::run_decompose_or_specify(task_id, None, action)
+                    .await
                 {
-                    Ok(crate::protocol::DecomposeResult::Ok { children_count, summary }) => {
+                    Ok(crate::protocol::DecomposeResult::Ok {
+                        children_count,
+                        summary,
+                    }) => {
                         tm.set(Some(format!(
                             "{:?}: {children_count} children. {summary}",
                             action
@@ -347,10 +354,7 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                     }
                     Ok(crate::protocol::DecomposeResult::NotWired { message }) => {
                         // UI-SPEC §7.5 toast: "{action} not configured. Run: ..."
-                        tm.set(Some(format!(
-                            "{} not configured. {message}",
-                            action.slug()
-                        )));
+                        tm.set(Some(format!("{} not configured. {message}", action.slug())));
                     }
                     Err(e) => {
                         tm.set(Some(format!("{}: {e}", action.slug())));

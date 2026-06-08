@@ -98,6 +98,7 @@ fn merge_style_overrides(extensions: &[Box<dyn TuiExtension>]) -> StyleOverrides
 pub struct TuiHandle {
     activity_tx: watch::Sender<ActivityState>,
     status_tx: watch::Sender<StatusLineState>,
+    #[allow(dead_code)] // Phase 22.1 extension event bus; TUI event dispatch wiring pending
     event_tx: Option<mpsc::UnboundedSender<TuiEvent>>,
     shutdown: CancellationToken,
     task: Option<JoinHandle<()>>,
@@ -123,6 +124,7 @@ impl TuiHandle {
     /// is not a TTY the loop exits on first iteration (non-tty fallback D-17).
     /// Delegates to `new_with_extensions` with an empty extension list, preserving
     /// Phase 21 zero-extension behavior exactly.
+    #[allow(dead_code)] // zero-extension constructor; callers use new_with_extensions directly
     pub fn new(initial_status: StatusLineState) -> Self {
         Self::new_with_extensions(initial_status, Vec::new())
     }
@@ -166,6 +168,8 @@ impl TuiHandle {
             };
             for (slot, widget) in ext_widgets {
                 let prefixed_id = format!("{}:{}", ext.name(), widget.id);
+                #[allow(clippy::map_entry)]
+                // entry API would suppress the conflict warning log; explicit check preserves it
                 if widgets.contains_key(&prefixed_id) {
                     tracing::warn!(
                         "tui: widget id '{}' conflicts with existing widget -- ignoring",
@@ -272,6 +276,7 @@ impl TuiHandle {
 
     /// Return a clone of the event sender, if available. Extensions or callers
     /// use this to push `TuiEvent`s to the render loop at runtime.
+    #[allow(dead_code)] // Phase 22.1 extension API; TUI event push wiring pending
     pub fn event_sender(&self) -> Option<mpsc::UnboundedSender<TuiEvent>> {
         self.event_tx.clone()
     }
@@ -406,8 +411,8 @@ pub fn prompt_position_ansi(rows: u16, reserved: u16) -> Option<Vec<u8>> {
 /// Terminal compat (RESEARCH §Terminal Compatibility Matrix):
 ///   - macOS Terminal.app, iTerm2, kitty, alacritty, Ghostty, screen: full support.
 ///   - tmux: `\x1b[3J` clears the pane's scrollback (not the outer terminal's);
-///           DECSTBM is clamped to pane geometry — `crossterm::terminal::size()`
-///           returns the pane size, so the math is correct as-is.
+///     DECSTBM is clamped to pane geometry — `crossterm::terminal::size()`
+///     returns the pane size, so the math is correct as-is.
 pub fn reset_terminal_visual(reserved: u16) {
     use std::io::Write as _;
     // Phase 22.3 WR-02 (review fix): flush stdout BEFORE writing the
@@ -506,6 +511,7 @@ pub fn write_into_scroll_region(bytes: &[u8], reserved: u16) {
 /// Position the terminal cursor at the fixed prompt row (row rows-reserved,
 /// outside the scroll region). Call before `rl.readline()` so user input
 /// appears at a stable position above the scanner and status bar.
+#[allow(dead_code)] // planned prompt-anchor helper for run_chat; not yet wired in all call sites
 pub fn prepare_prompt_with_reserve(reserved: u16) {
     let mut out = stderr();
     if !out.is_tty() {
@@ -521,6 +527,7 @@ pub fn prepare_prompt_with_reserve(reserved: u16) {
 /// the scroll region). Call before `rl.readline()` so user input appears at
 /// a stable position above the scanner and status bar.
 /// Backward-compatibility wrapper: calls `prepare_prompt_with_reserve(3)`.
+#[allow(dead_code)] // backward-compat wrapper; no current caller (all sites use prompt_position_ansi)
 pub fn prepare_prompt() {
     prepare_prompt_with_reserve(3);
 }
@@ -528,6 +535,7 @@ pub fn prepare_prompt() {
 /// Clear the prompt row after `rl.readline()` returns and reposition the cursor
 /// at the bottom of the scroll region so subsequent `println!()` output flows
 /// naturally inside the scrollable content area.
+#[allow(dead_code)] // planned post-readline cleanup helper; no current caller
 pub fn finish_prompt_with_reserve(reserved: u16) {
     use std::io::stdout;
     let _ = stdout().flush();
@@ -551,6 +559,7 @@ pub fn finish_prompt_with_reserve(reserved: u16) {
 /// at the bottom of the scroll region so subsequent `println!()` output flows
 /// naturally inside the scrollable content area.
 /// Backward-compatibility wrapper: calls `finish_prompt_with_reserve(3)`.
+#[allow(dead_code)] // backward-compat wrapper; no current caller
 pub fn finish_prompt() {
     finish_prompt_with_reserve(3);
 }
@@ -561,6 +570,7 @@ pub fn finish_prompt() {
 
 /// Main render loop. Per D-17 exits immediately if stderr is not a TTY.
 /// Accepts extension widget state and TuiEvent channel for runtime widget updates.
+#[allow(clippy::too_many_arguments)] // render loop: each arg is a distinct channel/state; params-struct would add indirection with no clarity gain
 async fn render_loop(
     activity_rx: watch::Receiver<ActivityState>,
     status_rx: watch::Receiver<StatusLineState>,

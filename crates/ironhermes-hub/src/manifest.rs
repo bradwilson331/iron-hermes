@@ -66,7 +66,7 @@ mod tests {
     use super::*;
 
     fn with_test_hermes_home<F: FnOnce()>(f: F) {
-        let _guard = crate::test_env_lock();
+        let _guard = crate::test_env_lock().blocking_lock();
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var("HERMES_HOME").ok();
         unsafe {

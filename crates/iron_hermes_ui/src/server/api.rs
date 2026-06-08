@@ -140,7 +140,8 @@ pub async fn list_sessions() -> Result<Vec<SessionInfo>> {
             .state_store
             .lock()
             .map_err(|_| ServerFnError::new("State store mutex poisoned"))?;
-        store.list_sessions(Some(&platform_filter), 100)
+        store
+            .list_sessions(Some(&platform_filter), 100)
             .map_err(|e| ServerFnError::new(format!("StateStore list sessions failed: {e}")))?
     };
 
@@ -166,9 +167,10 @@ pub async fn list_sessions() -> Result<Vec<SessionInfo>> {
                 // — better to render the row without a preview than 500 the
                 // entire sessions list.
                 state.state_store.lock().ok().and_then(|store| {
-                    store.get_messages(&session.id).ok().and_then(|msgs| {
-                        extract_last_message_preview(&msgs)
-                    })
+                    store
+                        .get_messages(&session.id)
+                        .ok()
+                        .and_then(|msgs| extract_last_message_preview(&msgs))
                 })
             };
             SessionInfo {
@@ -199,12 +201,7 @@ pub async fn get_config_summary() -> Result<ConfigSummary> {
 #[get("/api/tools")]
 pub async fn list_tools() -> Result<Vec<ToolInfo>> {
     let state = crate::server::state::global_app_state();
-    let definitions = state
-        .runtime
-        .registry()
-        .read()
-        .await
-        .get_definitions(None);
+    let definitions = state.runtime.registry().read().await.get_definitions(None);
     let out = definitions
         .into_iter()
         .map(|def| ToolInfo {
@@ -234,7 +231,7 @@ pub async fn get_memory() -> Result<MemoryInfo> {
     for (target, items) in entries.entries.iter() {
         let store = match target {
             ironhermes_core::memory_store::MemoryTarget::Memory => "agent",
-            ironhermes_core::memory_store::MemoryTarget::User   => "user",
+            ironhermes_core::memory_store::MemoryTarget::User => "user",
         };
         for body in items.iter() {
             out.push(MemoryEntry {
@@ -267,31 +264,57 @@ pub async fn list_models() -> Result<Vec<ModelInfo>> {
     let registry = state.resolver.model_registry();
     let default_id = state.config.model.default.clone();
 
-    let out = registry.all_models().into_iter().map(|(id, meta)| ModelInfo {
-        id: id.to_string(),
-        family: infer_family(id),
-        context_window: format_context_window(meta.context_length),
-        status: if id == default_id.as_str() { "DEFAULT".to_string() } else { "AVAILABLE".to_string() },
-    }).collect();
+    let out = registry
+        .all_models()
+        .into_iter()
+        .map(|(id, meta)| ModelInfo {
+            id: id.to_string(),
+            family: infer_family(id),
+            context_window: format_context_window(meta.context_length),
+            status: if id == default_id.as_str() {
+                "DEFAULT".to_string()
+            } else {
+                "AVAILABLE".to_string()
+            },
+        })
+        .collect();
 
     Ok(out)
 }
 
 fn infer_family(id: &str) -> String {
-    if id.starts_with("claude") { "Anthropic (Claude)".to_string() }
-    else if id.starts_with("gpt") || id.starts_with("o3") || id.starts_with("o4") || id.starts_with("o1") { "OpenAI".to_string() }
-    else if id.starts_with("gemini") { "Google (Gemini)".to_string() }
-    else if id.starts_with("llama") { "Meta (Llama)".to_string() }
-    else if id.starts_with("mistral") || id.starts_with("mixtral") || id.starts_with("codestral") { "Mistral".to_string() }
-    else if id.starts_with("deepseek") { "DeepSeek".to_string() }
-    else if id.starts_with("qwen") { "Qwen".to_string() }
-    else { "Other".to_string() }
+    if id.starts_with("claude") {
+        "Anthropic (Claude)".to_string()
+    } else if id.starts_with("gpt")
+        || id.starts_with("o3")
+        || id.starts_with("o4")
+        || id.starts_with("o1")
+    {
+        "OpenAI".to_string()
+    } else if id.starts_with("gemini") {
+        "Google (Gemini)".to_string()
+    } else if id.starts_with("llama") {
+        "Meta (Llama)".to_string()
+    } else if id.starts_with("mistral") || id.starts_with("mixtral") || id.starts_with("codestral")
+    {
+        "Mistral".to_string()
+    } else if id.starts_with("deepseek") {
+        "DeepSeek".to_string()
+    } else if id.starts_with("qwen") {
+        "Qwen".to_string()
+    } else {
+        "Other".to_string()
+    }
 }
 
 fn format_context_window(ctx: usize) -> String {
-    if ctx >= 1_000_000 { format!("{}M", ctx / 1_000_000) }
-    else if ctx >= 1_000 { format!("{}k", ctx / 1_000) }
-    else { format!("{}", ctx) }
+    if ctx >= 1_000_000 {
+        format!("{}M", ctx / 1_000_000)
+    } else if ctx >= 1_000 {
+        format!("{}k", ctx / 1_000)
+    } else {
+        format!("{}", ctx)
+    }
 }
 
 /// Phase 26.7.2 (D-04 / RESEARCH Q6): Extract last message preview for SessionInfo.
@@ -326,26 +349,33 @@ pub async fn list_skills() -> Result<Vec<SkillInfo>> {
 
     // std::sync::Mutex — short-lived lock, no .await inside the held scope.
     let active_names: std::collections::HashSet<String> = {
-        let guard = state.runtime.active_skills().lock()
+        let guard = state
+            .runtime
+            .active_skills()
+            .lock()
             .map_err(|e| ServerFnError::new(format!("active_skills lock poisoned: {e}")))?;
         guard.iter().map(|r| r.name.clone()).collect()
     };
 
-    let out = registry.list().iter().map(|r| {
-        let category = match r.source {
-            ironhermes_core::skills::SkillSource::Builtin     => "bundled",
-            ironhermes_core::skills::SkillSource::Official    => "official",
-            ironhermes_core::skills::SkillSource::Trusted     => "trusted",
-            ironhermes_core::skills::SkillSource::Community   => "installed",
-            ironhermes_core::skills::SkillSource::SelfCreated => "self-created",
-        };
-        SkillInfo {
-            name: r.name.clone(),
-            description: r.description.clone(),
-            category: category.to_string(),
-            enabled: active_names.contains(&r.name),
-        }
-    }).collect();
+    let out = registry
+        .list()
+        .iter()
+        .map(|r| {
+            let category = match r.source {
+                ironhermes_core::skills::SkillSource::Builtin => "bundled",
+                ironhermes_core::skills::SkillSource::Official => "official",
+                ironhermes_core::skills::SkillSource::Trusted => "trusted",
+                ironhermes_core::skills::SkillSource::Community => "installed",
+                ironhermes_core::skills::SkillSource::SelfCreated => "self-created",
+            };
+            SkillInfo {
+                name: r.name.clone(),
+                description: r.description.clone(),
+                category: category.to_string(),
+                enabled: active_names.contains(&r.name),
+            }
+        })
+        .collect();
     Ok(out)
 }
 
@@ -383,14 +413,19 @@ pub async fn toggle_skill(name: String) -> Result<(), ServerFnError> {
     let was_disabled = apply_disable_toggle(&mut config, &name);
 
     // Step 3 — persist config back to disk
-    config.save().map_err(|e| ServerFnError::new(format!("Config save failed: {e}")))?;
+    config
+        .save()
+        .map_err(|e| ServerFnError::new(format!("Config save failed: {e}")))?;
 
     // Step 4 — in-process active_skills mutation (scoped std::sync::Mutex lock).
     // The MutexGuard is dropped at the closing brace before fn returns; no async
     // suspension occurs while the lock is held (lock discipline: Behavior 5).
     // Pattern: api.rs list_skills lines 234–240 (active_skills lock pattern)
     {
-        let mut skills = state.runtime.active_skills().lock()
+        let mut skills = state
+            .runtime
+            .active_skills()
+            .lock()
             .map_err(|e| ServerFnError::new(format!("active_skills lock poisoned: {e}")))?;
         if was_disabled {
             // Was disabled → now enabled: push record if not already present
@@ -442,8 +477,10 @@ mod toggle_skill_tests {
         let mut config = make_config_with_disabled(&[]);
         let was_disabled = apply_disable_toggle(&mut config, "foo");
         assert!(!was_disabled, "foo was not disabled before toggle");
-        assert!(config.skills.disabled.contains(&"foo".to_string()),
-            "foo should now be in disabled list");
+        assert!(
+            config.skills.disabled.contains(&"foo".to_string()),
+            "foo should now be in disabled list"
+        );
     }
 
     #[test]
@@ -451,8 +488,10 @@ mod toggle_skill_tests {
         let mut config = make_config_with_disabled(&["bar"]);
         let was_disabled = apply_disable_toggle(&mut config, "bar");
         assert!(was_disabled, "bar was disabled before toggle");
-        assert!(!config.skills.disabled.contains(&"bar".to_string()),
-            "bar should no longer be in disabled list");
+        assert!(
+            !config.skills.disabled.contains(&"bar".to_string()),
+            "bar should no longer be in disabled list"
+        );
     }
 
     #[test]
@@ -460,12 +499,16 @@ mod toggle_skill_tests {
         let mut config = make_config_with_disabled(&[]);
         // enable→disable
         apply_disable_toggle(&mut config, "baz");
-        assert!(config.skills.disabled.contains(&"baz".to_string()),
-            "baz should be disabled after first toggle");
+        assert!(
+            config.skills.disabled.contains(&"baz".to_string()),
+            "baz should be disabled after first toggle"
+        );
         // disable→enable
         apply_disable_toggle(&mut config, "baz");
-        assert!(!config.skills.disabled.contains(&"baz".to_string()),
-            "baz should be re-enabled after second toggle");
+        assert!(
+            !config.skills.disabled.contains(&"baz".to_string()),
+            "baz should be re-enabled after second toggle"
+        );
     }
 }
 
@@ -644,12 +687,15 @@ pub async fn api_agents_list() -> Result<Vec<AgentInfo>> {
         guard.list()
     };
 
-    let out = infos.into_iter().map(|info| AgentInfo {
-        id: info.id.clone(),
-        task_summary: info.task_summary.clone(),
-        uptime_secs: info.started_at.elapsed().as_secs(),
-        status: "running".to_string(),
-        parent_id: info.parent_id.clone(),
-    }).collect();
+    let out = infos
+        .into_iter()
+        .map(|info| AgentInfo {
+            id: info.id.clone(),
+            task_summary: info.task_summary.clone(),
+            uptime_secs: info.started_at.elapsed().as_secs(),
+            status: "running".to_string(),
+            parent_id: info.parent_id.clone(),
+        })
+        .collect();
     Ok(out)
 }

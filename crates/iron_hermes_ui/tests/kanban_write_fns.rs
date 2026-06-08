@@ -123,9 +123,7 @@ fn kanban_api_has_no_format_sql_injection_vectors() {
         let pat_b = format!("format!(\" {}", sql_kw);
         let pat_c = format!("format!(r#\"{}", sql_kw);
         assert!(
-            !stripped.contains(&pat_a)
-                && !stripped.contains(&pat_b)
-                && !stripped.contains(&pat_c),
+            !stripped.contains(&pat_a) && !stripped.contains(&pat_b) && !stripped.contains(&pat_c),
             "Security: kanban_api.rs has a `format!(...)` whose literal starts with \
              SQL keyword `{}`: use rusqlite::params! instead",
             sql_kw,

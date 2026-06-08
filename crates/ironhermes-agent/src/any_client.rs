@@ -190,10 +190,7 @@ pub fn build_role_client(resolver: &ProviderResolver, role: &str) -> Result<Opti
 /// `tracing::warn!` and returns the agent unchanged.
 ///
 /// Used at every AgentLoop construction site to close PROV-07 gaps.
-pub fn wire_fallback_if_configured(
-    mut agent: AgentLoop,
-    resolver: &ProviderResolver,
-) -> AgentLoop {
+pub fn wire_fallback_if_configured(mut agent: AgentLoop, resolver: &ProviderResolver) -> AgentLoop {
     let main_endpoint = resolver.resolve_for_main();
     if let Some(fb_name) = main_endpoint.fallback_providers.first() {
         if let Some(fb_endpoint) = resolver.resolve(fb_name) {

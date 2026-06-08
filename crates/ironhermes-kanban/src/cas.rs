@@ -201,11 +201,7 @@ pub fn assert_run_id_tx(tx: &Transaction<'_>, task_id: &str, expected_run_id: &s
 /// Assert that `task.claim_lock == claim_lock`.
 ///
 /// Returns `Err(KanbanError::ClaimExpired)` when they differ (D-41).
-pub fn assert_claim_lock(
-    conn: &Connection,
-    task_id: &str,
-    claim_lock: &str,
-) -> Result<()> {
+pub fn assert_claim_lock(conn: &Connection, task_id: &str, claim_lock: &str) -> Result<()> {
     let actual: Option<String> = conn
         .query_row(
             "SELECT claim_lock FROM tasks WHERE id = ?1",

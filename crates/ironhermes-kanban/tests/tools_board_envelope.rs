@@ -9,7 +9,7 @@
 //! Tests redirect `IRONHERMES_HOME` to a per-test tempdir so `open_for_board`
 //! never touches `~/.ironhermes`. The ENV_LOCK serialises all env-var mutations.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use ironhermes_kanban::store::{CreateTaskOptions, KanbanStore};
 use ironhermes_kanban::tools::{
@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex as TokioMutex;
 
 // Serialize all tests that touch env vars.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -93,7 +93,7 @@ fn seed_running_task_in_default(title: &str) -> (String, String) {
 
 #[tokio::test]
 async fn show_success_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let (task_id, _run_id) = seed_running_task_in_default("show-success");
     unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id) };
@@ -105,14 +105,17 @@ async fn show_success_has_board_fields() {
 
 #[tokio::test]
 async fn show_rejection_missing_task_id_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     // No task_id arg and HERMES_KANBAN_TASK not set → structured missing_task_id rejection.
     unsafe { std::env::remove_var("HERMES_KANBAN_TASK") };
     let tool = KanbanShowTool::new(make_dummy_store(), true);
     let result = tool.execute(json!({})).await.unwrap();
     assert_board_fields(&result);
-    assert!(result.contains("missing_task_id") || result.contains("rejected"), "unexpected: {result}");
+    assert!(
+        result.contains("missing_task_id") || result.contains("rejected"),
+        "unexpected: {result}"
+    );
 }
 
 // ===========================================================================
@@ -121,7 +124,7 @@ async fn show_rejection_missing_task_id_has_board_fields() {
 
 #[tokio::test]
 async fn list_success_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     // Empty board — list still returns success envelope.
     let tool = KanbanListTool::new(make_dummy_store(), true);
@@ -131,13 +134,10 @@ async fn list_success_has_board_fields() {
 
 #[tokio::test]
 async fn list_explicit_board_slug_in_envelope() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let tool = KanbanListTool::new(make_dummy_store(), true);
-    let result = tool
-        .execute(json!({"board": "default"}))
-        .await
-        .unwrap();
+    let result = tool.execute(json!({"board": "default"})).await.unwrap();
     let v: Value = serde_json::from_str(&result).unwrap();
     assert_eq!(v["board"], "default", "unexpected: {result}");
     assert_eq!(v["board_source"], "flag", "unexpected: {result}");
@@ -149,7 +149,7 @@ async fn list_explicit_board_slug_in_envelope() {
 
 #[tokio::test]
 async fn comment_success_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let (task_id, _run_id) = seed_running_task_in_default("comment-success");
     unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id) };
@@ -164,17 +164,17 @@ async fn comment_success_has_board_fields() {
 
 #[tokio::test]
 async fn comment_rejection_missing_task_id_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     // No task_id arg and HERMES_KANBAN_TASK not set → missing_task_id rejection.
     unsafe { std::env::remove_var("HERMES_KANBAN_TASK") };
     let tool = KanbanCommentTool::new(make_dummy_store(), true);
-    let result = tool
-        .execute(json!({"body": "note"}))
-        .await
-        .unwrap();
+    let result = tool.execute(json!({"body": "note"})).await.unwrap();
     assert_board_fields(&result);
-    assert!(result.contains("rejected") || result.contains("missing_task_id"), "unexpected: {result}");
+    assert!(
+        result.contains("rejected") || result.contains("missing_task_id"),
+        "unexpected: {result}"
+    );
 }
 
 // ===========================================================================
@@ -183,7 +183,7 @@ async fn comment_rejection_missing_task_id_has_board_fields() {
 
 #[tokio::test]
 async fn complete_success_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let (task_id, run_id) = seed_running_task_in_default("complete-success");
     unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id) };
@@ -200,7 +200,7 @@ async fn complete_success_has_board_fields() {
 
 #[tokio::test]
 async fn complete_rejection_stale_run_id_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let (task_id, _run_id) = seed_running_task_in_default("complete-stale");
     unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id) };
@@ -212,7 +212,10 @@ async fn complete_rejection_stale_run_id_has_board_fields() {
         .unwrap();
     unsafe { std::env::remove_var("HERMES_KANBAN_TASK") };
     assert_board_fields(&result);
-    assert!(result.contains("stale_run_id") || result.contains("rejected"), "unexpected: {result}");
+    assert!(
+        result.contains("stale_run_id") || result.contains("rejected"),
+        "unexpected: {result}"
+    );
 }
 
 // ===========================================================================
@@ -221,14 +224,16 @@ async fn complete_rejection_stale_run_id_has_board_fields() {
 
 #[tokio::test]
 async fn block_success_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let (task_id, run_id) = seed_running_task_in_default("block-success");
     unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id) };
     unsafe { std::env::set_var("HERMES_KANBAN_RUN_ID", &run_id) };
     let tool = KanbanBlockTool::new(make_dummy_store(), true);
     let result = tool
-        .execute(json!({"task_id": task_id, "expected_run_id": run_id, "reason": "waiting for dep"}))
+        .execute(
+            json!({"task_id": task_id, "expected_run_id": run_id, "reason": "waiting for dep"}),
+        )
         .await
         .unwrap();
     unsafe { std::env::remove_var("HERMES_KANBAN_TASK") };
@@ -238,7 +243,7 @@ async fn block_success_has_board_fields() {
 
 #[tokio::test]
 async fn block_rejection_stale_run_id_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let (task_id, _run_id) = seed_running_task_in_default("block-stale");
     unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id) };
@@ -250,7 +255,10 @@ async fn block_rejection_stale_run_id_has_board_fields() {
         .unwrap();
     unsafe { std::env::remove_var("HERMES_KANBAN_TASK") };
     assert_board_fields(&result);
-    assert!(result.contains("stale_run_id") || result.contains("rejected"), "unexpected: {result}");
+    assert!(
+        result.contains("stale_run_id") || result.contains("rejected"),
+        "unexpected: {result}"
+    );
 }
 
 // ===========================================================================
@@ -259,7 +267,7 @@ async fn block_rejection_stale_run_id_has_board_fields() {
 
 #[tokio::test]
 async fn create_success_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let tool = KanbanCreateTool::new(make_dummy_store(), true);
     let result = tool
@@ -272,16 +280,16 @@ async fn create_success_has_board_fields() {
 
 #[tokio::test]
 async fn create_rejection_missing_title_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let tool = KanbanCreateTool::new(make_dummy_store(), true);
     // Missing title → structured missing_required_arg rejection (after Rule-1 fix).
-    let result = tool
-        .execute(json!({"assignee": "agent"}))
-        .await
-        .unwrap();
+    let result = tool.execute(json!({"assignee": "agent"})).await.unwrap();
     assert_board_fields(&result);
-    assert!(result.contains("rejected") || result.contains("missing_required_arg"), "unexpected: {result}");
+    assert!(
+        result.contains("rejected") || result.contains("missing_required_arg"),
+        "unexpected: {result}"
+    );
 }
 
 // ===========================================================================
@@ -290,7 +298,7 @@ async fn create_rejection_missing_title_has_board_fields() {
 
 #[tokio::test]
 async fn heartbeat_success_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let (task_id, run_id) = seed_running_task_in_default("heartbeat-success");
     unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id) };
@@ -308,14 +316,17 @@ async fn heartbeat_success_has_board_fields() {
 
 #[tokio::test]
 async fn heartbeat_rejection_missing_task_id_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     // No task_id arg and HERMES_KANBAN_TASK not set → missing_task_id rejection.
     unsafe { std::env::remove_var("HERMES_KANBAN_TASK") };
     let tool = KanbanHeartbeatTool::new(make_dummy_store(), true);
     let result = tool.execute(json!({})).await.unwrap();
     assert_board_fields(&result);
-    assert!(result.contains("missing_task_id") || result.contains("rejected"), "unexpected: {result}");
+    assert!(
+        result.contains("missing_task_id") || result.contains("rejected"),
+        "unexpected: {result}"
+    );
 }
 
 // ===========================================================================
@@ -324,7 +335,7 @@ async fn heartbeat_rejection_missing_task_id_has_board_fields() {
 
 #[tokio::test]
 async fn link_success_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let mut store = KanbanStore::open_default().unwrap();
     let parent = store
@@ -344,7 +355,7 @@ async fn link_success_has_board_fields() {
 
 #[tokio::test]
 async fn link_rejection_cycle_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let mut store = KanbanStore::open_default().unwrap();
     let t1 = store
@@ -362,7 +373,10 @@ async fn link_rejection_cycle_has_board_fields() {
         .await
         .unwrap();
     assert_board_fields(&result);
-    assert!(result.contains("link_cycle") || result.contains("rejected"), "unexpected: {result}");
+    assert!(
+        result.contains("link_cycle") || result.contains("rejected"),
+        "unexpected: {result}"
+    );
 }
 
 // ===========================================================================
@@ -371,7 +385,7 @@ async fn link_rejection_cycle_has_board_fields() {
 
 #[tokio::test]
 async fn unblock_success_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let mut store = KanbanStore::open_default().unwrap();
     let opts = CreateTaskOptions::default();
@@ -385,31 +399,26 @@ async fn unblock_success_has_board_fields() {
         )
         .unwrap();
     let tool = KanbanUnblockTool::new(make_dummy_store(), true);
-    let result = tool
-        .execute(json!({"task_id": task.id}))
-        .await
-        .unwrap();
+    let result = tool.execute(json!({"task_id": task.id})).await.unwrap();
     assert_board_fields(&result);
     assert!(result.contains("\"ok\""), "unexpected: {result}");
 }
 
 #[tokio::test]
 async fn unblock_rejection_wrong_status_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let mut store = KanbanStore::open_default().unwrap();
     let opts = CreateTaskOptions::default();
-    let task = store
-        .create_task("not-blocked", "agent", opts)
-        .unwrap();
+    let task = store.create_task("not-blocked", "agent", opts).unwrap();
     // Task is in 'ready' status (default), not 'blocked'.
     let tool = KanbanUnblockTool::new(make_dummy_store(), true);
-    let result = tool
-        .execute(json!({"task_id": task.id}))
-        .await
-        .unwrap();
+    let result = tool.execute(json!({"task_id": task.id})).await.unwrap();
     assert_board_fields(&result);
-    assert!(result.contains("invalid_status") || result.contains("rejected"), "unexpected: {result}");
+    assert!(
+        result.contains("invalid_status") || result.contains("rejected"),
+        "unexpected: {result}"
+    );
 }
 
 // ===========================================================================
@@ -418,7 +427,7 @@ async fn unblock_rejection_wrong_status_has_board_fields() {
 
 #[tokio::test]
 async fn swarm_success_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     // swarm uses HERMES_PROFILE to assign the root card when assignee is omitted.
     unsafe { std::env::set_var("HERMES_PROFILE", "orchestrator") };
@@ -436,12 +445,15 @@ async fn swarm_success_has_board_fields() {
         .unwrap();
     unsafe { std::env::remove_var("HERMES_PROFILE") };
     assert_board_fields(&result);
-    assert!(result.contains("root_id") || result.contains("\"ok\""), "unexpected: {result}");
+    assert!(
+        result.contains("root_id") || result.contains("\"ok\""),
+        "unexpected: {result}"
+    );
 }
 
 #[tokio::test]
 async fn swarm_rejection_missing_workers_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let tool = KanbanSwarmTool::new(make_dummy_store(), true);
     // Missing required 'workers' field.
@@ -450,7 +462,10 @@ async fn swarm_rejection_missing_workers_has_board_fields() {
         .await
         .unwrap();
     assert_board_fields(&result);
-    assert!(result.contains("rejected") || result.contains("missing"), "unexpected: {result}");
+    assert!(
+        result.contains("rejected") || result.contains("missing"),
+        "unexpected: {result}"
+    );
 }
 
 // ===========================================================================
@@ -459,14 +474,18 @@ async fn swarm_rejection_missing_workers_has_board_fields() {
 
 #[tokio::test]
 async fn mention_success_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     // Ensure HERMES_KANBAN_TASK is not set from a previous test in the process.
     unsafe { std::env::remove_var("HERMES_KANBAN_TASK") };
     // Seed a parent task in the default board so mention can attach children.
     let mut store = KanbanStore::open_default().unwrap();
     let parent = store
-        .create_task("parent for mention", "orchestrator", CreateTaskOptions::default())
+        .create_task(
+            "parent for mention",
+            "orchestrator",
+            CreateTaskOptions::default(),
+        )
         .unwrap();
     drop(store);
     let tool = KanbanMentionTool::new(make_dummy_store(), true);
@@ -480,12 +499,18 @@ async fn mention_success_has_board_fields() {
         .unwrap();
     assert_board_fields(&result);
     // Should succeed with task IDs for each mention.
-    assert!(result.contains("\"ok\"") || result.contains("task_id") || result.contains("tasks") || result.contains("children"), "unexpected: {result}");
+    assert!(
+        result.contains("\"ok\"")
+            || result.contains("task_id")
+            || result.contains("tasks")
+            || result.contains("children"),
+        "unexpected: {result}"
+    );
 }
 
 #[tokio::test]
 async fn mention_rejection_no_mentions_has_board_fields() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let tool = KanbanMentionTool::new(make_dummy_store(), true);
     // No @mentions in body — should reject.
@@ -497,7 +522,10 @@ async fn mention_rejection_no_mentions_has_board_fields() {
         .await
         .unwrap();
     assert_board_fields(&result);
-    assert!(result.contains("rejected") || result.contains("no_mentions") || result.contains("missing"), "unexpected: {result}");
+    assert!(
+        result.contains("rejected") || result.contains("no_mentions") || result.contains("missing"),
+        "unexpected: {result}"
+    );
 }
 
 // ===========================================================================
@@ -506,7 +534,7 @@ async fn mention_rejection_no_mentions_has_board_fields() {
 
 #[tokio::test]
 async fn create_with_explicit_board_flag_shows_flag_source() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let tool = KanbanCreateTool::new(make_dummy_store(), true);
     let result = tool
@@ -520,7 +548,7 @@ async fn create_with_explicit_board_flag_shows_flag_source() {
 
 #[tokio::test]
 async fn list_with_explicit_board_env_shows_env_source() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     unsafe { std::env::set_var("HERMES_KANBAN_BOARD", "default") };
     let tool = KanbanListTool::new(make_dummy_store(), true);

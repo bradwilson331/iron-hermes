@@ -7,21 +7,21 @@
 //! (0 = success, 1 = error, 2 = D-34 bulk-summary refusal).
 
 use anyhow::{Context, Result, anyhow};
+use ironhermes_kanban::cas::{atomic_claim, build_claim_lock, release_claim};
+use ironhermes_kanban::decomposer::{
+    ChildSpec, DecomposeFn, DecomposeOutput, DecomposeRequest, decompose_triage_task,
+    specify_triage_task,
+};
+use ironhermes_kanban::store::{CreateTaskOptions, ListFilters};
 use ironhermes_kanban::{
     DispatcherContext, KanbanConfig, KanbanStore, KanbanWorkerSpec, StrandedReport, SwarmGraphSpec,
     diagnose_stranded, run_dispatch_tick,
 };
-use ironhermes_kanban::decomposer::{
-    DecomposeFn, DecomposeOutput, DecomposeRequest, ChildSpec,
-    decompose_triage_task, specify_triage_task,
-};
-use ironhermes_kanban::store::{CreateTaskOptions, ListFilters};
-use ironhermes_kanban::cas::{atomic_claim, build_claim_lock, release_claim};
 use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
 
-use ironhermes_kanban::types::TaskComment;
 use ironhermes_core::config::Config;
+use ironhermes_kanban::types::TaskComment;
 
 use super::format::{
     format_assignees, format_diagnostics, format_event_line, format_runs_table, format_stats,
@@ -140,7 +140,10 @@ pub async fn cmd_create(
     let mut store = open_store_for_board(board)?;
 
     // Parse max_runtime (e.g. "30m", "3600")
-    let max_runtime_seconds: Option<i64> = max_runtime.as_deref().map(parse_duration_secs).transpose()?;
+    let max_runtime_seconds: Option<i64> = max_runtime
+        .as_deref()
+        .map(parse_duration_secs)
+        .transpose()?;
 
     // Handle --branch: append as marker to body
     let effective_body = match (body, branch) {
@@ -154,7 +157,11 @@ pub async fn cmd_create(
         parents,
         tenant,
         workspace,
-        skills: if skills.is_empty() { None } else { Some(skills) },
+        skills: if skills.is_empty() {
+            None
+        } else {
+            Some(skills)
+        },
         priority,
         idempotency_key,
         scheduled_at: scheduled_at.as_deref().map(parse_timestamp).transpose()?,
@@ -174,15 +181,19 @@ pub async fn cmd_create(
         goal_toolset,
     };
 
-    let task = store.create_task(&title, &assignee, opts)
+    let task = store
+        .create_task(&title, &assignee, opts)
         .context("Failed to create task")?;
 
     if json {
-        println!("{}", serde_json::json!({
-            "task_id": task.id,
-            "status": task.status,
-            "assignee": task.assignee,
-        }));
+        println!(
+            "{}",
+            serde_json::json!({
+                "task_id": task.id,
+                "status": task.status,
+                "assignee": task.assignee,
+            })
+        );
     } else {
         println!("{}", task.id);
     }
@@ -229,7 +240,10 @@ fn parse_timestamp(s: &str) -> Result<f64> {
     if let Ok(f) = s.parse::<f64>() {
         return Ok(f);
     }
-    Err(anyhow!("Could not parse timestamp '{}' — use a unix epoch float", s))
+    Err(anyhow!(
+        "Could not parse timestamp '{}' — use a unix epoch float",
+        s
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -297,8 +311,14 @@ pub async fn cmd_show(id: String, json: bool, board: Option<&str>) -> Result<i32
 pub async fn cmd_assign(id: String, profile: String, board: Option<&str>) -> Result<i32> {
     let mut store = open_store_for_board(board)?;
     // "none" sentinel → unassign (set to empty string)
-    let assignee = if profile.eq_ignore_ascii_case("none") { "" } else { &profile };
-    store.assign_task(&id, assignee).context("Failed to assign task")?;
+    let assignee = if profile.eq_ignore_ascii_case("none") {
+        ""
+    } else {
+        &profile
+    };
+    store
+        .assign_task(&id, assignee)
+        .context("Failed to assign task")?;
     println!("Assigned {} to '{}'", id, assignee);
     Ok(0)
 }
@@ -309,7 +329,9 @@ pub async fn cmd_assign(id: String, profile: String, board: Option<&str>) -> Res
 
 pub async fn cmd_link(parent_id: String, child_id: String, board: Option<&str>) -> Result<i32> {
     let mut store = open_store_for_board(board)?;
-    store.insert_link(&parent_id, &child_id).context("Failed to create link")?;
+    store
+        .insert_link(&parent_id, &child_id)
+        .context("Failed to create link")?;
     println!("Linked {} → {}", parent_id, child_id);
     Ok(0)
 }
@@ -353,10 +375,17 @@ pub async fn cmd_claim(id: String, ttl: Option<u64>, board: Option<&str>) -> Res
 // cmd_comment
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_comment(id: String, body: String, author: Option<String>, board: Option<&str>) -> Result<i32> {
+pub async fn cmd_comment(
+    id: String,
+    body: String,
+    author: Option<String>,
+    board: Option<&str>,
+) -> Result<i32> {
     let mut store = open_store_for_board(board)?;
-    let author = author.unwrap_or_else(|| profile_from_env());
-    store.add_comment(&id, &author, &body).context("Failed to add comment")?;
+    let author = author.unwrap_or_else(profile_from_env);
+    store
+        .add_comment(&id, &author, &body)
+        .context("Failed to add comment")?;
     println!("Comment added to {}", id);
     Ok(0)
 }
@@ -415,7 +444,12 @@ pub async fn cmd_complete(
 // cmd_block
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_block(id: String, reason: String, extra_ids: Vec<String>, board: Option<&str>) -> Result<i32> {
+pub async fn cmd_block(
+    id: String,
+    reason: String,
+    extra_ids: Vec<String>,
+    board: Option<&str>,
+) -> Result<i32> {
     let mut store = open_store_for_board(board)?;
     let mut all_ids = vec![id];
     all_ids.extend(extra_ids);
@@ -539,9 +573,8 @@ pub async fn cmd_swarm(
                 })
                 .collect()
         }
-        (None, Some(rich)) => {
-            serde_json::from_str::<Vec<KanbanWorkerSpec>>(&rich).context("Invalid --workers-json")?
-        }
+        (None, Some(rich)) => serde_json::from_str::<Vec<KanbanWorkerSpec>>(&rich)
+            .context("Invalid --workers-json")?,
         (Some(_), Some(_)) => {
             return Err(anyhow!(
                 "--workers and --workers-json are mutually exclusive"
@@ -584,7 +617,11 @@ pub async fn cmd_swarm(
         synthesizer,
         blackboard: blackboard_value,
         workspace,
-        skills: if skills.is_empty() { None } else { Some(skills) },
+        skills: if skills.is_empty() {
+            None
+        } else {
+            Some(skills)
+        },
         tenant,
         priority,
         max_runtime_seconds,
@@ -651,8 +688,7 @@ pub async fn cmd_mention(
     use std::collections::HashSet;
 
     use ironhermes_kanban::mention::{
-        FallbackPolicy, Resolution, SkipReason, ResolverCtx,
-        parse_mentions, resolve_mention,
+        FallbackPolicy, Resolution, ResolverCtx, SkipReason, parse_mentions, resolve_mention,
     };
     use ironhermes_kanban::store::{MentionChildSpec, MentionPlan};
 
@@ -665,7 +701,9 @@ pub async fn cmd_mention(
     let mut store = open_store_for_board(board)?;
 
     // 3. Fetch the parent task.
-    let parent = store.get_task(&task_id).context("Failed to fetch parent task")?;
+    let parent = store
+        .get_task(&task_id)
+        .context("Failed to fetch parent task")?;
 
     // 4. Determine body to parse.
     let body = body_override.unwrap_or_else(|| parent.body.clone().unwrap_or_default());
@@ -681,7 +719,9 @@ pub async fn cmd_mention(
     let known: HashSet<String> = {
         let mut stmt = store
             .conn
-            .prepare("SELECT DISTINCT assignee FROM tasks WHERE assignee != '' AND assignee IS NOT NULL")
+            .prepare(
+                "SELECT DISTINCT assignee FROM tasks WHERE assignee != '' AND assignee IS NOT NULL",
+            )
             .context("Failed to prepare known-assignees query")?;
         let rows = stmt
             .query_map(rusqlite::params![], |row| row.get::<_, String>(0))
@@ -969,7 +1009,10 @@ pub async fn cmd_assignees(json: bool, board: Option<&str>) -> Result<i32> {
     rows.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
 
     if json {
-        let val: Vec<_> = rows.iter().map(|(a, c)| serde_json::json!({"assignee": a, "count": c})).collect();
+        let val: Vec<_> = rows
+            .iter()
+            .map(|(a, c)| serde_json::json!({"assignee": a, "count": c}))
+            .collect();
         println!("{}", serde_json::to_string_pretty(&val)?);
     } else {
         print!("{}", format_assignees(&rows));
@@ -1002,7 +1045,9 @@ pub async fn cmd_dispatch(
     let store_arc = Arc::new(TokioMutex::new(store));
     let ctx = DispatcherContext::new(store_arc, config);
 
-    run_dispatch_tick(&ctx).await.context("Dispatch tick failed")?;
+    run_dispatch_tick(&ctx)
+        .await
+        .context("Dispatch tick failed")?;
 
     if json {
         println!("{}", serde_json::json!({"status": "ok"}));
@@ -1032,7 +1077,10 @@ pub async fn cmd_stats(json: bool, board: Option<&str>) -> Result<i32> {
     rows.sort_by_key(|(s, _)| s.clone());
 
     if json {
-        let val: Vec<_> = rows.iter().map(|(s, c)| serde_json::json!({"status": s, "count": c})).collect();
+        let val: Vec<_> = rows
+            .iter()
+            .map(|(s, c)| serde_json::json!({"status": s, "count": c}))
+            .collect();
         println!("{}", serde_json::to_string_pretty(&val)?);
     } else {
         print!("{}", format_stats(&rows));
@@ -1119,7 +1167,7 @@ pub async fn cmd_gc(
     log_retention_days: Option<u64>,
     board: Option<&str>,
 ) -> Result<i32> {
-    let mut store = open_store_for_board(board)?;
+    let store = open_store_for_board(board)?;
     let event_days = event_retention_days.unwrap_or(30);
     let log_days = log_retention_days.unwrap_or(30);
 
@@ -1132,30 +1180,38 @@ pub async fn cmd_gc(
         now - (event_days as f64 * 86400.0)
     };
 
-    let deleted = store.conn.execute(
-        "DELETE FROM task_events WHERE created_at < ?1",
-        rusqlite::params![cutoff],
-    ).context("Failed to delete old events")?;
-    println!("GC: deleted {} old events (older than {} days)", deleted, event_days);
+    let deleted = store
+        .conn
+        .execute(
+            "DELETE FROM task_events WHERE created_at < ?1",
+            rusqlite::params![cutoff],
+        )
+        .context("Failed to delete old events")?;
+    println!(
+        "GC: deleted {} old events (older than {} days)",
+        deleted, event_days
+    );
 
     // Remove old log files
     let logs_dir = ironhermes_kanban::kanban_logs_dir();
     if logs_dir.exists() {
-        let log_cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(log_days * 86400);
+        let log_cutoff =
+            std::time::SystemTime::now() - std::time::Duration::from_secs(log_days * 86400);
         let mut removed = 0usize;
         for entry in std::fs::read_dir(&logs_dir).context("Failed to read logs dir")? {
             let entry = entry?;
-            if let Ok(meta) = entry.metadata() {
-                if let Ok(modified) = meta.modified() {
-                    if modified < log_cutoff {
-                        if std::fs::remove_file(entry.path()).is_ok() {
-                            removed += 1;
-                        }
-                    }
-                }
+            if let Ok(meta) = entry.metadata()
+                && let Ok(modified) = meta.modified()
+                && modified < log_cutoff
+                && std::fs::remove_file(entry.path()).is_ok()
+            {
+                removed += 1;
             }
         }
-        println!("GC: removed {} old log files (older than {} days)", removed, log_days);
+        println!(
+            "GC: removed {} old log files (older than {} days)",
+            removed, log_days
+        );
     }
 
     Ok(0)
@@ -1190,7 +1246,12 @@ pub async fn cmd_reclaim(id: String, board: Option<&str>) -> Result<i32> {
 // cmd_reassign
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_reassign(id: String, new_profile: String, reclaim: bool, board: Option<&str>) -> Result<i32> {
+pub async fn cmd_reassign(
+    id: String,
+    new_profile: String,
+    reclaim: bool,
+    board: Option<&str>,
+) -> Result<i32> {
     let mut store = open_store_for_board(board)?;
 
     if reclaim {
@@ -1203,7 +1264,9 @@ pub async fn cmd_reassign(id: String, new_profile: String, reclaim: bool, board:
         }
     }
 
-    store.assign_task(&id, &new_profile).context("Failed to reassign task")?;
+    store
+        .assign_task(&id, &new_profile)
+        .context("Failed to reassign task")?;
     println!("{}: reassigned to '{}'", id, new_profile);
     Ok(0)
 }
@@ -1217,16 +1280,21 @@ pub async fn cmd_diagnostics(json: bool, board: Option<&str>) -> Result<i32> {
     let config = KanbanConfig::default();
     let threshold = config.stranded_threshold_seconds;
 
-    let reports: Vec<StrandedReport> = diagnose_stranded(&store, threshold)
-        .context("Failed to run diagnostics")?;
+    let reports: Vec<StrandedReport> =
+        diagnose_stranded(&store, threshold).context("Failed to run diagnostics")?;
 
     if json {
-        let val: Vec<_> = reports.iter().map(|r| serde_json::json!({
-            "task_id": r.task_id,
-            "assignee": r.assignee,
-            "age_seconds": r.age_seconds,
-            "severity": format!("{:?}", r.severity),
-        })).collect();
+        let val: Vec<_> = reports
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "task_id": r.task_id,
+                    "assignee": r.assignee,
+                    "age_seconds": r.age_seconds,
+                    "severity": format!("{:?}", r.severity),
+                })
+            })
+            .collect();
         println!("{}", serde_json::to_string_pretty(&val)?);
     } else {
         print!("{}", format_diagnostics(&reports));
@@ -1334,7 +1402,11 @@ pub async fn cmd_notify_subscribe(
 ///
 /// Lists all subscriptions, or filters by task_id. `--json` emits a serde
 /// JSON array (Subscription's derive(Serialize)).
-pub async fn cmd_notify_list(task_id: Option<String>, json: bool, board: Option<&str>) -> anyhow::Result<i32> {
+pub async fn cmd_notify_list(
+    task_id: Option<String>,
+    json: bool,
+    board: Option<&str>,
+) -> anyhow::Result<i32> {
     let store = match open_store_for_board(board) {
         Ok(s) => s,
         Err(e) => {
@@ -1423,8 +1495,8 @@ fn build_runtime_decompose_fn(
     main_config: &Config,
 ) -> anyhow::Result<DecomposeFn> {
     use ironhermes_agent::client::LlmClient;
-    use ironhermes_core::provider::ProviderResolver;
     use ironhermes_core::ChatMessage;
+    use ironhermes_core::provider::ProviderResolver;
 
     // Tier 1: kanban-local model override.
     // Tier 2: model.roles["kanban_decomposer"].model.
@@ -1528,12 +1600,13 @@ fn build_runtime_decompose_fn(
             // rather than a byte-slice — multi-byte UTF-8 (emoji, non-English LLM
             // output) would otherwise panic with `byte index N is not a char boundary`.
             let preview: String = raw_text.chars().take(200).collect();
-            let parsed: serde_json::Value = serde_json::from_str(&raw_text)
-                .map_err(|e| ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
+            let parsed: serde_json::Value = serde_json::from_str(&raw_text).map_err(|e| {
+                ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
                     "parse_error: LLM response is not valid JSON: {} (raw: {})",
                     e,
                     preview
-                )))?;
+                ))
+            })?;
 
             // CR-02 fix: reject the LLM output when required fields are missing,
             // rather than silently substituting `(untitled)` / `""` defaults.
@@ -1544,15 +1617,19 @@ fn build_runtime_decompose_fn(
             // event and the task is retained in `triage`.
             let new_title = parsed["new_title"]
                 .as_str()
-                .ok_or_else(|| ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
-                    "schema_error: LLM response missing required `new_title` field"
-                )))?
+                .ok_or_else(|| {
+                    ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
+                        "schema_error: LLM response missing required `new_title` field"
+                    ))
+                })?
                 .to_string();
             let new_body = parsed["new_body"]
                 .as_str()
-                .ok_or_else(|| ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
-                    "schema_error: LLM response missing required `new_body` field"
-                )))?
+                .ok_or_else(|| {
+                    ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
+                        "schema_error: LLM response missing required `new_body` field"
+                    ))
+                })?
                 .to_string();
 
             let empty_vec = vec![];
@@ -1567,7 +1644,11 @@ fn build_runtime_decompose_fn(
                 })
                 .collect();
 
-            Ok(DecomposeOutput { new_title, new_body, children })
+            Ok(DecomposeOutput {
+                new_title,
+                new_body,
+                children,
+            })
         })
     });
 
@@ -1687,8 +1768,7 @@ pub fn build_runtime_judge_fn(
             // creep. T-36.3.7.12-03-T03: even on a successful prompt
             // injection in `body`, the response space is still constrained
             // to the JSON parser below.
-            let system_prompt =
-                "You evaluate whether worker output meets the acceptance criteria in \
+            let system_prompt = "You evaluate whether worker output meets the acceptance criteria in \
                  title + body. Respond with JSON: \
                  {\"verdict\": \"met\" | \"not_met\", \"reason\": \"<short explanation>\"}.";
 
@@ -1723,22 +1803,24 @@ pub fn build_runtime_judge_fn(
             let preview: String = raw_text.chars().take(200).collect();
 
             // Parse JSON — fail-closed on malformed body.
-            let parsed: serde_json::Value =
-                serde_json::from_str(&raw_text).map_err(|e| {
-                    ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
-                        "judge response not JSON: {} (raw: {})",
-                        e,
-                        preview
-                    ))
-                })?;
-
-            // Required `verdict` string field — fail-closed on absence.
-            let verdict_str = parsed.get("verdict").and_then(|v| v.as_str()).ok_or_else(|| {
+            let parsed: serde_json::Value = serde_json::from_str(&raw_text).map_err(|e| {
                 ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
-                    "judge response missing 'verdict' field (raw: {})",
+                    "judge response not JSON: {} (raw: {})",
+                    e,
                     preview
                 ))
             })?;
+
+            // Required `verdict` string field — fail-closed on absence.
+            let verdict_str = parsed
+                .get("verdict")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
+                        "judge response missing 'verdict' field (raw: {})",
+                        preview
+                    ))
+                })?;
 
             // Case-sensitive match against the two locked literals
             // (T-36.3.7.12-03-T02 mitigation).
@@ -1806,11 +1888,13 @@ pub async fn cmd_decompose(
         let cap = kanban_config.auto_decompose_per_tick as usize;
         let triage_tasks = {
             let store = store_arc.lock().await;
-            store.list_tasks(ListFilters {
-                status: Some("triage".to_string()),
-                tenant: tenant.clone(),
-                ..Default::default()
-            }).context("Failed to list triage tasks")?
+            store
+                .list_tasks(ListFilters {
+                    status: Some("triage".to_string()),
+                    tenant: tenant.clone(),
+                    ..Default::default()
+                })
+                .context("Failed to list triage tasks")?
         };
 
         let mut any_err = false;
@@ -1818,12 +1902,9 @@ pub async fn cmd_decompose(
 
         for task in triage_tasks.into_iter().take(cap) {
             let task_id = task.id.clone();
-            match decompose_triage_task(
-                store_arc.clone(),
-                &task_id,
-                &decompose_fn,
-                &kanban_config,
-            ).await {
+            match decompose_triage_task(store_arc.clone(), &task_id, &decompose_fn, &kanban_config)
+                .await
+            {
                 Ok(ids) => {
                     // WR-01 fix: re-read the task after success so the JSON
                     // envelope reports the LLM's rewritten title rather than
@@ -1843,7 +1924,11 @@ pub async fn cmd_decompose(
                             "new_title": new_title,
                         }));
                     } else {
-                        println!("[{}] decomposed (children: {})", task_id, ids.child_ids.len());
+                        println!(
+                            "[{}] decomposed (children: {})",
+                            task_id,
+                            ids.child_ids.len()
+                        );
                     }
                 }
                 Err(e) => {
@@ -1880,42 +1965,49 @@ pub async fn cmd_decompose(
             let s = store_arc.lock().await;
             s.get_task(&task_id).map(|t| t.title).unwrap_or_default()
         };
-        match decompose_triage_task(
-            store_arc.clone(),
-            &task_id,
-            &decompose_fn,
-            &kanban_config,
-        ).await {
+        match decompose_triage_task(store_arc.clone(), &task_id, &decompose_fn, &kanban_config)
+            .await
+        {
             Ok(ids) => {
                 let new_title = {
                     let s = store_arc.lock().await;
                     s.get_task(&task_id).map(|t| t.title).unwrap_or_default()
                 };
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                        "ok": true,
-                        "task_id": task_id,
-                        "reason": serde_json::Value::Null,
-                        "fanout": ids.child_ids.len(),
-                        "child_ids": ids.child_ids,
-                        "new_title": new_title,
-                    }))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "ok": true,
+                            "task_id": task_id,
+                            "reason": serde_json::Value::Null,
+                            "fanout": ids.child_ids.len(),
+                            "child_ids": ids.child_ids,
+                            "new_title": new_title,
+                        }))?
+                    );
                 } else {
-                    println!("[{}] decomposed (children: {})", task_id, ids.child_ids.len());
+                    println!(
+                        "[{}] decomposed (children: {})",
+                        task_id,
+                        ids.child_ids.len()
+                    );
                 }
                 Ok(0)
             }
             Err(e) => {
                 eprintln!("[{}] decompose failed: {}", task_id, e);
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                        "ok": false,
-                        "task_id": task_id,
-                        "reason": e.to_string(),
-                        "fanout": 0,
-                        "child_ids": [],
-                        "new_title": original_title,
-                    }))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "ok": false,
+                            "task_id": task_id,
+                            "reason": e.to_string(),
+                            "fanout": 0,
+                            "child_ids": [],
+                            "new_title": original_title,
+                        }))?
+                    );
                 }
                 Ok(1)
             }
@@ -1966,11 +2058,13 @@ pub async fn cmd_specify(
         let cap = kanban_config.auto_decompose_per_tick as usize;
         let triage_tasks = {
             let store = store_arc.lock().await;
-            store.list_tasks(ListFilters {
-                status: Some("triage".to_string()),
-                tenant: tenant.clone(),
-                ..Default::default()
-            }).context("Failed to list triage tasks")?
+            store
+                .list_tasks(ListFilters {
+                    status: Some("triage".to_string()),
+                    tenant: tenant.clone(),
+                    ..Default::default()
+                })
+                .context("Failed to list triage tasks")?
         };
 
         let mut any_err = false;
@@ -1978,12 +2072,9 @@ pub async fn cmd_specify(
 
         for task in triage_tasks.into_iter().take(cap) {
             let task_id = task.id.clone();
-            match specify_triage_task(
-                store_arc.clone(),
-                &task_id,
-                &decompose_fn,
-                &kanban_config,
-            ).await {
+            match specify_triage_task(store_arc.clone(), &task_id, &decompose_fn, &kanban_config)
+                .await
+            {
                 Ok(ids) => {
                     // WR-05 fix: surface root_promoted in the JSON envelope so
                     // operators can distinguish "this run promoted the task"
@@ -2037,25 +2128,24 @@ pub async fn cmd_specify(
             let s = store_arc.lock().await;
             s.get_task(&task_id).map(|t| t.title).unwrap_or_default()
         };
-        match specify_triage_task(
-            store_arc.clone(),
-            &task_id,
-            &decompose_fn,
-            &kanban_config,
-        ).await {
+        match specify_triage_task(store_arc.clone(), &task_id, &decompose_fn, &kanban_config).await
+        {
             Ok(ids) => {
                 let new_title = {
                     let s = store_arc.lock().await;
                     s.get_task(&task_id).map(|t| t.title).unwrap_or_default()
                 };
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                        "ok": true,
-                        "task_id": task_id,
-                        "reason": serde_json::Value::Null,
-                        "new_title": new_title,
-                        "root_promoted": ids.root_promoted,
-                    }))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "ok": true,
+                            "task_id": task_id,
+                            "reason": serde_json::Value::Null,
+                            "new_title": new_title,
+                            "root_promoted": ids.root_promoted,
+                        }))?
+                    );
                 } else if ids.root_promoted {
                     println!("[{}] specified (promoted to todo)", task_id);
                 } else {
@@ -2066,13 +2156,16 @@ pub async fn cmd_specify(
             Err(e) => {
                 eprintln!("[{}] specify failed: {}", task_id, e);
                 if json {
-                    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-                        "ok": false,
-                        "task_id": task_id,
-                        "reason": e.to_string(),
-                        "new_title": original_title,
-                        "root_promoted": false,
-                    }))?);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "ok": false,
+                            "task_id": task_id,
+                            "reason": e.to_string(),
+                            "new_title": original_title,
+                            "root_promoted": false,
+                        }))?
+                    );
                 }
                 Ok(1)
             }

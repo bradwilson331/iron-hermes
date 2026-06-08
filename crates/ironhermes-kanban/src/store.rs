@@ -21,8 +21,8 @@ use crate::events::KanbanEventKind;
 use crate::paths::validate_dir_workspace;
 use crate::schema::{SCHEMA_SQL, SCHEMA_VERSION, run_migrations};
 use crate::types::{
-    KanbanStatus, KanbanWorkerSpec, Subscription, SwarmGraphIds, SwarmGraphSpec, Task,
-    TaskComment, TaskRun,
+    KanbanStatus, KanbanWorkerSpec, Subscription, SwarmGraphIds, SwarmGraphSpec, Task, TaskComment,
+    TaskRun,
 };
 
 // ---------------------------------------------------------------------------
@@ -324,13 +324,12 @@ impl KanbanStore {
     ///
     /// The format is the D-06 banner: `migrated board '<label>' from v<old> to v<new>`,
     /// prefixed with the `[kanban]` tag. No trailing punctuation; `eprintln!` adds the newline.
-    pub fn format_migration_banner(
-        slug: Option<&str>,
-        old: i64,
-        new: i64,
-    ) -> String {
+    pub fn format_migration_banner(slug: Option<&str>, old: i64, new: i64) -> String {
         let label = slug.unwrap_or("default");
-        format!("[kanban] migrated board '{}' from v{} to v{}", label, old, new)
+        format!(
+            "[kanban] migrated board '{}' from v{} to v{}",
+            label, old, new
+        )
     }
 
     fn init_schema(&mut self, slug_hint: Option<&str>) -> Result<()> {
@@ -486,10 +485,10 @@ impl KanbanStore {
         }
 
         // Idempotency short-circuit (D-24).
-        if let Some(ref key) = opts.idempotency_key {
-            if let Some(existing) = self.find_by_idempotency_key(key)? {
-                return Ok(existing);
-            }
+        if let Some(ref key) = opts.idempotency_key
+            && let Some(existing) = self.find_by_idempotency_key(key)?
+        {
+            return Ok(existing);
         }
 
         let now = Self::now();
@@ -507,7 +506,7 @@ impl KanbanStore {
         let skills_json = opts
             .skills
             .as_ref()
-            .map(|v| serde_json::to_string(v))
+            .map(serde_json::to_string)
             .transpose()?;
 
         // Phase 36.3.7.12 D-03 producer-level coercion: `0` from a caller that
@@ -562,7 +561,14 @@ impl KanbanStore {
             "parents": opts.parents,
             "tenant": opts.tenant,
         });
-        Self::append_event_internal(&self.conn, &id, None, KanbanEventKind::Created, Some(&payload), now)?;
+        Self::append_event_internal(
+            &self.conn,
+            &id,
+            None,
+            KanbanEventKind::Created,
+            Some(&payload),
+            now,
+        )?;
 
         self.get_task(&id)
     }
@@ -714,13 +720,13 @@ impl KanbanStore {
             .flatten();
 
         // D-39: reject only when BOTH are Some and unequal.
-        if let (Some(p), Some(c)) = (&parent_tenant, &child_tenant) {
-            if p != c {
-                return Err(KanbanError::TenantMismatch {
-                    parent: p.clone(),
-                    child: c.clone(),
-                });
-            }
+        if let (Some(p), Some(c)) = (&parent_tenant, &child_tenant)
+            && p != c
+        {
+            return Err(KanbanError::TenantMismatch {
+                parent: p.clone(),
+                child: c.clone(),
+            });
         }
 
         let now = Self::now();
@@ -800,13 +806,13 @@ impl KanbanStore {
             )
             .optional()?
             .flatten();
-        if let (Some(p), Some(c)) = (&parent_tenant, &child_tenant) {
-            if p != c {
-                return Err(KanbanError::TenantMismatch {
-                    parent: p.clone(),
-                    child: c.clone(),
-                });
-            }
+        if let (Some(p), Some(c)) = (&parent_tenant, &child_tenant)
+            && p != c
+        {
+            return Err(KanbanError::TenantMismatch {
+                parent: p.clone(),
+                child: c.clone(),
+            });
         }
 
         // Cycle gate: walk descendants of child; reject if parent appears.
@@ -1044,7 +1050,7 @@ impl KanbanStore {
         let skills_json: Option<String> = spec
             .skills
             .as_ref()
-            .map(|v| serde_json::to_string(v))
+            .map(serde_json::to_string)
             .transpose()?;
 
         // ---------------- Root card (status='done', ended_at=now) ---------------
@@ -1416,10 +1422,7 @@ impl KanbanStore {
     /// chain of `plan.parent_id` up to `MAX_MENTION_CHAIN_DEPTH` hops. A match
     /// returns [`KanbanError::Other`] and the dropped `Transaction` auto-rolls back
     /// (RAII), producing zero rows (REQ-11).
-    pub fn create_mention_children(
-        &mut self,
-        plan: MentionPlan,
-    ) -> Result<MentionResult> {
+    pub fn create_mention_children(&mut self, plan: MentionPlan) -> Result<MentionResult> {
         use rusqlite::TransactionBehavior;
 
         // ---------------- Empty-plan short-circuit (not an error) ---------------
@@ -1523,7 +1526,7 @@ impl KanbanStore {
         let skills_json: Option<String> = plan
             .skills
             .as_ref()
-            .map(|v| serde_json::to_string(v))
+            .map(serde_json::to_string)
             .transpose()?;
 
         let mut children: Vec<MentionChildIds> = Vec::with_capacity(plan.children.len());
@@ -1680,24 +1683,15 @@ impl KanbanStore {
     /// The Plan 04 goal-loop wrapper at
     /// `crates/ironhermes-cli/src/kanban/goal_loop.rs` is the sole intended
     /// caller of this method.
-    pub fn bump_goal_turn_counter(
-        &mut self,
-        task_id: &str,
-        claim_lock: &str,
-    ) -> Result<bool> {
+    pub fn bump_goal_turn_counter(&mut self, task_id: &str, claim_lock: &str) -> Result<bool> {
         let task_id_owned = task_id.to_string();
-        crate::cas::worker_write_gated(
-            &mut self.conn,
-            task_id,
-            claim_lock,
-            move |tx| {
-                tx.execute(
-                    "UPDATE tasks SET goal_turns_used = goal_turns_used + 1 WHERE id=?1",
-                    params![task_id_owned],
-                )?;
-                Ok(())
-            },
-        )
+        crate::cas::worker_write_gated(&mut self.conn, task_id, claim_lock, move |tx| {
+            tx.execute(
+                "UPDATE tasks SET goal_turns_used = goal_turns_used + 1 WHERE id=?1",
+                params![task_id_owned],
+            )?;
+            Ok(())
+        })
     }
 
     /// Reset `tasks.goal_turns_used` to 0.
@@ -2087,7 +2081,14 @@ impl KanbanStore {
         // (i) Append completed event.
         let result_len = result.map(|r| r.len()).unwrap_or(0);
         let summary_preview = summary
-            .map(|s| s.lines().next().unwrap_or("").chars().take(400).collect::<String>())
+            .map(|s| {
+                s.lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(400)
+                    .collect::<String>()
+            })
             .unwrap_or_default();
         let payload = serde_json::json!({
             "result_len": result_len,
@@ -2182,7 +2183,14 @@ impl KanbanStore {
              claim_expires=NULL WHERE id=?1",
             params![task_id],
         )?;
-        Self::append_event_internal(&self.conn, task_id, None, KanbanEventKind::Unblocked, None, now)?;
+        Self::append_event_internal(
+            &self.conn,
+            task_id,
+            None,
+            KanbanEventKind::Unblocked,
+            None,
+            now,
+        )?;
         Ok(())
     }
 
@@ -2217,7 +2225,14 @@ impl KanbanStore {
              claim_expires=NULL WHERE id=?1",
             params![task_id],
         )?;
-        Self::append_event_internal(&self.conn, task_id, None, KanbanEventKind::Archived, None, now)?;
+        Self::append_event_internal(
+            &self.conn,
+            task_id,
+            None,
+            KanbanEventKind::Archived,
+            None,
+            now,
+        )?;
         Ok(())
     }
 
@@ -2287,10 +2302,7 @@ impl KanbanStore {
     /// push EVERY event kind to the WS client (board-level feed + drawer event
     /// stream). Contrast with [`list_terminal_events_after`](Self::list_terminal_events_after)
     /// which filters to 5 terminal kinds only.
-    pub fn list_all_events_after(
-        &self,
-        watermark: i64,
-    ) -> Result<Vec<crate::events::KanbanEvent>> {
+    pub fn list_all_events_after(&self, watermark: i64) -> Result<Vec<crate::events::KanbanEvent>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, task_id, run_id, kind, payload, created_at \
              FROM task_events \
@@ -2318,11 +2330,11 @@ impl KanbanStore {
     /// watermark (locked CONTEXT decision: in-memory only; gateway-downtime
     /// loss accepted for v1). (Phase 36.3.7.5 BUG-36.3.7.5-03 — notifier helper)
     pub fn max_event_id(&self) -> Result<i64> {
-        let max: i64 = self
-            .conn
-            .query_row("SELECT COALESCE(MAX(id), 0) FROM task_events", [], |r| {
-                r.get(0)
-            })?;
+        let max: i64 =
+            self.conn
+                .query_row("SELECT COALESCE(MAX(id), 0) FROM task_events", [], |r| {
+                    r.get(0)
+                })?;
         Ok(max)
     }
 
@@ -2556,7 +2568,15 @@ impl KanbanStore {
                   consecutive_failures, created_by, created_at) \
                  VALUES \
                  (?1, ?2, ?3, ?4, 'todo', 0, ?5, NULL, NULL, 0, ?6, ?7)",
-                params![child_id, child.title, child.body, assignee, parent_tenant, parent_id, now],
+                params![
+                    child_id,
+                    child.title,
+                    child.body,
+                    assignee,
+                    parent_tenant,
+                    parent_id,
+                    now
+                ],
             )?;
 
             // Child creation event.

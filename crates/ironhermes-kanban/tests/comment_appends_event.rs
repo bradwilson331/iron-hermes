@@ -146,10 +146,9 @@ fn comment_event_carries_subkind_and_comment_id_in_payload() {
         )
         .expect("query latest event payload");
 
-    let payload_str = payload_str
-        .expect("comment-emitted event row must carry a non-NULL payload");
-    let payload: serde_json::Value = serde_json::from_str(&payload_str)
-        .expect("payload must parse as JSON");
+    let payload_str = payload_str.expect("comment-emitted event row must carry a non-NULL payload");
+    let payload: serde_json::Value =
+        serde_json::from_str(&payload_str).expect("payload must parse as JSON");
 
     assert_eq!(
         payload["subkind"], "comment",

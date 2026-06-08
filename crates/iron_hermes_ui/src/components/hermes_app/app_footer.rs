@@ -79,6 +79,12 @@ pub fn AppFooter() -> Element {
 
 /// Short-name map for the footer's SCREEN field. Matches the breadcrumb
 /// short-name vocabulary from the plan's `<interfaces>` table.
+// Called by AppFooter, which is only mounted via HermesApp. In a binary crate
+// `pub fn` does not suppress dead_code, so when `--all-features` enables
+// `legacy-shell` (app.rs mounts WarpHermes instead of HermesApp) the HermesApp
+// subtree is unreferenced and this helper reads as dead. Live in the default
+// (non-legacy-shell) build.
+#[allow(dead_code)]
 fn screen_label(s: Screen) -> &'static str {
     match s {
         Screen::Chat => "CHAT",
@@ -99,6 +105,10 @@ fn screen_label(s: Screen) -> &'static str {
     }
 }
 
+// Called only by AppFooter (HermesApp subtree); dead under `--all-features` when
+// `legacy-shell` swaps the root to WarpHermes (see screen_label note). Live in the
+// default build.
+#[allow(dead_code)]
 #[cfg(target_arch = "wasm32")]
 fn now_time_utc() -> String {
     let d = js_sys::Date::new_0();
@@ -111,6 +121,9 @@ fn now_time_utc() -> String {
     )
 }
 
+// Host stub for non-wasm builds; same dead-under-legacy-shell rationale as the
+// wasm arm above. Live in the default (non-legacy-shell) host build.
+#[allow(dead_code)]
 #[cfg(not(target_arch = "wasm32"))]
 fn now_time_utc() -> String {
     "00:00:00 UTC".to_string()

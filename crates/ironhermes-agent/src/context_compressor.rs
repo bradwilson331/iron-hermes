@@ -231,22 +231,26 @@ impl ContextCompressor {
     }
 
     pub fn compression_count(&self) -> usize {
-        self.compression_count.load(std::sync::atomic::Ordering::SeqCst)
+        self.compression_count
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Phase 34b Plan 02: last observed prompt-token count (Python parity).
     pub fn last_prompt_tokens(&self) -> usize {
-        self.last_prompt_tokens.load(std::sync::atomic::Ordering::SeqCst)
+        self.last_prompt_tokens
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Phase 34b Plan 02: last observed completion-token count (Python parity).
     pub fn last_completion_tokens(&self) -> usize {
-        self.last_completion_tokens.load(std::sync::atomic::Ordering::SeqCst)
+        self.last_completion_tokens
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Phase 34b Plan 02: last observed total-token count (Python parity).
     pub fn last_total_tokens(&self) -> usize {
-        self.last_total_tokens.load(std::sync::atomic::Ordering::SeqCst)
+        self.last_total_tokens
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Phase 34b Plan 02: record the per-response token usage (Python parity for
@@ -257,7 +261,12 @@ impl ContextCompressor {
     /// [`Self::record_usage_full`] with zero defaults for the cache token
     /// counters — the legacy 3-arg signature is preserved byte-for-byte so
     /// existing call sites compile unchanged.
-    pub fn record_usage(&self, prompt_tokens: usize, completion_tokens: usize, total_tokens: usize) {
+    pub fn record_usage(
+        &self,
+        prompt_tokens: usize,
+        completion_tokens: usize,
+        total_tokens: usize,
+    ) {
         self.record_usage_full(prompt_tokens, completion_tokens, total_tokens, 0, 0)
     }
 
@@ -278,7 +287,8 @@ impl ContextCompressor {
         cache_creation_tokens: usize,
     ) {
         use std::sync::atomic::Ordering;
-        self.last_prompt_tokens.store(prompt_tokens, Ordering::SeqCst);
+        self.last_prompt_tokens
+            .store(prompt_tokens, Ordering::SeqCst);
         self.last_completion_tokens
             .store(completion_tokens, Ordering::SeqCst);
         self.last_total_tokens.store(total_tokens, Ordering::SeqCst);
@@ -353,7 +363,8 @@ impl crate::context_engine::ContextEngine for ContextCompressor {
         &self,
         messages: &mut Vec<ChatMessage>,
         _stats: crate::context_engine::ContextStats,
-    ) -> Result<crate::context_engine::CompressionOutcome, crate::context_engine::ContextError> {
+    ) -> Result<crate::context_engine::CompressionOutcome, crate::context_engine::ContextError>
+    {
         let before = estimate_messages_tokens(messages);
         let compressed = ContextCompressor::compress(self, messages);
         let after = estimate_messages_tokens(messages);
@@ -377,7 +388,8 @@ impl crate::context_engine::ContextEngine for ContextCompressor {
     fn on_session_reset(&self) {
         use std::sync::atomic::Ordering;
         self.compression_count.store(0, Ordering::SeqCst);
-        self.ineffective_compression_count.store(0, Ordering::SeqCst);
+        self.ineffective_compression_count
+            .store(0, Ordering::SeqCst);
         self.last_prompt_tokens.store(0, Ordering::SeqCst);
         self.last_completion_tokens.store(0, Ordering::SeqCst);
         self.last_total_tokens.store(0, Ordering::SeqCst);
@@ -438,7 +450,7 @@ mod tests {
     fn compress_step0_evicts_recall_messages() {
         // Phase 34a D-03: recall messages must be stripped as step 0, even when
         // the context is below the compression threshold (no actual compression).
-        let mut compressor = ContextCompressor::new(100_000, 0.9);
+        let compressor = ContextCompressor::new(100_000, 0.9);
         let recall_msg = ChatMessage::recall_system("Recall: user prefers dark mode.");
         let normal_system = ChatMessage::system("You are Hermes.");
         let user_msg = ChatMessage::user("Hello");
@@ -453,7 +465,11 @@ mod tests {
             "compressor step 0 must evict all recall messages"
         );
         // Normal messages survive.
-        assert_eq!(messages.len(), 2, "normal system + user message should remain");
+        assert_eq!(
+            messages.len(),
+            2,
+            "normal system + user message should remain"
+        );
     }
 
     #[test]

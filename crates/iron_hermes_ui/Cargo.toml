@@ -1,6 +1,6 @@
 [package]
 name = "iron_hermes_ui"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["Brad Wilson <bradwilson331@users.noreply.github.com>"]
 edition = "2021"
 

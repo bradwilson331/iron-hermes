@@ -22,6 +22,7 @@ use rmcp::{RoleClient, ServiceExt};
 ///   2. `McpManager::shutdown_all` wraps each JoinHandle await in
 ///      `tokio::time::timeout(Duration::from_secs(2), handle)` so the gateway
 ///      always exits within a bounded time regardless of child behavior.
+///
 /// Together these guarantee `ironhermes gateway` exits within ~2s/server on
 /// Ctrl+C even when the stdio child ignores its parent-pipe EOF. When rmcp
 /// later exposes a pre-spawned-Child constructor, `connect_stdio` can upgrade
@@ -75,6 +76,31 @@ pub async fn connect_stdio(
     // internally; no supported constructor accepts a pre-spawned Child. We
     // return None for the external handle and rely on kill_on_drop(true) +
     // the bounded JoinHandle timeout in shutdown_all for graceful shutdown.
+    Ok((client, None))
+}
+
+/// Connect to an HTTP/StreamableHTTP MCP server.
+///
+/// Uses `StreamableHttpClientTransport` (reqwest-backed) from rmcp.
+/// Requires the `transport-streamable-http-client-reqwest` feature on rmcp.
+///
+/// GAP-8 (Phase 21.2 Plan 11): signature symmetric with `connect_stdio` — HTTP
+/// has no external child process, so the `Option<tokio::process::Child>` is
+/// always `None`. Kept for call-site uniformity in `server_task::connect_and_serve`.
+pub async fn connect_http(
+    config: &McpServerConfig,
+) -> Result<(
+    RunningService<RoleClient, ()>,
+    Option<tokio::process::Child>,
+)> {
+    let url = config
+        .url
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("HTTP transport requires 'url' field"))?;
+
+    use rmcp::transport::StreamableHttpClientTransport;
+    let transport = StreamableHttpClientTransport::from_uri(url.as_str());
+    let client = ().serve(transport).await?;
     Ok((client, None))
 }
 
@@ -162,29 +188,4 @@ mod tests {
              inherited by the parent. captured={captured:?}"
         );
     }
-}
-
-/// Connect to an HTTP/StreamableHTTP MCP server.
-///
-/// Uses `StreamableHttpClientTransport` (reqwest-backed) from rmcp.
-/// Requires the `transport-streamable-http-client-reqwest` feature on rmcp.
-///
-/// GAP-8 (Phase 21.2 Plan 11): signature symmetric with `connect_stdio` — HTTP
-/// has no external child process, so the `Option<tokio::process::Child>` is
-/// always `None`. Kept for call-site uniformity in `server_task::connect_and_serve`.
-pub async fn connect_http(
-    config: &McpServerConfig,
-) -> Result<(
-    RunningService<RoleClient, ()>,
-    Option<tokio::process::Child>,
-)> {
-    let url = config
-        .url
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("HTTP transport requires 'url' field"))?;
-
-    use rmcp::transport::StreamableHttpClientTransport;
-    let transport = StreamableHttpClientTransport::from_uri(url.as_str());
-    let client = ().serve(transport).await?;
-    Ok((client, None))
 }

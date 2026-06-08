@@ -26,10 +26,10 @@
 
 use std::sync::Arc;
 
+use ironhermes_kanban::dispatcher::DispatcherContext;
 use ironhermes_kanban::store::{CreateTaskOptions, KanbanStore};
 use ironhermes_kanban::tools::KanbanCompleteTool;
 use ironhermes_kanban::{KanbanConfig, run_dispatch_tick};
-use ironhermes_kanban::dispatcher::DispatcherContext;
 use ironhermes_tools::Tool;
 use rusqlite::params;
 use serde_json::json;
@@ -212,8 +212,8 @@ async fn full_lifecycle_via_tools_layer() {
         .expect("completed event must exist");
     if let Some(payload_str) = &completed_evt.payload {
         // The store encodes summary in the payload — verify it round-trips.
-        let payload: serde_json::Value = serde_json::from_str(payload_str)
-            .unwrap_or(serde_json::Value::Null);
+        let payload: serde_json::Value =
+            serde_json::from_str(payload_str).unwrap_or(serde_json::Value::Null);
         if payload.is_object() {
             // Payload presence is sufficient — exact field names may vary.
             assert!(

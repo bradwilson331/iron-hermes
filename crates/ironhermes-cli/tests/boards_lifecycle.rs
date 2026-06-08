@@ -37,6 +37,7 @@ impl Drop for ScopedHome {
 }
 
 /// Run an async boards function under a scoped IRONHERMES_HOME.
+#[allow(unused_macros)] // retained for future boards lifecycle tests; no test currently invokes it
 macro_rules! with_home {
     ($body:expr) => {{
         let _lock = ENV_LOCK.lock().unwrap();
@@ -60,11 +61,19 @@ fn list_shows_default_and_named_boards() {
 
     // Create two named boards first
     rt.block_on(boards::cmd_boards_create(
-        "alpha".into(), None, None, false, false,
+        "alpha".into(),
+        None,
+        None,
+        false,
+        false,
     ))
     .unwrap();
     rt.block_on(boards::cmd_boards_create(
-        "beta".into(), None, None, false, false,
+        "beta".into(),
+        None,
+        None,
+        false,
+        false,
     ))
     .unwrap();
 
@@ -88,7 +97,11 @@ fn create_rejects_default_slug() {
 
     let code = rt
         .block_on(boards::cmd_boards_create(
-            "default".into(), None, None, false, false,
+            "default".into(),
+            None,
+            None,
+            false,
+            false,
         ))
         .expect("cmd should not Err");
     assert_eq!(code, 1, "should refuse the reserved 'default' slug");
@@ -102,14 +115,22 @@ fn create_writes_board_dir_and_db() {
 
     let code = rt
         .block_on(boards::cmd_boards_create(
-            "myboard".into(), None, None, false, false,
+            "myboard".into(),
+            None,
+            None,
+            false,
+            false,
         ))
         .expect("cmd_boards_create should succeed");
     assert_eq!(code, 0);
 
     // Verify the board directory and DB were created
     let board_dir = home.root.join("kanban").join("boards").join("myboard");
-    assert!(board_dir.exists(), "board dir should exist at {:?}", board_dir);
+    assert!(
+        board_dir.exists(),
+        "board dir should exist at {:?}",
+        board_dir
+    );
     let db_path = board_dir.join("kanban.db");
     assert!(db_path.exists(), "kanban.db should exist at {:?}", db_path);
 }
@@ -122,7 +143,11 @@ fn create_with_switch_writes_current_only_after_db_init() {
 
     let code = rt
         .block_on(boards::cmd_boards_create(
-            "switchtest".into(), None, None, true, false,
+            "switchtest".into(),
+            None,
+            None,
+            true,
+            false,
         ))
         .expect("cmd_boards_create --switch should succeed");
     assert_eq!(code, 0);
@@ -155,7 +180,11 @@ fn switch_writes_current_atomically() {
 
     // Create a board first
     rt.block_on(boards::cmd_boards_create(
-        "projx".into(), None, None, false, false,
+        "projx".into(),
+        None,
+        None,
+        false,
+        false,
     ))
     .unwrap();
 
@@ -208,7 +237,11 @@ fn rename_persists_to_board_toml() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     rt.block_on(boards::cmd_boards_create(
-        "renametest".into(), None, None, false, false,
+        "renametest".into(),
+        None,
+        None,
+        false,
+        false,
     ))
     .unwrap();
 
@@ -245,15 +278,15 @@ fn rm_archives_board_by_default() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     rt.block_on(boards::cmd_boards_create(
-        "archiveme".into(), None, None, false, false,
+        "archiveme".into(),
+        None,
+        None,
+        false,
+        false,
     ))
     .unwrap();
 
-    let board_dir = home
-        .root
-        .join("kanban")
-        .join("boards")
-        .join("archiveme");
+    let board_dir = home.root.join("kanban").join("boards").join("archiveme");
     assert!(board_dir.exists(), "board should exist before rm");
 
     let code = rt
@@ -262,7 +295,10 @@ fn rm_archives_board_by_default() {
     assert_eq!(code, 0);
 
     // Original location should be gone
-    assert!(!board_dir.exists(), "board dir should be gone after archive");
+    assert!(
+        !board_dir.exists(),
+        "board dir should be gone after archive"
+    );
 
     // Should appear somewhere in _archived/
     let archive_root = home.root.join("kanban").join("boards").join("_archived");
@@ -300,7 +336,11 @@ fn rm_delete_succeeds_with_zero_open_tasks() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     rt.block_on(boards::cmd_boards_create(
-        "cleanboard".into(), None, None, false, false,
+        "cleanboard".into(),
+        None,
+        None,
+        false,
+        false,
     ))
     .unwrap();
 
@@ -309,11 +349,7 @@ fn rm_delete_succeeds_with_zero_open_tasks() {
         .expect("rm --delete should succeed with 0 open tasks");
     assert_eq!(code, 0);
 
-    let board_dir = home
-        .root
-        .join("kanban")
-        .join("boards")
-        .join("cleanboard");
+    let board_dir = home.root.join("kanban").join("boards").join("cleanboard");
     assert!(!board_dir.exists(), "board dir should be deleted");
 }
 
@@ -324,14 +360,18 @@ fn rm_delete_refuses_with_open_tasks() {
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     rt.block_on(boards::cmd_boards_create(
-        "haswork".into(), None, None, false, false,
+        "haswork".into(),
+        None,
+        None,
+        false,
+        false,
     ))
     .unwrap();
 
     // Seed an open task into the board
     {
-        let mut store = ironhermes_kanban::KanbanStore::open_for_board("haswork")
-            .expect("open board store");
+        let mut store =
+            ironhermes_kanban::KanbanStore::open_for_board("haswork").expect("open board store");
         store
             .create_task(
                 "Pending task",
@@ -439,7 +479,11 @@ fn board_toml_name_alt_key_not_matched_as_name() {
 
     // Create a board without a name.
     rt.block_on(boards::cmd_boards_create(
-        "noname".into(), None, None, false, false,
+        "noname".into(),
+        None,
+        None,
+        false,
+        false,
     ))
     .expect("create should succeed");
 
@@ -451,8 +495,7 @@ fn board_toml_name_alt_key_not_matched_as_name() {
         .join("boards")
         .join("noname")
         .join("board.toml");
-    std::fs::write(&board_toml_path, b"name_alt = \"misleading\"\n")
-        .expect("write board.toml");
+    std::fs::write(&board_toml_path, b"name_alt = \"misleading\"\n").expect("write board.toml");
 
     // cmd_boards_list writes to stdout — we test indirectly by calling
     // cmd_boards_list and confirming it returns 0 (no crash on malformed name).
@@ -486,7 +529,11 @@ fn rm_lock_file_cleaned_up_on_count_gt_zero_exit() {
 
     // Create board and seed one open task so the pre-flight count blocks deletion.
     rt.block_on(boards::cmd_boards_create(
-        "lockedboard".into(), None, None, false, false,
+        "lockedboard".into(),
+        None,
+        None,
+        false,
+        false,
     ))
     .expect("create should succeed");
 
@@ -519,5 +566,8 @@ fn rm_lock_file_cleaned_up_on_count_gt_zero_exit() {
     );
 
     // Board directory itself should still exist (was not deleted).
-    assert!(board_dir.exists(), "board dir must still exist after refusal");
+    assert!(
+        board_dir.exists(),
+        "board dir must still exist after refusal"
+    );
 }

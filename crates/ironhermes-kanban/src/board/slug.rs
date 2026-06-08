@@ -88,7 +88,10 @@ pub fn validate_board_slug(input: &str) -> Result<String, BoardSlugError> {
     }
 
     // Step 8: body chars must all be [a-z0-9_-].
-    if !s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+    if !s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
         return Err(BoardSlugError::InvalidChars);
     }
 
@@ -158,7 +161,10 @@ mod tests {
 
     #[test]
     fn rejects_empty() {
-        assert!(matches!(validate_board_slug(""), Err(BoardSlugError::Empty)));
+        assert!(matches!(
+            validate_board_slug(""),
+            Err(BoardSlugError::Empty)
+        ));
     }
 
     #[test]

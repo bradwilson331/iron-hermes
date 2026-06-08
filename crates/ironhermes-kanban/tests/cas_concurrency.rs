@@ -14,7 +14,7 @@ use rusqlite::Connection;
 use tempfile::TempDir;
 
 use ironhermes_kanban::{
-    cas::{atomic_claim, build_claim_lock, worker_write_gated, DEFAULT_CLAIM_TTL_SECONDS},
+    cas::{DEFAULT_CLAIM_TTL_SECONDS, atomic_claim, build_claim_lock, worker_write_gated},
     store::{CreateTaskOptions, KanbanStore},
 };
 
@@ -125,7 +125,7 @@ fn concurrent_claims_exactly_one_winner() {
         );
 
         // Verify exactly 1 task_runs row.
-        let mut store = KanbanStore::new(&db_path).expect("reopen store");
+        let store = KanbanStore::new(&db_path).expect("reopen store");
         let runs = store.get_runs(task_id).expect("get_runs");
         assert_eq!(
             runs.len(),
@@ -336,7 +336,7 @@ fn claim_lock_gates_writes() {
     }
 
     // Verify a claim_expired event was written.
-    let mut store = KanbanStore::new(&db_path).expect("reopen");
+    let store = KanbanStore::new(&db_path).expect("reopen");
     let events = store.get_events(&task_id).expect("get_events");
     let has_claim_expired = events.iter().any(|e| e.kind == "claim_expired");
     assert!(

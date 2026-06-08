@@ -1,19 +1,20 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use ironhermes_core::commands::running_agent::{
+    AGENT_RUNNING_REJECT_MSG, RunningAgentGuard, is_bypass,
+};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use ironhermes_core::commands::running_agent::{RunningAgentGuard, is_bypass, AGENT_RUNNING_REJECT_MSG};
 use tokio::sync::{Mutex as TokioMutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use ironhermes_agent::agent_loop::{StreamCallback, ToolProgressCallback};
 use ironhermes_agent::context_compressor::estimate_messages_tokens;
 use ironhermes_agent::context_engine::{ContextEngine, ContextStats};
 use ironhermes_agent::subagent_registry::SubagentRegistry;
 use ironhermes_agent::{
-    AgentRuntime, MemoryManager, PromptBuilder, TurnRequest,
-    build_main_client,
+    AgentRuntime, MemoryManager, PromptBuilder, TurnRequest, build_main_client,
 };
 use ironhermes_core::commands::context::{CommandContext, ToolsetSessionHandle};
 use ironhermes_core::commands::{
@@ -39,6 +40,8 @@ pub struct GatewayMessageHandler {
     config: Config,
     resolver: ProviderResolver,
     session_store: Arc<RwLock<SessionStore>>,
+    // retained handle; production per-turn AgentLoop construction wiring pending
+    #[allow(dead_code)]
     tool_registry: Arc<RwLock<ToolRegistry>>,
     memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,
     hook_registry: Option<Arc<ironhermes_hooks::HookRegistry>>,
@@ -57,7 +60,10 @@ pub struct GatewayMessageHandler {
     /// prompt before the agent runs (same semantics as hermes-agent's
     /// per-session skill injection). Cleared on session-end / `/clear` (out of
     /// scope for this phase — matches /personality overlay semantics).
-    skill_overlays: Arc<std::sync::Mutex<std::collections::HashMap<SessionKey, Vec<(String, String)>>>>,
+    #[allow(clippy::type_complexity)]
+    // per-session overlay map; type alias would only exist here, inline is clearer
+    skill_overlays:
+        Arc<std::sync::Mutex<std::collections::HashMap<SessionKey, Vec<(String, String)>>>>,
 
     /// Phase 21.8.2 D-02 / D-05: SkillsConfig used by the SkillsReload arm to
     /// re-invoke load_with_config. Set via `set_skills_config` after construction.
@@ -127,7 +133,8 @@ pub struct GatewayMessageHandler {
     /// Uses interior mutability (Arc<Mutex<HashMap<SessionKey, String>>>) mirroring
     /// skill_overlays — handle_slash_command takes &self, not &mut self (deviation from
     /// plan assumption; auto-fixed Rule 1). Per-session keying prevents cross-user bleed.
-    active_personality_overlay: Arc<std::sync::Mutex<std::collections::HashMap<SessionKey, String>>>,
+    active_personality_overlay:
+        Arc<std::sync::Mutex<std::collections::HashMap<SessionKey, String>>>,
 
     /// Phase 32 Plan 02 (LEARN-01): per-session nudge turn counter.
     ///
@@ -216,11 +223,13 @@ impl GatewayMessageHandler {
             browser_session: None,
             toolset_session: None,
             workspace: None, // Phase 25.3 D-W-2: wired by GatewayRunner::build_gateway_handler
-                             // Phase 25.3-15 CR-02: trajectory_writer field removed — per-session
-                             // writers live in SessionStore, looked up by canonical session UUID.
+            // Phase 25.3-15 CR-02: trajectory_writer field removed — per-session
+            // writers live in SessionStore, looked up by canonical session UUID.
             // Phase 21.8.3.1 D-07: no personality active until /personality <name> sets it.
             // Arc<Mutex<HashMap>> mirrors skill_overlays — &self constraint requires interior mutability.
-            active_personality_overlay: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            active_personality_overlay: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             // Phase 32 Plan 02 (LEARN-01): per-session nudge counter starts empty;
             // entries created lazily on first turn per session in run_agent's fire site.
             nudge_turns: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -459,7 +468,11 @@ impl GatewayMessageHandler {
         // Phase 36 / GW-05: per-session running flag retrieved from SessionStore (D-03/D-05/D-06).
         // Construction here is the single source of truth — handle_with_multimodal and
         // MessageHandler::handle non-slash arms also call get_running_flag for their own guard check.
-        let agent_running = self.session_store.read().await.get_running_flag(&session_key);
+        let agent_running = self
+            .session_store
+            .read()
+            .await
+            .get_running_flag(&session_key);
         // Phase 36.2 follow-up: use the canonical SQLite session UUID for
         // CommandContext.session_id so /usage, /history, /export, /rename all
         // filter on the same id that agent_loop writes to the sessions /
@@ -573,7 +586,7 @@ impl GatewayMessageHandler {
                 // Check uses def.name (post-alias canonical name) so /reset → "new" correctly
                 // bypasses (Pitfall 4 mitigation). Guard fires BEFORE personality/agents
                 // interceptors — rejection takes priority over dispatch-time concerns.
-                if agent_running.load(Ordering::SeqCst) && !is_bypass(&def.name) {
+                if agent_running.load(Ordering::SeqCst) && !is_bypass(def.name) {
                     with_rate_limit_retry(|| {
                         adapter.send_message(&event.chat_id, AGENT_RUNNING_REJECT_MSG, None)
                     })
@@ -602,20 +615,20 @@ impl GatewayMessageHandler {
                 // TUI and iron_hermes_ui surfaces do NOT require this token
                 // (they have synchronous user presence). Only `kill` and `prune`
                 // are destructive; `interrupt` and `status` are not gated.
-                if def.name == "agents"
-                    && !args.is_empty()
-                    && requires_confirm(args[0], &args[1..])
+                if def.name == "agents" && !args.is_empty() && requires_confirm(args[0], &args[1..])
                 {
                     let refusal = format!(
                         "Destructive op `/agents {}`. Re-run as:\n  `/agents {} {}confirm`",
                         args[0],
                         args[0],
-                        if args.len() > 1 { format!("{} ", args[1]) } else { String::new() },
+                        if args.len() > 1 {
+                            format!("{} ", args[1])
+                        } else {
+                            String::new()
+                        },
                     );
-                    with_rate_limit_retry(|| {
-                        adapter.send_message(&event.chat_id, &refusal, None)
-                    })
-                    .await?;
+                    with_rate_limit_retry(|| adapter.send_message(&event.chat_id, &refusal, None))
+                        .await?;
                     return Ok(());
                 }
                 let core_result = ironhermes_core::commands::handlers::dispatch(
@@ -639,10 +652,8 @@ impl GatewayMessageHandler {
                         .await?;
                     }
                     CoreCommandResult::Output(text) => {
-                        with_rate_limit_retry(|| {
-                            adapter.send_message(&event.chat_id, &text, None)
-                        })
-                        .await?;
+                        with_rate_limit_retry(|| adapter.send_message(&event.chat_id, &text, None))
+                            .await?;
                     }
                     CoreCommandResult::NewSession { .. } => {
                         // /start special handling: reset session then LLM greeting.
@@ -778,18 +789,13 @@ impl GatewayMessageHandler {
                         // Acquire current snapshot for diff computation.
                         let old_snapshot: Option<Arc<SkillRegistry>> =
                             self.skill_registry.lock().ok().and_then(|g| g.clone());
-                        let new_inner = Arc::new(
-                            SkillRegistry::load_with_config(&cwd, &cfg),
-                        );
+                        let new_inner = Arc::new(SkillRegistry::load_with_config(&cwd, &cfg));
                         let old_names: HashSet<String> = old_snapshot
                             .as_ref()
                             .map(|r| r.list().iter().map(|s| s.name.clone()).collect())
                             .unwrap_or_default();
-                        let new_names: HashSet<String> = new_inner
-                            .list()
-                            .iter()
-                            .map(|s| s.name.clone())
-                            .collect();
+                        let new_names: HashSet<String> =
+                            new_inner.list().iter().map(|s| s.name.clone()).collect();
                         let mut added: Vec<&String> = new_names.difference(&old_names).collect();
                         let mut removed: Vec<&String> = old_names.difference(&new_names).collect();
                         added.sort();
@@ -800,7 +806,11 @@ impl GatewayMessageHandler {
                             format!(
                                 "{} added ({})",
                                 added.len(),
-                                added.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                                added
+                                    .iter()
+                                    .map(|s| s.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
                             )
                         };
                         let removed_str = if removed.is_empty() {
@@ -809,7 +819,11 @@ impl GatewayMessageHandler {
                             format!(
                                 "{} removed ({})",
                                 removed.len(),
-                                removed.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+                                removed
+                                    .iter()
+                                    .map(|s| s.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
                             )
                         };
                         // Phase 21.8.2 D-05: count parse-failures (files scanned vs loaded).
@@ -856,9 +870,10 @@ impl GatewayMessageHandler {
                         if let Ok(mut guard) = self.skill_registry.lock() {
                             *guard = Some(new_inner);
                         }
-                        let _ = with_rate_limit_retry(|| adapter.send_message(
-                            &event.chat_id, &diff_text, None,
-                        )).await;
+                        let _ = with_rate_limit_retry(|| {
+                            adapter.send_message(&event.chat_id, &diff_text, None)
+                        })
+                        .await;
                         return Ok(());
                     }
                     ironhermes_core::commands::CommandResult::SkillActivated { name, body } => {
@@ -871,11 +886,10 @@ impl GatewayMessageHandler {
                                 .push((name.clone(), body));
                         }
                         let activation_msg = format!("Skill '{}' activated for this turn.", name);
-                        let _ = with_rate_limit_retry(|| adapter.send_message(
-                            &event.chat_id,
-                            &activation_msg,
-                            None,
-                        )).await;
+                        let _ = with_rate_limit_retry(|| {
+                            adapter.send_message(&event.chat_id, &activation_msg, None)
+                        })
+                        .await;
                         return Ok(());
                     }
                     // Phase 36.17.1 Plan 03 Task 2: /queue dispatch intercept.
@@ -1080,29 +1094,26 @@ impl GatewayMessageHandler {
                 if !cmd_token.is_empty() {
                     let snapshot: Option<Arc<SkillRegistry>> =
                         self.skill_registry.lock().ok().and_then(|g| g.clone());
-                    if let Some(registry) = snapshot {
-                        if let Some(record) = registry.find(cmd_token) {
-                            if let Some(body) = registry.read_content(&record.name) {
-                                // D-Plan03-05 / D-07: store in per-session overlay so
-                                // the NEXT agent turn picks it up via the run_agent
-                                // skill_overlays read site.
-                                if let Ok(mut overlays) = self.skill_overlays.lock() {
-                                    overlays
-                                        .entry(session_key.clone())
-                                        .or_insert_with(Vec::new)
-                                        .push((record.name.clone(), body));
-                                }
-                                let skill13_msg = format!(
-                                    "Skill '{}' activated for this turn.", record.name
-                                );
-                                let _ = with_rate_limit_retry(|| adapter.send_message(
-                                    &event.chat_id,
-                                    &skill13_msg,
-                                    None,
-                                )).await;
-                                return Ok(());
-                            }
+                    if let Some(registry) = snapshot
+                        && let Some(record) = registry.find(cmd_token)
+                        && let Some(body) = registry.read_content(&record.name)
+                    {
+                        // D-Plan03-05 / D-07: store in per-session overlay so
+                        // the NEXT agent turn picks it up via the run_agent
+                        // skill_overlays read site.
+                        if let Ok(mut overlays) = self.skill_overlays.lock() {
+                            overlays
+                                .entry(session_key.clone())
+                                .or_insert_with(Vec::new)
+                                .push((record.name.clone(), body));
                         }
+                        let skill13_msg =
+                            format!("Skill '{}' activated for this turn.", record.name);
+                        let _ = with_rate_limit_retry(|| {
+                            adapter.send_message(&event.chat_id, &skill13_msg, None)
+                        })
+                        .await;
+                        return Ok(());
                     }
                 }
                 // D-08: Unknown commands pass through to agent as normal message, preserving attachments
@@ -1142,7 +1153,11 @@ impl GatewayMessageHandler {
         {
             let session_key =
                 SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
-            let agent_running = self.session_store.read().await.get_running_flag(&session_key);
+            let agent_running = self
+                .session_store
+                .read()
+                .await
+                .get_running_flag(&session_key);
             if agent_running.load(Ordering::SeqCst) {
                 if let Some(queue) = self.session_queue.as_ref() {
                     // Phase 36.17.1: enqueue branch. `try_push` is sync — guard
@@ -1212,7 +1227,10 @@ impl GatewayMessageHandler {
         let _running_flag = {
             let session_key =
                 SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
-            self.session_store.read().await.get_running_flag(&session_key)
+            self.session_store
+                .read()
+                .await
+                .get_running_flag(&session_key)
         };
         let _agent_guard = RunningAgentGuard::new(_running_flag);
 
@@ -1297,21 +1315,21 @@ impl GatewayMessageHandler {
         prompt_builder.load_skills();
         // Phase 21.8.2 D-Plan03-05 / D-07 (gateway delivery): read activated overlays
         // for this session and inject before the agent turn so the model sees the skill body.
-        if let Ok(overlays) = self.skill_overlays.lock() {
-            if let Some(session_overlays) = overlays.get(&key) {
-                for (name, body) in session_overlays {
-                    prompt_builder.activate_skill(name, body);
-                }
+        if let Ok(overlays) = self.skill_overlays.lock()
+            && let Some(session_overlays) = overlays.get(&key)
+        {
+            for (name, body) in session_overlays {
+                prompt_builder.activate_skill(name, body);
             }
         }
         // Phase 21.8.3.1 D-09: inject active personality overlay into PromptBuilder slot 8
         // (SessionOverlay, ephemeral). Re-applied every turn from self.active_personality_overlay;
         // never explicitly cleared between turns (entry absent when no personality is active).
         // Order: AFTER load_skills + skill_overlays loop, BEFORE build_system_message.
-        if let Ok(overlays) = self.active_personality_overlay.lock() {
-            if let Some(overlay_text) = overlays.get(&key) {
-                prompt_builder.set_overlay(overlay_text.clone());
-            }
+        if let Ok(overlays) = self.active_personality_overlay.lock()
+            && let Some(overlay_text) = overlays.get(&key)
+        {
+            prompt_builder.set_overlay(overlay_text.clone());
         }
         let system_msg = prompt_builder.build_system_message();
         // Prepend system message
@@ -1525,7 +1543,9 @@ impl GatewayMessageHandler {
             };
             rt.run_turn(request).await
         } else {
-            Err(anyhow::anyhow!("AgentRuntime not configured in gateway handler"))
+            Err(anyhow::anyhow!(
+                "AgentRuntime not configured in gateway handler"
+            ))
         };
 
         // Phase 34a MEM-READ-05 + Phase 36.17.2.2 D-08: flush scrubber tail
@@ -1576,7 +1596,10 @@ impl GatewayMessageHandler {
             if let Some(media_sender) = self.media_sender.as_ref() {
                 let mut failed_tags: Vec<String> = Vec::new();
                 for media_ref in media_refs {
-                    match media_sender.send_media(&event.chat_id, &media_ref, None).await {
+                    match media_sender
+                        .send_media(&event.chat_id, &media_ref, None)
+                        .await
+                    {
                         Ok(_) => {}
                         Err(e) => {
                             tracing::warn!(
@@ -1663,10 +1686,7 @@ impl GatewayMessageHandler {
                 let nudge_interval = self.config.memory.nudge_interval;
                 if nudge_interval > 0 && self.config.memory.memory_enabled {
                     let should_fire = {
-                        let mut map = self
-                            .nudge_turns
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
+                        let mut map = self.nudge_turns.lock().unwrap_or_else(|e| e.into_inner());
                         let count = map.entry(key.clone()).or_insert(0);
                         *count += 1;
                         if *count >= nudge_interval {
@@ -1677,22 +1697,20 @@ impl GatewayMessageHandler {
                         }
                     }; // std::sync::MutexGuard dropped here — before any .await / tokio::spawn
 
-                    if should_fire {
-                        if let Some(ref mgr) = self.memory_manager {
-                            let mgr_clone = Arc::clone(mgr);
-                            let client_clone = nudge_client.clone();
-                            let messages_snapshot = messages_for_nudge.clone();
-                            let config_clone = self.config.clone();
-                            tokio::spawn(async move {
-                                ironhermes_agent::nudge::spawn_nudge_review(
-                                    messages_snapshot,
-                                    mgr_clone,
-                                    client_clone,
-                                    &config_clone,
-                                )
-                                .await;
-                            });
-                        }
+                    if should_fire && let Some(ref mgr) = self.memory_manager {
+                        let mgr_clone = Arc::clone(mgr);
+                        let client_clone = nudge_client.clone();
+                        let messages_snapshot = messages_for_nudge.clone();
+                        let config_clone = self.config.clone();
+                        tokio::spawn(async move {
+                            ironhermes_agent::nudge::spawn_nudge_review(
+                                messages_snapshot,
+                                mgr_clone,
+                                client_clone,
+                                &config_clone,
+                            )
+                            .await;
+                        });
                     }
                 }
 
@@ -1747,18 +1765,17 @@ impl GatewayMessageHandler {
         // plan lands per-session scoping. The call is still emitted so
         // INV-21.7-07 (static-grep gate on gateway handler drain) stays
         // green and the wiring is audit-visible.
-        if let Some(ref reg) = self.process_registry {
-            if let Err(e) = reg
+        if let Some(ref reg) = self.process_registry
+            && let Err(e) = reg
                 .write()
                 .await
                 .drain_and_kill_session(&session_id_str)
                 .await
-            {
-                tracing::warn!(
-                    error = %e,
-                    "process_registry drain_and_kill_session failed in gateway run_agent (best-effort)"
-                );
-            }
+        {
+            tracing::warn!(
+                error = %e,
+                "process_registry drain_and_kill_session failed in gateway run_agent (best-effort)"
+            );
         }
 
         // Plan 21.7-07 (D-05): drain pending fire-and-forget transcript
@@ -1815,7 +1832,11 @@ impl MessageHandler for GatewayMessageHandler {
         {
             let session_key =
                 SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
-            let agent_running = self.session_store.read().await.get_running_flag(&session_key);
+            let agent_running = self
+                .session_store
+                .read()
+                .await
+                .get_running_flag(&session_key);
             if agent_running.load(Ordering::SeqCst) {
                 if let Some(queue) = self.session_queue.as_ref() {
                     match queue.try_push(&session_key, event.clone()) {
@@ -1860,6 +1881,87 @@ impl MessageHandler for GatewayMessageHandler {
             image_data_uri: None,
         };
         self.run_agent(event, adapter, cancel, no_attachments).await
+    }
+}
+
+/// Build a ChatMessage for the user's input, incorporating any multimodal data.
+///
+/// - If there is an image_data_uri: creates a multipart message with text + image.
+/// - If there is a text_prefix (document): prepends it to the message content.
+/// - Otherwise: plain text message.
+///
+/// Phase 32.3 Plan 04 (D-09 / T-32.3-01): pure predicate — does this `/agents`
+/// subcommand require a `confirm` token to proceed on the gateway?
+///
+/// - `"kill"` and `"prune"` are destructive — must have `"confirm"` somewhere
+///   in `args` (tolerant position so operators can type
+///   `/agents kill sub_xxx confirm` OR `/agents kill confirm sub_xxx`).
+/// - `"interrupt"` and `"status"` are NOT destructive — never require confirm.
+/// - Any other subcommand (`"list"`, `"logs"`, unknown) — never require confirm.
+///
+/// Returns `true` when the subcommand IS destructive AND the confirm token
+/// is missing — i.e. the gateway should refuse to dispatch.
+///
+/// Extracted as a free fn so tests can exercise the D-09 contract directly
+/// without constructing a full GatewayMessageHandler + adapter pipeline.
+pub(crate) fn requires_confirm(subcommand: &str, args: &[&str]) -> bool {
+    let is_destructive = matches!(subcommand, "kill" | "prune");
+    if !is_destructive {
+        return false;
+    }
+    // Tolerant position: any arg after the subcommand may be "confirm".
+    !args.contains(&"confirm")
+}
+
+fn build_user_message(event: &MessageEvent, processed: ProcessedAttachments) -> ChatMessage {
+    if let Some(data_uri) = processed.image_data_uri {
+        // Vision input: multipart message with optional caption + image
+        let mut parts = Vec::new();
+        let text = if !event.content.is_empty() {
+            event.content.clone()
+        } else {
+            "What is in this image?".to_string()
+        };
+        parts.push(ContentPart::Text { text });
+        parts.push(ContentPart::ImageUrl {
+            image_url: ImageUrl {
+                url: data_uri,
+                detail: None,
+            },
+        });
+        ChatMessage {
+            role: Role::User,
+            content: Some(MessageContent::Parts(parts)),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            is_recall_context: false,
+        }
+    } else if let Some(prefix) = processed.text_prefix {
+        // Document text: prepend extracted content to the user message
+        let combined = if event.content.is_empty() {
+            prefix
+        } else {
+            format!("{}\n\n{}", prefix, event.content)
+        };
+        ChatMessage {
+            role: Role::User,
+            content: Some(MessageContent::text(combined)),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            is_recall_context: false,
+        }
+    } else {
+        // Plain text
+        ChatMessage {
+            role: Role::User,
+            content: Some(MessageContent::text(&event.content)),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            is_recall_context: false,
+        }
     }
 }
 
@@ -2141,85 +2243,5 @@ mod tests {
         let _ = handler
             .command_router
             .resolve("/help", &ironhermes_core::types::Platform::Telegram);
-    }
-}
-
-/// Build a ChatMessage for the user's input, incorporating any multimodal data.
-///
-/// - If there is an image_data_uri: creates a multipart message with text + image.
-/// - If there is a text_prefix (document): prepends it to the message content.
-/// - Otherwise: plain text message.
-/// Phase 32.3 Plan 04 (D-09 / T-32.3-01): pure predicate — does this `/agents`
-/// subcommand require a `confirm` token to proceed on the gateway?
-///
-/// - `"kill"` and `"prune"` are destructive — must have `"confirm"` somewhere
-///   in `args` (tolerant position so operators can type
-///   `/agents kill sub_xxx confirm` OR `/agents kill confirm sub_xxx`).
-/// - `"interrupt"` and `"status"` are NOT destructive — never require confirm.
-/// - Any other subcommand (`"list"`, `"logs"`, unknown) — never require confirm.
-///
-/// Returns `true` when the subcommand IS destructive AND the confirm token
-/// is missing — i.e. the gateway should refuse to dispatch.
-///
-/// Extracted as a free fn so tests can exercise the D-09 contract directly
-/// without constructing a full GatewayMessageHandler + adapter pipeline.
-pub(crate) fn requires_confirm(subcommand: &str, args: &[&str]) -> bool {
-    let is_destructive = matches!(subcommand, "kill" | "prune");
-    if !is_destructive {
-        return false;
-    }
-    // Tolerant position: any arg after the subcommand may be "confirm".
-    !args.iter().any(|a| *a == "confirm")
-}
-
-fn build_user_message(event: &MessageEvent, processed: ProcessedAttachments) -> ChatMessage {
-    if let Some(data_uri) = processed.image_data_uri {
-        // Vision input: multipart message with optional caption + image
-        let mut parts = Vec::new();
-        let text = if !event.content.is_empty() {
-            event.content.clone()
-        } else {
-            "What is in this image?".to_string()
-        };
-        parts.push(ContentPart::Text { text });
-        parts.push(ContentPart::ImageUrl {
-            image_url: ImageUrl {
-                url: data_uri,
-                detail: None,
-            },
-        });
-        ChatMessage {
-            role: Role::User,
-            content: Some(MessageContent::Parts(parts)),
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-            is_recall_context: false,
-        }
-    } else if let Some(prefix) = processed.text_prefix {
-        // Document text: prepend extracted content to the user message
-        let combined = if event.content.is_empty() {
-            prefix
-        } else {
-            format!("{}\n\n{}", prefix, event.content)
-        };
-        ChatMessage {
-            role: Role::User,
-            content: Some(MessageContent::text(combined)),
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-            is_recall_context: false,
-        }
-    } else {
-        // Plain text
-        ChatMessage {
-            role: Role::User,
-            content: Some(MessageContent::text(&event.content)),
-            tool_calls: None,
-            tool_call_id: None,
-            name: None,
-            is_recall_context: false,
-        }
     }
 }

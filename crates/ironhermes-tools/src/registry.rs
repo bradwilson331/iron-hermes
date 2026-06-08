@@ -149,9 +149,7 @@ impl ToolRegistry {
         &self,
     ) -> ironhermes_core::commands::context::TtsRegistrationStatus {
         use ironhermes_core::commands::context::TtsRegistrationStatus;
-        if !self.tools.contains_key("text_to_speech")
-            || !self.tools.contains_key("send_audio")
-        {
+        if !self.tools.contains_key("text_to_speech") || !self.tools.contains_key("send_audio") {
             return TtsRegistrationStatus::NotRegistered;
         }
         let Some(key) = self.tts_session_key.as_ref() else {
@@ -351,7 +349,8 @@ impl ToolRegistry {
     /// entry where the toolset is fixed for the entire session lifetime.
     pub fn retain_by_name(&mut self, allowed: &[&str]) -> usize {
         let before = self.tools.len();
-        self.tools.retain(|name, _| allowed.contains(&name.as_str()));
+        self.tools
+            .retain(|name, _| allowed.contains(&name.as_str()));
         before - self.tools.len()
     }
 
@@ -706,17 +705,24 @@ impl ToolRegistry {
         dispatcher: Option<Arc<dyn crate::AudioDispatcher>>,
         config: Arc<ironhermes_core::Config>,
     ) {
+        use crate::send_audio_tool::SendAudioTool;
         use crate::tts::build_tts_registry;
         use crate::tts_tool::TextToSpeechTool;
-        use crate::send_audio_tool::SendAudioTool;
 
         let tts_registry = Arc::new(build_tts_registry(&config.tts));
         // Phase 36.17.7 D-06 (Path B): record the session_key on the registry
         // BEFORE SendAudioTool consumes it via move — so
         // `tts_registration_status()` can later distinguish Live vs Inspection.
         self.tts_session_key = Some(session_key.clone());
-        self.register(Box::new(TextToSpeechTool::new(config.clone(), tts_registry)));
-        self.register(Box::new(SendAudioTool::new(session_key, dispatcher, config)));
+        self.register(Box::new(TextToSpeechTool::new(
+            config.clone(),
+            tts_registry,
+        )));
+        self.register(Box::new(SendAudioTool::new(
+            session_key,
+            dispatcher,
+            config,
+        )));
     }
 
     /// Phase 25.1 D-04: register all 11 browser_* tools sharing one Arc<Mutex<Option<BrowserSession>>>.
@@ -1650,10 +1656,19 @@ mod tests {
 
         let removed = registry.retain_by_name(&["a", "b"]);
 
-        assert_eq!(removed, 1, "retain_by_name must return the count of removed tools");
+        assert_eq!(
+            removed, 1,
+            "retain_by_name must return the count of removed tools"
+        );
         let names = registry.list_tools();
-        assert!(names.contains(&"a"), "\"a\" must remain after retain_by_name");
-        assert!(names.contains(&"b"), "\"b\" must remain after retain_by_name");
+        assert!(
+            names.contains(&"a"),
+            "\"a\" must remain after retain_by_name"
+        );
+        assert!(
+            names.contains(&"b"),
+            "\"b\" must remain after retain_by_name"
+        );
         assert!(
             !names.contains(&"c"),
             "\"c\" must be removed by retain_by_name (not in allowlist)"

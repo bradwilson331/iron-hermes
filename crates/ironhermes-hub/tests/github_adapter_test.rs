@@ -7,10 +7,10 @@ mod fixtures;
 use std::collections::HashSet;
 
 use ironhermes_core::SkillSource;
-use ironhermes_hub::{GitHubAuth, GitHubSource, GitHubTap, HubError, HubErrorKind, HubSource};
+use ironhermes_hub::{GitHubAuth, GitHubSource, HubError, HubErrorKind, HubSource};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{header, method, path, query_param},
+    matchers::{method, path, query_param},
 };
 
 fn anon_auth() -> GitHubAuth {

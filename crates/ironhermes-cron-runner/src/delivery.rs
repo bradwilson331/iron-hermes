@@ -1,10 +1,13 @@
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use ironhermes_core::Config;
 use ironhermes_cron::{
-    format_delivery_message, is_silent, CronJob, DeliveryTarget,
+    CronJob,
+    DeliveryTarget,
     TgSendApi, // Relocated from ironhermes-gateway in Task 1 step (a)
+    format_delivery_message,
+    is_silent,
 };
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tracing::error;
 
 // ---------------------------------------------------------------------------
@@ -170,10 +173,7 @@ pub async fn dispatch_all_targets(
         match target.platform.as_str() {
             "telegram" => {
                 let Some(tg) = tg_client else {
-                    errors.push(format!(
-                        "telegram:{}: no adapter available",
-                        target.chat_id
-                    ));
+                    errors.push(format!("telegram:{}: no adapter available", target.chat_id));
                     continue;
                 };
                 match tg
@@ -183,8 +183,7 @@ pub async fn dispatch_all_targets(
                     Ok(_) => {
                         // Route media after text body (caption-style ordering — Test 9)
                         if !media_paths.is_empty() {
-                            let media_errors =
-                                route_media_payload(target, &media_paths, tg).await;
+                            let media_errors = route_media_payload(target, &media_paths, tg).await;
                             errors.extend(media_errors);
                         }
                     }
@@ -200,7 +199,10 @@ pub async fn dispatch_all_targets(
                 }
             }
             other => {
-                errors.push(format!("{}:{}: unsupported platform", other, target.chat_id));
+                errors.push(format!(
+                    "{}:{}: unsupported platform",
+                    other, target.chat_id
+                ));
             }
         }
     }
@@ -215,10 +217,10 @@ pub async fn dispatch_all_targets(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use chrono::Utc;
     use ironhermes_cron::job::{JobOrigin, JobState, RepeatConfig, ScheduleParsed};
     use std::collections::HashSet;
     use std::sync::Mutex;
-    use chrono::Utc;
 
     // ---------------------------------------------------------------------------
     // FakeTg — testable TgSendApi implementation
@@ -253,10 +255,11 @@ mod tests {
             if self.fail_on.contains(chat_id) {
                 return Err(anyhow::anyhow!("simulated failure for {}", chat_id));
             }
-            self.calls
-                .lock()
-                .unwrap()
-                .push((chat_id.to_string(), content.to_string(), thread_id.map(|s| s.to_string())));
+            self.calls.lock().unwrap().push((
+                chat_id.to_string(),
+                content.to_string(),
+                thread_id.map(|s| s.to_string()),
+            ));
             Ok(())
         }
 
@@ -267,7 +270,10 @@ mod tests {
             thread_id: Option<&str>,
         ) -> anyhow::Result<()> {
             if self.fail_media.contains(path) {
-                return Err(anyhow::anyhow!("simulated media failure for {}", path.display()));
+                return Err(anyhow::anyhow!(
+                    "simulated media failure for {}",
+                    path.display()
+                ));
             }
             self.voices.lock().unwrap().push((
                 chat_id.to_string(),
@@ -284,7 +290,10 @@ mod tests {
             thread_id: Option<&str>,
         ) -> anyhow::Result<()> {
             if self.fail_media.contains(path) {
-                return Err(anyhow::anyhow!("simulated media failure for {}", path.display()));
+                return Err(anyhow::anyhow!(
+                    "simulated media failure for {}",
+                    path.display()
+                ));
             }
             self.images.lock().unwrap().push((
                 chat_id.to_string(),
@@ -301,7 +310,10 @@ mod tests {
             thread_id: Option<&str>,
         ) -> anyhow::Result<()> {
             if self.fail_media.contains(path) {
-                return Err(anyhow::anyhow!("simulated media failure for {}", path.display()));
+                return Err(anyhow::anyhow!(
+                    "simulated media failure for {}",
+                    path.display()
+                ));
             }
             self.videos.lock().unwrap().push((
                 chat_id.to_string(),
@@ -318,7 +330,10 @@ mod tests {
             thread_id: Option<&str>,
         ) -> anyhow::Result<()> {
             if self.fail_media.contains(path) {
-                return Err(anyhow::anyhow!("simulated media failure for {}", path.display()));
+                return Err(anyhow::anyhow!(
+                    "simulated media failure for {}",
+                    path.display()
+                ));
             }
             self.documents.lock().unwrap().push((
                 chat_id.to_string(),
@@ -528,10 +543,7 @@ mod tests {
         let config = Config::default();
         // discord (chat_id "99") fails, telegram ("42") succeeds
         let tg = Arc::new(FakeTg::with_fail_on(["99"]));
-        let targets = vec![
-            make_target("telegram", "42"),
-            make_target("discord", "99"),
-        ];
+        let targets = vec![make_target("telegram", "42"), make_target("discord", "99")];
 
         let errors = dispatch_all_targets(
             targets,
@@ -565,10 +577,7 @@ mod tests {
         let job = make_job("telegram:42,telegram:99");
         let config = Config::default();
         let tg = Arc::new(FakeTg::default());
-        let targets = vec![
-            make_target("telegram", "42"),
-            make_target("telegram", "99"),
-        ];
+        let targets = vec![make_target("telegram", "42"), make_target("telegram", "99")];
 
         let errors = dispatch_all_targets(
             targets,
@@ -753,11 +762,33 @@ mod tests {
             )
             .await;
 
-            assert!(errors.is_empty(), "unexpected errors for .{}: {:?}", ext, errors);
-            assert_eq!(tg.recorded_images().len(), 1, ".{} must route to send_image_file", ext);
-            assert!(tg.recorded_videos().is_empty(), ".{} must not route to send_video", ext);
-            assert!(tg.recorded_voices().is_empty(), ".{} must not route to send_voice", ext);
-            assert!(tg.recorded_documents().is_empty(), ".{} must not route to send_document", ext);
+            assert!(
+                errors.is_empty(),
+                "unexpected errors for .{}: {:?}",
+                ext,
+                errors
+            );
+            assert_eq!(
+                tg.recorded_images().len(),
+                1,
+                ".{} must route to send_image_file",
+                ext
+            );
+            assert!(
+                tg.recorded_videos().is_empty(),
+                ".{} must not route to send_video",
+                ext
+            );
+            assert!(
+                tg.recorded_voices().is_empty(),
+                ".{} must not route to send_voice",
+                ext
+            );
+            assert!(
+                tg.recorded_documents().is_empty(),
+                ".{} must not route to send_document",
+                ext
+            );
         }
     }
 
@@ -780,11 +811,33 @@ mod tests {
             )
             .await;
 
-            assert!(errors.is_empty(), "unexpected errors for .{}: {:?}", ext, errors);
-            assert_eq!(tg.recorded_videos().len(), 1, ".{} must route to send_video", ext);
-            assert!(tg.recorded_images().is_empty(), ".{} must not route to send_image_file", ext);
-            assert!(tg.recorded_voices().is_empty(), ".{} must not route to send_voice", ext);
-            assert!(tg.recorded_documents().is_empty(), ".{} must not route to send_document", ext);
+            assert!(
+                errors.is_empty(),
+                "unexpected errors for .{}: {:?}",
+                ext,
+                errors
+            );
+            assert_eq!(
+                tg.recorded_videos().len(),
+                1,
+                ".{} must route to send_video",
+                ext
+            );
+            assert!(
+                tg.recorded_images().is_empty(),
+                ".{} must not route to send_image_file",
+                ext
+            );
+            assert!(
+                tg.recorded_voices().is_empty(),
+                ".{} must not route to send_voice",
+                ext
+            );
+            assert!(
+                tg.recorded_documents().is_empty(),
+                ".{} must not route to send_document",
+                ext
+            );
         }
     }
 
@@ -807,11 +860,33 @@ mod tests {
             )
             .await;
 
-            assert!(errors.is_empty(), "unexpected errors for .{}: {:?}", ext, errors);
-            assert_eq!(tg.recorded_voices().len(), 1, ".{} must route to send_voice", ext);
-            assert!(tg.recorded_images().is_empty(), ".{} must not route to send_image_file", ext);
-            assert!(tg.recorded_videos().is_empty(), ".{} must not route to send_video", ext);
-            assert!(tg.recorded_documents().is_empty(), ".{} must not route to send_document", ext);
+            assert!(
+                errors.is_empty(),
+                "unexpected errors for .{}: {:?}",
+                ext,
+                errors
+            );
+            assert_eq!(
+                tg.recorded_voices().len(),
+                1,
+                ".{} must route to send_voice",
+                ext
+            );
+            assert!(
+                tg.recorded_images().is_empty(),
+                ".{} must not route to send_image_file",
+                ext
+            );
+            assert!(
+                tg.recorded_videos().is_empty(),
+                ".{} must not route to send_video",
+                ext
+            );
+            assert!(
+                tg.recorded_documents().is_empty(),
+                ".{} must not route to send_document",
+                ext
+            );
         }
     }
 
@@ -835,7 +910,11 @@ mod tests {
 
         assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
         let docs = tg.recorded_documents();
-        assert_eq!(docs.len(), 1, "unknown extension must route to send_document");
+        assert_eq!(
+            docs.len(),
+            1,
+            "unknown extension must route to send_document"
+        );
         assert_eq!(docs[0].1, PathBuf::from("/tmp/blob.xyz"));
         assert!(tg.recorded_images().is_empty());
         assert!(tg.recorded_videos().is_empty());
@@ -892,9 +971,18 @@ mod tests {
         // text body has all MEDIA lines stripped
         let calls = tg.recorded_calls();
         assert_eq!(calls.len(), 1);
-        assert!(!calls[0].1.contains("MEDIA:"), "body must not contain MEDIA: lines");
-        assert!(calls[0].1.contains("header"), "body must contain non-MEDIA content");
-        assert!(calls[0].1.contains("footer"), "body must contain non-MEDIA content");
+        assert!(
+            !calls[0].1.contains("MEDIA:"),
+            "body must not contain MEDIA: lines"
+        );
+        assert!(
+            calls[0].1.contains("header"),
+            "body must contain non-MEDIA content"
+        );
+        assert!(
+            calls[0].1.contains("footer"),
+            "body must contain non-MEDIA content"
+        );
     }
 
     // Test M9: text-first ordering — send_message called before send_image_file
@@ -916,14 +1004,40 @@ mod tests {
                 *self.message_order.lock().unwrap() = Some(n);
                 Ok(())
             }
-            async fn send_voice(&self, _: &str, _: &std::path::Path, _: Option<&str>) -> anyhow::Result<()> { Ok(()) }
-            async fn send_image_file(&self, _: &str, _: &std::path::Path, _: Option<&str>) -> anyhow::Result<()> {
+            async fn send_voice(
+                &self,
+                _: &str,
+                _: &std::path::Path,
+                _: Option<&str>,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn send_image_file(
+                &self,
+                _: &str,
+                _: &std::path::Path,
+                _: Option<&str>,
+            ) -> anyhow::Result<()> {
                 let n = self.counter.fetch_add(1, Ordering::SeqCst);
                 *self.image_order.lock().unwrap() = Some(n);
                 Ok(())
             }
-            async fn send_video(&self, _: &str, _: &std::path::Path, _: Option<&str>) -> anyhow::Result<()> { Ok(()) }
-            async fn send_document(&self, _: &str, _: &std::path::Path, _: Option<&str>) -> anyhow::Result<()> { Ok(()) }
+            async fn send_video(
+                &self,
+                _: &str,
+                _: &std::path::Path,
+                _: Option<&str>,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn send_document(
+                &self,
+                _: &str,
+                _: &std::path::Path,
+                _: Option<&str>,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
         }
 
         let counter = Arc::new(AtomicUsize::new(0));
@@ -948,8 +1062,16 @@ mod tests {
         .await;
 
         assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
-        let msg_ord = fake.message_order.lock().unwrap().expect("send_message not called");
-        let img_ord = fake.image_order.lock().unwrap().expect("send_image_file not called");
+        let msg_ord = fake
+            .message_order
+            .lock()
+            .unwrap()
+            .expect("send_message not called");
+        let img_ord = fake
+            .image_order
+            .lock()
+            .unwrap()
+            .expect("send_image_file not called");
         assert!(
             msg_ord < img_ord,
             "send_message (order {}) must be called BEFORE send_image_file (order {})",
@@ -983,7 +1105,11 @@ mod tests {
             errors[0]
         );
         // text send_message succeeded — no text error
-        assert_eq!(tg.recorded_calls().len(), 1, "send_message must still have been called");
+        assert_eq!(
+            tg.recorded_calls().len(),
+            1,
+            "send_message must still have been called"
+        );
     }
 
     // Test M11: no adapter for media — existing "no adapter available" error preserved
@@ -1023,7 +1149,11 @@ mod tests {
         .await;
 
         assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
-        assert_eq!(tg.recorded_images().len(), 1, ".PNG must route to send_image_file");
+        assert_eq!(
+            tg.recorded_images().len(),
+            1,
+            ".PNG must route to send_image_file"
+        );
     }
 
     // Test M13: relative path (no leading slash) — passed verbatim to adapter
@@ -1046,8 +1176,16 @@ mod tests {
 
         assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
         let images = tg.recorded_images();
-        assert_eq!(images.len(), 1, "relative .png must route to send_image_file");
-        assert_eq!(images[0].1, PathBuf::from("blob.png"), "path must be passed verbatim");
+        assert_eq!(
+            images.len(),
+            1,
+            "relative .png must route to send_image_file"
+        );
+        assert_eq!(
+            images[0].1,
+            PathBuf::from("blob.png"),
+            "path must be passed verbatim"
+        );
     }
 
     // Test M14: [SILENT] gate respected — no MEDIA extraction, no media sends
@@ -1069,11 +1207,26 @@ mod tests {
         .await;
 
         assert!(errors.is_empty(), "silent output must produce no errors");
-        assert!(tg.recorded_calls().is_empty(), "no send_message for silent output");
-        assert!(tg.recorded_images().is_empty(), "no send_image_file for silent output");
-        assert!(tg.recorded_videos().is_empty(), "no send_video for silent output");
-        assert!(tg.recorded_voices().is_empty(), "no send_voice for silent output");
-        assert!(tg.recorded_documents().is_empty(), "no send_document for silent output");
+        assert!(
+            tg.recorded_calls().is_empty(),
+            "no send_message for silent output"
+        );
+        assert!(
+            tg.recorded_images().is_empty(),
+            "no send_image_file for silent output"
+        );
+        assert!(
+            tg.recorded_videos().is_empty(),
+            "no send_video for silent output"
+        );
+        assert!(
+            tg.recorded_voices().is_empty(),
+            "no send_voice for silent output"
+        );
+        assert!(
+            tg.recorded_documents().is_empty(),
+            "no send_document for silent output"
+        );
     }
 
     // -----------------------------------------------------------------------

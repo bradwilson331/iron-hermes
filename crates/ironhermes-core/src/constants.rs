@@ -40,8 +40,9 @@ pub const PROFILES_SUBDIR: &str = "profiles";
 /// "learning" (Phase 33): autonomous skill creation via skill_manage. No external prereqs
 /// — writes only to HERMES_HOME/skills/. Same risk profile as "memory" (T-33-03-A).
 /// web and code are disabled by default (require API keys / high blast radius).
-pub const DEFAULT_TOOLSETS: &[&str] =
-    &["memory", "session", "agent", "skills", "robotics", "learning"];
+pub const DEFAULT_TOOLSETS: &[&str] = &[
+    "memory", "session", "agent", "skills", "robotics", "learning",
+];
 
 /// D-20 (Phase 27.1.1-gap-02): canonical exhaustive list of all known toolset names.
 ///
@@ -57,7 +58,7 @@ pub const DEFAULT_TOOLSETS: &[&str] =
 /// as they have no external prerequisites.
 pub const ALL_TOOLSETS: &[&str] = &[
     "memory", "session", "agent", "skills", "robotics", "learning", "web", "code", "browser",
-    "voice",   // Phase 36.17.5 D-15
+    "voice", // Phase 36.17.5 D-15
 ];
 
 /// Get the IronHermes home directory (default: ~/.ironhermes).

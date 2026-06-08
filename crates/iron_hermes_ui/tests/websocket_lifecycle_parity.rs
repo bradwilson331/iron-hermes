@@ -39,7 +39,7 @@ fn server_ws_runs_turn_in_spawned_task_and_streams_concurrently() {
 fn malformed_request_path_is_recoverable_and_send_failures_abort_turn() {
     let ws = read("src/server/ws.rs");
     assert!(
-        ws.contains("#[get(\"/api/ws/chat\")]") ,
+        ws.contains("#[get(\"/api/ws/chat\")]"),
         "ws route annotation must remain /api/ws/chat"
     );
     assert!(
@@ -94,9 +94,7 @@ fn server_ws_disconnect_teardown_distinguishes_clean_recv_from_broken_send() {
     );
 
     assert!(
-        ws.contains("session_id = %")
-            && ws.contains("reason = %")
-            && ws.contains("in_flight ="),
+        ws.contains("session_id = %") && ws.contains("reason = %") && ws.contains("in_flight ="),
         "disconnect telemetry must include session_id, reason, and in_flight fields"
     );
 }

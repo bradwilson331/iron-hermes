@@ -5,18 +5,18 @@
 //!
 //! Run: `cargo test -p ironhermes-tools --test tts_tools`
 
-fn env_lock() -> &'static std::sync::Mutex<()> {
+fn env_lock() -> &'static tokio::sync::Mutex<()> {
     use std::sync::OnceLock;
-    static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 // TTS-03 (un-ignored by PLAN 02): EdgeProvider::is_available() always returns true (D-03).
 #[test]
 fn test_edge_provider_available() {
     use ironhermes_core::config::EdgeTtsConfig;
-    use ironhermes_tools::tts::EdgeProvider;
     use ironhermes_core::tts::TtsProvider;
+    use ironhermes_tools::tts::EdgeProvider;
 
     let provider = EdgeProvider::new(EdgeTtsConfig::default());
     assert!(
@@ -29,10 +29,11 @@ fn test_edge_provider_available() {
 #[test]
 fn test_elevenlabs_unavailable_no_key() {
     use ironhermes_core::config::ElevenLabsConfig;
-    use ironhermes_tools::tts::ElevenLabsProvider;
     use ironhermes_core::tts::TtsProvider;
+    use ironhermes_tools::tts::ElevenLabsProvider;
 
-    let _lock = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _lock = rt.block_on(env_lock().lock());
 
     // SAFETY: env_lock() serializes all env-var mutations across tests in this
     // binary, so no other thread reads ELEVENLABS_API_KEY concurrently.
@@ -56,8 +57,8 @@ fn test_elevenlabs_unavailable_no_key() {
 #[test]
 fn test_tts_tool_metadata() {
     use ironhermes_core::Config;
-    use ironhermes_tools::tts_tool::TextToSpeechTool;
     use ironhermes_tools::registry::Tool;
+    use ironhermes_tools::tts_tool::TextToSpeechTool;
     use std::sync::Arc;
 
     let config = Arc::new(Config::default());
@@ -68,7 +69,10 @@ fn test_tts_tool_metadata() {
     assert_eq!(tool.toolset(), "voice");
 
     let schema = tool.schema();
-    let props = schema.function.parameters.get("properties")
+    let props = schema
+        .function
+        .parameters
+        .get("properties")
         .expect("schema must have properties");
     assert!(
         props.get("text").is_some(),
@@ -79,15 +83,22 @@ fn test_tts_tool_metadata() {
         "schema must have 'output_path' property (D-07)"
     );
 
-    let required = schema.function.parameters.get("required")
+    let required = schema
+        .function
+        .parameters
+        .get("required")
         .and_then(|r: &serde_json::Value| r.as_array())
         .expect("schema must have 'required' array");
     assert!(
-        required.iter().any(|v: &serde_json::Value| v.as_str() == Some("text")),
+        required
+            .iter()
+            .any(|v: &serde_json::Value| v.as_str() == Some("text")),
         "'text' must be in required (D-07)"
     );
     assert!(
-        !required.iter().any(|v: &serde_json::Value| v.as_str() == Some("output_path")),
+        !required
+            .iter()
+            .any(|v: &serde_json::Value| v.as_str() == Some("output_path")),
         "'output_path' must NOT be required (D-07 — optional)"
     );
 }
@@ -96,30 +107,38 @@ fn test_tts_tool_metadata() {
 // Uses FakeProvider via new_with_registry to avoid live network.
 #[tokio::test]
 async fn test_tts_tool_creates_audio_cache_dir() {
+    use async_trait::async_trait;
     use ironhermes_core::Config;
     use ironhermes_core::tts::{TtsProvider, TtsRegistry};
-    use ironhermes_tools::tts_tool::TextToSpeechTool;
     use ironhermes_tools::registry::Tool;
+    use ironhermes_tools::tts_tool::TextToSpeechTool;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use async_trait::async_trait;
 
     // FakeProvider: returns Ok(output_path.clone()) without network I/O.
     struct FakeProvider;
 
     #[async_trait]
     impl TtsProvider for FakeProvider {
-        fn name(&self) -> &str { "edge" }
-        fn is_available(&self) -> bool { true }
-        async fn synthesize(&self, _text: &str, output_path: &std::path::Path) -> anyhow::Result<PathBuf> {
+        fn name(&self) -> &str {
+            "edge"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        async fn synthesize(
+            &self,
+            _text: &str,
+            output_path: &std::path::Path,
+        ) -> anyhow::Result<PathBuf> {
             // Write a tiny stub file so the path exists after "synthesis"
             std::fs::write(output_path, b"fake-audio")?;
             Ok(output_path.to_path_buf())
         }
     }
 
-    let _lock = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _lock = env_lock().lock().await;
     let tmpdir = TempDir::new().expect("create tempdir");
 
     // SAFETY: env_lock() serializes IRONHERMES_HOME mutations across tests.
@@ -141,7 +160,11 @@ async fn test_tts_tool_creates_audio_cache_dir() {
         audio_cache
     );
 
-    assert!(result.is_ok(), "FakeProvider synthesize should succeed: {:?}", result);
+    assert!(
+        result.is_ok(),
+        "FakeProvider synthesize should succeed: {:?}",
+        result
+    );
 
     unsafe { std::env::remove_var("IRONHERMES_HOME") };
 }
@@ -149,27 +172,35 @@ async fn test_tts_tool_creates_audio_cache_dir() {
 // T-output-path BLOCKING test: LLM-supplied path traversal must be rejected.
 #[tokio::test]
 async fn test_output_path_traversal_blocked() {
+    use async_trait::async_trait;
     use ironhermes_core::Config;
     use ironhermes_core::tts::{TtsProvider, TtsRegistry};
-    use ironhermes_tools::tts_tool::TextToSpeechTool;
     use ironhermes_tools::registry::Tool;
+    use ironhermes_tools::tts_tool::TextToSpeechTool;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::TempDir;
-    use async_trait::async_trait;
 
     struct FakeProvider;
 
     #[async_trait]
     impl TtsProvider for FakeProvider {
-        fn name(&self) -> &str { "edge" }
-        fn is_available(&self) -> bool { true }
-        async fn synthesize(&self, _text: &str, output_path: &std::path::Path) -> anyhow::Result<PathBuf> {
+        fn name(&self) -> &str {
+            "edge"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        async fn synthesize(
+            &self,
+            _text: &str,
+            output_path: &std::path::Path,
+        ) -> anyhow::Result<PathBuf> {
             Ok(output_path.to_path_buf())
         }
     }
 
-    let _lock = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _lock = env_lock().lock().await;
     let tmpdir = TempDir::new().expect("create tempdir");
 
     // SAFETY: env_lock() serializes IRONHERMES_HOME mutations across tests.
@@ -182,10 +213,12 @@ async fn test_output_path_traversal_blocked() {
     let tool = TextToSpeechTool::new_with_registry(config, registry);
 
     // Attempt path traversal with /etc/passwd
-    let result: anyhow::Result<String> = tool.execute(serde_json::json!({
-        "text": "x",
-        "output_path": "/etc/passwd"
-    })).await;
+    let result: anyhow::Result<String> = tool
+        .execute(serde_json::json!({
+            "text": "x",
+            "output_path": "/etc/passwd"
+        }))
+        .await;
 
     assert!(
         result.is_err(),
@@ -194,7 +227,8 @@ async fn test_output_path_traversal_blocked() {
     let err_msg = result.unwrap_err().to_string();
     assert!(
         err_msg.contains("audio_cache"),
-        "error message must mention audio_cache (got: {})", err_msg
+        "error message must mention audio_cache (got: {})",
+        err_msg
     );
 
     unsafe { std::env::remove_var("IRONHERMES_HOME") };
@@ -238,8 +272,8 @@ fn test_ffmpeg_probe_no_panic() {
 #[test]
 fn test_edge_provider_name_is_edge() {
     use ironhermes_core::config::EdgeTtsConfig;
-    use ironhermes_tools::tts::EdgeProvider;
     use ironhermes_core::tts::TtsProvider;
+    use ironhermes_tools::tts::EdgeProvider;
 
     let provider = EdgeProvider::new(EdgeTtsConfig::default());
     assert_eq!(provider.name(), "edge");
@@ -249,8 +283,8 @@ fn test_edge_provider_name_is_edge() {
 #[test]
 fn test_elevenlabs_provider_name_is_elevenlabs() {
     use ironhermes_core::config::ElevenLabsConfig;
-    use ironhermes_tools::tts::ElevenLabsProvider;
     use ironhermes_core::tts::TtsProvider;
+    use ironhermes_tools::tts::ElevenLabsProvider;
 
     let provider = ElevenLabsProvider::new(ElevenLabsConfig::default());
     assert_eq!(provider.name(), "elevenlabs");
@@ -272,7 +306,7 @@ async fn test_edge_synth_writes_file() {
     // `.ok()` is intentional: if another test already installed a provider, ignore the error.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let _lock = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let _lock = env_lock().lock().await;
     let tmpdir = TempDir::new().expect("create tempdir");
 
     // SAFETY: env_lock() serializes IRONHERMES_HOME mutations across tests.
@@ -291,13 +325,11 @@ async fn test_edge_synth_writes_file() {
 
     unsafe { std::env::remove_var("IRONHERMES_HOME") };
 
-    let written = result.expect("EdgeProvider::synthesize must succeed against live Edge TTS (D-03)");
+    let written =
+        result.expect("EdgeProvider::synthesize must succeed against live Edge TTS (D-03)");
 
     // Assert returned PathBuf matches the requested path.
-    assert_eq!(
-        written, tmp_path,
-        "synthesize must return the output path"
-    );
+    assert_eq!(written, tmp_path, "synthesize must return the output path");
 
     // Assert file exists on disk.
     assert!(
@@ -340,8 +372,8 @@ async fn test_edge_synth_writes_file() {
 #[test]
 fn test_send_audio_tool_metadata() {
     use ironhermes_core::{Config, Platform, SessionKey};
-    use ironhermes_tools::send_audio_tool::SendAudioTool;
     use ironhermes_tools::registry::Tool;
+    use ironhermes_tools::send_audio_tool::SendAudioTool;
     use std::sync::Arc;
 
     let config = Arc::new(Config::default());
@@ -352,18 +384,26 @@ fn test_send_audio_tool_metadata() {
     assert_eq!(tool.toolset(), "voice");
 
     let schema = tool.schema();
-    let props = schema.function.parameters.get("properties")
+    let props = schema
+        .function
+        .parameters
+        .get("properties")
         .expect("schema must have properties");
     assert!(
         props.get("path").is_some(),
         "schema must have 'path' property (D-14)"
     );
 
-    let required = schema.function.parameters.get("required")
+    let required = schema
+        .function
+        .parameters
+        .get("required")
         .and_then(|r: &serde_json::Value| r.as_array())
         .expect("schema must have required array");
     assert!(
-        required.iter().any(|v: &serde_json::Value| v.as_str() == Some("path")),
+        required
+            .iter()
+            .any(|v: &serde_json::Value| v.as_str() == Some("path")),
         "'path' must be in required"
     );
 }
@@ -371,8 +411,8 @@ fn test_send_audio_tool_metadata() {
 #[tokio::test]
 async fn test_send_audio_local_arm_plays_or_errors() {
     use ironhermes_core::{Config, Platform, SessionKey};
-    use ironhermes_tools::send_audio_tool::SendAudioTool;
     use ironhermes_tools::registry::Tool;
+    use ironhermes_tools::send_audio_tool::SendAudioTool;
     use std::sync::Arc;
     use tempfile::NamedTempFile;
 
@@ -384,30 +424,30 @@ async fn test_send_audio_local_arm_plays_or_errors() {
     let tmpfile = NamedTempFile::new().expect("create temp file");
     std::fs::write(tmpfile.path(), b"not-a-real-mp3-file").unwrap();
 
-    let result = tool.execute(serde_json::json!({
-        "path": tmpfile.path().to_str().unwrap()
-    })).await;
+    let result = tool
+        .execute(serde_json::json!({
+            "path": tmpfile.path().to_str().unwrap()
+        }))
+        .await;
 
     // The file exists but is not valid audio — rodio returns Err, NOT a panic.
     // If the host has no audio device, we also get Err with "No audio device".
     // Either way: must be Err, must not panic.
     assert!(
         result.is_err(),
-        "Local arm with a non-audio file must return Err, not panic; got: {:?}", result
+        "Local arm with a non-audio file must return Err, not panic; got: {:?}",
+        result
     );
     // The error must be an anyhow error string (not an unwrap panic trace)
     let msg = result.unwrap_err().to_string();
-    assert!(
-        !msg.is_empty(),
-        "error message must be non-empty"
-    );
+    assert!(!msg.is_empty(), "error message must be non-empty");
 }
 
 #[tokio::test]
 async fn test_send_audio_telegram_no_adapter_errors() {
     use ironhermes_core::{Config, Platform, SessionKey};
-    use ironhermes_tools::send_audio_tool::SendAudioTool;
     use ironhermes_tools::registry::Tool;
+    use ironhermes_tools::send_audio_tool::SendAudioTool;
     use std::sync::Arc;
     use tempfile::NamedTempFile;
 
@@ -418,9 +458,11 @@ async fn test_send_audio_telegram_no_adapter_errors() {
     let tmpfile = NamedTempFile::new().expect("create temp file");
     std::fs::write(tmpfile.path(), b"fake-audio").unwrap();
 
-    let result = tool.execute(serde_json::json!({
-        "path": tmpfile.path().to_str().unwrap()
-    })).await;
+    let result = tool
+        .execute(serde_json::json!({
+            "path": tmpfile.path().to_str().unwrap()
+        }))
+        .await;
 
     assert!(
         result.is_err(),
@@ -429,28 +471,38 @@ async fn test_send_audio_telegram_no_adapter_errors() {
     let msg = result.unwrap_err().to_string();
     assert!(
         msg.to_lowercase().contains("adapter") || msg.to_lowercase().contains("dispatcher"),
-        "error message must mention adapter or dispatcher; got: {}", msg
+        "error message must mention adapter or dispatcher; got: {}",
+        msg
     );
 }
 
 #[tokio::test]
 async fn test_send_audio_unsupported_platform_bails() {
-    use ironhermes_core::{Config, Platform, SessionKey};
-    use ironhermes_tools::send_audio_tool::{SendAudioTool, AudioDispatcher};
-    use ironhermes_tools::registry::Tool;
-    use std::sync::Arc;
-    use std::path::PathBuf;
-    use tempfile::NamedTempFile;
     use async_trait::async_trait;
+    use ironhermes_core::{Config, Platform, SessionKey};
+    use ironhermes_tools::registry::Tool;
+    use ironhermes_tools::send_audio_tool::{AudioDispatcher, SendAudioTool};
+    use std::sync::Arc;
+    use tempfile::NamedTempFile;
 
     struct MockDispatcher;
 
     #[async_trait]
     impl AudioDispatcher for MockDispatcher {
-        async fn send_voice_file(&self, _chat_id: &str, _path: &PathBuf, _thread_id: Option<&str>) -> anyhow::Result<()> {
+        async fn send_voice_file(
+            &self,
+            _chat_id: &str,
+            _path: &std::path::Path,
+            _thread_id: Option<&str>,
+        ) -> anyhow::Result<()> {
             Ok(())
         }
-        async fn send_audio_file(&self, _chat_id: &str, _path: &PathBuf, _thread_id: Option<&str>) -> anyhow::Result<()> {
+        async fn send_audio_file(
+            &self,
+            _chat_id: &str,
+            _path: &std::path::Path,
+            _thread_id: Option<&str>,
+        ) -> anyhow::Result<()> {
             Ok(())
         }
     }
@@ -463,9 +515,11 @@ async fn test_send_audio_unsupported_platform_bails() {
     let tmpfile = NamedTempFile::new().expect("create temp file");
     std::fs::write(tmpfile.path(), b"fake-audio").unwrap();
 
-    let result = tool.execute(serde_json::json!({
-        "path": tmpfile.path().to_str().unwrap()
-    })).await;
+    let result = tool
+        .execute(serde_json::json!({
+            "path": tmpfile.path().to_str().unwrap()
+        }))
+        .await;
 
     assert!(
         result.is_err(),
@@ -474,6 +528,7 @@ async fn test_send_audio_unsupported_platform_bails() {
     let msg = result.unwrap_err().to_string().to_lowercase();
     assert!(
         msg.contains("not yet wired") || msg.contains("discord"),
-        "error must mention 'not yet wired' or 'discord'; got: {}", msg
+        "error must mention 'not yet wired' or 'discord'; got: {}",
+        msg
     );
 }

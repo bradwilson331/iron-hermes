@@ -74,21 +74,20 @@ fn reconcile_unix(profile_dir: &Path) -> SingletonOutcome {
     };
 
     // D-03: hostname check — if different host, it's stale regardless of pid.
-    if let Some(lock_host) = parse_hostname_from_target(&target_str) {
-        if let Some(our_host) = current_hostname() {
-            if lock_host != our_host.as_str() {
-                warn!(
-                    path = %lock_path.display(),
-                    lock_host = %lock_host,
-                    our_host = %our_host,
-                    "SingletonLock written by different host (shared profile dir?); cleaning stale sentinels"
-                );
-                cleanup_sentinels(profile_dir);
-                return SingletonOutcome::UseProfile;
-            }
-        }
-        // If current_hostname() returns None: fall through to pid-liveness check (D-03 fallback).
+    if let Some(lock_host) = parse_hostname_from_target(&target_str)
+        && let Some(our_host) = current_hostname()
+        && lock_host != our_host.as_str()
+    {
+        warn!(
+            path = %lock_path.display(),
+            lock_host = %lock_host,
+            our_host = %our_host,
+            "SingletonLock written by different host (shared profile dir?); cleaning stale sentinels"
+        );
+        cleanup_sentinels(profile_dir);
+        return SingletonOutcome::UseProfile;
     }
+    // If current_hostname() returns None: fall through to pid-liveness check (D-03 fallback).
 
     // D-02 / D-05 / D-06: pid liveness check — stale check always runs before any cleanup.
     if is_pid_alive(pid) {
@@ -138,14 +137,14 @@ fn parse_hostname_from_target(target: &str) -> Option<&str> {
 fn cleanup_sentinels(profile_dir: &Path) {
     for name in &["SingletonLock", "SingletonSocket", "SingletonCookie"] {
         let path = profile_dir.join(name);
-        if let Err(e) = std::fs::remove_file(&path) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                warn!(
-                    path = %path.display(),
-                    error = %e,
-                    "failed to remove singleton sentinel (best-effort, continuing)"
-                );
-            }
+        if let Err(e) = std::fs::remove_file(&path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(
+                path = %path.display(),
+                error = %e,
+                "failed to remove singleton sentinel (best-effort, continuing)"
+            );
         }
     }
 }
@@ -350,10 +349,7 @@ mod tests {
             parse_hostname_from_target("Brads-MacBook-Pro.local-20704"),
             Some("Brads-MacBook-Pro.local")
         );
-        assert_eq!(
-            parse_hostname_from_target("simple-12345"),
-            Some("simple")
-        );
+        assert_eq!(parse_hostname_from_target("simple-12345"), Some("simple"));
         assert_eq!(parse_hostname_from_target("nodash"), None);
         // Dash at index 0 → no hostname segment
         assert_eq!(parse_hostname_from_target("-99"), None);

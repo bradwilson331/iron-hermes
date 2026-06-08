@@ -70,10 +70,10 @@ pub fn filter_no_reasoning(result: &AgentResult) -> Option<String> {
     }
 
     // Also check the final_response field
-    if let Some(ref resp) = result.final_response {
-        if resp.len() >= 100 {
-            return None;
-        }
+    if let Some(ref resp) = result.final_response
+        && resp.len() >= 100
+    {
+        return None;
     }
 
     Some("no_reasoning_steps".to_string())
@@ -110,12 +110,11 @@ pub fn filter_error_only(result: &AgentResult) -> Option<String> {
 /// UAT fix: also scans Role::Assistant messages where the model may echo secrets.
 pub fn filter_secrets_in_output(result: &AgentResult) -> Option<String> {
     for msg in &result.messages {
-        if msg.role == Role::Tool || msg.role == Role::Assistant {
-            if let Some(text) = msg.content_text() {
-                if SECRET_PATTERNS.is_match(text) {
-                    return Some("secrets_in_output".to_string());
-                }
-            }
+        if (msg.role == Role::Tool || msg.role == Role::Assistant)
+            && let Some(text) = msg.content_text()
+            && SECRET_PATTERNS.is_match(text)
+        {
+            return Some("secrets_in_output".to_string());
         }
     }
     None

@@ -236,17 +236,15 @@ pub async fn install(
     // ── Step 3: Audit (D-19 soft-fail; skipped if --skip-audit) ────────────
     if !skip_audit {
         let owner_repo = extract_owner_repo(&bundle);
-        if !owner_repo.is_empty() {
-            if let Ok(client) = reqwest::Client::builder()
+        if !owner_repo.is_empty()
+            && let Ok(client) = reqwest::Client::builder()
                 .user_agent(concat!("ironhermes-hub/", env!("CARGO_PKG_VERSION")))
                 .build()
-            {
-                let slug = crate::sanitize::to_skill_slug(&bundle.name);
-                if let Some(audit) = crate::audit::fetch_audit(&client, &owner_repo, &[&slug]).await
-                {
-                    for (s, a) in &audit {
-                        tracing::info!(skill = %s, risk = %a.risk, alerts = a.alerts, "audit result");
-                    }
+        {
+            let slug = crate::sanitize::to_skill_slug(&bundle.name);
+            if let Some(audit) = crate::audit::fetch_audit(&client, &owner_repo, &[&slug]).await {
+                for (s, a) in &audit {
+                    tracing::info!(skill = %s, risk = %a.risk, alerts = a.alerts, "audit result");
                 }
             }
         }
@@ -312,15 +310,16 @@ pub async fn install(
     // previous strict equality check. Strict-mode gating is deferred
     // (not built in this plan); see decisions G-01/G-02 in 21.8-06-PLAN.md.
     let computed = compute_folder_hash(&final_path)?;
-    if let Some(server_hash) = &server_snapshot_hash {
-        if !server_hash.is_empty() && &computed != server_hash {
-            tracing::warn!(
-                computed_hash = %computed,
-                server_snapshot_hash = %server_hash,
-                skill = %name,
-                "server snapshotHash differs from local folder hash — advisory only, install proceeding (D-14 opaque contract)"
-            );
-        }
+    if let Some(server_hash) = &server_snapshot_hash
+        && !server_hash.is_empty()
+        && &computed != server_hash
+    {
+        tracing::warn!(
+            computed_hash = %computed,
+            server_snapshot_hash = %server_hash,
+            skill = %name,
+            "server snapshotHash differs from local folder hash — advisory only, install proceeding (D-14 opaque contract)"
+        );
     }
 
     // ── Step 8: SkillLock write (replaces legacy 19.1 manifest write) ──────
@@ -423,17 +422,15 @@ pub async fn update(
     // Audit (soft-fail, same as install).
     if !skip_audit {
         let owner_repo = extract_owner_repo(&bundle);
-        if !owner_repo.is_empty() {
-            if let Ok(client) = reqwest::Client::builder()
+        if !owner_repo.is_empty()
+            && let Ok(client) = reqwest::Client::builder()
                 .user_agent(concat!("ironhermes-hub/", env!("CARGO_PKG_VERSION")))
                 .build()
-            {
-                let slug = crate::sanitize::to_skill_slug(&bundle.name);
-                if let Some(audit) = crate::audit::fetch_audit(&client, &owner_repo, &[&slug]).await
-                {
-                    for (s, a) in &audit {
-                        tracing::info!(skill = %s, risk = %a.risk, alerts = a.alerts, "audit result");
-                    }
+        {
+            let slug = crate::sanitize::to_skill_slug(&bundle.name);
+            if let Some(audit) = crate::audit::fetch_audit(&client, &owner_repo, &[&slug]).await {
+                for (s, a) in &audit {
+                    tracing::info!(skill = %s, risk = %a.risk, alerts = a.alerts, "audit result");
                 }
             }
         }
@@ -471,15 +468,16 @@ pub async fn update(
 
     // Post-install hash observation (D-13/D-14 — advisory; see install() Step 7 for rationale).
     let computed = compute_folder_hash(&resolved_final)?;
-    if let Some(server_hash) = &server_snapshot_hash {
-        if !server_hash.is_empty() && &computed != server_hash {
-            tracing::warn!(
-                computed_hash = %computed,
-                server_snapshot_hash = %server_hash,
-                skill = %skill_name,
-                "server snapshotHash differs from local folder hash on update — advisory only, replacement proceeding (D-14 opaque contract)"
-            );
-        }
+    if let Some(server_hash) = &server_snapshot_hash
+        && !server_hash.is_empty()
+        && &computed != server_hash
+    {
+        tracing::warn!(
+            computed_hash = %computed,
+            server_snapshot_hash = %server_hash,
+            skill = %skill_name,
+            "server snapshotHash differs from local folder hash on update — advisory only, replacement proceeding (D-14 opaque contract)"
+        );
     }
 
     // Update lock entry.
@@ -573,14 +571,12 @@ pub fn uninstall(skill_name: &str) -> Result<UninstallOutcome, HubError> {
     }
 
     // Clean up empty parent category dir.
-    if let Some(parent) = install_path.parent() {
-        if parent.exists() {
-            if let Ok(mut entries) = std::fs::read_dir(parent) {
-                if entries.next().is_none() {
-                    let _ = std::fs::remove_dir(parent);
-                }
-            }
-        }
+    if let Some(parent) = install_path.parent()
+        && parent.exists()
+        && let Ok(mut entries) = std::fs::read_dir(parent)
+        && entries.next().is_none()
+    {
+        let _ = std::fs::remove_dir(parent);
     }
 
     Ok(UninstallOutcome {
@@ -646,6 +642,7 @@ fn write_bundle_to_dir(dir: &Path, bundle: &SkillBundle) -> Result<(), HubError>
 ///     `paths::quarantine_dir`). `tempfile::tempdir_in(quarantine_root)`
 ///     places the tmp dir here, which is NOT under `env::temp_dir()` on
 ///     macOS, so gating on temp_dir alone refused every legitimate cleanup.
+///
 /// Symlink-swap defense is preserved: we still canonicalize and verify
 /// containment before any `remove_dir_all`.
 fn cleanup_quarantine_safely(p: &Path) {
@@ -666,10 +663,10 @@ fn is_in_accepted_cleanup_root(p: &Path) -> bool {
     if crate::sanitize::assert_temp_contained(p).is_ok() {
         return true;
     }
-    if let Ok(qroot) = crate::paths::quarantine_dir() {
-        if let Ok(true) = crate::sanitize::is_path_safe(&qroot, p) {
-            return true;
-        }
+    if let Ok(qroot) = crate::paths::quarantine_dir()
+        && let Ok(true) = crate::sanitize::is_path_safe(&qroot, p)
+    {
+        return true;
     }
     false
 }
@@ -961,7 +958,7 @@ mod tests {
         // Regression test for the macOS false-positive where HERMES_HOME lives
         // outside env::temp_dir(). The fix accepts paths under
         // `<skills_root>/.hub/quarantine/` as a second safe root.
-        let _env_guard = crate::test_env_lock();
+        let _env_guard = crate::test_env_lock().blocking_lock();
         let fake_home = tempfile::tempdir().unwrap();
         let prev = std::env::var("HERMES_HOME").ok();
         unsafe {
@@ -1092,12 +1089,10 @@ mod tests {
     /// not match the locally-computed D-13 folder hash. The advisory branch emits
     /// a tracing::warn but MUST NOT cleanup the install dir or return ShaMismatch.
     #[tokio::test]
-    // The env guard is intentionally held across `.await`: it pins the shared
-    // process-global HERMES_HOME for the whole async test. `#[tokio::test]` uses a
-    // current-thread runtime so this cannot deadlock — it just serializes the test.
-    #[allow(clippy::await_holding_lock)]
     async fn post_install_compare_is_advisory_when_hashes_diverge() {
-        let _env_guard = crate::test_env_lock();
+        // Hold the tokio::sync::Mutex guard across `.await` — safe, no deadlock
+        // risk because tokio::sync::Mutex is designed for async tasks.
+        let _env_guard = crate::test_env_lock().lock().await;
         let hermes_home = tempfile::tempdir().unwrap();
         let prev_home = std::env::var("HERMES_HOME").ok();
         unsafe {
@@ -1156,10 +1151,10 @@ mod tests {
     /// match the locally-computed D-13 folder hash. The advisory branch emits
     /// a tracing::warn but MUST NOT cleanup resolved_final or return ShaMismatch.
     #[tokio::test]
-    // See sibling test above: the env guard is intentionally held across `.await`.
-    #[allow(clippy::await_holding_lock)]
     async fn update_post_rename_compare_is_advisory_when_hashes_diverge() {
-        let _env_guard = crate::test_env_lock();
+        // Hold the tokio::sync::Mutex guard across `.await` — safe, no deadlock
+        // risk because tokio::sync::Mutex is designed for async tasks.
+        let _env_guard = crate::test_env_lock().lock().await;
         let hermes_home = tempfile::tempdir().unwrap();
         let prev_home = std::env::var("HERMES_HOME").ok();
         unsafe {

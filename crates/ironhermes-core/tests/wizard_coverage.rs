@@ -42,7 +42,7 @@ fn apply_kanban_section_answer_emits_all_17_fields() {
 
     for field in expected_fields {
         assert!(
-            block.contains_key(&serde_yaml::Value::String(field.to_string())),
+            block.contains_key(serde_yaml::Value::String(field.to_string())),
             "apply_kanban_section_answer must emit field `{field}` in the returned Mapping \
              (REQ-37.1-04)"
         );
@@ -88,7 +88,7 @@ fn write_defaults_if_absent_inserts_when_missing() {
 
     let map = yaml.as_mapping().expect("yaml must remain a mapping");
     assert!(
-        map.contains_key(&serde_yaml::Value::String("new_section".to_string())),
+        map.contains_key(serde_yaml::Value::String("new_section".to_string())),
         "write_defaults_if_absent must insert the key when it is absent (REQ-37.1-04)"
     );
 }

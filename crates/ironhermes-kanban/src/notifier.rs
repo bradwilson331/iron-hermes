@@ -33,8 +33,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Mutex as StdMutex;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use anyhow::Result as AnyResult;
 use tokio::sync::Mutex as TokioMutex;
@@ -61,9 +61,8 @@ type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + 
 /// Returns `anyhow::Result<()>` (not the kanban-local Result type) so the gateway can
 /// surface platform-specific error variants without the kanban crate needing to know
 /// about them.
-pub type SendFn = Arc<
-    dyn Fn(&str, &str, Option<&str>, &str) -> BoxFuture<'static, AnyResult<()>> + Send + Sync,
->;
+pub type SendFn =
+    Arc<dyn Fn(&str, &str, Option<&str>, &str) -> BoxFuture<'static, AnyResult<()>> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // NotifierContext
@@ -200,8 +199,7 @@ pub async fn run_notifier_loop(ctx: Arc<NotifierContext>, cancel: CancellationTo
         return;
     }
     let interval_secs = ctx.poll_interval_seconds.max(1);
-    let mut interval =
-        tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     tracing::info!(
         interval_seconds = interval_secs,
@@ -374,8 +372,7 @@ async fn sweep_board_with_store_ref(
             } else {
                 Some(sub.thread_id.as_str())
             };
-            match (ctx.send_fn)(sub.platform.as_str(), sub.chat_id.as_str(), tid, &message).await
-            {
+            match (ctx.send_fn)(sub.platform.as_str(), sub.chat_id.as_str(), tid, &message).await {
                 Ok(_) => stats.delivered += 1,
                 Err(e) => {
                     stats.delivery_failures += 1;

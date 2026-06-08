@@ -673,19 +673,18 @@ impl ProcessRegistry {
         );
 
         // Check sustained-overload auto-disable threshold.
-        if let Some(overload_since) = s.watch_state.overload_since {
-            if now.duration_since(overload_since)
+        if let Some(overload_since) = s.watch_state.overload_since
+            && now.duration_since(overload_since)
                 >= Duration::from_secs(WATCH_OVERLOAD_KILL_SECONDS)
-            {
-                s.watch_state.disabled = true;
-                tracing::warn!(
-                    target: "ironhermes_exec::process_registry",
-                    pid = ?pid,
-                    "watch overload disabled after {}s sustained at cap",
-                    WATCH_OVERLOAD_KILL_SECONDS
-                );
-                return RateDecision::AutoDisable;
-            }
+        {
+            s.watch_state.disabled = true;
+            tracing::warn!(
+                target: "ironhermes_exec::process_registry",
+                pid = ?pid,
+                "watch overload disabled after {}s sustained at cap",
+                WATCH_OVERLOAD_KILL_SECONDS
+            );
+            return RateDecision::AutoDisable;
         }
         RateDecision::Drop
     }

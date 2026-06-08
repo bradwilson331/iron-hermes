@@ -208,10 +208,7 @@ async fn test_session_isolation() {
     // Set session A running (simulates in-flight turn on session A).
     {
         let s = store.read().await;
-        s.get(&key_a)
-            .unwrap()
-            .running
-            .store(true, Ordering::SeqCst);
+        s.get(&key_a).unwrap().running.store(true, Ordering::SeqCst);
     }
 
     // Dispatch /model to session B — must NOT receive D-02 rejection.
@@ -440,9 +437,9 @@ async fn test_queue_bypasses_guard() {
 /// After the guard goes out of scope (Ok path), flag must be false.
 #[tokio::test]
 async fn test_guard_clears_on_success() {
+    use ironhermes_gateway::RunningAgentGuard;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
-    use ironhermes_gateway::RunningAgentGuard;
 
     let flag = Arc::new(AtomicBool::new(false));
 
@@ -467,15 +464,18 @@ async fn test_guard_clears_on_success() {
 /// After the error path, the flag must be `false`.
 #[tokio::test]
 async fn test_guard_clears_on_error() {
+    use ironhermes_gateway::RunningAgentGuard;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
-    use ironhermes_gateway::RunningAgentGuard;
 
     let flag = Arc::new(AtomicBool::new(false));
 
     let result: anyhow::Result<()> = {
         let _guard = RunningAgentGuard::new(flag.clone());
-        assert!(flag.load(Ordering::SeqCst), "Flag must be true inside guard");
+        assert!(
+            flag.load(Ordering::SeqCst),
+            "Flag must be true inside guard"
+        );
         // Simulate error propagation via ?
         Err(anyhow::anyhow!("simulated run_agent error"))
     };

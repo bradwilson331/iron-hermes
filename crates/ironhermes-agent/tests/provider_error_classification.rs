@@ -185,7 +185,10 @@ fn test_http_400_context_overflow() {
         "Streaming chat completion failed (400 Bad Request): context length 50000 exceeds maximum context length of 32000"
     );
     let result = classify_llm_error_typed(&err);
-    assert!(matches!(result, ProviderError::ContextLength), "got {result:?}");
+    assert!(
+        matches!(result, ProviderError::ContextLength),
+        "got {result:?}"
+    );
     assert!(!result.should_retry());
     assert!(result.should_fallback());
 }
@@ -200,7 +203,10 @@ fn test_400_image_too_large() {
         "Streaming chat completion failed (400 Bad Request): image too large; max size limit is 5MB"
     );
     let result = classify_llm_error_typed(&err);
-    assert!(matches!(result, ProviderError::PayloadTooLarge), "got {result:?}");
+    assert!(
+        matches!(result, ProviderError::PayloadTooLarge),
+        "got {result:?}"
+    );
     assert_eq!(result.variant_name(), "PayloadTooLarge");
 }
 
@@ -214,7 +220,10 @@ fn test_400_thinking_signature_invalid() {
         "Streaming chat completion failed (400 Bad Request): thinking signature is invalid for this model"
     );
     let result = classify_llm_error_typed(&err);
-    assert!(matches!(result, ProviderError::SchemaInvalid), "got {result:?}");
+    assert!(
+        matches!(result, ProviderError::SchemaInvalid),
+        "got {result:?}"
+    );
 }
 
 // =========================================================================
@@ -227,7 +236,10 @@ fn test_400_llama_cpp_grammar_pattern() {
         "Streaming chat completion failed (400 Bad Request): json-schema-to-grammar conversion failed in llama.cpp"
     );
     let result = classify_llm_error_typed(&err);
-    assert!(matches!(result, ProviderError::SchemaInvalid), "got {result:?}");
+    assert!(
+        matches!(result, ProviderError::SchemaInvalid),
+        "got {result:?}"
+    );
 }
 
 // =========================================================================
@@ -255,9 +267,8 @@ fn test_400_generic_large_session_falls_back_as_schema_invalid() {
 // =========================================================================
 #[test]
 fn test_400_generic_small_session_format_error() {
-    let err = anyhow::anyhow!(
-        "Streaming chat completion failed (400 Bad Request): malformed JSON body"
-    );
+    let err =
+        anyhow::anyhow!("Streaming chat completion failed (400 Bad Request): malformed JSON body");
     let result = classify_llm_error_typed(&err);
     assert!(matches!(result, ProviderError::SchemaInvalid));
 }
@@ -271,7 +282,10 @@ fn test_404_model_not_found_fallback() {
         "Streaming chat completion failed (404 Not Found): model gpt-9999 not found in registry"
     );
     let result = classify_llm_error_typed(&err);
-    assert!(matches!(result, ProviderError::ModelNotFound), "got {result:?}");
+    assert!(
+        matches!(result, ProviderError::ModelNotFound),
+        "got {result:?}"
+    );
     assert!(!result.should_retry());
     assert!(result.should_fallback());
     assert_eq!(result.variant_name(), "ModelNotFound");
@@ -300,7 +314,10 @@ fn test_413_payload_too_large_compress() {
         "Streaming chat completion failed (413 Payload Too Large): body exceeds limit"
     );
     let result = classify_llm_error_typed(&err);
-    assert!(matches!(result, ProviderError::PayloadTooLarge), "got {result:?}");
+    assert!(
+        matches!(result, ProviderError::PayloadTooLarge),
+        "got {result:?}"
+    );
     assert!(!result.should_retry());
     assert!(result.should_fallback());
     assert_eq!(result.variant_name(), "PayloadTooLarge");
@@ -321,9 +338,13 @@ fn test_500_server_error_retryable() {
 
 #[test]
 fn test_502_server_error_retryable() {
-    let err = anyhow::anyhow!("Streaming chat completion failed (502 Bad Gateway): upstream timeout");
+    let err =
+        anyhow::anyhow!("Streaming chat completion failed (502 Bad Gateway): upstream timeout");
     let result = classify_llm_error_typed(&err);
-    assert!(matches!(result, ProviderError::Server { status: 502 }), "got {result:?}");
+    assert!(
+        matches!(result, ProviderError::Server { status: 502 }),
+        "got {result:?}"
+    );
     assert!(result.should_retry());
 }
 
@@ -336,7 +357,10 @@ fn test_503_overloaded_retryable() {
         "Streaming chat completion failed (503 Service Unavailable): upstream overloaded"
     );
     let result = classify_llm_error_typed(&err);
-    assert!(matches!(result, ProviderError::Server { status: 503 }), "got {result:?}");
+    assert!(
+        matches!(result, ProviderError::Server { status: 503 }),
+        "got {result:?}"
+    );
     assert!(result.should_retry());
     assert!(result.should_fallback());
 }
@@ -347,7 +371,10 @@ fn test_529_overloaded_retryable() {
         "Streaming chat completion failed (529 Site is overloaded): try again later"
     );
     let result = classify_llm_error_typed(&err);
-    assert!(matches!(result, ProviderError::Server { status: 529 }), "got {result:?}");
+    assert!(
+        matches!(result, ProviderError::Server { status: 529 }),
+        "got {result:?}"
+    );
     assert!(result.should_retry());
 }
 
@@ -475,7 +502,10 @@ fn test_openrouter_metadata_raw_unwrap_via_anyhow_chain() {
         .context("OpenRouter metadata.raw envelope")
         .unwrap_err();
     let result = classify_llm_error_typed(&wrapped);
-    assert!(matches!(result, ProviderError::RateLimited { .. }), "got {result:?}");
+    assert!(
+        matches!(result, ProviderError::RateLimited { .. }),
+        "got {result:?}"
+    );
 }
 
 // =========================================================================
@@ -483,9 +513,8 @@ fn test_openrouter_metadata_raw_unwrap_via_anyhow_chain() {
 // =========================================================================
 #[test]
 fn test_grok_subscription_sse_error_no_status() {
-    let err = anyhow::anyhow!(
-        "Grok subscription SSE error: unauthorized access to xAI premium tier"
-    );
+    let err =
+        anyhow::anyhow!("Grok subscription SSE error: unauthorized access to xAI premium tier");
     let result = classify_llm_error_typed(&err);
     assert!(matches!(result, ProviderError::Auth));
     assert!(!result.should_retry());
@@ -501,7 +530,10 @@ fn test_oauth_long_context_beta_forbidden() {
         "Streaming chat completion failed (400 Bad Request): long context beta is not yet available for this OAuth tier"
     );
     let result = classify_llm_error_typed(&err);
-    assert!(matches!(result, ProviderError::SchemaInvalid), "got {result:?}");
+    assert!(
+        matches!(result, ProviderError::SchemaInvalid),
+        "got {result:?}"
+    );
 }
 
 // =========================================================================

@@ -19,10 +19,9 @@
 //!
 //! ENV_LOCK guards all env-mutating tests (Tests 1-5) to prevent test interference.
 
-use std::sync::Mutex;
+use ironhermes_tools::ToolRegistry;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use ironhermes_tools::ToolRegistry;
 
 // Re-export the public functions we test from the binary (they're `pub` in main.rs).
 // Because `main.rs` is a binary, we import via `ironhermes_cli` lib re-exports.
@@ -42,7 +41,7 @@ use ironhermes_tools::ToolRegistry;
 // ---------------------------------------------------------------------------
 // ENV_LOCK — serialize all env-mutating tests
 // ---------------------------------------------------------------------------
-static ENV_LOCK: Mutex<()> = Mutex::new(());
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ---------------------------------------------------------------------------
 // Preset constants (mirrored from main.rs GOAL_TOOLSET_RESTRICTED/EXTENDED).
@@ -103,7 +102,13 @@ fn build_full_registry() -> Arc<RwLock<ToolRegistry>> {
     }
     // Register extras that restricted should remove (simulating terminal,
     // delegate_task, web_search, etc. from the default tool set).
-    for name in &["terminal", "delegate_task", "web_search", "web_read", "patch_file"] {
+    for name in &[
+        "terminal",
+        "delegate_task",
+        "web_search",
+        "web_read",
+        "patch_file",
+    ] {
         reg.register_dynamic(Box::new(MockTool { name }));
     }
     Arc::new(RwLock::new(reg))
@@ -142,7 +147,7 @@ impl ironhermes_tools::Tool for MockTool {
 /// delegate_task / web_search schemas under the default goal-mode preset.
 #[tokio::test]
 async fn restricted_preset_exact_count() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().await;
 
     let registry = build_full_registry();
     let removed = registry.write().await.retain_by_name(RESTRICTED);
@@ -159,7 +164,13 @@ async fn restricted_preset_exact_count() {
     );
 
     // Verify none of the dangerous extras survived.
-    for dangerous in &["terminal", "delegate_task", "web_search", "web_read", "patch_file"] {
+    for dangerous in &[
+        "terminal",
+        "delegate_task",
+        "web_search",
+        "web_read",
+        "patch_file",
+    ] {
         assert!(
             !names.contains(dangerous),
             "tool '{}' must be removed by restricted preset but is still present: {:?}",
@@ -187,7 +198,7 @@ async fn restricted_preset_exact_count() {
 /// must remain (RESTRICTED + memory + skills + skill_manage).
 #[tokio::test]
 async fn extended_preset_exact_count() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().await;
 
     let registry = build_full_registry();
     let removed = registry.write().await.retain_by_name(EXTENDED);
@@ -233,7 +244,7 @@ async fn extended_preset_exact_count() {
 /// This test simulates the filter_for_goal_mode_if_applicable "full" no-op path.
 #[tokio::test]
 async fn full_preset_no_filter() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().await;
 
     let registry = build_full_registry();
     let before_count = registry.read().await.list_tools().len();
@@ -251,7 +262,8 @@ async fn full_preset_no_filter() {
     let names = guard.list_tools();
     assert!(
         names.contains(&"terminal"),
-        "full preset must NOT remove 'terminal': {:?}", names
+        "full preset must NOT remove 'terminal': {:?}",
+        names
     );
 }
 
@@ -264,7 +276,7 @@ async fn full_preset_no_filter() {
 /// early-return in filter_for_goal_mode_if_applicable.
 #[tokio::test]
 async fn filter_noops_when_not_goal_mode() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().await;
 
     // Set up: worker mode without goal mode.
     unsafe {
@@ -281,7 +293,10 @@ async fn filter_noops_when_not_goal_mode() {
         .map(|v| v == "1")
         .unwrap_or(false);
 
-    assert!(!goal_mode, "HERMES_KANBAN_GOAL_MODE must not be '1' for this test");
+    assert!(
+        !goal_mode,
+        "HERMES_KANBAN_GOAL_MODE must not be '1' for this test"
+    );
 
     // Since goal_mode=false, filter would early-return. Tool count unchanged.
     let after_count = registry.read().await.list_tools().len();
@@ -305,7 +320,7 @@ async fn filter_noops_when_not_goal_mode() {
 /// the gate 1 early-return.
 #[tokio::test]
 async fn filter_noops_when_not_worker_mode() {
-    let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _g = ENV_LOCK.lock().await;
 
     unsafe {
         std::env::remove_var("HERMES_KANBAN_TASK");
@@ -318,7 +333,10 @@ async fn filter_noops_when_not_worker_mode() {
 
     // Simulate the filter gate 1: HERMES_KANBAN_TASK unset → early-return.
     let worker_mode = std::env::var("HERMES_KANBAN_TASK").is_ok();
-    assert!(!worker_mode, "HERMES_KANBAN_TASK must be unset for this test");
+    assert!(
+        !worker_mode,
+        "HERMES_KANBAN_TASK must be unset for this test"
+    );
 
     // No filter applied.
     let after_count = registry.read().await.list_tools().len();

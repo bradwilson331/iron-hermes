@@ -2,16 +2,15 @@
 //! Implemented in Task 1 of plan 32.1-05b.
 
 use anyhow::Result;
-use ironhermes_core::{get_hermes_home, SkillRegistry};
-use ironhermes_cron::{scan_cron_prompt, CronJob};
+use ironhermes_core::{SkillRegistry, get_hermes_home};
+use ironhermes_cron::{CronJob, scan_cron_prompt};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const CRON_HINT_BANNER: &str =
-    "[IMPORTANT: You are running as a scheduled cron job. \
+const CRON_HINT_BANNER: &str = "[IMPORTANT: You are running as a scheduled cron job. \
      Your response will be delivered automatically without user \
      interaction. Be concise and actionable.]\n\n";
 
@@ -201,10 +200,7 @@ pub async fn build_job_prompt(
 
     // Post-assembly threat rescan — operates on the FULL assembled view so
     // injection hidden in skill content or context_from blocks is caught.
-    let blocked_reason = match scan_cron_prompt(&assembled) {
-        Ok(()) => None,
-        Err(reason) => Some(reason),
-    };
+    let blocked_reason = scan_cron_prompt(&assembled).err();
 
     Ok(AssembledPrompt {
         system_addendum: String::new(),
@@ -218,10 +214,7 @@ pub async fn build_job_prompt(
 /// Returns the scanner's verdict (`Some(reason)` if blocked, `None` if clean).
 /// This runs AFTER the five-step assembly, not before.
 pub fn scan_assembled(assembled: &str) -> Option<String> {
-    match scan_cron_prompt(assembled) {
-        Ok(()) => None,
-        Err(reason) => Some(reason),
-    }
+    scan_cron_prompt(assembled).err()
 }
 
 // ---------------------------------------------------------------------------
@@ -231,10 +224,10 @@ pub fn scan_assembled(assembled: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::env_lock;
     use chrono::Utc;
     use ironhermes_cron::{CronJob, ScheduleParsed};
     use std::fs;
-    use crate::test_util::env_lock;
     use tempfile::TempDir;
 
     fn make_job(prompt: &str) -> CronJob {
@@ -320,7 +313,10 @@ mod tests {
             1,
             "Expected exactly one '## Script Output' section"
         );
-        assert!(prompt.contains("hello world"), "Expected script output content");
+        assert!(
+            prompt.contains("hello world"),
+            "Expected script output content"
+        );
     }
 
     // Test 3: skill content + skip-missing prefix
@@ -331,9 +327,7 @@ mod tests {
         let mut job = make_job("hello");
         job.skills = vec!["greeter".to_string(), "missing-skill".to_string()];
 
-        let result = build_job_prompt(&job, None, Some(&registry))
-            .await
-            .unwrap();
+        let result = build_job_prompt(&job, None, Some(&registry)).await.unwrap();
         let prompt = &result.user_prompt;
 
         assert!(
@@ -362,7 +356,7 @@ mod tests {
         fs::write(output_dir.join(file_name), file_content).unwrap();
 
         // Point IRONHERMES_HOME to tempdir; serialize against other env-mutating tests.
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock().lock().await;
         unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()) };
 
         let mut job = make_job("use the context");
@@ -374,7 +368,9 @@ mod tests {
         unsafe { std::env::remove_var("IRONHERMES_HOME") };
 
         assert_eq!(
-            prompt.matches(&format!("## Output from job '{}'", uuid)).count(),
+            prompt
+                .matches(&format!("## Output from job '{}'", uuid))
+                .count(),
             1,
             "Expected exactly one context_from block"
         );
@@ -394,7 +390,7 @@ mod tests {
         let big_content = "x".repeat(10000);
         fs::write(output_dir.join("20260515_120000.md"), &big_content).unwrap();
 
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock().lock().await;
         unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()) };
 
         let mut job = make_job("use context");
@@ -427,7 +423,7 @@ mod tests {
     #[tokio::test]
     async fn test6_context_from_uuid_guard_rejects_non_uuid() {
         let tmp = TempDir::new().unwrap();
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock().lock().await;
         unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()) };
 
         let mut job = make_job("test");
@@ -453,7 +449,7 @@ mod tests {
         fs::create_dir_all(&output_dir).unwrap();
         fs::write(output_dir.join("20260515_120000.md"), "ctx content").unwrap();
 
-        let _guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = env_lock().lock().await;
         unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()) };
 
         let (_skill_dir, registry) = make_skill_registry(&[("my-skill", "skill body text")]);
@@ -471,12 +467,18 @@ mod tests {
 
         // Find byte offsets of each section
         let banner_pos = prompt.find(CRON_HINT_BANNER).expect("banner not found");
-        let skill_pos = prompt.find("skill body text").expect("skill content not found");
-        let script_pos = prompt.find("## Script Output").expect("script output not found");
+        let skill_pos = prompt
+            .find("skill body text")
+            .expect("skill content not found");
+        let script_pos = prompt
+            .find("## Script Output")
+            .expect("script output not found");
         let context_pos = prompt
             .find("## Output from job")
             .expect("context_from not found");
-        let user_pos = prompt.find("the user prompt").expect("user prompt not found");
+        let user_pos = prompt
+            .find("the user prompt")
+            .expect("user prompt not found");
 
         assert!(
             banner_pos < skill_pos,
@@ -507,9 +509,7 @@ mod tests {
         let mut job = make_job("benign user prompt");
         job.skills = vec!["evil-skill".to_string()];
 
-        let result = build_job_prompt(&job, None, Some(&registry))
-            .await
-            .unwrap();
+        let result = build_job_prompt(&job, None, Some(&registry)).await.unwrap();
 
         assert!(
             result.blocked_reason.is_some(),

@@ -53,7 +53,7 @@ fn fmt_commas(n: u64) -> String {
     let mut result = String::with_capacity(s.len() + s.len() / 3);
     let len = bytes.len();
     for (i, &b) in bytes.iter().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
+        if i > 0 && (len - i).is_multiple_of(3) {
             result.push(',');
         }
         result.push(b as char);
@@ -320,6 +320,8 @@ mod tests {
     }
 
     impl MockManager {
+        // One-off test helper return — alias would only exist here, inline is clearer.
+        #[allow(clippy::type_complexity)]
         fn new_ok(response: &str) -> (Self, Arc<StdMutex<Vec<(String, serde_json::Value)>>>) {
             let writes = Arc::new(StdMutex::new(Vec::new()));
             (
@@ -340,6 +342,8 @@ mod tests {
         }
     }
 
+    // One-off test helper return — alias would only exist here, inline is clearer.
+    #[allow(clippy::type_complexity)]
     fn make_tool_with_ok(
         response: &str,
     ) -> (MemoryTool, Arc<StdMutex<Vec<(String, serde_json::Value)>>>) {

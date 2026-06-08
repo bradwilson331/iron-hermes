@@ -30,8 +30,8 @@ use crate::tui_rata::status_line::StatusLineState;
 use crate::tui_rata::stream_events::StreamEvent;
 
 // Concrete paths — grep-verified iteration 2.
-use ironhermes_agent::AnyClient;
 use ironhermes_agent::AgentRuntime;
+use ironhermes_agent::AnyClient;
 use ironhermes_agent::context_engine::ContextEngine;
 use ironhermes_agent::memory::MemoryManager;
 use ironhermes_agent::personality::PersonalityRegistry;
@@ -806,10 +806,10 @@ impl App {
 
     /// Flush `assistant_buffer` into `history` as an assistant message.
     fn commit_assistant_buffer(&mut self) {
-        if let Some(buf) = self.assistant_buffer.take() {
-            if !buf.is_empty() {
-                self.history.push(assistant_message(buf));
-            }
+        if let Some(buf) = self.assistant_buffer.take()
+            && !buf.is_empty()
+        {
+            self.history.push(assistant_message(buf));
         }
     }
 
@@ -1102,7 +1102,7 @@ pub(crate) fn word_wrapped_line_count(line: &str, width: usize) -> usize {
             } else {
                 // Oversized word: character-wrap it across rows (ratatui line_full path).
                 // We are at the start of a row, so the first row is already counted.
-                let word_rows = (*pending_word_width + width - 1) / width;
+                let word_rows = (*pending_word_width).div_ceil(width);
                 *rows += word_rows - 1; // additional rows beyond the current one
                 let remainder = *pending_word_width % width;
                 *current_row_width = if remainder == 0 { width } else { remainder };
@@ -1180,7 +1180,7 @@ fn test_message(role: &str, body: &str) -> ChatMessage {
 
 #[cfg(feature = "test-support")]
 fn test_deps() -> AppDeps {
-    use ironhermes_agent::{AnyClient, AgentRuntime};
+    use ironhermes_agent::{AgentRuntime, AnyClient};
     use ironhermes_core::commands::registry::build_registry;
     use ironhermes_core::{Config, ProviderResolver};
     use ironhermes_tools::ToolRegistry;
@@ -1526,7 +1526,7 @@ mod scroll_tests {
 
     #[test]
     fn handle_mouse_outside_area_noop() {
-        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use crossterm::event::{MouseEvent, MouseEventKind};
         let mut app = App::new_test_empty();
         let scroll_before = app.transcript_scroll;
         let auto_before = app.auto_follow;
@@ -1561,7 +1561,10 @@ mod scroll_tests {
         let mut app = App::new_test_empty();
         // Simulate user having scrolled up before issuing /skills reload.
         app.scroll_up(5);
-        assert!(!app.auto_follow, "precondition: scroll_up disabled auto_follow");
+        assert!(
+            !app.auto_follow,
+            "precondition: scroll_up disabled auto_follow"
+        );
         let prev_len = app.history.len();
 
         let outcome = crate::tui_rata::commands::SlashOutcome::SkillsReload(
@@ -1600,7 +1603,10 @@ mod scroll_tests {
         // the same render tick. Reference: submit() at app.rs:718.
         let mut app = App::new_test_empty();
         app.scroll_up(5);
-        assert!(!app.auto_follow, "precondition: scroll_up disabled auto_follow");
+        assert!(
+            !app.auto_follow,
+            "precondition: scroll_up disabled auto_follow"
+        );
         let prev_len = app.history.len();
 
         let outcome = crate::tui_rata::commands::SlashOutcome::SkillActivated {
@@ -1792,7 +1798,11 @@ mod scroll_tests {
 #[cfg(all(test, feature = "test-support"))]
 mod word_wrap_tests {
     use super::*;
-    use ratatui::{Terminal, backend::TestBackend, widgets::{Paragraph, Wrap}};
+    use ratatui::{
+        Terminal,
+        backend::TestBackend,
+        widgets::{Paragraph, Wrap},
+    };
 
     /// Helper: count rows ratatui actually renders for `text` at column `width`.
     ///
@@ -1803,15 +1813,19 @@ mod word_wrap_tests {
         let height = 200u16;
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|f| {
-            let para = Paragraph::new(text).wrap(Wrap { trim: false });
-            f.render_widget(para, f.area());
-        }).unwrap();
+        terminal
+            .draw(|f| {
+                let para = Paragraph::new(text).wrap(Wrap { trim: false });
+                f.render_widget(para, f.area());
+            })
+            .unwrap();
         let buf = terminal.backend().buffer();
         let mut count = 0usize;
         for row in 0..height {
             let row_blank = (0..width).all(|col| {
-                buf.cell((col, row)).map(|c| c.symbol() == " ").unwrap_or(true)
+                buf.cell((col, row))
+                    .map(|c| c.symbol() == " ")
+                    .unwrap_or(true)
             });
             if row_blank && row > 0 {
                 break;
@@ -1843,13 +1857,19 @@ mod word_wrap_tests {
     fn word_wrapped_line_count_short_empty_exact() {
         // Short line
         assert_eq!(word_wrapped_line_count("Hi!", 78), 1);
-        assert_eq!(word_wrapped_line_count("Hi!", 78), ratatui_line_count("Hi!", 78));
+        assert_eq!(
+            word_wrapped_line_count("Hi!", 78),
+            ratatui_line_count("Hi!", 78)
+        );
         // Empty line
         assert_eq!(word_wrapped_line_count("", 78), 1);
         // Exact-width line (78 'a' chars) — fills one row, no wrap
         let exact = "a".repeat(78);
         assert_eq!(word_wrapped_line_count(&exact, 78), 1);
-        assert_eq!(word_wrapped_line_count(&exact, 78), ratatui_line_count(&exact, 78));
+        assert_eq!(
+            word_wrapped_line_count(&exact, 78),
+            ratatui_line_count(&exact, 78)
+        );
     }
 
     /// 36.6.1-01-03: A word that straddles the column-78 boundary is pushed to
@@ -1917,7 +1937,9 @@ mod word_wrap_tests {
         let mut ratatui_count = 0usize;
         for row in 1u16..199 {
             let row_blank = (1u16..78).all(|col| {
-                buf.cell((col, row)).map(|c| c.symbol() == " ").unwrap_or(true)
+                buf.cell((col, row))
+                    .map(|c| c.symbol() == " ")
+                    .unwrap_or(true)
             });
             if row_blank && ratatui_count > 0 {
                 break;

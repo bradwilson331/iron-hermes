@@ -131,7 +131,7 @@ async fn s02_parent_cancels_subagents_plus_processes_no_zombies() {
 }
 
 /// S-03 — third ctrl-c emergency hard-exit. Automatable only via subprocess
-/// + real SIGINT delivery, which is finicky on macOS and excluded from CI.
+/// with real SIGINT delivery, which is finicky on macOS and excluded from CI.
 /// VALIDATION.md carries the manual UAT row.
 #[test]
 #[ignore = "S-03 manual UAT — real SIGINT delivery covered in VALIDATION.md Manual-Only row"]

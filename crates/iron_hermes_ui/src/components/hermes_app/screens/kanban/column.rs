@@ -26,6 +26,7 @@ use std::collections::HashSet;
 /// archived (toolbar toggle). Values match
 /// `ironhermes_kanban::types::KanbanStatus` lowercase reference names
 /// exactly (D-09).
+#[allow(dead_code)] // variants constructed in ScreenKanban and KanbanColumn callers; dead_code fires on test target
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum KanbanColumnStatus {
     Triage,
@@ -37,6 +38,7 @@ pub enum KanbanColumnStatus {
     Archived,
 }
 
+#[allow(dead_code)] // methods called in KanbanColumn component; dead_code fires on test target
 impl KanbanColumnStatus {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -138,11 +140,10 @@ pub fn KanbanColumn(
         Some(tid) => {
             // Look up the source task's current status to evaluate
             // is_drag_allowed.
-            let source = tasks
-                .read()
-                .iter()
-                .find(|t| t.id == tid)
-                .map(|t| KanbanStatus::from_wire_str(&t.status).unwrap_or(KanbanStatus::Triage));
+            let source =
+                tasks.read().iter().find(|t| t.id == tid).map(|t| {
+                    KanbanStatus::from_wire_str(&t.status).unwrap_or(KanbanStatus::Triage)
+                });
             match source {
                 Some(from) if from == target_status => (false, false, Some(from)),
                 Some(from) if is_drag_allowed(from, target_status) => (true, false, Some(from)),
@@ -157,9 +158,10 @@ pub fn KanbanColumn(
     // target. Pick the per-target hint, falling back to a generic
     // cross-skip message when the target has no per-column hint.
     let drag_hint: Option<&'static str> = if is_invalid_target {
-        Some(drag_blocked_hint(target_status).unwrap_or(
-            "This transition skips lifecycle steps — drag to TODO first",
-        ))
+        Some(
+            drag_blocked_hint(target_status)
+                .unwrap_or("This transition skips lifecycle steps — drag to TODO first"),
+        )
     } else {
         None
     };

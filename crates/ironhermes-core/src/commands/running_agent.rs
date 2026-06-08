@@ -45,7 +45,10 @@ pub fn is_bypass(name: &str) -> bool {
     // TODO(D-01): add "approve" | "deny" when approval queue lands
     // Phase 36.17.4 (D-08): pause/unpause must bypass — they affect drain behavior, not the in-flight turn.
     // Phase 36.3.7 (D-36): kanban must bypass — board state lives in DB, not agent context; mid-run /kanban is safe.
-    matches!(name, "stop" | "new" | "status" | "queue" | "pause" | "unpause" | "kanban")
+    matches!(
+        name,
+        "stop" | "new" | "status" | "queue" | "pause" | "unpause" | "kanban"
+    )
 }
 
 #[cfg(test)]
@@ -64,10 +67,16 @@ mod tests {
         assert!(is_bypass("status"), "status must bypass");
         assert!(is_bypass("queue"), "queue must bypass");
         assert!(is_bypass("pause"), "pause must bypass (Phase 36.17.4 D-08)");
-        assert!(is_bypass("unpause"), "unpause must bypass (Phase 36.17.4 D-08)");
+        assert!(
+            is_bypass("unpause"),
+            "unpause must bypass (Phase 36.17.4 D-08)"
+        );
 
         // Phase 36.3.7 D-36: kanban must bypass (board lives in DB, not agent context)
-        assert!(is_bypass("kanban"), "kanban must bypass (Phase 36.3.7 D-36 mid-run safety — board lives in DB, not agent context)");
+        assert!(
+            is_bypass("kanban"),
+            "kanban must bypass (Phase 36.3.7 D-36 mid-run safety — board lives in DB, not agent context)"
+        );
 
         // Non-members — all must return false
         assert!(!is_bypass("model"), "model must not bypass");
@@ -75,9 +84,18 @@ mod tests {
         assert!(!is_bypass("approve"), "approve must not bypass");
         assert!(!is_bypass("deny"), "deny must not bypass");
         assert!(!is_bypass(""), "empty string must not bypass");
-        assert!(!is_bypass("STOP"), "STOP (uppercase) must not bypass — case-sensitive (D-01)");
-        assert!(!is_bypass("PAUSE"), "PAUSE (uppercase) must not bypass — case-sensitive (D-01)");
-        assert!(!is_bypass("KANBAN"), "KANBAN (uppercase) must not bypass — case-sensitive (D-01)");
+        assert!(
+            !is_bypass("STOP"),
+            "STOP (uppercase) must not bypass — case-sensitive (D-01)"
+        );
+        assert!(
+            !is_bypass("PAUSE"),
+            "PAUSE (uppercase) must not bypass — case-sensitive (D-01)"
+        );
+        assert!(
+            !is_bypass("KANBAN"),
+            "KANBAN (uppercase) must not bypass — case-sensitive (D-01)"
+        );
     }
 
     /// Test 2: The flag is set to true when the guard is constructed.
@@ -98,7 +116,10 @@ mod tests {
 
         {
             let _guard = RunningAgentGuard::new(flag.clone());
-            assert!(flag.load(Ordering::SeqCst), "Flag must be true inside guard scope");
+            assert!(
+                flag.load(Ordering::SeqCst),
+                "Flag must be true inside guard scope"
+            );
             // Guard drops here
         }
 

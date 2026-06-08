@@ -34,11 +34,7 @@ fn read_tasks_columns(conn: &Connection) -> Vec<ColumnInfo> {
         .prepare("PRAGMA table_info(tasks)")
         .expect("prepare table_info");
     let rows: Vec<ColumnInfo> = stmt
-        .query_map([], |row| {
-            Ok(ColumnInfo {
-                name: row.get(1)?,
-            })
-        })
+        .query_map([], |row| Ok(ColumnInfo { name: row.get(1)? }))
         .expect("query table_info")
         .collect::<Result<_, _>>()
         .expect("collect table_info");

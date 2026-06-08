@@ -25,13 +25,17 @@ pub mod well_known;
 /// MUST hold this single lock — independent per-module mutexes do NOT serialize
 /// against each other, so concurrent tests in different modules previously
 /// stomped each other's `HERMES_HOME` and produced flaky cross-module failures.
+///
+/// Returns the underlying `tokio::sync::Mutex` so callers can choose between:
+/// - `test_env_lock().lock().await` in async tests (no clippy::await_holding_lock)
+/// - `test_env_lock().blocking_lock()` in sync tests (no tokio runtime required)
+///
+/// Both forms share the same mutex instance and therefore serialize against each other.
 #[cfg(test)]
-pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    use std::sync::{Mutex, OnceLock};
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+pub(crate) fn test_env_lock() -> &'static tokio::sync::Mutex<()> {
+    use std::sync::OnceLock;
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 pub use audit::{AuditData, PartnerAudit, fetch_audit};

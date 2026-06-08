@@ -9,7 +9,6 @@
 // Mirrors the AudioDispatcher trait definition at send_audio_tool.rs:24-40.
 
 use async_trait::async_trait;
-use std::path::PathBuf;
 
 /// Stub `AudioDispatcher` for platforms without audio delivery support.
 ///
@@ -32,7 +31,7 @@ impl crate::AudioDispatcher for NotSupportedAudioDispatcher {
     async fn send_voice_file(
         &self,
         _chat_id: &str,
-        _path: &PathBuf,
+        _path: &std::path::Path,
         _thread_id: Option<&str>,
     ) -> anyhow::Result<()> {
         anyhow::bail!("audio dispatch not supported on {}", self.platform_name)
@@ -41,7 +40,7 @@ impl crate::AudioDispatcher for NotSupportedAudioDispatcher {
     async fn send_audio_file(
         &self,
         _chat_id: &str,
-        _path: &PathBuf,
+        _path: &std::path::Path,
         _thread_id: Option<&str>,
     ) -> anyhow::Result<()> {
         anyhow::bail!("audio dispatch not supported on {}", self.platform_name)

@@ -45,10 +45,10 @@ impl SqliteMemoryProvider {
     /// Opens (or creates) a SQLite database at `db_path`, runs schema creation,
     /// sets WAL mode and busy_timeout.
     pub fn new(db_path: &Path) -> anyhow::Result<Self> {
-        if let Some(parent) = db_path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = db_path.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(db_path)?;
         // WAL mode for better concurrent read/write performance
@@ -701,7 +701,7 @@ fn format_with_commas(n: usize) -> String {
     let mut result = String::with_capacity(s.len() + s.len() / 3);
     let len = bytes.len();
     for (i, &b) in bytes.iter().enumerate() {
-        if i > 0 && (len - i) % 3 == 0 {
+        if i > 0 && (len - i).is_multiple_of(3) {
             result.push(',');
         }
         result.push(b as char);

@@ -58,10 +58,10 @@ pub fn kanban_skills_dir() -> PathBuf {
 /// Non-`dir:` workspaces (`scratch`, `worktree`, `worktree:<path>`) are
 /// passed through unchanged — their validation lives elsewhere.
 pub fn validate_dir_workspace(workspace: &str) -> Result<()> {
-    if let Some(tail) = workspace.strip_prefix("dir:") {
-        if !Path::new(tail).is_absolute() {
-            return Err(KanbanError::RelativeDirWorkspace(workspace.to_string()));
-        }
+    if let Some(tail) = workspace.strip_prefix("dir:")
+        && !Path::new(tail).is_absolute()
+    {
+        return Err(KanbanError::RelativeDirWorkspace(workspace.to_string()));
     }
     Ok(())
 }
@@ -203,31 +203,55 @@ mod tests {
     #[test]
     fn boards_root_ends_with_boards() {
         let p = boards_root();
-        assert!(p.ends_with("boards"), "boards_root should end with 'boards', got {:?}", p);
+        assert!(
+            p.ends_with("boards"),
+            "boards_root should end with 'boards', got {:?}",
+            p
+        );
     }
 
     #[test]
     fn board_dir_appends_slug() {
         let p = board_dir("alpha");
-        assert!(p.ends_with("alpha"), "board_dir('alpha') should end with 'alpha', got {:?}", p);
+        assert!(
+            p.ends_with("alpha"),
+            "board_dir('alpha') should end with 'alpha', got {:?}",
+            p
+        );
         // Must be under boards/
         let parent = p.parent().unwrap();
-        assert!(parent.ends_with("boards"), "board_dir parent should end with 'boards', got {:?}", parent);
+        assert!(
+            parent.ends_with("boards"),
+            "board_dir parent should end with 'boards', got {:?}",
+            parent
+        );
     }
 
     #[test]
     fn board_db_path_appends_kanban_db() {
         let p = board_db_path("alpha");
-        assert!(p.ends_with("kanban.db"), "board_db_path should end with 'kanban.db', got {:?}", p);
+        assert!(
+            p.ends_with("kanban.db"),
+            "board_db_path should end with 'kanban.db', got {:?}",
+            p
+        );
         let parent = p.parent().unwrap();
-        assert!(parent.ends_with("alpha"), "board_db_path parent should be 'alpha', got {:?}", parent);
+        assert!(
+            parent.ends_with("alpha"),
+            "board_db_path parent should be 'alpha', got {:?}",
+            parent
+        );
     }
 
     #[test]
     fn board_db_path_for_slug_default_is_legacy() {
         let p = board_db_path_for_slug("default");
         // Must end with kanban.db
-        assert!(p.ends_with("kanban.db"), "default slug should end with kanban.db, got {:?}", p);
+        assert!(
+            p.ends_with("kanban.db"),
+            "default slug should end with kanban.db, got {:?}",
+            p
+        );
         // Must NOT contain /boards/ anywhere (D-01 back-compat)
         let s = p.to_string_lossy();
         assert!(
@@ -251,22 +275,38 @@ mod tests {
     #[test]
     fn current_board_file_ends_with_current() {
         let p = current_board_file();
-        assert!(p.ends_with("current"), "current_board_file should end with 'current', got {:?}", p);
+        assert!(
+            p.ends_with("current"),
+            "current_board_file should end with 'current', got {:?}",
+            p
+        );
     }
 
     #[test]
     fn notifier_config_path_ends_with_notifier_toml() {
         let p = notifier_config_path();
-        assert!(p.ends_with("notifier.toml"), "notifier_config_path should end with 'notifier.toml', got {:?}", p);
+        assert!(
+            p.ends_with("notifier.toml"),
+            "notifier_config_path should end with 'notifier.toml', got {:?}",
+            p
+        );
     }
 
     #[test]
     fn archive_dir_ends_with_archived() {
         let p = archive_dir();
-        assert!(p.ends_with("_archived"), "archive_dir should end with '_archived', got {:?}", p);
+        assert!(
+            p.ends_with("_archived"),
+            "archive_dir should end with '_archived', got {:?}",
+            p
+        );
         // Must be under boards/
         let parent = p.parent().unwrap();
-        assert!(parent.ends_with("boards"), "archive_dir parent should end with 'boards', got {:?}", parent);
+        assert!(
+            parent.ends_with("boards"),
+            "archive_dir parent should end with 'boards', got {:?}",
+            parent
+        );
     }
 
     #[test]
@@ -309,7 +349,10 @@ mod tests {
             let prev = std::env::var(key).ok();
             // SAFETY: single-threaded test context; no concurrent env access.
             unsafe { std::env::set_var(key, value) };
-            Self { key: key.to_string(), prev }
+            Self {
+                key: key.to_string(),
+                prev,
+            }
         }
     }
 

@@ -101,8 +101,7 @@ pub struct JudgeOutput {
 /// [`crate::decomposer::DecomposeFn`] precisely; do not introduce a
 /// different `Send` / lifetime shape here without updating the goal-loop
 /// wrapper in lockstep.
-pub type JudgeFn =
-    Arc<dyn Fn(JudgeRequest) -> BoxFuture<Result<JudgeOutput>> + Send + Sync>;
+pub type JudgeFn = Arc<dyn Fn(JudgeRequest) -> BoxFuture<Result<JudgeOutput>> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // Test anchor

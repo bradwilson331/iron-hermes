@@ -27,12 +27,10 @@ use tokio::sync::{Mutex as TokioMutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 use ironhermes_core::{Config, MessageEvent, MessageResponse, Platform, ProviderResolver};
-use ironhermes_gateway::{
-    GatewayMessageHandler, GatewayRunner,
-};
 use ironhermes_gateway::adapter::PlatformAdapter;
 use ironhermes_gateway::session::{SessionKey, SessionStore};
 use ironhermes_gateway::session_queue::{MAX_QUEUE_DEPTH, SessionQueue};
+use ironhermes_gateway::{GatewayMessageHandler, GatewayRunner};
 use ironhermes_tools::ToolRegistry;
 
 // --------------------------------------------------------------------------
@@ -98,12 +96,7 @@ impl PlatformAdapter for RecordingPlatformAdapter {
         })
     }
 
-    async fn edit_message(
-        &self,
-        _chat_id: &str,
-        _message_id: &str,
-        _content: &str,
-    ) -> Result<()> {
+    async fn edit_message(&self, _chat_id: &str, _message_id: &str, _content: &str) -> Result<()> {
         Ok(())
     }
 
@@ -140,12 +133,7 @@ impl PlatformAdapter for RecordingPlatformAdapter {
         Ok(())
     }
 
-    async fn add_reaction(
-        &self,
-        chat_id: &str,
-        message_id: &str,
-        emoji: &str,
-    ) -> Result<()> {
+    async fn add_reaction(&self, chat_id: &str, message_id: &str, emoji: &str) -> Result<()> {
         self.reactions.lock().await.push(RecordedReaction {
             chat_id: chat_id.to_string(),
             message_id: message_id.to_string(),
@@ -209,12 +197,7 @@ impl PlatformAdapter for FailingPlatformAdapter {
         ))
     }
 
-    async fn edit_message(
-        &self,
-        _chat_id: &str,
-        _message_id: &str,
-        _content: &str,
-    ) -> Result<()> {
+    async fn edit_message(&self, _chat_id: &str, _message_id: &str, _content: &str) -> Result<()> {
         Ok(())
     }
 
@@ -250,12 +233,7 @@ impl PlatformAdapter for FailingPlatformAdapter {
         Ok(())
     }
 
-    async fn add_reaction(
-        &self,
-        _chat_id: &str,
-        _message_id: &str,
-        _emoji: &str,
-    ) -> Result<()> {
+    async fn add_reaction(&self, _chat_id: &str, _message_id: &str, _emoji: &str) -> Result<()> {
         Ok(())
     }
 
@@ -561,10 +539,8 @@ async fn test_drain_after_turn() {
     // missing AgentRuntime. That count proves the drain loop iterated
     // exactly 3 times — the queue went 3 → 0 and pop returned None after.
     let msgs = adapter.messages().await;
-    let placeholders: Vec<&(String, String)> = msgs
-        .iter()
-        .filter(|(_, c)| c == "\u{2588}")
-        .collect();
+    let placeholders: Vec<&(String, String)> =
+        msgs.iter().filter(|(_, c)| c == "\u{2588}").collect();
     assert_eq!(
         placeholders.len(),
         3,
@@ -634,7 +610,12 @@ async fn test_cmd_queue_enqueues_and_replies_with_depth() {
     // After push: depth == 1; one chat reply containing the singular text.
     assert_eq!(queue.len(&key), 1, "first /queue must push (depth == 1)");
     let msgs1 = adapter.messages().await;
-    assert_eq!(msgs1.len(), 1, "expected exactly 1 send_message, got {:?}", msgs1);
+    assert_eq!(
+        msgs1.len(),
+        1,
+        "expected exactly 1 send_message, got {:?}",
+        msgs1
+    );
     assert_eq!(
         msgs1[0].1, "Queued for the next turn.",
         "depth==1 reply must use the singular form"
@@ -650,7 +631,11 @@ async fn test_cmd_queue_enqueues_and_replies_with_depth() {
     // After push: depth == 2; second chat reply contains plural form.
     assert_eq!(queue.len(&key), 2, "second /queue must push (depth == 2)");
     let msgs2 = adapter.messages().await;
-    assert_eq!(msgs2.len(), 2, "expected exactly 2 send_message after 2 pushes");
+    assert_eq!(
+        msgs2.len(),
+        2,
+        "expected exactly 2 send_message after 2 pushes"
+    );
     assert!(
         msgs2[1].1.contains("(2 queued)"),
         "depth==2 reply must include depth suffix; got {:?}",
@@ -663,8 +648,14 @@ async fn test_cmd_queue_enqueues_and_replies_with_depth() {
     // Pop and inspect.
     let popped1 = queue.pop(&key).expect("first pop yields event");
     assert_eq!(popped1.content, "hello", "first queued content == 'hello'");
-    assert_eq!(popped1.chat_id, "chat-q", "chat_id inherits from triggering event");
-    assert_eq!(popped1.sender_id, "u1", "sender_id inherits from triggering event");
+    assert_eq!(
+        popped1.chat_id, "chat-q",
+        "chat_id inherits from triggering event"
+    );
+    assert_eq!(
+        popped1.sender_id, "u1",
+        "sender_id inherits from triggering event"
+    );
 
     let popped2 = queue.pop(&key).expect("second pop yields event");
     assert_eq!(popped2.content, "world", "second queued content == 'world'");
@@ -1132,9 +1123,7 @@ async fn test_telegram_post_turn_drain_in_arrival_order() {
             sender_name: None,
             replied_to_id: None,
         };
-        runner
-            .try_enqueue(&key, event)
-            .expect("enqueue under cap");
+        runner.try_enqueue(&key, event).expect("enqueue under cap");
     }
     assert_eq!(
         runner.queue_len(&key),
@@ -1175,10 +1164,8 @@ async fn test_telegram_post_turn_drain_in_arrival_order() {
     // property of SessionQueue::pop (VecDeque::pop_front) proven by the
     // proptest suite in session_queue.rs::parity (1024 cases).
     let msgs = adapter.messages().await;
-    let placeholders: Vec<&(String, String)> = msgs
-        .iter()
-        .filter(|(_, c)| c == "\u{2588}")
-        .collect();
+    let placeholders: Vec<&(String, String)> =
+        msgs.iter().filter(|(_, c)| c == "\u{2588}").collect();
     assert_eq!(
         placeholders.len(),
         3,

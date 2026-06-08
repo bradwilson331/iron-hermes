@@ -73,12 +73,15 @@ enum TestSub {
 #[test]
 fn board_flag_parses_at_kanban_parent_level() {
     let parsed = TestCli::try_parse_from(["hermes", "kanban", "--board", "alpha", "list"])
-        .ok()
         .expect("parse should succeed for `kanban --board alpha list`");
 
     match parsed.cmd {
         TestSub::Kanban { board, sub } => {
-            assert_eq!(board.as_deref(), Some("alpha"), "--board should capture 'alpha'");
+            assert_eq!(
+                board.as_deref(),
+                Some("alpha"),
+                "--board should capture 'alpha'"
+            );
             // Verify the inner verb is KanbanCommands::List (spot-check)
             assert!(
                 matches!(sub, KanbanCommands::List { .. }),
@@ -96,12 +99,14 @@ fn board_flag_parses_at_kanban_parent_level() {
 #[test]
 fn board_flag_absent_yields_none() {
     let parsed = TestCli::try_parse_from(["hermes", "kanban", "list"])
-        .ok()
         .expect("parse should succeed for `kanban list` without --board");
 
     match parsed.cmd {
         TestSub::Kanban { board, sub } => {
-            assert!(board.is_none(), "--board should be None when flag is absent");
+            assert!(
+                board.is_none(),
+                "--board should be None when flag is absent"
+            );
             assert!(
                 matches!(sub, KanbanCommands::List { .. }),
                 "inner verb should be KanbanCommands::List"
@@ -122,6 +127,8 @@ fn board_flag_absent_yields_none() {
 fn board_flag_passes_to_handler_signature_test() {
     // Compile-time: assert handle_kanban_command has the expected fn-pointer type.
     // The underscore suppresses unused-variable warnings; the cast is what matters.
+    #[allow(clippy::type_complexity)]
+    // compile-time signature lock; type alias would be test-only noise
     let _: fn(
         KanbanCommands,
         Option<String>,
@@ -129,8 +136,7 @@ fn board_flag_passes_to_handler_signature_test() {
         Box<dyn std::future::Future<Output = anyhow::Result<i32>> + Send>,
     > = |cmd, board| Box::pin(ironhermes_cli::kanban::handle_kanban_command(cmd, board));
 
-    // Runtime: trivially pass.
-    assert!(true, "signature lock test: if it compiled, it passed");
+    // Runtime: trivially pass (compile-time assertion above is the real guard).
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +168,12 @@ fn board_flag_routes_open_store_to_named_board() {
 
     // Step 2: confirm the DB file exists at the expected path.
     // Path is: $IRONHERMES_HOME/kanban/boards/alpha/kanban.db (D-01 layout).
-    let expected_db = home.root.join("kanban").join("boards").join("alpha").join("kanban.db");
+    let expected_db = home
+        .root
+        .join("kanban")
+        .join("boards")
+        .join("alpha")
+        .join("kanban.db");
     assert!(
         expected_db.exists(),
         "kanban/boards/alpha/kanban.db should exist after create; home={}",
@@ -209,7 +220,9 @@ fn open_store_for_board_rejects_dotdot_slug() {
 
     let result = ironhermes_cli::kanban::commands::open_store_for_board(Some(".."));
     match result {
-        Ok(_) => panic!("open_store_for_board(Some(\"..\")) must return Err (path-traversal rejected)"),
+        Ok(_) => {
+            panic!("open_store_for_board(Some(\"..\")) must return Err (path-traversal rejected)")
+        }
         Err(e) => {
             let err_msg = format!("{}", e);
             assert!(
@@ -228,7 +241,9 @@ fn open_store_for_board_rejects_path_traversal_slug() {
 
     let result = ironhermes_cli::kanban::commands::open_store_for_board(Some("../etc/passwd"));
     match result {
-        Ok(_) => panic!("open_store_for_board(Some(\"../etc/passwd\")) must return Err (path-traversal rejected)"),
+        Ok(_) => panic!(
+            "open_store_for_board(Some(\"../etc/passwd\")) must return Err (path-traversal rejected)"
+        ),
         Err(e) => {
             let err_msg = format!("{}", e);
             assert!(

@@ -41,9 +41,7 @@ impl KanbanStoreReader for FakeStore {
     }
 
     fn deferred_subverb_message(&self, name: &str) -> String {
-        format!(
-            "/kanban {name}: use 'hermes kanban {name}' from the CLI for this subverb."
-        )
+        format!("/kanban {name}: use 'hermes kanban {name}' from the CLI for this subverb.")
     }
 }
 
@@ -78,9 +76,7 @@ fn assert_deferred(subverb: &str) {
 
     let output = match result {
         CommandResult::Output(s) => s,
-        other => panic!(
-            "Expected CommandResult::Output for subverb '{subverb}', got: {other:?}"
-        ),
+        other => panic!("Expected CommandResult::Output for subverb '{subverb}', got: {other:?}"),
     };
 
     assert!(
@@ -114,9 +110,7 @@ fn deferred_kanban_subverbs_contains_boards() {
 
     let output = match result {
         CommandResult::Output(s) => s,
-        other => panic!(
-            "Expected CommandResult::Output for 'boards list', got: {other:?}"
-        ),
+        other => panic!("Expected CommandResult::Output for 'boards list', got: {other:?}"),
     };
 
     assert!(

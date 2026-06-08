@@ -27,12 +27,9 @@ fn simulate_turn(
     messages: &mut Vec<ChatMessage>,
     last_tier_seen: &mut PressureTier,
 ) -> bool /* true iff turn proceeded; false iff Stop100 clean-stop */ {
-    match handle.consume() {
-        None => {
-            // Stop100 clean-stop — agent loop returns budget_exhausted here.
-            return false;
-        }
-        Some(_) => {}
+    if handle.consume().is_none() {
+        // Stop100 clean-stop — agent loop returns budget_exhausted here.
+        return false;
     }
     let tier = handle.pressure();
     if tier != *last_tier_seen {

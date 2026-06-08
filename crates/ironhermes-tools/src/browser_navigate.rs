@@ -180,10 +180,12 @@ mod tests {
     }
 
     fn dummy_navigate_tool(allowed_domains: Vec<String>) -> BrowserNavigateTool {
-        let mut config = Config::default();
-        config.browser = BrowserConfig {
-            allowed_domains,
-            ..BrowserConfig::default()
+        let config = Config {
+            browser: BrowserConfig {
+                allowed_domains,
+                ..BrowserConfig::default()
+            },
+            ..Default::default()
         };
         BrowserNavigateTool::new(dummy_session(), Arc::new(config))
     }

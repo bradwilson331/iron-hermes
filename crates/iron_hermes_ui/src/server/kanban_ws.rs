@@ -16,9 +16,9 @@
 //!    `use ironhermes_kanban::notifier` import, no shared primitive).
 
 use dioxus::prelude::*;
-use dioxus_fullstack::{WebSocketOptions, Websocket};
 #[cfg(feature = "server")]
 use dioxus_fullstack::{body::Bytes, CloseCode, Message, TypedWebsocket};
+use dioxus_fullstack::{WebSocketOptions, Websocket};
 #[cfg(feature = "server")]
 use std::time::Duration;
 #[cfg(feature = "server")]
@@ -259,10 +259,7 @@ pub async fn run_kanban_tail_loop(
         }
     };
 
-    info!(
-        interval_ms,
-        watermark, "kanban tail consumer started"
-    );
+    info!(interval_ms, watermark, "kanban tail consumer started");
 
     let poll_interval = Duration::from_millis(interval_ms);
 

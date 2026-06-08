@@ -17,8 +17,7 @@ use crate::error::{KanbanError, Result};
 
 /// Bundled content of `skills/kanban-worker/SKILL.md` (v2.0.0), translated
 /// per D-29 substitution rules.
-pub const KANBAN_WORKER_SKILL_MD: &str =
-    include_str!("../../../skills/kanban-worker/SKILL.md");
+pub const KANBAN_WORKER_SKILL_MD: &str = include_str!("../../../skills/kanban-worker/SKILL.md");
 
 /// Bundled content of `skills/kanban-orchestrator/SKILL.md` (v3.0.0),
 /// translated per D-29 substitution rules.
@@ -109,8 +108,9 @@ pub fn restore_bundled_kanban_skill(skills_root: &Path, skill_name: &str) -> Res
     };
     let dest = skills_root.join(skill_name).join("SKILL.md");
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| KanbanError::Other(anyhow::anyhow!("create_dir_all {:?}: {}", parent, e)))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            KanbanError::Other(anyhow::anyhow!("create_dir_all {:?}: {}", parent, e))
+        })?;
     }
     std::fs::write(&dest, content)
         .map_err(|e| KanbanError::Other(anyhow::anyhow!("write {:?}: {}", dest, e)))?;
@@ -132,8 +132,9 @@ fn sync_one(skills_root: &Path, name: &str, content: &str, force: bool) -> Resul
         SyncAction::Wrote
     };
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| KanbanError::Other(anyhow::anyhow!("create_dir_all {:?}: {}", parent, e)))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            KanbanError::Other(anyhow::anyhow!("create_dir_all {:?}: {}", parent, e))
+        })?;
     }
     std::fs::write(&dest, content)
         .map_err(|e| KanbanError::Other(anyhow::anyhow!("write {:?}: {}", dest, e)))?;

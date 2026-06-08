@@ -74,11 +74,9 @@ fn deserialize_origin_lenient<'de, D: Deserializer<'de>>(
     let value: serde_json::Value = Deserialize::deserialize(d)?;
     match value {
         serde_json::Value::Null => Ok(None),
-        serde_json::Value::Object(_) => {
-            serde_json::from_value::<JobOrigin>(value)
-                .map(Some)
-                .or(Ok(None))
-        }
+        serde_json::Value::Object(_) => serde_json::from_value::<JobOrigin>(value)
+            .map(Some)
+            .or(Ok(None)),
         other => {
             tracing::warn!(
                 origin = ?other,
@@ -280,7 +278,10 @@ mod cronjob_serde_tests {
         }"#;
 
         let result: Result<CronJob, _> = serde_json::from_str(json);
-        assert!(result.is_ok(), "Deserialization MUST succeed even with string origin");
+        assert!(
+            result.is_ok(),
+            "Deserialization MUST succeed even with string origin"
+        );
         let job = result.unwrap();
         assert_eq!(job.origin, None, "String origin must produce origin=None");
     }

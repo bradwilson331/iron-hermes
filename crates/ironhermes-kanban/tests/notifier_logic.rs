@@ -20,9 +20,7 @@ use std::sync::Mutex as StdMutex;
 
 use ironhermes_kanban::events::KanbanEventKind;
 use ironhermes_kanban::store::CreateTaskOptions;
-use ironhermes_kanban::{
-    KanbanStore, NotifierContext, SendFn, run_notifier_tick,
-};
+use ironhermes_kanban::{KanbanStore, NotifierContext, SendFn, run_notifier_tick};
 use tempfile::TempDir;
 use tokio::sync::Mutex as TokioMutex;
 
@@ -84,13 +82,8 @@ async fn seed_task_with_completed_event(
     {
         let mut s = store.lock().await;
         let payload = serde_json::json!({"summary": summary});
-        s.append_event(
-            &task_id,
-            None,
-            KanbanEventKind::Completed,
-            Some(&payload),
-        )
-        .expect("append_event");
+        s.append_event(&task_id, None, KanbanEventKind::Completed, Some(&payload))
+            .expect("append_event");
     }
     task_id
 }
@@ -100,13 +93,8 @@ async fn seed_task_with_completed_event(
 async fn append_reclaimed_event(store: &Arc<TokioMutex<KanbanStore>>, task_id: &str) {
     let mut s = store.lock().await;
     let payload = serde_json::json!({"reason": "ttl expired"});
-    s.append_event(
-        task_id,
-        None,
-        KanbanEventKind::Reclaimed,
-        Some(&payload),
-    )
-    .expect("append_event reclaimed");
+    s.append_event(task_id, None, KanbanEventKind::Reclaimed, Some(&payload))
+        .expect("append_event reclaimed");
 }
 
 // ---------------------------------------------------------------------------
@@ -240,9 +228,7 @@ async fn watermark_advances_past_processed_event() {
     assert_eq!(log.lock().unwrap().len(), 1, "tick 1: one send");
     assert_eq!(r1.delivered, 1);
     assert_eq!(r1.events_processed, 1);
-    let watermark_after_1 = ctx
-        .last_event_id
-        .load(std::sync::atomic::Ordering::SeqCst);
+    let watermark_after_1 = ctx.last_event_id.load(std::sync::atomic::Ordering::SeqCst);
     assert!(watermark_after_1 >= 1);
 
     // -- seed task B + Completed event, no subscription --
@@ -257,9 +243,7 @@ async fn watermark_advances_past_processed_event() {
     );
     assert_eq!(r2.events_processed, 1);
     assert_eq!(r2.delivered, 0);
-    let watermark_after_2 = ctx
-        .last_event_id
-        .load(std::sync::atomic::Ordering::SeqCst);
+    let watermark_after_2 = ctx.last_event_id.load(std::sync::atomic::Ordering::SeqCst);
     assert!(
         watermark_after_2 > watermark_after_1,
         "BUG-36.3.7.5-03: watermark must advance past unsubscribed events too"
@@ -283,9 +267,7 @@ async fn watermark_advances_past_processed_event() {
     assert_eq!(thread_id.as_deref(), Some("thread-7"));
     assert_eq!(r3.delivered, 1);
 
-    let watermark_after_3 = ctx
-        .last_event_id
-        .load(std::sync::atomic::Ordering::SeqCst);
+    let watermark_after_3 = ctx.last_event_id.load(std::sync::atomic::Ordering::SeqCst);
     assert!(watermark_after_3 > watermark_after_2);
 
     // Tick 4: nothing new — no-op.
@@ -312,9 +294,7 @@ async fn send_fn_failure_still_removes_subscription() {
 
     let (send_fn, counter) = make_failing_send_fn();
     let ctx = NotifierContext::new(store.clone(), 1, send_fn);
-    let watermark_before = ctx
-        .last_event_id
-        .load(std::sync::atomic::Ordering::SeqCst);
+    let watermark_before = ctx.last_event_id.load(std::sync::atomic::Ordering::SeqCst);
     let report = run_notifier_tick(&ctx).await.expect("tick");
 
     assert_eq!(
@@ -334,9 +314,7 @@ async fn send_fn_failure_still_removes_subscription() {
         subs.is_empty(),
         "BUG-36.3.7.5-03: locked log+drop policy — subscription removed even after send failure"
     );
-    let watermark_after = ctx
-        .last_event_id
-        .load(std::sync::atomic::Ordering::SeqCst);
+    let watermark_after = ctx.last_event_id.load(std::sync::atomic::Ordering::SeqCst);
     assert!(
         watermark_after > watermark_before,
         "BUG-36.3.7.5-03: watermark must advance so next tick does NOT replay"

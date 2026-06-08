@@ -44,7 +44,8 @@ pub struct AgentSubagentRunner {
     /// and is grep-locked by invariant tests (`invariants_21_7.rs`,
     /// `invariants_22_4.rs`). Removing the param would be more invasive than
     /// warranted; keeping it written-but-unread-by-children is the blessed choice.
-    #[allow(dead_code)] // retained for new() signature / grep invariants; no longer read by run_child
+    #[allow(dead_code)]
+    // retained for new() signature / grep invariants; no longer read by run_child
     budget: Option<BudgetHandle>,
     /// Plan 21.7-07 (D-03 / D-04): shared SubagentRegistry. Each `run_child`
     /// call registers its subagent on entry and unregisters on exit so the
@@ -142,7 +143,8 @@ impl AgentSubagentRunner {
 ///
 /// Extracted as a pure helper so the parent_id wiring can be unit-tested
 /// without driving the full async `run_child` path (which requires live
-/// clients, AgentLoop, etc.). Production code calls this; tests call it directly.
+/// clients, AgentLoop, etc.). Only called from tests; production sites inline the same fields.
+#[cfg(test)]
 pub(crate) fn build_subagent_info(
     subagent_id: String,
     task_summary: String,
@@ -231,10 +233,7 @@ impl SubagentRunner for AgentSubagentRunner {
         // The orphan token is only used for the registry's kill path; the
         // AgentLoop still gets the original (possibly None) token via the
         // existing D-21 wiring.
-        let cancel_for_info = cancel_token
-            .as_ref()
-            .map(|t| t.clone())
-            .unwrap_or_else(CancellationToken::new);
+        let cancel_for_info = cancel_token.clone().unwrap_or_default();
 
         // Attempt to build a transcript writer; skip silently if scope
         // wasn't provided (keeps legacy tests that don't set it green).
@@ -356,21 +355,24 @@ impl SubagentRunner for AgentSubagentRunner {
         // tool-result layer.
         let (final_response, outcome) = match run_result {
             Ok(result) => {
-                let rewritten = if matches!(result.stop_reason, crate::agent_loop::StopReason::Natural) {
-                    result.final_response
-                } else {
-                    let reason = match result.stop_reason {
-                        crate::agent_loop::StopReason::MaxIterations => "max_iterations",
-                        crate::agent_loop::StopReason::Cancelled => "cancelled",
-                        crate::agent_loop::StopReason::BudgetExhausted => "budget_exhausted",
-                        crate::agent_loop::StopReason::DelegationFailures => "delegation_failures",
-                        crate::agent_loop::StopReason::Natural => unreachable!(),
+                let rewritten =
+                    if matches!(result.stop_reason, crate::agent_loop::StopReason::Natural) {
+                        result.final_response
+                    } else {
+                        let reason = match result.stop_reason {
+                            crate::agent_loop::StopReason::MaxIterations => "max_iterations",
+                            crate::agent_loop::StopReason::Cancelled => "cancelled",
+                            crate::agent_loop::StopReason::BudgetExhausted => "budget_exhausted",
+                            crate::agent_loop::StopReason::DelegationFailures => {
+                                "delegation_failures"
+                            }
+                            crate::agent_loop::StopReason::Natural => unreachable!(),
+                        };
+                        let body = result
+                            .final_response
+                            .unwrap_or_else(|| "(no text response)".to_string());
+                        Some(format!("[subagent-failure: {reason}] {body}"))
                     };
-                    let body = result
-                        .final_response
-                        .unwrap_or_else(|| "(no text response)".to_string());
-                    Some(format!("[subagent-failure: {reason}] {body}"))
-                };
                 (rewritten, Ok::<(), anyhow::Error>(()))
             }
             Err(e) => (None, Err(e)),

@@ -246,7 +246,9 @@ pub fn schema() -> Vec<ConfigField> {
         // --- Plan 36.15-03: per-provider extras keys (PROV-13) ---
         ConfigField {
             key: "providers.ollama.extra_request_options.num_ctx".into(),
-            description: Some("Ollama context window size (tokens). Sets num_ctx in request body.".into()),
+            description: Some(
+                "Ollama context window size (tokens). Sets num_ctx in request body.".into(),
+            ),
             secret: false,
             required: false,
             cache_breaking: false,
@@ -257,7 +259,9 @@ pub fn schema() -> Vec<ConfigField> {
         },
         ConfigField {
             key: "providers.ollama.extra_request_options.num_predict".into(),
-            description: Some("Ollama max tokens to predict. Sets num_predict in request body.".into()),
+            description: Some(
+                "Ollama max tokens to predict. Sets num_predict in request body.".into(),
+            ),
             secret: false,
             required: false,
             cache_breaking: false,
@@ -301,7 +305,9 @@ pub fn schema() -> Vec<ConfigField> {
         },
         ConfigField {
             key: "providers.openrouter.extra_request_options.provider.order".into(),
-            description: Some("OpenRouter provider preference order (YAML list of provider names).".into()),
+            description: Some(
+                "OpenRouter provider preference order (YAML list of provider names).".into(),
+            ),
             secret: false,
             required: false,
             cache_breaking: false,
@@ -476,8 +482,7 @@ mod tests {
         let extras: Vec<&ConfigField> = s
             .iter()
             .filter(|f| {
-                f.key.starts_with("providers.")
-                    && f.key.contains(".extra_request_options.")
+                f.key.starts_with("providers.") && f.key.contains(".extra_request_options.")
             })
             .collect();
         assert!(
@@ -495,11 +500,7 @@ mod tests {
                 "extras key {} must not be cache_breaking (Pitfall 4)",
                 f.key
             );
-            assert!(
-                !f.required,
-                "extras key {} must not be required",
-                f.key
-            );
+            assert!(!f.required, "extras key {} must not be required", f.key);
         }
     }
 }

@@ -91,10 +91,10 @@ impl ReplHistory {
         if entry.is_empty() {
             return;
         }
-        if let Some(last) = self.entries.last() {
-            if *last == entry {
-                return;
-            }
+        if let Some(last) = self.entries.last()
+            && *last == entry
+        {
+            return;
         }
         self.entries.push(entry);
         if self.entries.len() > self.max {
@@ -120,6 +120,7 @@ impl ReplHistory {
 
     /// Recall: step forward (newer). Called on KeyCode::Down per D-06.
     /// Returns None when cursor advances past the newest entry (back to prompt).
+    #[allow(clippy::should_implement_trait)] // named `next` for keyboard-nav symmetry with `prev`; not an Iterator (stateful cursor, not item producer)
     pub fn next(&mut self) -> Option<&str> {
         let current = self.cursor?;
         let new_cursor = current + 1;

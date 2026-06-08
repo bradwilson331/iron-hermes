@@ -4,8 +4,8 @@
 //! content (Markdown bodies + helper scripts). This tool shells out to the skill's
 //! `scripts/fetch_transcript.py` directly via `tokio::process::Command` (RESEARCH.md target #4
 //! + Open Question §2). The CONTEXT.md D-10 wording "via the Phase 19 skills framework" is
-//! satisfied by using the skill's on-disk layout as the canonical extension point — operators
-//! can swap the script without rebuilding the binary.
+//!   satisfied by using the skill's on-disk layout as the canonical extension point — operators
+//!   can swap the script without rebuilding the binary.
 //!
 //! Skill name: `youtube-content` (HYPHENATED) — verified against
 //! skills/media/youtube-content/SKILL.md `name:` frontmatter (RESEARCH.md target #4).

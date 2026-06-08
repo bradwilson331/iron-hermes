@@ -263,7 +263,10 @@ async fn severity_warning_at_under_ten_percent() {
     let key_hash = hash_api_key("test-key-7");
     // 5/100 = 5% → Warning
     let headers = vec![
-        ("x-ratelimit-remaining-requests".to_string(), "5".to_string()),
+        (
+            "x-ratelimit-remaining-requests".to_string(),
+            "5".to_string(),
+        ),
         ("x-ratelimit-limit-requests".to_string(), "100".to_string()),
     ];
     tracker.record_headers("openrouter", key_hash, "gpt-4o", headers);
@@ -295,7 +298,10 @@ async fn severity_critical_at_zero_remaining_and_reset_far() {
     let (tracker, mut rx) = RateLimitTracker::new();
     let key_hash = hash_api_key("test-key-9");
     let headers = vec![
-        ("x-ratelimit-remaining-requests".to_string(), "0".to_string()),
+        (
+            "x-ratelimit-remaining-requests".to_string(),
+            "0".to_string(),
+        ),
         ("x-ratelimit-limit-requests".to_string(), "100".to_string()),
         (
             "x-ratelimit-reset-requests".to_string(),
@@ -312,7 +318,10 @@ async fn severity_warning_at_zero_remaining_and_reset_near() {
     let (tracker, mut rx) = RateLimitTracker::new();
     let key_hash = hash_api_key("test-key-10");
     let headers = vec![
-        ("x-ratelimit-remaining-requests".to_string(), "0".to_string()),
+        (
+            "x-ratelimit-remaining-requests".to_string(),
+            "0".to_string(),
+        ),
         ("x-ratelimit-limit-requests".to_string(), "100".to_string()),
         ("x-ratelimit-reset-requests".to_string(), "10.0".to_string()),
     ];

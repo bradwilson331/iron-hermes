@@ -1,12 +1,12 @@
 //! Sandboxed script execution + wake-gate parsing.
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
+use ironhermes_core::get_hermes_home;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::timeout;
-use ironhermes_core::get_hermes_home;
 
 /// Outcome of running a cron job script.
 #[derive(Debug, Clone)]
@@ -64,10 +64,10 @@ pub fn parse_wake_gate(stdout: &str) -> bool {
         .rev()
         .find(|l| !l.trim().is_empty())
         .unwrap_or("");
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(last_non_empty) {
-        if matches!(v.get("wakeAgent").and_then(|v| v.as_bool()), Some(false)) {
-            return false;
-        }
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(last_non_empty)
+        && matches!(v.get("wakeAgent").and_then(|v| v.as_bool()), Some(false))
+    {
+        return false;
     }
     true
 }
@@ -102,10 +102,7 @@ pub async fn run_job_script(script_name: &str) -> Result<ScriptOutcome> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(
-            &scripts_dir,
-            std::fs::Permissions::from_mode(0o700),
-        );
+        let _ = std::fs::set_permissions(&scripts_dir, std::fs::Permissions::from_mode(0o700));
     }
 
     // Reject absolute paths and path components that escape the scripts dir
@@ -145,24 +142,12 @@ pub async fn run_job_script(script_name: &str) -> Result<ScriptOutcome> {
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .with_context(|| {
-            format!(
-                "spawn script {:?} with {}",
-                canonical, interpreter
-            )
-        })?;
+        .with_context(|| format!("spawn script {:?} with {}", canonical, interpreter))?;
 
-    let outcome = match timeout(
-        Duration::from_secs(timeout_secs),
-        child.wait_with_output(),
-    )
-    .await
-    {
+    let outcome = match timeout(Duration::from_secs(timeout_secs), child.wait_with_output()).await {
         Ok(Ok(out)) => {
-            let stdout =
-                redact_passthrough(String::from_utf8_lossy(&out.stdout).into_owned());
-            let stderr =
-                redact_passthrough(String::from_utf8_lossy(&out.stderr).into_owned());
+            let stdout = redact_passthrough(String::from_utf8_lossy(&out.stdout).into_owned());
+            let stderr = redact_passthrough(String::from_utf8_lossy(&out.stderr).into_owned());
             let wake_agent = parse_wake_gate(&stdout);
             ScriptOutcome {
                 ok: out.status.success(),
@@ -189,9 +174,11 @@ mod tests {
     use tempfile::TempDir;
 
     // Crate-wide lock — serializes against `prompt_builder` tests that also
-    // mutate IRONHERMES_HOME. Returns a guard that survives lock poisoning.
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        shared_env_lock().lock().unwrap_or_else(|e| e.into_inner())
+    // mutate IRONHERMES_HOME. Uses tokio::sync::Mutex so the guard can be
+    // held across .await points in async tests without triggering
+    // clippy::await_holding_lock.
+    async fn env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        shared_env_lock().lock().await
     }
 
     // Helper: create a script file in <tmpdir>/scripts/ and set IRONHERMES_HOME.
@@ -212,8 +199,10 @@ mod tests {
     async fn test_happy_path_bash() {
         let tmp = TempDir::new().unwrap();
         make_script(&tmp, "test.sh", "#!/bin/sh\necho hello\n");
-        let _guard = env_lock();
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        let _guard = env_lock().await;
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
 
         let outcome = super::run_job_script("test.sh").await.unwrap();
         assert!(outcome.ok, "expected ok=true");
@@ -226,8 +215,10 @@ mod tests {
     async fn test_happy_path_python() {
         let tmp = TempDir::new().unwrap();
         make_script(&tmp, "test.py", "print('world')\n");
-        let _guard = env_lock();
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        let _guard = env_lock().await;
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
 
         let outcome = super::run_job_script("test.py").await.unwrap();
         assert!(outcome.ok, "expected ok=true");
@@ -238,8 +229,10 @@ mod tests {
     #[tokio::test]
     async fn test_path_traversal_rejected() {
         let tmp = TempDir::new().unwrap();
-        let _guard = env_lock();
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        let _guard = env_lock().await;
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
         // create scripts dir so the traversal reaches canonicalize
         std::fs::create_dir_all(tmp.path().join("scripts")).unwrap();
 
@@ -255,8 +248,10 @@ mod tests {
     #[tokio::test]
     async fn test_absolute_path_rejected() {
         let tmp = TempDir::new().unwrap();
-        let _guard = env_lock();
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        let _guard = env_lock().await;
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
         std::fs::create_dir_all(tmp.path().join("scripts")).unwrap();
 
         let err = super::run_job_script("/etc/passwd").await.unwrap_err();
@@ -271,8 +266,10 @@ mod tests {
     #[tokio::test]
     async fn test_nonexistent_script() {
         let tmp = TempDir::new().unwrap();
-        let _guard = env_lock();
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        let _guard = env_lock().await;
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
         std::fs::create_dir_all(tmp.path().join("scripts")).unwrap();
 
         let err = super::run_job_script("nope.sh").await.unwrap_err();
@@ -288,8 +285,10 @@ mod tests {
     async fn test_nonzero_exit() {
         let tmp = TempDir::new().unwrap();
         make_script(&tmp, "fail.sh", "#!/bin/sh\nexit 1\n");
-        let _guard = env_lock();
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        let _guard = env_lock().await;
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
 
         let outcome = super::run_job_script("fail.sh").await.unwrap();
         assert!(!outcome.ok, "expected ok=false for exit 1");
@@ -301,7 +300,7 @@ mod tests {
     async fn test_script_timeout() {
         let tmp = TempDir::new().unwrap();
         make_script(&tmp, "slow.sh", "#!/bin/sh\nsleep 5\n");
-        let _guard = env_lock();
+        let _guard = env_lock().await;
         unsafe {
             std::env::set_var("IRONHERMES_HOME", tmp.path());
             std::env::set_var("IRONHERMES_CRON_SCRIPT_TIMEOUT", "1");
@@ -319,7 +318,9 @@ mod tests {
         );
         assert!(elapsed < 3, "expected timeout under 3s, got {}s", elapsed);
 
-        unsafe { std::env::remove_var("IRONHERMES_CRON_SCRIPT_TIMEOUT"); }
+        unsafe {
+            std::env::remove_var("IRONHERMES_CRON_SCRIPT_TIMEOUT");
+        }
     }
 
     // Test 8: wake gate true (default — non-JSON)
@@ -360,8 +361,10 @@ mod tests {
     async fn test_scripts_dir_created_with_permissions() {
         use std::os::unix::fs::MetadataExt;
         let tmp = TempDir::new().unwrap();
-        let _guard = env_lock();
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        let _guard = env_lock().await;
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
         // scripts dir does NOT exist yet — run_job_script should create it
         // (the call will fail with not-found, but the dir should be created)
         let _ = super::run_job_script("nonexistent.sh").await;
@@ -370,7 +373,10 @@ mod tests {
         assert!(scripts_dir.exists(), "scripts dir should be created");
         let meta = std::fs::metadata(&scripts_dir).unwrap();
         let mode = meta.mode() & 0o777;
-        assert_eq!(mode, 0o700, "scripts dir should have mode 0700, got {mode:o}");
+        assert_eq!(
+            mode, 0o700,
+            "scripts dir should have mode 0700, got {mode:o}"
+        );
     }
 
     // Test 14: BASH_PATH override
@@ -378,7 +384,7 @@ mod tests {
     async fn test_bash_path_override() {
         let tmp = TempDir::new().unwrap();
         make_script(&tmp, "hi.sh", "#!/bin/sh\necho hi\n");
-        let _guard = env_lock();
+        let _guard = env_lock().await;
         unsafe {
             std::env::set_var("IRONHERMES_HOME", tmp.path());
             std::env::set_var("BASH_PATH", "/bin/bash");
@@ -388,7 +394,9 @@ mod tests {
         assert!(outcome.ok);
         assert_eq!(outcome.stdout.trim(), "hi");
 
-        unsafe { std::env::remove_var("BASH_PATH"); }
+        unsafe {
+            std::env::remove_var("BASH_PATH");
+        }
     }
 
     // Test 15: ScriptOutcome.wake_agent populated from parse_wake_gate
@@ -400,8 +408,10 @@ mod tests {
             "gate.sh",
             "#!/bin/sh\necho '{\"wakeAgent\": false}'\n",
         );
-        let _guard = env_lock();
-        unsafe { std::env::set_var("IRONHERMES_HOME", tmp.path()); }
+        let _guard = env_lock().await;
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
 
         let outcome = super::run_job_script("gate.sh").await.unwrap();
         assert!(outcome.ok, "exit 0 should be ok=true");

@@ -156,7 +156,13 @@ fn protocol_declares_kanban_status_wire_enum() {
     );
     // Must list all seven canonical variants.
     for needle in [
-        "Triage", "Todo", "Ready", "InProgress", "Blocked", "Done", "Archived",
+        "Triage",
+        "Todo",
+        "Ready",
+        "InProgress",
+        "Blocked",
+        "Done",
+        "Archived",
     ] {
         assert!(
             src.contains(needle),

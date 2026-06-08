@@ -31,13 +31,17 @@ pub use tick::*;
 /// modules MUST hold this single lock — independent per-module mutexes do NOT
 /// serialize against each other, so concurrent tests in different modules
 /// otherwise stomp each other's env state and produce flaky cross-module failures.
+///
+/// Returns the underlying `tokio::sync::Mutex` so callers can choose between:
+/// - `.lock().await` in async tests (no clippy::await_holding_lock)
+/// - `.blocking_lock()` in sync tests (no tokio runtime required)
+///
+/// Both forms share the same mutex instance and serialize against each other.
 #[cfg(test)]
-pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
-    use std::sync::{Mutex, OnceLock};
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+pub(crate) fn test_env_lock() -> &'static tokio::sync::Mutex<()> {
+    use std::sync::OnceLock;
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
 // ---------------------------------------------------------------------------

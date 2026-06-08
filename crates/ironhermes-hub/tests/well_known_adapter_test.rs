@@ -12,6 +12,7 @@ use wiremock::{
 };
 
 /// Build a WellKnownSkillSource restricted to a single mock host.
+#[allow(dead_code)] // retained test helper; no test currently exercises host-restricted source
 fn source_for(host: &str) -> WellKnownSkillSource {
     WellKnownSkillSource::new(vec![host.to_string()])
 }

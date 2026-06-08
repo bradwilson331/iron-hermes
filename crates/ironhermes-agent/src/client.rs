@@ -133,10 +133,7 @@ impl LlmClient {
     /// the client's provider+model are OpenRouter Claude, the streaming
     /// request body is built via `build_openrouter_chat_request` so
     /// `cache_control` markers attach per the system_and_3 strategy.
-    pub fn set_prompt_caching(
-        &mut self,
-        cfg: ironhermes_core::config::PromptCachingConfig,
-    ) {
+    pub fn set_prompt_caching(&mut self, cfg: ironhermes_core::config::PromptCachingConfig) {
         self.prompt_caching = cfg;
     }
 
@@ -246,57 +243,56 @@ impl LlmClient {
         // system_and_3 strategy. Pre-fix this builder existed and was tested
         // but no production code path invoked it — the OpenRouter Claude
         // cache hits Plan 11 was meant to deliver never fired.
-        let response = if crate::any_client::is_openrouter_claude(
-            &self.provider_name,
-            &resolved_model,
-        ) && self.prompt_caching.enabled
-        {
-            let or_request = crate::any_client::build_openrouter_chat_request_full(
-                &self.provider_name,
-                &resolved_model,
-                messages,
-                tools,
-                max_tokens,
-                temperature,
-                Some(true),
-                &self.prompt_caching,
-                extra,
-            );
-            debug!(
-                url = %url,
-                model = %or_request.model,
-                "Sending streaming OpenRouter Claude request (cache_control attached)"
-            );
-            self.http
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .header("Content-Type", "application/json")
-                .json(&or_request)
-                .send()
-                .await
-                .context("Failed to send streaming request")?
-        } else {
-            let request = ChatRequest {
-                model: resolved_model,
-                messages: messages.to_vec(),
-                tools: tools.map(|t| t.to_vec()),
-                max_tokens,
-                temperature,
-                stream: Some(true),
-                stop: None,
-                extra,
-            };
+        let response =
+            if crate::any_client::is_openrouter_claude(&self.provider_name, &resolved_model)
+                && self.prompt_caching.enabled
+            {
+                let or_request = crate::any_client::build_openrouter_chat_request_full(
+                    &self.provider_name,
+                    &resolved_model,
+                    messages,
+                    tools,
+                    max_tokens,
+                    temperature,
+                    Some(true),
+                    &self.prompt_caching,
+                    extra,
+                );
+                debug!(
+                    url = %url,
+                    model = %or_request.model,
+                    "Sending streaming OpenRouter Claude request (cache_control attached)"
+                );
+                self.http
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", self.api_key))
+                    .header("Content-Type", "application/json")
+                    .json(&or_request)
+                    .send()
+                    .await
+                    .context("Failed to send streaming request")?
+            } else {
+                let request = ChatRequest {
+                    model: resolved_model,
+                    messages: messages.to_vec(),
+                    tools: tools.map(|t| t.to_vec()),
+                    max_tokens,
+                    temperature,
+                    stream: Some(true),
+                    stop: None,
+                    extra,
+                };
 
-            debug!(url = %url, model = %request.model, "Sending streaming LLM request");
-            self.http
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", self.api_key))
-                .header("Content-Type", "application/json")
-                .json(&request)
-                .send()
-                .await
-                .context("Failed to send streaming request")?
-        };
+                debug!(url = %url, model = %request.model, "Sending streaming LLM request");
+                self.http
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", self.api_key))
+                    .header("Content-Type", "application/json")
+                    .json(&request)
+                    .send()
+                    .await
+                    .context("Failed to send streaming request")?
+            };
 
         let status = response.status();
         debug!(status = %status, "LLM response received");
@@ -419,15 +415,18 @@ impl LlmClient {
                         }
                         Err(_parse_err) => {
                             // D-01 (phase 36.14): second-pass — is this an SSE provider error envelope?
-                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(data) {
-                                if val.get("error").is_some() {
-                                    let msg = sse_error_to_bail_string(data, &val);
-                                    let _ = tx.send(StreamEvent::ProviderError(msg)).await;
-                                    return;
-                                }
+                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(data)
+                                && val.get("error").is_some()
+                            {
+                                let msg = sse_error_to_bail_string(data, &val);
+                                let _ = tx.send(StreamEvent::ProviderError(msg)).await;
+                                return;
                             }
                             // D-05 (phase 36.14): not a recognised error envelope — preserve existing debug log.
-                            debug!("Failed to parse stream chunk: {} — data: {}", _parse_err, data);
+                            debug!(
+                                "Failed to parse stream chunk: {} — data: {}",
+                                _parse_err, data
+                            );
                         }
                     }
                 }

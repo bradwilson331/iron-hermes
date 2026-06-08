@@ -249,9 +249,10 @@ mod tests {
         HookEvent::new("req-test", kind)
     }
 
+    #[allow(dead_code)] // test fixture retained for future retry-queue integration tests; no test currently calls it
     fn make_queue() -> Arc<RetryQueue> {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let path = tmp.path().join("retry-queue.jsonl");
+        let _path = tmp.path().join("retry-queue.jsonl");
         // Keep tempdir alive by leaking it for test duration
         let path = std::mem::ManuallyDrop::new(tmp)
             .path()

@@ -30,10 +30,10 @@ pub fn default_credential_dir(config: &SkillsConfig) -> PathBuf {
     if let Some(explicit) = &config.credential_dir {
         return explicit.clone();
     }
-    if let Ok(hermes_home) = std::env::var("HERMES_HOME") {
-        if !hermes_home.is_empty() {
-            return PathBuf::from(hermes_home).join("credentials");
-        }
+    if let Ok(hermes_home) = std::env::var("HERMES_HOME")
+        && !hermes_home.is_empty()
+    {
+        return PathBuf::from(hermes_home).join("credentials");
     }
     if let Some(home) = dirs::home_dir() {
         return home.join(".ironhermes").join("credentials");
@@ -229,10 +229,10 @@ fn handle_activate(
                 Ok(v) if !v.is_empty() => {}
                 _ => {
                     missing_env.push(entry.name.clone());
-                    if setup_help.is_none() {
-                        if let Some(h) = &entry.help {
-                            setup_help = Some(h.clone());
-                        }
+                    if setup_help.is_none()
+                        && let Some(h) = &entry.help
+                    {
+                        setup_help = Some(h.clone());
                     }
                     if let Some(rf) = &entry.required_for {
                         required_for_hints.push(rf.clone());
@@ -281,10 +281,10 @@ fn handle_activate(
     match registry.read_content(&record.name) {
         Some(body) => {
             let canonical_name = record.name.clone();
-            if let Ok(mut skills) = active_skills.lock() {
-                if !skills.iter().any(|s| s.name == canonical_name) {
-                    skills.push(record.clone());
-                }
+            if let Ok(mut skills) = active_skills.lock()
+                && !skills.iter().any(|s| s.name == canonical_name)
+            {
+                skills.push(record.clone());
             }
             // D-08 body-injection: prepend `[Skill config: ...]\n\n` when
             // per-skill config exists; otherwise return the body unchanged.
@@ -890,10 +890,8 @@ mod tests {
     // racing with each other on shared process env.
 
     use std::collections::HashMap;
-    use std::sync::Mutex as StdMutex;
-
     // Serialize env-mutating tests so we don't clobber each other's HERMES_TEST_* vars.
-    static ENV_LOCK: StdMutex<()> = StdMutex::new(());
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn make_skill_md_with_hermes(
         name: &str,
@@ -943,7 +941,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_activate_missing_env_var() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         // Ensure the test var is unset.
         // SAFETY: tests serialized via ENV_LOCK above.
         unsafe {
@@ -993,7 +991,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_activate_missing_credential() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
 
         let cred_dir = tempfile::tempdir().unwrap();
         let hermes_yaml = "    required_credential_files:\n      - oauth_token.json";
@@ -1025,7 +1023,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_activate_all_requirements_met() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         // SAFETY: tests serialized via ENV_LOCK above.
         unsafe {
             std::env::set_var("HERMES_TEST_PRESENT_KEY", "dummy");
@@ -1071,7 +1069,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_activate_mixed_missing() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         // SAFETY: tests serialized via ENV_LOCK above.
         unsafe {
             std::env::remove_var("HERMES_TEST_MIXED_KEY");
@@ -1113,7 +1111,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_activate_not_found() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         let cred_dir = tempfile::tempdir().unwrap();
         let (tool, _dir, _active_skills) = make_p03_tool(&[], cred_dir.path().to_path_buf());
 
@@ -1270,7 +1268,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_setup_note_format() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = ENV_LOCK.lock().await;
         // SAFETY: tests serialized via ENV_LOCK above.
         unsafe {
             std::env::remove_var("TENOR_API_KEY");

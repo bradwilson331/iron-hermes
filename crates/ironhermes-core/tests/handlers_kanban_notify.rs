@@ -94,10 +94,7 @@ impl KanbanStoreWriter for FakeKanbanStoreWriter {
         Ok(1)
     }
 
-    fn list_subscriptions_for_task(
-        &self,
-        task_id: &str,
-    ) -> Result<Vec<SubscriptionView>, String> {
+    fn list_subscriptions_for_task(&self, task_id: &str) -> Result<Vec<SubscriptionView>, String> {
         self.calls
             .lock()
             .unwrap()
@@ -224,7 +221,7 @@ fn dispatch_kanban_create_routes_to_create_arm_not_deferred() {
     );
     assert_eq!(calls.create_calls[0].0, "the title");
     assert_eq!(calls.create_calls[0].1, "alice");
-    assert_eq!(calls.create_calls[0].2, false);
+    assert!(!calls.create_calls[0].2);
 }
 
 /// Test 2 (BUG-05): notify-subscribe writer-handler path is exercised through
@@ -433,8 +430,8 @@ fn dispatch_kanban_create_with_json_skips_auto_subscribe() {
         1,
         "BUG-36.3.7.5-06: create still fires under --json"
     );
-    assert_eq!(
-        calls.create_calls[0].2, true,
+    assert!(
+        calls.create_calls[0].2,
         "BUG-36.3.7.5-06: json flag plumbed through to create_task_simple"
     );
     assert_eq!(
@@ -600,6 +597,8 @@ async fn auto_subscribe_lifecycle_end_to_end() {
     }
 
     // 4. Build a real NotifierContext sharing the same tempfile store.
+    #[allow(clippy::type_complexity)]
+    // test helper: notification tuple; type alias would only exist here, inline is clearer
     let recorded: Arc<StdMutex<Vec<(String, String, Option<String>, String)>>> =
         Arc::new(StdMutex::new(vec![]));
     let recorded_clone = recorded.clone();

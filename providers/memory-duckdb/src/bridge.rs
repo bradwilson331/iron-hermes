@@ -82,10 +82,10 @@ impl DuckDbBridge {
     /// Open (or create) a DuckDB database and start the worker thread.
     pub fn new(db_path: &Path) -> anyhow::Result<Self> {
         // Ensure parent directory exists
-        if let Some(parent) = db_path.parent() {
-            if !parent.exists() {
-                std::fs::create_dir_all(parent)?;
-            }
+        if let Some(parent) = db_path.parent()
+            && !parent.exists()
+        {
+            std::fs::create_dir_all(parent)?;
         }
 
         let (tx, rx) = mpsc::channel::<DuckDbCommand>();
@@ -486,14 +486,14 @@ fn handle_sync_turn(conn: &duckdb::Connection, _entries_json: &str) -> anyhow::R
 fn handle_on_pre_compress(conn: &duckdb::Connection, messages_json: &str) -> anyhow::Result<()> {
     let messages: Vec<serde_json::Value> = serde_json::from_str(messages_json).unwrap_or_default();
     for msg in &messages {
-        if let Some(content) = msg.get("content").and_then(|c| c.as_str()) {
-            if content.len() > 10 {
-                conn.execute(
-                    "INSERT INTO conversation_facts (content) VALUES ($1)",
-                    duckdb::params![content],
-                )
-                .ok();
-            }
+        if let Some(content) = msg.get("content").and_then(|c| c.as_str())
+            && content.len() > 10
+        {
+            conn.execute(
+                "INSERT INTO conversation_facts (content) VALUES ($1)",
+                duckdb::params![content],
+            )
+            .ok();
         }
     }
     Ok(())

@@ -130,8 +130,7 @@ impl Tool for KanbanCompleteTool {
             })?;
 
         // Resolve current_profile.
-        let current_profile =
-            std::env::var("HERMES_PROFILE").unwrap_or_else(|_| "unknown".into());
+        let current_profile = std::env::var("HERMES_PROFILE").unwrap_or_else(|_| "unknown".into());
 
         // expected_run_id: from arg, then from HERMES_KANBAN_RUN_ID env (D-22 defense-in-depth).
         let expected_run_id = args
@@ -173,20 +172,26 @@ impl Tool for KanbanCompleteTool {
             created_cards.as_deref(),
             &current_profile,
         ) {
-            Ok(()) => crate::tools::common::ok_with_board(json!({
-                "status": "ok",
-                "task_id": task_id,
-            }), &board_ctx),
+            Ok(()) => crate::tools::common::ok_with_board(
+                json!({
+                    "status": "ok",
+                    "task_id": task_id,
+                }),
+                &board_ctx,
+            ),
 
             Err(KanbanError::StaleRunId { expected, actual }) => {
                 // Structured rejection — return Ok so the LLM can read and decide.
-                crate::tools::common::ok_with_board(json!({
-                    "status": "rejected",
-                    "reason": "stale_run_id",
-                    "task_id": task_id,
-                    "expected": expected,
-                    "actual": actual,
-                }), &board_ctx)
+                crate::tools::common::ok_with_board(
+                    json!({
+                        "status": "rejected",
+                        "reason": "stale_run_id",
+                        "task_id": task_id,
+                        "expected": expected,
+                        "actual": actual,
+                    }),
+                    &board_ctx,
+                )
             }
 
             Err(KanbanError::CreatedCardsRejected {
@@ -194,13 +199,16 @@ impl Tool for KanbanCompleteTool {
                 wrong_profile,
             }) => {
                 // Structured rejection — permanent completion_rejected event already written.
-                crate::tools::common::ok_with_board(json!({
-                    "status": "rejected",
-                    "reason": "created_cards",
-                    "task_id": task_id,
-                    "phantom_ids": phantom,
-                    "wrong_profile_ids": wrong_profile,
-                }), &board_ctx)
+                crate::tools::common::ok_with_board(
+                    json!({
+                        "status": "rejected",
+                        "reason": "created_cards",
+                        "task_id": task_id,
+                        "phantom_ids": phantom,
+                        "wrong_profile_ids": wrong_profile,
+                    }),
+                    &board_ctx,
+                )
             }
 
             Err(other) => Err(other.into()),
@@ -222,15 +230,21 @@ mod tests {
     #[test]
     fn is_available_respects_env() {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
+        unsafe {
+            std::env::remove_var("HERMES_KANBAN_TASK");
+        }
         let store = make_store();
         let tool = KanbanCompleteTool::new(store.clone(), false);
         assert!(!tool.is_available());
 
-        unsafe { std::env::set_var("HERMES_KANBAN_TASK", "t_test"); }
+        unsafe {
+            std::env::set_var("HERMES_KANBAN_TASK", "t_test");
+        }
         let tool2 = KanbanCompleteTool::new(store.clone(), false);
         assert!(tool2.is_available());
-        unsafe { std::env::remove_var("HERMES_KANBAN_TASK"); }
+        unsafe {
+            std::env::remove_var("HERMES_KANBAN_TASK");
+        }
 
         let tool3 = KanbanCompleteTool::new(store, true);
         assert!(tool3.is_available());
@@ -241,6 +255,9 @@ mod tests {
         let store = make_store();
         let tool = KanbanCompleteTool::new(store, true);
         let schema_str = serde_json::to_string(&tool.schema()).unwrap();
-        assert!(schema_str.contains("\"board\""), "schema missing board property: {schema_str}");
+        assert!(
+            schema_str.contains("\"board\""),
+            "schema missing board property: {schema_str}"
+        );
     }
 }

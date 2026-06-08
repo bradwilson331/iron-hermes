@@ -95,14 +95,13 @@ impl MemoryManager {
 
     pub async fn handle_tool_call(&self, name: &str, args: serde_json::Value) -> MemoryResult {
         // GAP-4 / T-21.4-03: reject User-target writes when user_profile_enabled=false.
-        if !self.user_profile_enabled {
-            if let Some(target_str) = args.get("target").and_then(|v| v.as_str()) {
-                if target_str == "user" {
-                    return Err("User profile memory is disabled via configuration. \
+        if !self.user_profile_enabled
+            && let Some(target_str) = args.get("target").and_then(|v| v.as_str())
+            && target_str == "user"
+        {
+            return Err("User profile memory is disabled via configuration. \
                          Enable it with memory.user_profile_enabled=true in config.yaml."
-                        .to_string());
-                }
-            }
+                .to_string());
         }
 
         // 1. Run the write on the primary. Drop guard before mirror call.
@@ -198,7 +197,11 @@ impl MemoryManager {
     }
 
     // ---- Read paths (primary only per D-26, D-28) — query-scoped recall ----
-    pub async fn prefetch_with_query(&self, query: &str, session_id: &str) -> anyhow::Result<String> {
+    pub async fn prefetch_with_query(
+        &self,
+        query: &str,
+        session_id: &str,
+    ) -> anyhow::Result<String> {
         let p = self.primary.lock().await;
         p.prefetch_with_query(query, session_id).await
     }
@@ -619,8 +622,15 @@ mod tests {
         // prefetch_with_query must return Ok("") from the file provider (no-op default)
         // and must NOT fan out to the mirror (D-26/D-28: mirror is write-only).
         let result = mgr.prefetch_with_query("what is my name?", "sid").await;
-        assert!(result.is_ok(), "prefetch_with_query must succeed on file provider");
-        assert_eq!(result.unwrap(), "", "file provider prefetch_with_query must return empty string");
+        assert!(
+            result.is_ok(),
+            "prefetch_with_query must succeed on file provider"
+        );
+        assert_eq!(
+            result.unwrap(),
+            "",
+            "file provider prefetch_with_query must return empty string"
+        );
 
         let reads = recorder_inner.lock().unwrap().read_calls.clone();
         assert!(

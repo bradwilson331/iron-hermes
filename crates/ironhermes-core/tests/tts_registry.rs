@@ -8,8 +8,8 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use ironhermes_core::tts::{TtsProvider, TtsRegistry, BUILTIN_TTS_NAMES};
 use ironhermes_core::Config;
+use ironhermes_core::tts::{BUILTIN_TTS_NAMES, TtsProvider, TtsRegistry};
 
 // ---------------------------------------------------------------------------
 // Minimal in-test TtsProvider implementation
@@ -30,11 +30,7 @@ impl TtsProvider for FakeProvider {
         self.available
     }
 
-    async fn synthesize(
-        &self,
-        _text: &str,
-        _path: &std::path::Path,
-    ) -> anyhow::Result<PathBuf> {
+    async fn synthesize(&self, _text: &str, _path: &std::path::Path) -> anyhow::Result<PathBuf> {
         anyhow::bail!("fake provider — synthesize not implemented")
     }
 }

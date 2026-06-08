@@ -134,7 +134,7 @@ impl Tool for HexapodVideoTool {
                         return Ok(
                             "Error: HEXAPOD_IP env var not set — cannot connect to robot"
                                 .to_string(),
-                        )
+                        );
                     }
                 };
                 let addr = format!("{ip}:{VIDEO_PORT}");
@@ -193,11 +193,9 @@ impl Tool for HexapodVideoTool {
                             ));
                         }
                         Err(_) => {
-                            return Ok(
-                                "Error: read timed out after 5s waiting for video frame \
+                            return Ok("Error: read timed out after 5s waiting for video frame \
                                  — camera may not be streaming"
-                                    .to_string(),
-                            );
+                                .to_string());
                         }
                     };
 
@@ -231,7 +229,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[tokio::test]
     async fn test_missing_env_var() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         unsafe { std::env::remove_var("HEXAPOD_IP") };
         let tool = HexapodVideoTool;
         let result = tool
@@ -249,14 +247,11 @@ mod tests {
     // -----------------------------------------------------------------------
     #[tokio::test]
     async fn test_unknown_action_blocked() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         // Env var does not matter — blocked arm fires before env read (D-16).
         unsafe { std::env::remove_var("HEXAPOD_IP") };
         let tool = HexapodVideoTool;
-        let result = tool
-            .execute(json!({"action": "foo"}))
-            .await
-            .unwrap();
+        let result = tool.execute(json!({"action": "foo"})).await.unwrap();
         assert!(
             result.starts_with("Action 'foo' is blocked"),
             "got: {result}"
@@ -268,7 +263,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[tokio::test]
     async fn test_capture_frame_passes_allowlist() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = ENV_LOCK.lock().await;
         unsafe { std::env::remove_var("HEXAPOD_IP") };
         let tool = HexapodVideoTool;
         let result = tool

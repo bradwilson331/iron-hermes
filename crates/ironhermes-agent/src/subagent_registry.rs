@@ -98,23 +98,23 @@ impl Drop for RegistrationGuard {
         //     matching the original block_in_place contract that existing tests rely on.
         // The cost is one OS thread spawn per Drop, which is acceptable because Drops
         // are infrequent (subagent lifecycle, not hot-path).
-        if let Some(arc) = self.registry.upgrade() {
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                let id = self.id.clone();
-                if let Ok(thread) = std::thread::Builder::new()
-                    .name("registration-guard-drop".into())
-                    .spawn(move || {
-                        handle.block_on(async move {
-                            arc.write().await.unregister_internal(&id);
-                        });
-                    })
-                {
-                    let _ = thread.join();
-                }
-                // If thread spawn fails (e.g. OS resource exhaustion), silent no-op.
+        if let Some(arc) = self.registry.upgrade()
+            && let Ok(handle) = tokio::runtime::Handle::try_current()
+        {
+            let id = self.id.clone();
+            if let Ok(thread) = std::thread::Builder::new()
+                .name("registration-guard-drop".into())
+                .spawn(move || {
+                    handle.block_on(async move {
+                        arc.write().await.unregister_internal(&id);
+                    });
+                })
+            {
+                let _ = thread.join();
             }
-            // If no tokio runtime is current (process teardown), silent no-op.
+            // If thread spawn fails (e.g. OS resource exhaustion), silent no-op.
         }
+        // If no tokio runtime is current (process teardown), silent no-op.
         // If upgrade() is None the registry's Arc has already been dropped
         // (session shutdown). Silent no-op — there is nothing to unregister.
     }
@@ -262,8 +262,7 @@ impl SubagentRegistryHandle {
 /// Each node is emitted before its children (pre-order). `depth` tracks the
 /// nesting level (0 = root). Status derivation order (priority):
 ///   1. `"killed"`  — `info.cancel.is_cancelled()`
-///   2. `"stale"`   — `info.activity_last` is Some and elapsed >
-///                    `info.stale_warn_seconds`
+///   2. `"stale"`   — `info.activity_last` is Some and elapsed > `info.stale_warn_seconds`
 ///   3. `"running"` — otherwise
 ///
 /// `stale_warned` is the registry's once-per-child dedup set. When a node
@@ -289,17 +288,17 @@ fn flatten_tree(
         {
             if elapsed_secs > node.info.stale_warn_seconds {
                 // D-06 once-per-child warn gate (T-32.3-05 mitigation).
-                if let Ok(mut warned) = stale_warned.lock() {
-                    if !warned.contains(&node.info.id) {
-                        tracing::warn!(
-                            target: "ironhermes_agent::subagent_registry",
-                            subagent_id = %node.info.id,
-                            idle_secs = elapsed_secs,
-                            stale_warn_seconds = node.info.stale_warn_seconds,
-                            "subagent stale threshold crossed"
-                        );
-                        warned.insert(node.info.id.clone());
-                    }
+                if let Ok(mut warned) = stale_warned.lock()
+                    && !warned.contains(&node.info.id)
+                {
+                    tracing::warn!(
+                        target: "ironhermes_agent::subagent_registry",
+                        subagent_id = %node.info.id,
+                        idle_secs = elapsed_secs,
+                        stale_warn_seconds = node.info.stale_warn_seconds,
+                        "subagent stale threshold crossed"
+                    );
+                    warned.insert(node.info.id.clone());
                 }
                 "stale".to_string()
             } else {
@@ -400,10 +399,7 @@ impl ironhermes_core::commands::context::SubagentListSnapshot for SubagentRegist
     /// Phase 32.3 Plan 03 (D-08): forwards to `ShrikeService::status` —
     /// diagnostic snapshot for one subagent. Returns None when the id
     /// is not present.
-    fn status(
-        &self,
-        id: &str,
-    ) -> Option<ironhermes_core::commands::context::SubagentStatusInfo> {
+    fn status(&self, id: &str) -> Option<ironhermes_core::commands::context::SubagentStatusInfo> {
         self.shrike.status(id)
     }
 }
@@ -566,7 +562,10 @@ mod tests {
         // Should have 3 entries: 1 root (depth 0) + 2 children (depth 1)
         assert_eq!(entries.len(), 3, "expected 3 entries in flat output");
 
-        let root_entry = entries.iter().find(|e| e.id == "root").expect("root missing");
+        let root_entry = entries
+            .iter()
+            .find(|e| e.id == "root")
+            .expect("root missing");
         assert_eq!(root_entry.depth, 0);
         assert!(root_entry.parent_id.is_none());
         assert_eq!(root_entry.status, "running");

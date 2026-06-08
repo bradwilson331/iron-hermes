@@ -166,6 +166,7 @@ pub fn KanbanCard(
 /// seconds, float) as a short relative age string for the card AGE chip.
 /// Plan 01 uses a coarse seconds/minutes/hours/days bucket — Plan 04 polish
 /// may add a richer format. Falls back to `"--"` on any clock error.
+#[allow(dead_code)] // called in KanbanCard rsx! format string; dead_code fires on test target
 fn format_age_secs(created_at: f64) -> String {
     let now = current_unix_time();
     if now <= 0.0 {
@@ -186,6 +187,7 @@ fn format_age_secs(created_at: f64) -> String {
 /// Phase 36.3.7.11 Plan 01: current time in Unix seconds (float). On
 /// WASM uses `js_sys::Date::now()`; on native uses `SystemTime`. Returns
 /// `0.0` on error so the caller can fall back to a placeholder.
+#[allow(dead_code)] // called from format_age_secs; dead_code fires on test target
 fn current_unix_time() -> f64 {
     #[cfg(target_arch = "wasm32")]
     {

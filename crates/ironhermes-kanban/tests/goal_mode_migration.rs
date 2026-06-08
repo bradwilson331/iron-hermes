@@ -66,10 +66,7 @@ fn fresh_db_has_v2_columns() {
     let goal_mode = by_name
         .get("goal_mode")
         .expect("fresh DB must have goal_mode column");
-    assert_eq!(
-        goal_mode.notnull, 1,
-        "goal_mode must be NOT NULL"
-    );
+    assert_eq!(goal_mode.notnull, 1, "goal_mode must be NOT NULL");
     assert_eq!(
         goal_mode.dflt_value.as_deref(),
         Some("0"),
@@ -89,7 +86,10 @@ fn fresh_db_has_v2_columns() {
     let goal_turns_used = by_name
         .get("goal_turns_used")
         .expect("fresh DB must have goal_turns_used column");
-    assert_eq!(goal_turns_used.notnull, 1, "goal_turns_used must be NOT NULL");
+    assert_eq!(
+        goal_turns_used.notnull, 1,
+        "goal_turns_used must be NOT NULL"
+    );
     assert_eq!(
         goal_turns_used.dflt_value.as_deref(),
         Some("0"),
@@ -104,7 +104,10 @@ fn fresh_db_has_v2_columns() {
         })
         .expect("read schema_version");
     // Phase 36.3.7.13: schema is now at v3; fresh DBs land at 3.
-    assert_eq!(version, 3, "fresh DB must land at schema_version 3 (current SCHEMA_VERSION)");
+    assert_eq!(
+        version, 3,
+        "fresh DB must land at schema_version 3 (current SCHEMA_VERSION)"
+    );
 }
 
 /// Migration-ladder path: a hand-crafted v1 DB (no goal-mode columns,
@@ -226,7 +229,12 @@ fn migration_is_idempotent() {
     // All goal-mode columns (v2) and goal_toolset (v3) are still present after the second open.
     let cols = read_tasks_columns(&store.conn);
     let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
-    for col in &["goal_mode", "goal_max_turns", "goal_turns_used", "goal_toolset"] {
+    for col in &[
+        "goal_mode",
+        "goal_max_turns",
+        "goal_turns_used",
+        "goal_toolset",
+    ] {
         assert!(
             names.contains(col),
             "column '{}' must persist after idempotent re-open; actual: {:?}",

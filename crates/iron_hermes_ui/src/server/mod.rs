@@ -8,10 +8,10 @@
 
 pub mod api;
 #[cfg(feature = "server")]
+pub mod logging;
+#[cfg(feature = "server")]
 pub mod state;
 pub mod ws;
-#[cfg(feature = "server")]
-pub mod logging;
 // Phase 36.3.7.11 Plan 01 — kanban dashboard read surface + WS.
 // `kanban_api` is unconditional (the `#[server]` macros handle the
 // client/server split). `kanban_ws` is unconditional too: like `ws`, the
