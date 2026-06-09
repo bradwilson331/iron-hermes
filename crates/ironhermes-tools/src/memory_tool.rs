@@ -73,11 +73,7 @@ fn format_success_response(action: &str, target: MemoryTarget, json_str: &str) -
             let chars_used = v.get("chars_used").and_then(|x| x.as_u64()).unwrap_or(0);
             let chars_limit = v.get("chars_limit").and_then(|x| x.as_u64()).unwrap_or(0);
             let entries = v.get("entries").and_then(|x| x.as_u64()).unwrap_or(0);
-            let pct = if chars_limit > 0 {
-                chars_used * 100 / chars_limit
-            } else {
-                0
-            };
+            let pct = (chars_used * 100).checked_div(chars_limit).unwrap_or(0);
             format!(
                 "{} to memory. {}: {}% -- {}/{} chars ({} {})",
                 action,

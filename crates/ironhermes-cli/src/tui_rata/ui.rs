@@ -248,7 +248,7 @@ mod tests {
         terminal.draw(|f| ui(f, &app)).unwrap();
         let buf = terminal.backend().buffer();
         // transcript_area.height = 19; last content row = 19 - 2 = 17 (0-indexed in buffer)
-        let last_visible_row = (transcript_area.height - 2) as u16; // = 17
+        let last_visible_row = transcript_area.height - 2; // = 17
         let last_row_non_blank = (1u16..78u16).any(|col| {
             buf.cell((col, last_visible_row))
                 .map(|c| c.symbol() != " ")
