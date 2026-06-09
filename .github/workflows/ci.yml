@@ -80,7 +80,12 @@ jobs:
         run: cargo install cargo-insta --locked
 
       - name: cargo insta test (reject unreferenced)
-        run: cargo insta test --unreferenced=reject --workspace
+        # --all-features is required (matches the nextest job): without it the
+        # default build (a) compiles iron_hermes_ui's server/legacy-shell code
+        # as dead under -D warnings and (b) cfg's out tui_rata_snapshots.rs
+        # (#![cfg(feature = "test-support")]), orphaning its 8 snapshots and
+        # tripping --unreferenced=reject. All features on fixes both.
+        run: cargo insta test --unreferenced=reject --workspace --all-features
 
   # ---------------------------------------------------------------------------
   # Full workspace test — catches regressions across every crate.
