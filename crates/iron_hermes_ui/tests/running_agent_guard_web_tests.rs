@@ -457,8 +457,8 @@ fn ws_rs_contains_phase_36_1_anchors() {
         "ws.rs must contain the slash interception entry `starts_with('/')`"
     );
     assert!(
-        WS_SOURCE.contains("is_bypass(&def.name)"),
-        "ws.rs must use is_bypass(&def.name) on the canonical post-resolution \
+        WS_SOURCE.contains("is_bypass(def.name)"),
+        "ws.rs must use is_bypass(def.name) on the canonical post-resolution \
          name (Pitfall 4 mitigation — never raw input)"
     );
     assert!(

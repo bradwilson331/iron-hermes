@@ -60,6 +60,7 @@ fn count_rows(store: &KanbanStore, sql: &str, task_id: &str) -> i64 {
 #[tokio::test]
 async fn full_lifecycle_via_tools_layer() {
     let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("kanban.db").to_string_lossy().into_owned();
     let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
 
     // ---- Step 1: create a ready task ----
@@ -87,6 +88,7 @@ async fn full_lifecycle_via_tools_layer() {
     // the vars before returning. SAFETY: see env-var race note in module doc.
     let store_for_spawn = store_arc.clone();
     let task_id_for_spawn = task_id.clone();
+    let db_path_for_spawn = db_path.clone();
 
     let spawn_fn = Arc::new(
         move |task: ironhermes_kanban::types::Task,
@@ -98,6 +100,7 @@ async fn full_lifecycle_via_tools_layer() {
         > {
             let store = store_for_spawn.clone();
             let task_id = task_id_for_spawn.clone();
+            let db_path = db_path_for_spawn.clone();
 
             // Capture the run_id and claim_lock for env injection.
             let run_id = run.id.clone();
@@ -105,8 +108,11 @@ async fn full_lifecycle_via_tools_layer() {
             let assignee = task.assignee.clone();
 
             Box::pin(async move {
-                // Set the env vars the tool reads (D-17 / D-22).
+                // Set the env vars the tool reads (D-17 / D-22). HERMES_KANBAN_DB
+                // points the tool's own KanbanStore::open_from_env_or_board at this
+                // test's tempfile DB instead of ~/.ironhermes/kanban.db.
                 unsafe {
+                    std::env::set_var("HERMES_KANBAN_DB", &db_path);
                     std::env::set_var("HERMES_KANBAN_TASK", &task_id);
                     std::env::set_var("HERMES_KANBAN_RUN_ID", &run_id);
                     std::env::set_var("HERMES_KANBAN_CLAIM_LOCK", &claim_lock);
@@ -125,6 +131,7 @@ async fn full_lifecycle_via_tools_layer() {
 
                 // Clean up env vars before returning regardless of tool result.
                 unsafe {
+                    std::env::remove_var("HERMES_KANBAN_DB");
                     std::env::remove_var("HERMES_KANBAN_TASK");
                     std::env::remove_var("HERMES_KANBAN_RUN_ID");
                     std::env::remove_var("HERMES_KANBAN_CLAIM_LOCK");
@@ -233,7 +240,15 @@ async fn full_lifecycle_via_tools_layer() {
 #[tokio::test]
 async fn duplicate_completion_is_rejected() {
     let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("kanban.db").to_string_lossy().into_owned();
     let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
+
+    // Point the tools' KanbanStore::open_from_env_or_board at this test's
+    // tempfile DB instead of ~/.ironhermes/kanban.db (kept set for the whole
+    // tool-call span; process-global, so requires --test-threads=1).
+    unsafe {
+        std::env::set_var("HERMES_KANBAN_DB", &db_path);
+    }
 
     // Create and manually seed a running task with a known run_id.
     let (task_id, run_id) = {
@@ -304,5 +319,9 @@ async fn duplicate_completion_is_rejected() {
             parsed["status"], "rejected",
             "second completion with stale run_id must be rejected; got: {result}"
         );
+    }
+
+    unsafe {
+        std::env::remove_var("HERMES_KANBAN_DB");
     }
 }

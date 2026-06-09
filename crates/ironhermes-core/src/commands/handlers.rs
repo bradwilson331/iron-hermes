@@ -2031,7 +2031,7 @@ mod tests {
             CommandResult::Output(text) => {
                 assert!(text.contains("claude-sonnet-4"), "missing model name");
                 assert!(
-                    text.contains("1,000,000"),
+                    text.contains("200,000"),
                     "missing context length: {}",
                     text
                 );

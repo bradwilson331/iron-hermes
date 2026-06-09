@@ -85,7 +85,15 @@ fn make_browser_registry(
 ) -> (ironhermes_tools::ToolRegistry, BrowserSessionArc) {
     let session: BrowserSessionArc = std::sync::Arc::new(tokio::sync::Mutex::new(None));
     let mut registry = ironhermes_tools::ToolRegistry::new();
-    let config = std::sync::Arc::new(ironhermes_core::config::Config::default());
+    let mut config = ironhermes_core::config::Config::default();
+    // CI (Ubuntu 23.10+) disables unprivileged user namespaces via AppArmor, which causes
+    // Chromium's zygote sandbox to abort (zygote_host_impl_linux.cc: "No usable sandbox!").
+    // Set no_sandbox=true when running under CI so Chromium can launch. This is test-only;
+    // the production default (no_sandbox: false) is never changed.
+    if std::env::var("CI").is_ok() {
+        config.browser.no_sandbox = true;
+    }
+    let config = std::sync::Arc::new(config);
     registry.register_browser_tools_with_vision(session.clone(), resolver, vision_client, config);
     (registry, session)
 }

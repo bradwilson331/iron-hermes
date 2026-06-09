@@ -851,7 +851,7 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
             user_id: None,
         };
         let tts_wiring = Some(ironhermes_agent::TtsPerTurnWiring {
-            session_key: session_key.clone(), // explicit Some() literal for D-05 source-grep
+            session_key: session_key.clone(), // D-05 source-grep anchor (TtsPerTurnWiring.session_key is a non-Option SessionKey)
             audio_dispatcher: None,
         });
 

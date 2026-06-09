@@ -69,33 +69,35 @@ fn gateway_handler_wires_session_key_some() {
 
 /// Phase 36.17.7 D-05 / A5 Test 3 — Plan 04 web ws wiring.
 ///
-/// `iron_hermes_ui/src/server/ws.rs` must contain `session_key: Some(` at
+/// `iron_hermes_ui/src/server/ws.rs` must wire `session_key: web_key(` at
 /// the per-turn spawn point AND the queue-drain spawn point.
 #[test]
 fn web_ws_handler_wires_session_key_some() {
     const SRC: &str = include_str!("../../iron_hermes_ui/src/server/ws.rs");
     assert!(
-        SRC.contains("session_key: Some("),
-        "Phase 36.17.7 D-05 Test 3: iron_hermes_ui/src/server/ws.rs must \
-         contain the literal `session_key: Some(` — Plan 04 threads the \
-         per-turn `TtsPerTurnWiring {{ session_key: Some(...) }}` into the \
-         web ws handler's primary + queue-drain TurnRequest construction."
+        SRC.contains("session_key: web_key("),
+        "Phase 36.17.7 D-05 Test 3: iron_hermes_ui/src/server/ws.rs must wire \
+         the per-turn `TtsPerTurnWiring` session_key — `session_key: web_key(` \
+         appears at the primary + queue-drain spawn sites. (TtsPerTurnWiring's \
+         session_key is a non-Option SessionKey, so the value is `web_key(...)`, \
+         not `Some(...)`.)"
     );
 }
 
 /// Phase 36.17.7 D-05 / A5 Test 4 — Plan 03 TUI wiring.
 ///
-/// `ironhermes-cli/src/tui_rata/event_loop.rs` must contain
-/// `session_key: Some(` at the `spawn_turn` site.
+/// `ironhermes-cli/src/tui_rata/event_loop.rs` must wire
+/// `session_key: session_key.clone()` at the `spawn_turn` site.
 #[test]
 fn tui_event_loop_wires_session_key_some() {
     const SRC: &str = include_str!("../../ironhermes-cli/src/tui_rata/event_loop.rs");
     assert!(
-        SRC.contains("session_key: Some("),
+        SRC.contains("session_key: session_key.clone()"),
         "Phase 36.17.7 D-05 Test 4: ironhermes-cli/src/tui_rata/event_loop.rs \
-         must contain the literal `session_key: Some(` — Plan 03 threads the \
-         per-turn `TtsPerTurnWiring {{ session_key: Some(...) }}` into the TUI \
-         spawn_turn TurnRequest construction."
+         must wire the per-turn `TtsPerTurnWiring` session_key — \
+         `session_key: session_key.clone()` appears at the spawn_turn site. \
+         (TtsPerTurnWiring's session_key is a non-Option SessionKey, not \
+         `Some(...)`.)"
     );
 }
 

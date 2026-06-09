@@ -140,21 +140,21 @@ fn invariant_22_3_03_cmd_clear_returns_reset_terminal_and_cmd_new_unchanged() {
     );
 }
 
-/// INV-22.3-04: `repl_input.add_history(` appears AFTER `starts_with('/')` in
+/// INV-22.3-04: `repl_input.add_history(` appears AFTER `strip_prefix('/')` in
 /// `main.rs`. This is the slash-side history wiring (Plan 22.3-05). The total
 /// count must be at least 2 (slash-time + chat-time at line 1213).
 #[test]
 fn invariant_22_3_04_slash_commands_added_to_history_at_prompt_time() {
     let slash_check_pos = MAIN_RS
-        .find("starts_with('/')")
-        .expect("starts_with('/') not found in main.rs");
+        .find("strip_prefix('/')")
+        .expect("strip_prefix('/') not found in main.rs");
     let add_history_pos = MAIN_RS
         .find("repl_input.add_history(")
         .expect("repl_input.add_history( not found in main.rs");
     assert!(
         slash_check_pos < add_history_pos,
         "INV-22.3-04: repl_input.add_history must appear AFTER the first \
-         starts_with('/') check in main.rs. Plan 22.3-05 added the slash-side \
+         strip_prefix('/') check in main.rs. Plan 22.3-05 added the slash-side \
          add_history call at the prompt-time dispatch site. Without this \
          ordering, slash commands are not recorded in unified rustyline history \
          (UI-SPEC HIST-2 regression)."

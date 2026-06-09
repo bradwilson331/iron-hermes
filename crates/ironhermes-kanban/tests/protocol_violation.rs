@@ -148,6 +148,7 @@ fn crashed_and_protocol_violation_are_distinct_event_kinds() {
 #[tokio::test]
 async fn impostor_worker_run_id_mismatch_emits_rejection() {
     let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("kanban.db").to_string_lossy().into_owned();
     let store_arc = make_store_arc(&dir);
 
     let (task_id, stale_run_id) = {
@@ -176,6 +177,11 @@ async fn impostor_worker_run_id_mismatch_emits_rejection() {
     }
 
     // Old worker (impostor) tries to complete with stale_run_id.
+    // HERMES_KANBAN_DB points the tool's open_from_env_or_board at this
+    // test's tempfile DB instead of ~/.ironhermes/kanban.db.
+    unsafe {
+        std::env::set_var("HERMES_KANBAN_DB", &db_path);
+    }
     let tool = KanbanCompleteTool::new(store_arc.clone(), true);
     let result = tool
         .execute(json!({
@@ -185,6 +191,9 @@ async fn impostor_worker_run_id_mismatch_emits_rejection() {
         }))
         .await
         .unwrap();
+    unsafe {
+        std::env::remove_var("HERMES_KANBAN_DB");
+    }
 
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
     assert_eq!(
@@ -216,6 +225,7 @@ async fn impostor_worker_run_id_mismatch_emits_rejection() {
 #[tokio::test]
 async fn phantom_created_cards_emits_completion_rejected_event() {
     let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("kanban.db").to_string_lossy().into_owned();
     let store_arc = make_store_arc(&dir);
 
     let (task_id, run_id) = {
@@ -228,8 +238,10 @@ async fn phantom_created_cards_emits_completion_rejected_event() {
         )
     };
 
-    // Set the profile env so the tool reads the right profile.
+    // Set the profile env so the tool reads the right profile. HERMES_KANBAN_DB
+    // points the tool's open_from_env_or_board at this test's tempfile DB.
     unsafe {
+        std::env::set_var("HERMES_KANBAN_DB", &db_path);
         std::env::set_var("HERMES_PROFILE", "bot-worker");
     }
 
@@ -246,6 +258,7 @@ async fn phantom_created_cards_emits_completion_rejected_event() {
         .unwrap();
 
     unsafe {
+        std::env::remove_var("HERMES_KANBAN_DB");
         std::env::remove_var("HERMES_PROFILE");
     }
 
@@ -282,6 +295,7 @@ async fn phantom_created_cards_emits_completion_rejected_event() {
 #[tokio::test]
 async fn wrong_profile_created_cards_emits_completion_rejected_event() {
     let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("kanban.db").to_string_lossy().into_owned();
     let store_arc = make_store_arc(&dir);
 
     // Create a child task owned by "other-bot".
@@ -311,7 +325,10 @@ async fn wrong_profile_created_cards_emits_completion_rejected_event() {
         )
     };
 
+    // HERMES_KANBAN_DB points the tool's open_from_env_or_board at this test's
+    // tempfile DB instead of ~/.ironhermes/kanban.db.
     unsafe {
+        std::env::set_var("HERMES_KANBAN_DB", &db_path);
         std::env::set_var("HERMES_PROFILE", "bot-worker");
     }
 
@@ -327,6 +344,7 @@ async fn wrong_profile_created_cards_emits_completion_rejected_event() {
         .unwrap();
 
     unsafe {
+        std::env::remove_var("HERMES_KANBAN_DB");
         std::env::remove_var("HERMES_PROFILE");
     }
 
@@ -355,9 +373,17 @@ async fn wrong_profile_created_cards_emits_completion_rejected_event() {
 #[tokio::test]
 async fn idempotency_key_dedup_prevents_duplicate_tasks() {
     let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("kanban.db").to_string_lossy().into_owned();
     let store_arc = make_store_arc(&dir);
 
     let idem_key = "smoke-idem-key-001";
+
+    // HERMES_KANBAN_DB points the tool's open_from_env_or_board at this test's
+    // tempfile DB instead of ~/.ironhermes/kanban.db (both create calls must
+    // land in the same DB the count assertion below reads via store_arc).
+    unsafe {
+        std::env::set_var("HERMES_KANBAN_DB", &db_path);
+    }
 
     let tool = KanbanCreateTool::new(store_arc.clone(), true);
 
@@ -394,6 +420,10 @@ async fn idempotency_key_dedup_prevents_duplicate_tasks() {
         "both kanban_create calls with the same idempotency_key must return the same task_id"
     );
 
+    unsafe {
+        std::env::remove_var("HERMES_KANBAN_DB");
+    }
+
     // Only one row must exist in the tasks table.
     let store = store_arc.lock().await;
     let count: i64 = store
@@ -419,6 +449,7 @@ async fn idempotency_key_dedup_prevents_duplicate_tasks() {
 #[tokio::test]
 async fn claim_lock_gated_write_emits_claim_expired() {
     let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("kanban.db").to_string_lossy().into_owned();
     let store_arc = make_store_arc(&dir);
 
     let task_id = {
@@ -465,7 +496,10 @@ async fn claim_lock_gated_write_emits_claim_expired() {
     }
 
     // Inject stale claim_lock in env so the comment tool reads it.
+    // HERMES_KANBAN_DB points the tool's open_from_env_or_board at this test's
+    // tempfile DB instead of ~/.ironhermes/kanban.db.
     unsafe {
+        std::env::set_var("HERMES_KANBAN_DB", &db_path);
         std::env::set_var("HERMES_KANBAN_TASK", &task_id);
         std::env::set_var("HERMES_KANBAN_CLAIM_LOCK", "lock-A");
     }
@@ -479,6 +513,7 @@ async fn claim_lock_gated_write_emits_claim_expired() {
         .unwrap();
 
     unsafe {
+        std::env::remove_var("HERMES_KANBAN_DB");
         std::env::remove_var("HERMES_KANBAN_TASK");
         std::env::remove_var("HERMES_KANBAN_CLAIM_LOCK");
     }
