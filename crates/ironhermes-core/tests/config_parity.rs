@@ -226,11 +226,17 @@ fn example_contains_no_private_range_ips() {
 ///   - a bare port number "port: 11434" has no IP → returns None (no false positives)
 #[test]
 fn detector_fires_on_synthetic_private_ip() {
-    // Positive: the original G3 leaked host must be detected.
-    let synthetic = "providers:\n  ollama:\n    base_url: \"http://127.0.0.1:11434/v1\"\n";
+    // Positive: a synthetic private IP must be detected. The original G3 leak
+    // (REQ-37.1-03) was the developer LAN host 127.0.0.1; we assert on a
+    // 172.16/12 address instead because the public-showcase PII scrub rewrites
+    // every 192.168.x.x literal to loopback 127.0.0.1 — which the detector
+    // correctly treats as ALLOWED — so a 192.168 literal would be a false
+    // negative on the scrubbed branch. The 10.x and 172.x cases (here + below)
+    // keep RFC1918 detection covered on both develop and the showcase branch.
+    let synthetic = "providers:\n  ollama:\n    base_url: \"http://172.31.0.1:11434/v1\"\n";
     assert!(
         first_private_ip_in(synthetic).is_some(),
-        "detector FAILED to fire on 127.0.0.1 — the G3 guard is vacuous (REQ-37.1-03)"
+        "detector FAILED to fire on 172.31.0.1 — the G3 guard is vacuous (REQ-37.1-03)"
     );
 
     // Negative control 1: loopback is explicitly allowed.

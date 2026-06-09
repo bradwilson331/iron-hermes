@@ -80,12 +80,21 @@ jobs:
         run: cargo install cargo-insta --locked
 
       - name: cargo insta test (reject unreferenced)
-        # --all-features is required (matches the nextest job): without it the
-        # default build (a) compiles iron_hermes_ui's server/legacy-shell code
-        # as dead under -D warnings and (b) cfg's out tui_rata_snapshots.rs
-        # (#![cfg(feature = "test-support")]), orphaning its 8 snapshots and
-        # tripping --unreferenced=reject. All features on fixes both.
-        run: cargo insta test --unreferenced=reject --workspace --all-features
+        # Scoped to ironhermes-cli: every committed .snap lives in
+        # crates/ironhermes-cli/tests/snapshots, so the orphan check
+        # (--unreferenced=reject) only needs that crate. The workspace nextest
+        # job already runs every snapshot ASSERTION across all crates (so
+        # mismatches are caught everywhere); this job's unique job is orphan
+        # detection over the snapshot-owning crate.
+        #
+        # Why not --workspace here: cargo-insta's default cargo-test runner runs
+        # a binary's tests as in-process threads, which breaks tests written for
+        # nextest's per-process isolation — HERMES_KANBAN_DB env handoff in
+        # ironhermes-kanban, the ironhermes-agent budget-concurrency stress test,
+        # etc. (all green under the nextest job). Scoping to the cli sidesteps
+        # them. --all-features enables cli's `test-support` feature, which gates
+        # tui_rata_snapshots.rs (its 8 snapshots) — without it they orphan.
+        run: cargo insta test --unreferenced=reject -p ironhermes-cli --all-features
 
   # ---------------------------------------------------------------------------
   # Full workspace test — catches regressions across every crate.

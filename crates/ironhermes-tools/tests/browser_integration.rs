@@ -93,6 +93,20 @@ fn make_browser_registry(
     if std::env::var("CI").is_ok() {
         config.browser.no_sandbox = true;
     }
+    // Per-invocation unique Chromium profile dir. Without this, every browser test
+    // shares the default `$HERMES_HOME/browser-profile`, and nextest (which runs each
+    // test as a separate parallel PROCESS) makes two launches collide on Chrome's
+    // per-profile SingletonLock ("Failed to create .../SingletonLock: File exists").
+    // Using an absolute path under the OS temp dir keyed by pid + an atomic counter
+    // guarantees uniqueness across BOTH processes and concurrent calls within one
+    // process. The path is a plain string (not a dropped TempDir), so it can never be
+    // deleted out from under chromium mid-test; BrowserSession::spawn create_dir_all's
+    // it on launch. Test-only — production still uses the default profile dir.
+    static PROFILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = PROFILE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let unique_profile =
+        std::env::temp_dir().join(format!("ih-browser-test-{}-{}", std::process::id(), seq));
+    config.browser.user_data_dir = Some(unique_profile.to_string_lossy().into_owned());
     let config = std::sync::Arc::new(config);
     registry.register_browser_tools_with_vision(session.clone(), resolver, vision_client, config);
     (registry, session)
