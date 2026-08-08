@@ -76,22 +76,29 @@ After install, seed your API keys in `~/.ironhermes/.env` and set the model prov
 
 ---
 
-## Docker Deployment
+## Container Deployment (Podman / Docker)
 
-The `Dockerfile` uses a three-stage build:
+> **Step-by-step build/run walkthrough (prerequisites, rootless notes,
+> systemd user service, troubleshooting): [CONTAINER.md](CONTAINER.md).**
+> This section is the reference: build stages, environment variables, volumes.
 
-- **Stage 0 (`gosu_source`)** — pulls `gosu` 1.19 from `tianon/gosu` for privilege dropping
-- **Stage 1 (`builder`)** — `rust:latest`; compiles `ironhermes` release binary (`cargo build --release --bin ironhermes`, no `--features` flags) with workspace layer caching
-- **Stage 2 (`runtime`)** — `debian:bookworm-slim`; installs `python3`, `ca-certificates`, `procps`; runs as UID 10000 (`ironhermes` user)
+The `Dockerfile` uses a three-stage build (OCI format — buildable and runnable with both **Podman** and Docker):
+
+- **Stage 0 (`gosu_source`)** — pulls `gosu` from `tianon/gosu:1.17` for privilege dropping
+- **Stage 1 (`builder`)** — `rust:1.96-bookworm` (pinned; edition 2024 requires rustc ≥ 1.85); installs `pkg-config` + `libasound2-dev` (ALSA for the `cpal`/`rodio` audio deps in `ironhermes-tools`) and `libssl-dev` + `perl`; compiles `ironhermes` release binary (`cargo build --release --bin ironhermes`, no `--features` flags) with workspace layer caching
+- **Stage 2 (`runtime`)** — `debian:bookworm-slim`; installs `python3`, `ca-certificates`, `procps`, `libasound2` (ALSA runtime); runs as UID 10000 (`ironhermes` user)
+
+The build context also copies `skills/` and `assets/` (not just `crates/`/`providers/`): two crates embed files from those directories at compile time via `include_str!` (`ironhermes-kanban` embeds `skills/kanban-worker` + `skills/kanban-orchestrator` SKILL.md; `iron_hermes_ui` embeds `assets/site.css`). Omitting them fails the release build.
 
 The shipped `Dockerfile` does not build with the `rusty-vault` cargo feature. To run the container with the RustyVault secret backend available, add `--features rusty-vault` to the `cargo build` line in a local copy of the Dockerfile (or maintain a custom build stage) before building the image.
 
 ```bash
-# Build the image
-docker build -t ironhermes .
+# Build the image (podman or docker — the OCI format works with both)
+podman build -t ironhermes .
+#   equivalently: docker build -t ironhermes .
 
 # Run with a named volume for persistent data
-docker run -d \
+podman run -d \
   --name ironhermes \
   -v ironhermes-data:/opt/data \
   -p 8080:8080 \
@@ -112,10 +119,10 @@ The entrypoint (`docker/entrypoint.sh`) seeds config templates on first run, dro
 | `IRONHERMES_UID` | Override the runtime UID (for volume ownership compatibility with host) |
 | `IRONHERMES_GID` | Override the runtime GID |
 
-Pass provider API keys and gateway tokens via `docker run -e` or a `--env-file`:
+Pass provider API keys and gateway tokens via `podman run -e` (or `docker run -e`) or a `--env-file`:
 
 ```bash
-docker run -d \
+podman run -d \
   --name ironhermes \
   -v ironhermes-data:/opt/data \
   -p 8080:8080 \

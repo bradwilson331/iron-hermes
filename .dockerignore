@@ -1,10 +1,28 @@
+# Build artifacts
 target/
-.planning/
+
+# VCS / tooling metadata
 .git/
+.gitignore
 .claude/
 .omc/
+.planning/
 worktrees/
+
+# Secrets / local env — never ship credentials in an image
+.env
+*.pem
+*.key
+
+# Lockfiles except the Rust one needed for reproducible builds
 *.lock
 !Cargo.lock
-news_analysis.md
+
+# Node / website artifacts not needed for the Rust binary
+node_modules/
+website/node_modules/
+
+# Misc
 .DS_Store
+tmp/
+news_analysis.md
