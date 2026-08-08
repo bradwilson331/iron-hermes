@@ -48,7 +48,7 @@ cargo build --release
 **1. Run the setup wizard (recommended)**
 
 ```bash
-hermes setup
+ironhermes setup
 ```
 
 The interactive setup wizard configures your API provider, model, and writes both `~/.ironhermes/config.yaml` and `~/.ironhermes/.env` for you. It asks whether you want a quick setup (provider + model only) or a full setup (all sections including skills, terminal, tools, memory, and gateway).
@@ -133,7 +133,7 @@ IronHermes looks for configuration in `~/.ironhermes/`:
 
 Set `IRONHERMES_HOME` to override the default home directory.
 
-Set `IRONHERMES_SOURCE` to the project root directory to enable skills installation during `hermes setup` (full). When set, the wizard copies skill files from `$IRONHERMES_SOURCE/skills/` and `$IRONHERMES_SOURCE/optional-skills/` into `~/.ironhermes/skills/`. The wizard also auto-detects the source by walking up from the binary location in dev builds.
+Set `IRONHERMES_SOURCE` to the project root directory to enable skills installation during `ironhermes setup` (full). When set, the wizard copies skill files from `$IRONHERMES_SOURCE/skills/` and `$IRONHERMES_SOURCE/optional-skills/` into `~/.ironhermes/skills/`. The wizard also auto-detects the source by walking up from the binary location in dev builds.
 
 ### Provider fallback
 
