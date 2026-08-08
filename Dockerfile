@@ -1,14 +1,24 @@
 # =============================================================================
 # IronHermes — Multi-stage OCI Build (Podman / Docker compatible)
 # =============================================================================
+# Builds the iron_hermes_ui Dioxus 0.7 fullstack app (WASM client + embedded
+# agent server) and runs it on 0.0.0.0:8080 — the HTTP endpoint the Hermes-AaaS
+# VPS stack (Caddy reverse-proxy + healthcheck) expects. The `ironhermes` CLI is
+# bundled alongside for management (e.g. `ironhermes web set-password`).
+#
+# NOTE: iron_hermes_ui has a FAIL-CLOSED bind guard — it refuses a non-loopback
+# bind unless a web password hash is configured (IRONHERMES_WEB_PASSWORD_HASH
+# env, or config.yaml web_ui.auth.password_hash). Provide one at runtime.
+#
 # Build: podman build -t ironhermes .
-# Run:   podman run -v ironhermes-data:/opt/data ironhermes
+# Run:   podman run -e IRONHERMES_WEB_PASSWORD_HASH=... -p 8080:8080 \
+#            -v ironhermes-data:/opt/data ironhermes
 # =============================================================================
 
 # --- Stage 0: gosu for privilege dropping ---
 FROM docker.io/tianon/gosu:1.17 AS gosu_source
 
-# --- Stage 1: Rust build ---
+# --- Stage 1: Rust + Dioxus build ---
 # Edition 2024 requires rustc >= 1.85; pin for reproducibility.
 FROM docker.io/library/rust:1.96-bookworm AS builder
 WORKDIR /build
@@ -23,6 +33,15 @@ RUN apt-get update && \
         libssl-dev \
         perl && \
     rm -rf /var/lib/apt/lists/*
+
+# WASM target for the Dioxus web client.
+RUN rustup target add wasm32-unknown-unknown
+
+# Dioxus CLI — MUST match the dioxus crate version (=0.7.1). binstall is fast
+# (prebuilt); fall back to a from-source install if binstall lacks the pin.
+RUN cargo install cargo-binstall --locked && \
+    cargo binstall -y dioxus-cli@0.7.1 || \
+    cargo install dioxus-cli@0.7.1 --locked
 
 # Copy dependency manifests first for layer caching.
 COPY Cargo.toml Cargo.lock ./
@@ -56,12 +75,17 @@ COPY crates/ crates/
 COPY providers/ providers/
 # Embedded at compile time via include_str! from crate sources:
 # - skills/: kanban-worker & kanban-orchestrator SKILL.md (ironhermes-kanban)
-#   (iron_hermes_ui's site.css lives inside crates/iron_hermes_ui/assets/,
+#   (iron_hermes_ui's assets live inside crates/iron_hermes_ui/assets/,
 #    already covered by `COPY crates/ crates/` — the repo has no root assets/)
 COPY skills/ skills/
 
-# Build release binary
+# CLI binary (management + `ironhermes web set-password`).
 RUN cargo build --release --bin ironhermes
+
+# Fullstack web bundle: WASM client + axum server binary + public/ assets.
+# dx drives the dual (client+server) build and asset optimization.
+# Output tree: target/dx/iron_hermes_ui/release/web/{iron_hermes_ui, public/}
+RUN dx bundle --platform web -p iron_hermes_ui --release
 
 # --- Stage 2: Minimal runtime ---
 FROM docker.io/library/debian:bookworm-slim AS runtime
@@ -71,12 +95,14 @@ FROM docker.io/library/debian:bookworm-slim AS runtime
 # - ca-certificates: HTTPS for API calls
 # - procps: ps for process management
 # - libasound2: ALSA runtime for cpal/rodio audio
+# - curl: compose healthcheck (GET http://localhost:8080/)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3 \
         ca-certificates \
         procps \
-        libasound2 && \
+        libasound2 \
+        curl && \
     rm -rf /var/lib/apt/lists/*
 
 # gosu from dedicated stage (avoids apt security-repo dependency)
@@ -85,21 +111,28 @@ COPY --chmod=0755 --from=gosu_source /gosu /usr/local/bin/gosu
 # Non-root runtime user (UID 10000, home at /opt/data)
 RUN useradd -u 10000 -m -d /opt/data ironhermes
 
-# Compiled binary
+# CLI (management) + the fullstack web bundle (server binary + public/ assets)
 COPY --from=builder /build/target/release/ironhermes /usr/local/bin/ironhermes
+COPY --from=builder /build/target/dx/iron_hermes_ui/release/web/ /opt/ironhermes/web/
 
-# Templates and entrypoint
+# Templates and entrypoints
 COPY --chown=ironhermes:ironhermes env.example /opt/ironhermes/.env.example
 COPY --chown=ironhermes:ironhermes cli-config.yaml.example /opt/ironhermes/cli-config.yaml.example
 COPY --chown=ironhermes:ironhermes docker/ /opt/ironhermes/docker/
+COPY --chmod=0755 docker/web-entrypoint.sh /usr/local/bin/web-entrypoint.sh
 
 WORKDIR /opt/ironhermes
 
 ENV PYTHONUNBUFFERED=1
 ENV IRONHERMES_HOME=/opt/data
+# Bind all interfaces so Caddy (separate container) can reach hermes:8080.
+# Requires IRONHERMES_WEB_PASSWORD_HASH (fail-closed bind guard).
+ENV IP=0.0.0.0
+ENV PORT=8080
 
 VOLUME ["/opt/data"]
 
 EXPOSE 8080
 
-ENTRYPOINT ["/opt/ironhermes/docker/entrypoint.sh"]
+# Privilege-drop + seed ~/.ironhermes, then exec the web server on 0.0.0.0:8080.
+ENTRYPOINT ["/usr/local/bin/web-entrypoint.sh"]
