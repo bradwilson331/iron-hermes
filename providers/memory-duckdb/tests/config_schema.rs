@@ -33,7 +33,7 @@ fn duckdb_provider_config_schema_shape() {
     assert!(db_path.env_var.is_none());
     assert_eq!(
         db_path.default,
-        Some(serde_json::json!("$HERMES_HOME/memory.duckdb")),
+        Some(serde_json::json!("$IRONHERMES_HOME/memory.duckdb")),
     );
 
     let threads = schema.iter().find(|f| f.key == "threads").unwrap();

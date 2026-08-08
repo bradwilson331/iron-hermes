@@ -61,12 +61,26 @@ fn resolve_skill_content(registry: Option<&SkillRegistry>, skill_names: &[String
     let mut parts: Vec<String> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
 
+    let tool_names = ironhermes_tools::known_tool_names();
     for name in skill_names {
         match registry.read_content(name) {
             Some(content) => parts.push(format!(
                 "[IMPORTANT: The user has invoked the \"{}\" skill...]\n\n{}",
                 name, content
             )),
+            None if tool_names.contains(&name.as_str()) => {
+                // A tool name mistakenly listed as a skill is NOT a missing
+                // capability: the tool is available to the job via toolsets.
+                // Emitting the "skipped" banner here would wrongly tell the
+                // agent the capability is gone, so we omit it (debug-log only).
+                // New jobs are blocked from this mistake at create/edit time
+                // (cronjob tool + `cron create|edit`); this guards legacy or
+                // hand-edited jobs.
+                tracing::debug!(
+                    tool = %name,
+                    "ignoring tool name listed in cron job skills — tools come from toolsets, not skills"
+                );
+            }
             None => {
                 tracing::warn!(skill = %name, "skill not found at tick time — skipping");
                 skipped.push(name.clone());
@@ -341,6 +355,31 @@ mod tests {
         assert!(
             prompt.contains("could not be found and were skipped"),
             "Expected skip-missing prefix text"
+        );
+    }
+
+    // Test 3b (C): a tool name listed as a skill must NOT produce the
+    // "skipped" banner — the tool is available via toolsets, not skills.
+    #[tokio::test]
+    async fn test3b_tool_name_in_skills_not_reported_as_skipped() {
+        // Registry has a real skill but NOT "web_search" (which is a tool).
+        let (_dir, registry) = make_skill_registry(&[("greeter", "you are friendly")]);
+
+        let mut job = make_job("hello");
+        job.skills = vec!["web_search".to_string(), "missing-skill".to_string()];
+
+        let result = build_job_prompt(&job, None, Some(&registry)).await.unwrap();
+        let prompt = &result.user_prompt;
+
+        // The genuine missing skill is still reported...
+        assert!(
+            prompt.contains("missing-skill"),
+            "genuine missing skill should still be reported"
+        );
+        // ...but the tool name must NOT appear in the skipped banner.
+        assert!(
+            !prompt.contains("web_search"),
+            "tool name must not be surfaced as a skipped skill, got: {prompt}"
         );
     }
 

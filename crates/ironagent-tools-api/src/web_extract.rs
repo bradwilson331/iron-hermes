@@ -12,6 +12,7 @@ pub mod summary;
 pub mod youtube;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -72,6 +73,32 @@ impl WebExtractTool {
             summarization_client,
             skill_registry,
         }
+    }
+
+    /// Phase 41.3 D-04/D-16 twin-sync (Plan 03 Task 3): registry budget for the
+    /// WHOLE `web_extract` call, mirroring `ironhermes-tools`'s
+    /// `WebExtractTool::timeout_secs()`. At the shipped defaults — 60s per-URL
+    /// deadline, `extract.max_parallel_summaries` = 4 — an 8-URL batch is at
+    /// most `ceil(8/4) = 2` rounds = 120s; 300s leaves headroom above that
+    /// worst case.
+    ///
+    /// DIVERGENCE FROM THE PRIMARY CRATE (documented, not silently forced):
+    /// this crate's `Tool` trait (`crate::registry::Tool`) does not declare a
+    /// `timeout_secs()` method at all — Phase 41.3 Plan 01 added that method
+    /// only to `ironhermes-tools::registry::Tool`; the twin's registry has no
+    /// equivalent yet (Plan 01's SUMMARY names this as Plan 02's follow-up:
+    /// "mirror into the ironagent-tools-api twin crate"). Adding a method here
+    /// named `timeout_secs` to `impl Tool for WebExtractTool` would not compile
+    /// (it is not a member of this crate's `Tool` trait), and this task's
+    /// `files_modified` is scoped to `web_extract.rs` only — `registry.rs` is
+    /// out of scope. This inherent method is therefore currently INERT (no
+    /// caller wires it into any registry-level enforcement in this crate); it
+    /// exists so the D-16 contract ("web_extract declares a budget that
+    /// outranks its worst-case batch") is expressed here too, ready to move
+    /// into `impl Tool for WebExtractTool` verbatim once a future plan adds
+    /// `timeout_secs()` to this crate's `Tool` trait.
+    pub fn timeout_secs(&self) -> Option<u64> {
+        Some(300)
     }
 }
 
@@ -226,17 +253,47 @@ impl Tool for WebExtractTool {
                         .await
                         .expect("semaphore not closed");
 
-                    let result = process_one_url(
-                        &url,
-                        use_llm_processing,
-                        min_length,
-                        &format_c,
-                        &cfg_c,
-                        &client_c,
-                        &registry_c,
-                        sem_c.clone(), // share sem so chunked summarization shares budget (D-15)
+                    // D-16 twin-sync (Plan 03 Task 3): the per-URL deadline starts
+                    // AFTER the permit is acquired — a URL waiting behind
+                    // extract.max_parallel_summaries must not be charged for queue
+                    // time it did not spend fetching. No batch-level deadline is
+                    // added (rejected option — three interacting deadlines); this
+                    // bounds only this one URL's task.
+                    let per_url_secs = cfg_c.extract.per_url_timeout_secs;
+                    let result = match tokio::time::timeout(
+                        Duration::from_secs(per_url_secs),
+                        process_one_url(
+                            &url,
+                            use_llm_processing,
+                            min_length,
+                            &format_c,
+                            &cfg_c,
+                            &client_c,
+                            &registry_c,
+                            sem_c.clone(), // share sem so chunked summarization shares budget (D-15)
+                        ),
                     )
-                    .await;
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(_elapsed) => {
+                            // Blackbox run 0eaed980: a bot-walled homepage never
+                            // answered and sank the whole 6-URL batch. This turns
+                            // that URL into an in-array error entry at its own idx
+                            // instead. Never log the raw url — redact first, as
+                            // fetch_web_with_chain already does everywhere else.
+                            let redacted =
+                                redact_secrets_in_url(&url, &cfg_c.extract.redact_url_patterns);
+                            warn!(
+                                "web_extract: URL exceeded per-URL deadline of {}s: {}",
+                                per_url_secs, redacted
+                            );
+                            ExtractionResult::error(
+                                &url,
+                                format!("extraction_timeout after {}s", per_url_secs),
+                            )
+                        }
+                    };
 
                     (idx, result)
                 }

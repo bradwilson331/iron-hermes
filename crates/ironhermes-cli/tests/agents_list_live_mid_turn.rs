@@ -20,7 +20,6 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
 use ironhermes_agent::subagent_registry::{SubagentInfo, SubagentRegistry, SubagentRegistryHandle};
@@ -37,11 +36,7 @@ use tokio_util::sync::CancellationToken;
 // =========================================================================
 
 fn base_ctx() -> CommandContext {
-    CommandContext::new(
-        Platform::Local,
-        "test-session".to_string(),
-        Arc::new(AtomicBool::new(false)),
-    )
+    CommandContext::new(Platform::Local, "test-session".to_string())
 }
 
 fn find_cmd(name: &str) -> CommandDef {

@@ -8,6 +8,7 @@
 
 pub mod boards;
 pub mod commands;
+pub mod dispatch_gate;
 pub mod format;
 pub mod goal_loop;
 pub mod store_reader_impl;
@@ -79,7 +80,7 @@ pub enum KanbanCommands {
         goal_max_turns: u32,
         /// Phase 36.3.7.13 F-03: tool filter preset for goal-mode workers.
         /// One of: restricted (15 safe tools, default), extended (18 tools + terminal), full (no filter).
-        /// Only meaningful when --goal is set. Stored in DB; emitted as HERMES_KANBAN_GOAL_TOOLSET.
+        /// Only meaningful when --goal is set. Stored in DB; emitted as IRONHERMES_KANBAN_GOAL_TOOLSET.
         #[arg(long, requires = "goal")]
         goal_toolset: Option<String>,
         /// Idempotency key — short-circuits to existing task if key already exists
@@ -184,6 +185,16 @@ pub enum KanbanCommands {
         author: Option<String>,
     },
 
+    /// Attach a local file to a task (D-04/D-03: converges on the same
+    /// KanbanStore::add_attachment method the web upload surface uses)
+    #[command(name = "attach")]
+    Attach {
+        /// Task ID
+        id: String,
+        /// Path to the local file to attach
+        file: std::path::PathBuf,
+    },
+
     /// Mark one or more tasks complete
     ///
     /// D-34: bulk complete with --summary or --metadata is REFUSED (exit code 2).
@@ -201,6 +212,9 @@ pub enum KanbanCommands {
         /// Free-form JSON metadata dict (per-run; refused if multiple ids given)
         #[arg(long)]
         metadata: Option<String>,
+        /// Output/deploy path where the built work lives (per-run; refused if multiple ids given)
+        #[arg(long)]
+        output_path: Option<String>,
     },
 
     /// Block a task with a reason
@@ -300,7 +314,7 @@ pub enum KanbanCommands {
     /// in one atomic transaction. See docs/kanban/reference.md §741 for semantics.
     #[command(name = "mention")]
     Mention {
-        /// Source task ID (defaults to $HERMES_KANBAN_TASK in worker mode).
+        /// Source task ID (defaults to $IRONHERMES_KANBAN_TASK in worker mode).
         task_id: Option<String>,
         /// Fallback policy for unknown handles: skip | pending | error (default: skip).
         #[arg(long, default_value = "skip")]
@@ -663,12 +677,26 @@ pub async fn handle_kanban_command(
         KanbanCommands::Comment { id, body, author } => {
             commands::cmd_comment(id, body, author, board.as_deref()).await
         }
+        KanbanCommands::Attach { id, file } => {
+            commands::cmd_attach(id, file, board.as_deref()).await
+        }
         KanbanCommands::Complete {
             ids,
             result,
             summary,
             metadata,
-        } => commands::cmd_complete(ids, result, summary, metadata, board.as_deref()).await,
+            output_path,
+        } => {
+            commands::cmd_complete(
+                ids,
+                result,
+                summary,
+                metadata,
+                output_path,
+                board.as_deref(),
+            )
+            .await
+        }
         KanbanCommands::Block {
             id,
             reason,
@@ -775,7 +803,7 @@ pub async fn handle_kanban_command(
             json,
         } => commands::cmd_dispatch(dry_run, max, failure_limit, json, board.as_deref()).await,
         KanbanCommands::Stats { json } => commands::cmd_stats(json, board.as_deref()).await,
-        KanbanCommands::Log { id, tail } => commands::cmd_log(id, tail).await,
+        KanbanCommands::Log { id, tail } => commands::cmd_log(id, tail, board.as_deref()).await,
         KanbanCommands::Context { id } => commands::cmd_context(id, board.as_deref()).await,
         KanbanCommands::Gc {
             event_retention_days,

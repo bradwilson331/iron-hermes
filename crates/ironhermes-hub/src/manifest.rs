@@ -68,15 +68,15 @@ mod tests {
     fn with_test_hermes_home<F: FnOnce()>(f: F) {
         let _guard = crate::test_env_lock().blocking_lock();
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("HERMES_HOME").ok();
+        let prev = std::env::var("IRONHERMES_HOME").ok();
         unsafe {
-            std::env::set_var("HERMES_HOME", tmp.path());
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
         }
         f();
         unsafe {
             match prev {
-                Some(v) => std::env::set_var("HERMES_HOME", v),
-                None => std::env::remove_var("HERMES_HOME"),
+                Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+                None => std::env::remove_var("IRONHERMES_HOME"),
             }
         }
     }

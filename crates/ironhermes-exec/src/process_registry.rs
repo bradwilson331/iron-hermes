@@ -211,6 +211,12 @@ impl ProcessRegistry {
         if let Some(ref cwd) = spec.cwd {
             cmd.current_dir(cwd);
         }
+        // EXEC-03 / D-06: clear the full inherited parent env BEFORE applying
+        // the sanitized spec.env set by TerminalTool (Task 1). This closes the
+        // background-path hole: without env_clear(), cmd.env(k,v) is additive
+        // and secrets in the parent env (e.g. CLOUDFLARE_API_TOKEN) survive
+        // (Anti-Pattern 2 in 42-RESEARCH.md; canonical order from worker_spawn.rs).
+        cmd.env_clear();
         for (k, v) in &spec.env {
             cmd.env(k, v);
         }
@@ -695,8 +701,10 @@ impl ProcessRegistry {
 /// orphan rule (can't impl foreign trait on foreign type `Arc<RwLock<_>>`).
 ///
 /// Sync trait methods bridge to the async `tokio::sync::RwLock` via
-/// `block_in_place` + `Handle::current().block_on` — same pattern used in
-/// `ironhermes-core/src/commands/handlers.rs` for `/models refresh`.
+/// [`ironhermes_core::async_bridge::block_on_sync`] — the same bridge used by
+/// every other `CommandContext` handle. It is `LocalSet`-safe, which the former
+/// `block_in_place` bridge was not (Phase 41.3 UAT: `/agents` on the Dioxus web
+/// server panicked from inside the per-connection `LocalSet`).
 #[derive(Clone)]
 pub struct ProcessRegistryHandle(pub Arc<tokio::sync::RwLock<ProcessRegistry>>);
 
@@ -708,18 +716,15 @@ impl ProcessRegistryHandle {
 
 impl ironhermes_core::commands::context::ProcessRegistrySnapshotHandle for ProcessRegistryHandle {
     fn tracked(&self) -> usize {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { self.0.read().await.snapshot().tracked })
+        ironhermes_core::async_bridge::block_on_sync(async {
+            self.0.read().await.snapshot().tracked
         })
     }
 
     fn snapshot_json(&self) -> serde_json::Value {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let snap = self.0.read().await.snapshot();
-                serde_json::to_value(&snap).unwrap_or_else(|_| serde_json::json!({}))
-            })
+        ironhermes_core::async_bridge::block_on_sync(async {
+            let snap = self.0.read().await.snapshot();
+            serde_json::to_value(&snap).unwrap_or_else(|_| serde_json::json!({}))
         })
     }
 

@@ -99,6 +99,105 @@ impl Default for KeybindingRegistry {
     }
 }
 
+// ---------------------------------------------------------------------------
+// build_help_registry — Phase 36.6.2 Plan 04 (TUI-02, D-08/D-09)
+// ---------------------------------------------------------------------------
+
+/// Build a `KeybindingRegistry` populated with every keybinding currently
+/// hardcoded in `App::handle_key`, for use ONLY as the `?` Help overlay's
+/// display source (`overlay.rs::render_help` calls `.help_entries()` on the
+/// result of this fn).
+///
+/// This is a manually-synced SECOND source of truth, not a live dispatch
+/// mechanism — `handle_key` must NEVER be refactored to route through
+/// `KeybindingRegistry::match_key` (RESEARCH Pitfall 3). The
+/// `ctrl_t_and_ctrl_k_are_conflict_free_with_existing_bindings` regression
+/// test in `app.rs` locks today's hardcoded match-arm structure so a future
+/// edit cannot silently reroute or shadow a security-relevant binding (e.g.
+/// Ctrl+C cancel) through this registry instead.
+pub fn build_help_registry() -> KeybindingRegistry {
+    let mut r = KeybindingRegistry::new();
+
+    let mut push = |code: KeyCode, modifiers: KeyModifiers, description: &str, action: &str| {
+        r.push(Keybinding {
+            key: KeyEvent {
+                code,
+                modifiers,
+                kind: crossterm::event::KeyEventKind::Press,
+                state: crossterm::event::KeyEventState::NONE,
+            },
+            description: description.to_string(),
+            when: KeyContext::Always,
+            action_name: action.to_string(),
+        });
+    };
+
+    push(
+        KeyCode::Char('b'),
+        KeyModifiers::CONTROL,
+        "Toggle push-to-talk voice capture",
+        "record",
+    );
+    push(
+        KeyCode::Char('c'),
+        KeyModifiers::CONTROL,
+        "Cancel (press twice to force-quit)",
+        "cancel",
+    );
+    push(
+        KeyCode::Enter,
+        KeyModifiers::SHIFT,
+        "Insert newline without submitting",
+        "newline",
+    );
+    push(KeyCode::Enter, KeyModifiers::NONE, "Submit", "submit");
+    push(KeyCode::Up, KeyModifiers::NONE, "Recall previous history entry", "history_prev");
+    push(KeyCode::Down, KeyModifiers::NONE, "Recall next history entry", "history_next");
+    push(KeyCode::PageUp, KeyModifiers::NONE, "Scroll up", "scroll_up");
+    push(KeyCode::PageDown, KeyModifiers::NONE, "Scroll down", "scroll_down");
+    push(KeyCode::End, KeyModifiers::NONE, "Jump to bottom", "scroll_bottom");
+    push(KeyCode::Esc, KeyModifiers::NONE, "Close overlay / clear input", "esc");
+    push(
+        KeyCode::Char('t'),
+        KeyModifiers::CONTROL,
+        "Toggle the expanded thinking panel",
+        "toggle_thinking",
+    );
+    push(
+        KeyCode::Char('k'),
+        KeyModifiers::CONTROL,
+        "Toggle the Skills Hub",
+        "toggle_skills_hub",
+    );
+    push(
+        KeyCode::Char('?'),
+        KeyModifiers::NONE,
+        "Open this Help overlay (types the literal character if the input line is non-empty)",
+        "help",
+    );
+    // Phase 36.6.3 Plan 04 (D-08): command palette + /model picker
+    // discoverability. Display-only rows — `/` and `Tab` are NOT new
+    // `handle_key` dispatch arms; `/` is ordinary text input that the
+    // palette derives its visibility from live (palette.rs::palette_query),
+    // and `Tab` is bound only inside `handle_palette_key` while the palette
+    // is showing (Plan 01). This registry is the Help overlay's DISPLAY
+    // source only — see the module doc comment above.
+    push(
+        KeyCode::Char('/'),
+        KeyModifiers::NONE,
+        "Open the command palette (type / at the start of input)",
+        "open_palette",
+    );
+    push(
+        KeyCode::Tab,
+        KeyModifiers::NONE,
+        "Palette: insert highlighted command",
+        "palette_tab_insert",
+    );
+
+    r
+}
+
 /// Returns `true` if a binding with context `binding_ctx` is active in
 /// the current `active_ctx`.
 fn context_matches(binding_ctx: &KeyContext, active_ctx: &KeyContext) -> bool {
@@ -346,5 +445,30 @@ mod tests {
     fn format_key_display_esc() {
         let key = plain_key(KeyCode::Esc);
         assert_eq!(format_key_display(&key), "Esc");
+    }
+
+    // --- build_help_registry (Phase 36.6.2 Plan 04) ---
+
+    #[test]
+    fn help_registry_contains_all_bindings() {
+        let registry = build_help_registry();
+        let entries = registry.help_entries();
+        // 10 existing hardcoded bindings + Ctrl+T + Ctrl+K + ? == 13.
+        assert!(
+            entries.len() >= 11,
+            "expected at least 11 help entries, got {}: {:?}",
+            entries.len(),
+            entries.iter().map(|e| e.0.clone()).collect::<Vec<_>>()
+        );
+        let keys: Vec<&str> = entries.iter().map(|e| e.0.as_str()).collect();
+        for expected in [
+            "Ctrl+B", "Ctrl+C", "Shift+Enter", "Enter", "Up", "Down", "PageUp", "PageDown", "End",
+            "Esc", "Ctrl+T", "Ctrl+K", "?",
+        ] {
+            assert!(
+                keys.contains(&expected),
+                "expected help registry to contain {expected:?}; got {keys:?}"
+            );
+        }
     }
 }

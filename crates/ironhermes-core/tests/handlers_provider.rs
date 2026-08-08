@@ -12,9 +12,10 @@
 //! pattern from `cmd_agents_and_stop.rs`.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
-use ironhermes_core::commands::context::{CommandContext, ProviderResolverHandle};
+use ironhermes_core::commands::context::{
+    CommandContext, ProviderPickerRow, ProviderResolverHandle,
+};
 use ironhermes_core::commands::handlers::dispatch;
 use ironhermes_core::commands::registry::build_registry;
 use ironhermes_core::commands::{CommandDef, CommandResult, CommandRouter};
@@ -86,6 +87,20 @@ impl ProviderResolverHandle for FakeResolver {
     fn fast_role_model(&self) -> Option<String> {
         self.fast_model.clone()
     }
+
+    fn list_providers(&self) -> Vec<ProviderPickerRow> {
+        // Test double — Plan 03's picker integration test exercises the real
+        // ProviderResolverAdapter forward; a fixed single-row fixture is
+        // sufficient here so the crate compiles for every ProviderResolverHandle
+        // implementor (Phase 36.6.3 D-10).
+        vec![ProviderPickerRow {
+            name: self.main_provider.clone(),
+            base_url: "https://example.com".to_string(),
+            default_model: self.main_model.clone(),
+            is_current: true,
+            models: vec![self.main_model.clone()],
+        }]
+    }
 }
 
 // =============================================================================
@@ -105,23 +120,15 @@ fn find_cmd(name: &str) -> CommandDef {
 
 /// Minimal context with no provider_resolver wired.
 fn make_ctx_no_resolver() -> CommandContext {
-    CommandContext::new(
-        Platform::Local,
-        "test-session-provider".to_string(),
-        Arc::new(AtomicBool::new(false)),
-    )
+    CommandContext::new(Platform::Local, "test-session-provider".to_string())
 }
 
 /// Context with a FakeResolver wired (fast_model configurable).
 fn make_test_ctx_with_provider_resolver(fast_model: Option<&str>) -> CommandContext {
     let resolver: Arc<dyn ProviderResolverHandle> =
         Arc::new(FakeResolver::new("openai", "gpt-4o", fast_model));
-    CommandContext::new(
-        Platform::Local,
-        "test-session-provider".to_string(),
-        Arc::new(AtomicBool::new(false)),
-    )
-    .with_provider_resolver(resolver)
+    CommandContext::new(Platform::Local, "test-session-provider".to_string())
+        .with_provider_resolver(resolver)
 }
 
 // =============================================================================
@@ -144,19 +151,23 @@ fn cmd_model_none_guard_returns_not_configured() {
     }
 }
 
-/// With resolver wired and no args, /model lists available models.
+/// Phase 36.6.3 Plan 03 (D-06): with resolver wired and no args, bare
+/// `/model` now opens the picker (`CommandResult::OpenModelPicker`) instead
+/// of listing models directly. `fallback_text` preserves the exact former
+/// `Output` text so non-TUI/gateway surfaces that map this variant straight
+/// through see no regression.
 #[test]
-fn cmd_model_no_args_lists_models() {
+fn cmd_model_bare_returns_open_picker() {
     let ctx = make_test_ctx_with_provider_resolver(None);
     let router = make_router();
     let cmd = find_cmd("model");
     let result = dispatch(&cmd, &[], &ctx, &router);
     match result {
-        CommandResult::Output(s) => assert!(
-            s.contains("Available models") || s.contains("gpt-4o"),
-            "Expected model listing, got: {s}"
+        CommandResult::OpenModelPicker { fallback_text } => assert!(
+            fallback_text.contains("Available models") || fallback_text.contains("gpt-4o"),
+            "Expected model listing in fallback_text, got: {fallback_text}"
         ),
-        other => panic!("Expected Output, got {:?}", other),
+        other => panic!("Expected OpenModelPicker, got {:?}", other),
     }
 }
 
@@ -183,12 +194,8 @@ fn cmd_model_invalid_arg_returns_error() {
         FakeResolver::new("openai", "gpt-4o", None)
             .with_validate_error("Unknown model: nonexistent-model"),
     );
-    let ctx = CommandContext::new(
-        Platform::Local,
-        "test-session-provider".to_string(),
-        Arc::new(AtomicBool::new(false)),
-    )
-    .with_provider_resolver(resolver);
+    let ctx = CommandContext::new(Platform::Local, "test-session-provider".to_string())
+        .with_provider_resolver(resolver);
     let router = make_router();
     let cmd = find_cmd("model");
     let result = dispatch(&cmd, &["nonexistent-model"], &ctx, &router);
@@ -219,42 +226,47 @@ fn cmd_provider_none_guard_returns_not_configured() {
     }
 }
 
-/// With resolver wired, /provider returns status including provider name.
+/// Phase 36.6.3 Plan 03 (D-06): bare `/provider` now opens the single-step
+/// picker (`CommandResult::OpenProviderPicker`) instead of returning status
+/// text directly. `fallback_text` preserves the exact former `Output` text
+/// (including provider name) so non-TUI/gateway surfaces see no regression.
 #[test]
-fn cmd_provider_wired_returns_status() {
+fn cmd_provider_bare_returns_open_picker() {
     let ctx = make_test_ctx_with_provider_resolver(None);
     let router = make_router();
     let cmd = find_cmd("provider");
     let result = dispatch(&cmd, &[], &ctx, &router);
     match result {
-        CommandResult::Output(s) => {
+        CommandResult::OpenProviderPicker { fallback_text } => {
             assert!(
-                s.contains("openai") || s.contains("Provider"),
-                "Expected provider status text, got: {s}"
+                fallback_text.contains("openai") || fallback_text.contains("Provider"),
+                "Expected provider status text in fallback_text, got: {fallback_text}"
             );
             // V8.1: must NOT include api_key
             assert!(
-                !s.to_lowercase().contains("api_key") && !s.to_lowercase().contains("apikey"),
-                "INV V8.1: /provider output must NOT include api_key, got: {s}"
+                !fallback_text.to_lowercase().contains("api_key")
+                    && !fallback_text.to_lowercase().contains("apikey"),
+                "INV V8.1: /provider fallback_text must NOT include api_key, got: {fallback_text}"
             );
         }
-        other => panic!("Expected Output, got {:?}", other),
+        other => panic!("Expected OpenProviderPicker, got {:?}", other),
     }
 }
 
-/// With resolver wired, /provider status includes current model.
+/// `fallback_text` includes the current model (parity with the pre-picker
+/// status text's field set).
 #[test]
-fn cmd_provider_wired_includes_model() {
+fn cmd_provider_bare_fallback_text_includes_model() {
     let ctx = make_test_ctx_with_provider_resolver(None);
     let router = make_router();
     let cmd = find_cmd("provider");
     let result = dispatch(&cmd, &[], &ctx, &router);
     match result {
-        CommandResult::Output(s) => assert!(
-            s.contains("gpt-4o") || s.contains("Model"),
-            "Expected model in provider status, got: {s}"
+        CommandResult::OpenProviderPicker { fallback_text } => assert!(
+            fallback_text.contains("gpt-4o") || fallback_text.contains("Model"),
+            "Expected model in provider fallback_text, got: {fallback_text}"
         ),
-        other => panic!("Expected Output, got {:?}", other),
+        other => panic!("Expected OpenProviderPicker, got {:?}", other),
     }
 }
 

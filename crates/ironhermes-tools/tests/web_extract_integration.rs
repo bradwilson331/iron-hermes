@@ -65,6 +65,7 @@ impl Drop for EnvGuard {
 // =============================================================================
 
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -837,5 +838,657 @@ async fn web_extract_excluded_when_no_backend_available() {
     assert!(
         has_web_extract,
         "D-27: web_extract must appear in definitions even with no provider env vars"
+    );
+}
+
+// =============================================================================
+// Phase 41.3 Plan 03 Task 1 (D-04/D-16): registry-budget arithmetic guard.
+// =============================================================================
+
+/// `web_extract`'s declared registry budget (Plan 01's `Tool::timeout_secs()`)
+/// must strictly exceed the worst-case batch time implied by D-16's per-URL
+/// deadline and `extract.max_parallel_summaries`, or the registry ceiling could
+/// pre-empt a batch the per-URL deadlines would otherwise have completed.
+/// Encodes the arithmetic comment on `WebExtractTool::timeout_secs()` as an
+/// executable constraint rather than a comment only.
+#[tokio::test(flavor = "multi_thread")]
+async fn web_extract_budget_exceeds_worst_case_batch() {
+    let (reg, _counter, _tmp) = make_test_registry();
+    let tool = reg
+        .get("web_extract")
+        .expect("web_extract must be registered");
+    let budget = tool
+        .timeout_secs()
+        .expect("web_extract must declare a registry budget (D-04)");
+
+    let cfg = ironhermes_core::config::Config::default();
+    const MAX_REASONABLE_BATCH: u64 = 8;
+    let rounds = MAX_REASONABLE_BATCH.div_ceil(cfg.extract.max_parallel_summaries as u64);
+    let worst_case_batch_secs = cfg.extract.per_url_timeout_secs * rounds;
+
+    assert!(
+        budget > worst_case_batch_secs,
+        "web_extract's declared timeout_secs() ({budget}s) must exceed the worst-case \
+         {MAX_REASONABLE_BATCH}-URL batch time ({worst_case_batch_secs}s = \
+         {}s per-URL * {rounds} rounds at parallelism {}), or the registry ceiling \
+         (Plan 01) could pre-empt a batch the per-URL deadlines would have completed",
+        cfg.extract.per_url_timeout_secs, cfg.extract.max_parallel_summaries
+    );
+}
+
+// =============================================================================
+// Phase 41.3 Plan 03 Task 2 (D-16): the blackbox 0eaed980 regression test.
+// =============================================================================
+
+/// `partial_batch_on_one_stuck_url` — the direct regression test for blackbox
+/// run `0eaed980`. A 6-URL batch where url index 3 is a REAL delayed HTTP
+/// response (wiremock `set_delay`, not a synthetic `tokio::time::sleep` future —
+/// 41.3-VALIDATION.md Anti-Self-Verification Guard 1 / RESEARCH.md Pitfall 4)
+/// must return `Ok` with all 6 results, in input order, the stuck URL's entry
+/// carrying an `extraction_timeout` error at its ORIGINAL index — not appended
+/// at the end — and complete in a fraction of the 120s delay. Drives the real
+/// `WebExtractTool::execute` entry point via `ToolRegistry::handle_tool_call`,
+/// not `process_one_url` in isolation.
+#[tokio::test(flavor = "multi_thread")]
+async fn partial_batch_on_one_stuck_url() {
+    let _g = env_lock().lock().await;
+    let _f = EnvGuard::unset("FIRECRAWL_API_KEY");
+    let _e = EnvGuard::unset("EXA_API_KEY");
+    let _t = EnvGuard::unset("TAVILY_API_KEY");
+    // SSRF test escape hatch: wiremock listens on 127.0.0.1, which is_safe_url
+    // correctly blocks in production. The bypass is loopback-only and gated by
+    // the _TEST_ env var (Plan 25.2-13 [Rule 3 deviation]).
+    let _ssrf = EnvGuard::set("IRONHERMES_SSRF_TEST_ALLOW_LOOPBACK", "1");
+
+    // Redirect Config::load() to a tempdir with extract.per_url_timeout_secs
+    // lowered to 2s (the shipped default is 60s — too slow for a test to wait
+    // out even on the "fast" URLs' round). Mirrors the IRONHERMES_HOME +
+    // written config.yaml convention already used by
+    // crates/ironhermes-tools/tests/cronjob_tool_default_deliver.rs.
+    let cfg_tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        cfg_tmp.path().join("config.yaml"),
+        "extract:\n  per_url_timeout_secs: 2\n",
+    )
+    .expect("write test config.yaml");
+    let _home = EnvGuard::set(
+        "IRONHERMES_HOME",
+        cfg_tmp.path().to_str().expect("tmp path is valid utf8"),
+    );
+
+    let server = MockServer::start().await;
+    for i in [0usize, 1, 2, 4, 5] {
+        let marker = format!("OK{i}");
+        Mock::given(method("GET"))
+            .and(path(format!("/url{i}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/html")
+                    .set_body_raw(
+                        format!("<html><body><article>{marker}</article></body></html>"),
+                        "text/html",
+                    ),
+            )
+            .mount(&server)
+            .await;
+    }
+    // url3: a REAL delayed HTTP response, far past the 2s per-URL deadline —
+    // reproducing the bot-walled news homepage from blackbox run 0eaed980.
+    Mock::given(method("GET"))
+        .and(path("/url3"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(120)))
+        .mount(&server)
+        .await;
+
+    let (reg, _counter, _tmp) = make_test_registry();
+    let urls: Vec<String> = (0..6)
+        .map(|i| format!("{}/url{}", server.uri(), i))
+        .collect();
+
+    let start = Instant::now();
+    let result = reg
+        .handle_tool_call(
+            "web_extract",
+            json!({ "urls": urls, "use_llm_processing": false }),
+        )
+        .await
+        .expect("web_extract must return Ok, not Err, when one URL hangs (D-16)");
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "the 6-URL batch must complete well under the 120s stuck-URL delay; took {elapsed:?}"
+    );
+
+    let results: Vec<Value> = serde_json::from_str(&result).expect("parse Vec<ExtractionResult>");
+    assert_eq!(results.len(), 6, "exactly 6 ExtractionResult entries expected");
+
+    for i in [0usize, 1, 2, 4, 5] {
+        let marker = format!("OK{i}");
+        assert!(
+            results[i]["content"].as_str().unwrap_or("").contains(&marker),
+            "index {i} expected content containing {marker}; got {:?}",
+            results[i]
+        );
+    }
+
+    // Pitfall 6 / D-16: the stuck URL's error entry sits at its ORIGINAL input
+    // index (3), not appended at the end of the array.
+    let stuck_error = results[3]["error"].as_str().unwrap_or("");
+    assert!(
+        stuck_error.contains("extraction_timeout"),
+        "index 3 (the stuck URL) must carry an extraction_timeout error at its \
+         original index; got {:?}",
+        results[3]
+    );
+    assert!(
+        results[3]["content"].as_str().unwrap_or("").is_empty(),
+        "stuck entry must have empty content: {:?}",
+        results[3]
+    );
+}
+
+/// `stuck_url_error_entry_does_not_leak_the_request_url_query`.
+///
+/// Mechanism note (documented rather than silently assumed): `sanitize::contains_secret`
+/// runs synchronously as `process_one_url`'s FIRST step, before any `.await` point. A
+/// URL matching a `SECRET_URL_PATTERNS` entry (e.g. `token=`) can therefore NEVER reach
+/// the network fetch this plan's new per-URL `tokio::time::timeout` wraps — it is
+/// rejected by the D-19 pre-gate on the task future's very first poll, before the
+/// timeout race can even begin. A URL carrying both a recognized secret AND a hang
+/// is intercepted by the pre-gate, not the new D-16 timeout arm.
+///
+/// This test proves the invariant the plan's `must_haves` actually require — the
+/// query string never reaches the model-visible error entry, and zero HTTP calls
+/// reach the (deliberately hanging) mock server — regardless of which of the two
+/// gates intercepts it. It is deliberately NOT a test of the D-16 timeout arm's own
+/// `redact_secrets_in_url` call (that call is only reachable via a URL with no
+/// recognized secret pattern — see Task 1's placement inside the spawn block — and
+/// the D-16 arm's use of `redact_secrets_in_url` in the `tracing::warn!` is instead
+/// covered by Task 1's acceptance criteria via `git diff` grep).
+#[tokio::test(flavor = "multi_thread")]
+async fn stuck_url_error_entry_does_not_leak_the_request_url_query() {
+    let _g = env_lock().lock().await;
+    let _f = EnvGuard::unset("FIRECRAWL_API_KEY");
+    let _e = EnvGuard::unset("EXA_API_KEY");
+    let _t = EnvGuard::unset("TAVILY_API_KEY");
+    let _ssrf = EnvGuard::set("IRONHERMES_SSRF_TEST_ALLOW_LOOPBACK", "1");
+
+    let cfg_tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        cfg_tmp.path().join("config.yaml"),
+        "extract:\n  per_url_timeout_secs: 2\n",
+    )
+    .expect("write test config.yaml");
+    let _home = EnvGuard::set(
+        "IRONHERMES_HOME",
+        cfg_tmp.path().to_str().expect("tmp path is valid utf8"),
+    );
+
+    let server = MockServer::start().await;
+    // Deliberately hanging — a request reaching this mock at all would mean the
+    // D-19 secret pre-gate did NOT short-circuit before the network attempt.
+    Mock::given(method("GET"))
+        .and(path("/stuck"))
+        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(120)))
+        .mount(&server)
+        .await;
+
+    let secret_query = "token=SUPER_SECRET_QUERY_VALUE_9x7z";
+    let stuck_url = format!("{}/stuck?{secret_query}", server.uri());
+
+    let (reg, _counter, _tmp) = make_test_registry();
+    let start = Instant::now();
+    let result = reg
+        .handle_tool_call(
+            "web_extract",
+            json!({ "urls": [stuck_url], "use_llm_processing": false }),
+        )
+        .await
+        .expect("web_extract must return Ok");
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the secret-URL pre-gate must short-circuit before any network attempt \
+         (well before the 120s delay, and before the 2s per-URL deadline too); \
+         took {elapsed:?}"
+    );
+    assert!(
+        !result.contains("SUPER_SECRET_QUERY_VALUE_9x7z"),
+        "the raw secret value must never appear anywhere in the serialized \
+         ExtractionResult array; got: {result}"
+    );
+
+    let received = server.received_requests().await.unwrap();
+    assert!(
+        received.is_empty(),
+        "the secret-URL pre-gate must reject the URL before any HTTP call reaches \
+         the (deliberately hanging) mock server; got {} requests",
+        received.len()
+    );
+
+    let results: Vec<Value> = serde_json::from_str(&result).unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0]["error"].as_str(),
+        Some("url_contains_secret"),
+        "expected the D-19 secret gate to reject this URL before the D-16 \
+         per-URL deadline could ever engage; got {:?}",
+        results[0]
+    );
+}
+
+// =============================================================================
+// Phase 41.3 Plan 05 (D-08/D-17): config-ordered chain selection integration
+// tests. All cases take the shared env_lock() and run under
+// `--test-threads=1` (the whole binary already does, per the repo-wide
+// convention this file follows).
+//
+// The target `url` argument these tests pass to `web_extract` is NOT fetched
+// directly by the exa/firecrawl/tavily backends — they POST it as a JSON
+// field to their own (overridden) endpoint. Per web_local::validate_url_async,
+// a loopback host with IRONHERMES_SSRF_TEST_ALLOW_LOOPBACK set is accepted by
+// a pure string check with no network dial, so a throwaway loopback URL is
+// safe to use as that target when the test doesn't also need `local` to GET
+// it for real content.
+// =============================================================================
+
+/// Writes a `config.yaml` with a `tools.web_extract.chain` list to a fresh
+/// tempdir and points `IRONHERMES_HOME` at it via `EnvGuard`, mirroring the
+/// convention already used by `partial_batch_on_one_stuck_url` /
+/// `stuck_url_error_entry_does_not_leak_the_request_url_query` (Plan 03).
+fn write_chain_config(chain: &[&str]) -> (tempfile::TempDir, EnvGuard) {
+    let cfg_tmp = tempfile::tempdir().expect("tempdir");
+    let chain_yaml: String = chain.iter().map(|p| format!("      - {p}\n")).collect();
+    let yaml = format!("tools:\n  web_extract:\n    chain:\n{chain_yaml}");
+    std::fs::write(cfg_tmp.path().join("config.yaml"), yaml).expect("write test config.yaml");
+    let home = EnvGuard::set(
+        "IRONHERMES_HOME",
+        cfg_tmp.path().to_str().expect("tmp path is valid utf8"),
+    );
+    (cfg_tmp, home)
+}
+
+/// Writes an empty `config.yaml` (no `tools.web_extract.chain` key at all) to
+/// a fresh tempdir and points `IRONHERMES_HOME` at it — isolates the test from
+/// the real operator config while leaving `tools.web_extract.chain` fully
+/// unconfigured, so `ToolsConfig`'s serde default (the built-in Phase 25.2
+/// D-04 order) applies exactly as it would for an operator who edits nothing.
+fn write_isolated_home_no_chain_override() -> (tempfile::TempDir, EnvGuard) {
+    let cfg_tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::write(cfg_tmp.path().join("config.yaml"), "").expect("write empty config.yaml");
+    let home = EnvGuard::set(
+        "IRONHERMES_HOME",
+        cfg_tmp.path().to_str().expect("tmp path is valid utf8"),
+    );
+    (cfg_tmp, home)
+}
+
+/// `chain_order_promotes_exa_ahead_of_firecrawl`: with both `FIRECRAWL_API_KEY`
+/// and `EXA_API_KEY` set and both endpoints mocked, a chain of
+/// `["exa", "firecrawl", "local"]` results in the **exa** mock receiving the
+/// request and the firecrawl mock receiving none — the inverse of the shipped
+/// fixed order, proving configuration actually drives selection (D-17).
+#[tokio::test(flavor = "multi_thread")]
+async fn chain_order_promotes_exa_ahead_of_firecrawl() {
+    let _g = env_lock().lock().await;
+    let _ssrf = EnvGuard::set("IRONHERMES_SSRF_TEST_ALLOW_LOOPBACK", "1");
+    let _tk = EnvGuard::unset("TAVILY_API_KEY");
+
+    let exa_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/exa_contents"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_string(
+                    r#"{"results":[{"url":"http://target.example/x","title":"Exa Title","text":"Exa body text"}],"statuses":[]}"#,
+                ),
+        )
+        .mount(&exa_server)
+        .await;
+
+    let firecrawl_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/firecrawl_scrape"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_string(
+                    r#"{"success":true,"data":{"markdown":"Firecrawl body","metadata":{"title":"FC Title"}}}"#,
+                ),
+        )
+        .mount(&firecrawl_server)
+        .await;
+
+    let _fk = EnvGuard::set("FIRECRAWL_API_KEY", "test-firecrawl-key");
+    let _ek = EnvGuard::set("EXA_API_KEY", "test-exa-key");
+    let _fe = EnvGuard::set(
+        "FIRECRAWL_ENDPOINT_OVERRIDE",
+        &format!("{}/firecrawl_scrape", firecrawl_server.uri()),
+    );
+    let _ee = EnvGuard::set(
+        "EXA_ENDPOINT_OVERRIDE",
+        &format!("{}/exa_contents", exa_server.uri()),
+    );
+
+    let (_cfg_tmp, _home) = write_chain_config(&["exa", "firecrawl", "local"]);
+
+    let (reg, _counter, _tmp) = make_test_registry();
+    let url = "http://127.0.0.1:1/target";
+    let result = reg
+        .handle_tool_call(
+            "web_extract",
+            json!({ "urls": [url], "use_llm_processing": false }),
+        )
+        .await
+        .expect("web_extract call should succeed");
+
+    let results: Vec<Value> = serde_json::from_str(&result).expect("parse Vec<ExtractionResult>");
+    assert_eq!(results.len(), 1);
+    assert!(
+        results[0]["error"].is_null(),
+        "expected success via exa (first in configured chain); got {:?}",
+        results[0]
+    );
+    assert!(
+        results[0]["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Exa body text"),
+        "expected exa content; got {:?}",
+        results[0]
+    );
+
+    let exa_received = exa_server.received_requests().await.unwrap();
+    let firecrawl_received = firecrawl_server.received_requests().await.unwrap();
+    assert!(
+        !exa_received.is_empty(),
+        "exa mock must receive the request — configured chain order promotes it \
+         ahead of firecrawl"
+    );
+    assert_eq!(
+        firecrawl_received.len(),
+        0,
+        "firecrawl mock must receive ZERO requests — exa (earlier in the \
+         configured chain) already succeeded; got {} requests",
+        firecrawl_received.len()
+    );
+}
+
+/// `chain_can_demote_local_below_a_keyed_backend`: a chain of `["exa", "local"]`
+/// with `EXA_API_KEY` set routes to exa; with `EXA_API_KEY` unset it falls
+/// through to local. This is the concrete operator fix for the bot-wall
+/// failure (blackbox run `0eaed980`), so it must be asserted, not assumed.
+#[tokio::test(flavor = "multi_thread")]
+async fn chain_can_demote_local_below_a_keyed_backend() {
+    let _g = env_lock().lock().await;
+    let _ssrf = EnvGuard::set("IRONHERMES_SSRF_TEST_ALLOW_LOOPBACK", "1");
+    let _fk = EnvGuard::unset("FIRECRAWL_API_KEY");
+    let _tk = EnvGuard::unset("TAVILY_API_KEY");
+
+    // ---- Sub-case 1: EXA_API_KEY set → exa wins over local ----
+    {
+        let exa_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/exa_contents"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "application/json")
+                    .set_body_string(
+                        r#"{"results":[{"url":"http://target.example/x","title":"Exa Title","text":"Exa keyed body"}],"statuses":[]}"#,
+                    ),
+            )
+            .mount(&exa_server)
+            .await;
+        let _ek = EnvGuard::set("EXA_API_KEY", "test-exa-key");
+        let _ee = EnvGuard::set(
+            "EXA_ENDPOINT_OVERRIDE",
+            &format!("{}/exa_contents", exa_server.uri()),
+        );
+
+        let (_cfg_tmp, _home) = write_chain_config(&["exa", "local"]);
+        let (reg, _counter, _tmp) = make_test_registry();
+        let url = "http://127.0.0.1:1/target";
+        let result = reg
+            .handle_tool_call(
+                "web_extract",
+                json!({ "urls": [url], "use_llm_processing": false }),
+            )
+            .await
+            .expect("web_extract call should succeed");
+        let results: Vec<Value> = serde_json::from_str(&result).unwrap();
+        assert!(
+            results[0]["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Exa keyed body"),
+            "expected exa content when EXA_API_KEY is set; got {:?}",
+            results[0]
+        );
+        let exa_received = exa_server.received_requests().await.unwrap();
+        assert!(
+            !exa_received.is_empty(),
+            "exa mock must receive the request when keyed and ahead of local"
+        );
+    }
+
+    // ---- Sub-case 2: EXA_API_KEY unset → falls through to local ----
+    {
+        let local_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/article"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/html; charset=utf-8")
+                    .set_body_raw(
+                        r#"<html><head><title>Local Fallback</title></head><body><article><p>Local demoted-exa body.</p></article></body></html>"#,
+                        "text/html",
+                    ),
+            )
+            .mount(&local_server)
+            .await;
+        let _ek = EnvGuard::unset("EXA_API_KEY");
+
+        let (_cfg_tmp, _home) = write_chain_config(&["exa", "local"]);
+        let (reg, _counter, _tmp) = make_test_registry();
+        let url = format!("{}/article", local_server.uri());
+        let result = reg
+            .handle_tool_call(
+                "web_extract",
+                json!({ "urls": [url], "use_llm_processing": false }),
+            )
+            .await
+            .expect("web_extract call should succeed");
+        let results: Vec<Value> = serde_json::from_str(&result).unwrap();
+        assert!(
+            results[0]["content"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Local demoted-exa body"),
+            "expected local fallback content when EXA_API_KEY is unset; got {:?}",
+            results[0]
+        );
+    }
+}
+
+/// `unkeyed_chain_entry_is_skipped_not_failed`: a chain naming a provider
+/// whose API key is absent skips to the next entry and still returns a
+/// successful extraction. The would-be provider's endpoint is mocked to
+/// return a 599 failure if ever hit, proving the entry is skipped BEFORE any
+/// network attempt (not attempted-and-failed).
+#[tokio::test(flavor = "multi_thread")]
+async fn unkeyed_chain_entry_is_skipped_not_failed() {
+    let _g = env_lock().lock().await;
+    let _ssrf = EnvGuard::set("IRONHERMES_SSRF_TEST_ALLOW_LOOPBACK", "1");
+    let _fk = EnvGuard::unset("FIRECRAWL_API_KEY");
+    let _ek = EnvGuard::unset("EXA_API_KEY");
+    let _tk = EnvGuard::unset("TAVILY_API_KEY");
+
+    let firecrawl_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/firecrawl_scrape"))
+        .respond_with(ResponseTemplate::new(599))
+        .mount(&firecrawl_server)
+        .await;
+    let _fe = EnvGuard::set(
+        "FIRECRAWL_ENDPOINT_OVERRIDE",
+        &format!("{}/firecrawl_scrape", firecrawl_server.uri()),
+    );
+
+    let local_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/article"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/html; charset=utf-8")
+                .set_body_raw(
+                    r#"<html><head><title>T</title></head><body><article><p>Skip-then-succeed body.</p></article></body></html>"#,
+                    "text/html",
+                ),
+        )
+        .mount(&local_server)
+        .await;
+
+    let (_cfg_tmp, _home) = write_chain_config(&["firecrawl", "local"]);
+    let (reg, _counter, _tmp) = make_test_registry();
+    let url = format!("{}/article", local_server.uri());
+    let result = reg
+        .handle_tool_call(
+            "web_extract",
+            json!({ "urls": [url], "use_llm_processing": false }),
+        )
+        .await
+        .expect("web_extract call should succeed");
+
+    let results: Vec<Value> = serde_json::from_str(&result).expect("parse Vec<ExtractionResult>");
+    assert_eq!(results.len(), 1);
+    assert!(
+        results[0]["error"].is_null(),
+        "an unkeyed chain entry must be skipped, not fail the call; got {:?}",
+        results[0]
+    );
+    assert!(
+        results[0]["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Skip-then-succeed body"),
+        "expected local content after skipping the unkeyed firecrawl entry; got {:?}",
+        results[0]
+    );
+
+    let firecrawl_received = firecrawl_server.received_requests().await.unwrap();
+    assert_eq!(
+        firecrawl_received.len(),
+        0,
+        "unkeyed firecrawl entry must be skipped BEFORE any network attempt; got {} requests",
+        firecrawl_received.len()
+    );
+}
+
+/// `exhausted_chain_returns_err`: a chain of `["exa"]` with no key and no
+/// other entry yields the pre-existing `Err` path, not a silent implicit
+/// fall-through to local.
+#[tokio::test(flavor = "multi_thread")]
+async fn exhausted_chain_returns_err() {
+    let _g = env_lock().lock().await;
+    let _ssrf = EnvGuard::set("IRONHERMES_SSRF_TEST_ALLOW_LOOPBACK", "1");
+    let _fk = EnvGuard::unset("FIRECRAWL_API_KEY");
+    let _ek = EnvGuard::unset("EXA_API_KEY");
+    let _tk = EnvGuard::unset("TAVILY_API_KEY");
+
+    let (_cfg_tmp, _home) = write_chain_config(&["exa"]);
+    let (reg, _counter, _tmp) = make_test_registry();
+    let url = "http://127.0.0.1:1/target";
+    let result = reg
+        .handle_tool_call(
+            "web_extract",
+            json!({ "urls": [url], "use_llm_processing": false }),
+        )
+        .await
+        .expect("web_extract call itself succeeds — per-URL errors are D-02 partial-success, not a call-level Err");
+
+    let results: Vec<Value> = serde_json::from_str(&result).expect("parse Vec<ExtractionResult>");
+    assert_eq!(results.len(), 1);
+    assert!(
+        results[0]["error"].as_str().is_some(),
+        "an exhausted chain (no keyed entry, no local fallback configured) must \
+         surface a per-URL error, not silently fall through to local; got {:?}",
+        results[0]
+    );
+    assert!(
+        results[0]["content"].as_str().unwrap_or("").is_empty(),
+        "no content expected on chain exhaustion; got {:?}",
+        results[0]
+    );
+}
+
+/// `default_chain_matches_pre_phase_behavior`: with no chain configured and
+/// only `FIRECRAWL_API_KEY` set, firecrawl receives the request — the
+/// Phase 25.2 D-04 behavior is unchanged for operators who edit nothing. This
+/// is the back-compat guard for D-17's acknowledged risk.
+#[tokio::test(flavor = "multi_thread")]
+async fn default_chain_matches_pre_phase_behavior() {
+    let _g = env_lock().lock().await;
+    let _ssrf = EnvGuard::set("IRONHERMES_SSRF_TEST_ALLOW_LOOPBACK", "1");
+    let _ek = EnvGuard::unset("EXA_API_KEY");
+    let _tk = EnvGuard::unset("TAVILY_API_KEY");
+
+    let firecrawl_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/firecrawl_scrape"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "application/json")
+                .set_body_string(
+                    r#"{"success":true,"data":{"markdown":"Firecrawl default-order body","metadata":{"title":"FC"}}}"#,
+                ),
+        )
+        .mount(&firecrawl_server)
+        .await;
+
+    let _fk = EnvGuard::set("FIRECRAWL_API_KEY", "test-firecrawl-key");
+    let _fe = EnvGuard::set(
+        "FIRECRAWL_ENDPOINT_OVERRIDE",
+        &format!("{}/firecrawl_scrape", firecrawl_server.uri()),
+    );
+
+    // No tools.web_extract.chain key anywhere → ToolsConfig's serde default
+    // (the built-in Phase 25.2 D-04 order) applies, exactly as it would for
+    // an operator who upgrades without editing config.yaml.
+    let (_cfg_tmp, _home) = write_isolated_home_no_chain_override();
+
+    let (reg, _counter, _tmp) = make_test_registry();
+    let url = "http://127.0.0.1:1/target";
+    let result = reg
+        .handle_tool_call(
+            "web_extract",
+            json!({ "urls": [url], "use_llm_processing": false }),
+        )
+        .await
+        .expect("web_extract call should succeed");
+
+    let results: Vec<Value> = serde_json::from_str(&result).expect("parse Vec<ExtractionResult>");
+    assert!(
+        results[0]["error"].is_null(),
+        "expected firecrawl success via the unconfigured default chain; got {:?}",
+        results[0]
+    );
+    assert!(
+        results[0]["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Firecrawl default-order body"),
+        "expected firecrawl content; got {:?}",
+        results[0]
+    );
+
+    let firecrawl_received = firecrawl_server.received_requests().await.unwrap();
+    assert!(
+        !firecrawl_received.is_empty(),
+        "firecrawl must receive the request under the unconfigured default \
+         chain — Phase 25.2 D-04 behavior must be unchanged for operators who \
+         edit nothing"
     );
 }

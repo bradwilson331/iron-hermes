@@ -24,8 +24,8 @@ impl ScopedHome {
         let root = dir.path().to_path_buf();
         // SAFETY: test-only; we hold ENV_LOCK for the duration.
         unsafe { std::env::set_var("IRONHERMES_HOME", &root) };
-        // Also clear HERMES_KANBAN_BOARD so the resolver falls through to default.
-        unsafe { std::env::remove_var("HERMES_KANBAN_BOARD") };
+        // Also clear IRONHERMES_KANBAN_BOARD so the resolver falls through to default.
+        unsafe { std::env::remove_var("IRONHERMES_KANBAN_BOARD") };
         ScopedHome { _dir: dir, root }
     }
 }

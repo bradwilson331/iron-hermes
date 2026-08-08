@@ -14,6 +14,13 @@
 //! - PRUNE click now also clears recently_terminated synchronously (D-12).
 //! - AgentCard extended with is_ended + rpc_in_flight props (D-09/D-10/D-14).
 //!
+//! Phase 39.1 Plan 07 additions (R39.1-09 / R39.1-10):
+//! - TurnRegistry section below the agent grid renders all in-flight turns
+//!   across every surface (Web, Gateway, CLI, Realtime) via `turns_list`.
+//! - TurnCard renders turn_id, surface pill, session_id, elapsed_ms, and a
+//!   CANCEL button wired to `turn_cancel`.
+//! - Turns list auto-refreshes every 3 s (independent of agent poll loop).
+//!
 //! Signal-borrow discipline (clippy.toml): all `.read()` calls that produce
 //! a `GenerationalRef` are dropped before the `rsx!` block.  Signals
 //! captured in `spawn(async move { ... })` closures are read/written via
@@ -85,11 +92,11 @@ pub fn ScreenAgents(is_active: bool) -> Element {
     // Consume context signals provided by Task 1's HermesApp providers.
     // Binding here proves the context is resolvable on first render (including
     // SSR), preventing the "Could not find context" panic.
-    let ws_connected_ctx = use_context::<Signal<bool>>(); // is_ws_connected
-    let subagent_events = use_context::<Signal<u64>>(); // D-07 — increments on ws SubagentEvent
-                                                        // Phase 36.3.7.11 D-03 — Agents-toolbar `KANBAN BOARD →` button writes to
-                                                        // the screen signal published by HermesApp. Same context-access pattern as
-                                                        // screens/sessions.rs:63 and screens/settings.rs:326.
+    let ws_connected_ctx = use_context::<crate::state::WsConnectedContext>().0; // is_ws_connected
+    let subagent_events = use_context::<crate::state::SubagentEventsContext>().0; // D-07 — increments on ws SubagentEvent
+                                                                                  // Phase 36.3.7.11 D-03 — Agents-toolbar `KANBAN BOARD →` button writes to
+                                                                                  // the screen signal published by HermesApp. Same context-access pattern as
+                                                                                  // screens/sessions.rs:63 and screens/settings.rs:326.
     let mut active_screen = use_context::<Signal<crate::state::Screen>>();
 
     // Materialise the list and error flag BEFORE the rsx! block so no
@@ -290,6 +297,25 @@ pub fn ScreenAgents(is_active: bool) -> Element {
         }
     });
 
+    // Phase 39.1 Plan 07 (R39.1-09): fetch all in-flight turns from TurnRegistry.
+    // Refreshed every 3 s independently of the agent poll loop.
+    let mut turns_resource =
+        use_resource(move || async move { crate::server::api::turns_list().await });
+
+    // Turns poll loop — 3 s cadence.
+    use_future(move || async move {
+        loop {
+            gloo_timers::future::TimeoutFuture::new(3_000).await;
+            turns_resource.restart();
+        }
+    });
+
+    // Materialise turns list before rsx! — no GenerationalRef across macro boundary.
+    let turns_list: Vec<crate::server::api::TurnSummaryWire> = match turns_resource() {
+        Some(Ok(v)) => v,
+        _ => Vec::new(),
+    };
+
     // Phase 26.7.1 Plan 02 D-07: any SubagentEvent from the chat ws bumps the
     // counter; this effect subscribes (call-syntax returns Copy u64 — no
     // borrow held) and triggers a fresh `agents_resource.restart()`. Same code
@@ -411,6 +437,44 @@ pub fn ScreenAgents(is_active: bool) -> Element {
                             agents_resource: agents_resource,
                             is_ended: true,
                             rpc_in_flight: rpc_in_flight,
+                        }
+                    }
+                }
+            }
+
+            // ── In-flight turns (R39.1-09 / R39.1-10) ────────────────
+            // All surfaces: Web, Gateway, CLI, Realtime.
+            div { class: "screen-header",
+                div { class: "screen-header-left",
+                    div { class: "screen-tag", "// TURNS" }
+                    h2 {
+                        style: "font-size:var(--fs-14);margin:0;",
+                        "In-Flight Turns"
+                    }
+                    p { class: "screen-sub",
+                        "Active agent turns across all surfaces. CANCEL signals cooperative teardown."
+                    }
+                }
+                div { class: "screen-actions",
+                    button {
+                        class: "btn btn--ghost btn--sm",
+                        onclick: move |_| { turns_resource.restart(); },
+                        "REFRESH"
+                    }
+                }
+            }
+            div { class: "grid wide",
+                if turns_list.is_empty() {
+                    div {
+                        style: "color:var(--fg-muted);font-size:var(--fs-12);padding:var(--sp-8) 0;",
+                        "No in-flight turns."
+                    }
+                } else {
+                    for turn in turns_list.iter() {
+                        TurnCard {
+                            key: "{turn.turn_id}",
+                            turn: turn.clone(),
+                            turns_resource: turns_resource,
                         }
                     }
                 }
@@ -577,6 +641,82 @@ fn AgentCard(
                         }
                     },
                     if armed() { "KILL?" } else { "KILL" }
+                }
+            }
+        }
+    }
+}
+
+// ── TurnCard ─────────────────────────────────────────────────────────────────
+
+/// One in-flight turn card rendered in the turns section (R39.1-09).
+///
+/// Shows turn_id (truncated to 12 chars), surface pill, session_id, elapsed_ms,
+/// and a CANCEL button that calls `turn_cancel` and refreshes the turns list.
+///
+/// Signal-borrow discipline: no GenerationalRef held across `.await`.
+/// `cancelling: Signal<bool>` is set/cleared via value-copy `.set()`.
+#[component]
+fn TurnCard(
+    turn: crate::server::api::TurnSummaryWire,
+    turns_resource: Resource<Result<Vec<crate::server::api::TurnSummaryWire>, ServerFnError>>,
+) -> Element {
+    let mut cancelling = use_signal(|| false);
+
+    // Short display id — first 12 hex chars of the UUID string.
+    let short_id: String = turn.turn_id.chars().take(12).collect();
+
+    // Surface pill color class.
+    let surface_class = match turn.surface.as_str() {
+        "realtime" => "pill green",
+        "web" => "pill",
+        "gateway" => "pill",
+        "cli" => "pill",
+        _ => "pill",
+    };
+
+    // Elapsed seconds for display.
+    let elapsed_s = turn.elapsed_ms / 1_000;
+
+    let turn_id_for_cancel = turn.turn_id.clone();
+
+    rsx! {
+        div {
+            class: "card",
+
+            // ── Card head ─────────────────────────────────────────────
+            div { class: "card-head",
+                div { class: "avatar shield",
+                    // First char of surface as avatar glyph.
+                    "{turn.surface.chars().next().unwrap_or('?').to_ascii_uppercase()}"
+                }
+                div { style: "flex:1",
+                    div { class: "card-title", "{short_id}…" }
+                    div { class: "card-meta",
+                        "session: {turn.session_id.chars().take(8).collect::<String>()}… · {elapsed_s}s"
+                    }
+                }
+                span { class: "{surface_class}", "{turn.surface.to_uppercase()}" }
+            }
+
+            // ── Card footer — cancel control ──────────────────────────
+            div { class: "card-footer",
+                button {
+                    class: "btn btn--sm btn--ghost",
+                    style: "color:var(--danger)",
+                    disabled: cancelling(),
+                    onclick: move |_| {
+                        cancelling.set(true);
+                        let tid = turn_id_for_cancel.clone();
+                        spawn(async move {
+                            let _ = crate::server::api::turn_cancel(tid).await;
+                            // Brief visual hold then refresh turns list.
+                            gloo_timers::future::TimeoutFuture::new(300).await;
+                            cancelling.set(false);
+                            turns_resource.restart();
+                        });
+                    },
+                    if cancelling() { "…" } else { "CANCEL" }
                 }
             }
         }

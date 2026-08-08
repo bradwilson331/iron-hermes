@@ -19,7 +19,7 @@
 //! the existing `kanban_show` `parent_handoffs` field (2 hops max — worker
 //! → root, then `kanban_show root_id` to read the shared blackboard JSON
 //! from `comments[0].body`). The 9-env-var worker spawn contract is
-//! UNTOUCHED — no `HERMES_KANBAN_SWARM_ROOT` env var is added.
+//! UNTOUCHED — no `IRONIRONHERMES_KANBAN_SWARM_ROOT` env var is added.
 //!
 //! Reference example from `docs/kanban/reference.md` §664:
 //! `hermes kanban swarm "Design a multi-region failover plan" --workers
@@ -220,7 +220,7 @@ impl Tool for KanbanSwarmTool {
                     },
                     "board": {
                         "type": "string",
-                        "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
+                        "description": "Board slug to target. Omit to use IRONHERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
                     }
                 },
                 "required": ["goal", "workers"]
@@ -229,7 +229,7 @@ impl Tool for KanbanSwarmTool {
     }
 
     fn is_available(&self) -> bool {
-        std::env::var("HERMES_KANBAN_TASK").is_ok() || self.explicit_enable
+        crate::kanban_env("TASK").is_some() || self.explicit_enable
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<String> {
@@ -437,7 +437,7 @@ mod tests {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tool = KanbanSwarmTool::new(make_store(), false);
         unsafe {
-            std::env::remove_var("HERMES_KANBAN_TASK");
+            std::env::remove_var("IRONHERMES_KANBAN_TASK");
         }
         assert!(!tool.is_available());
         let tool2 = KanbanSwarmTool::new(make_store(), true);

@@ -41,7 +41,11 @@ pub struct UserQueueManager {
     /// only 👀-timing and cap-hit signal are user-visible changes per CONTEXT.md).
     #[allow(clippy::type_complexity)]
     // multimodal FIFO per session; type alias would only exist here, inline is clearer
-    pending_multimodal: Mutex<HashMap<SessionKey, VecDeque<(Option<String>, Option<String>)>>>,
+    // Tuple is (text_prefix, image_data_uri, image_cache_path) — the third element
+    // carries the inbound photo's cache PATH so the worker can offer it to the model
+    // for image-to-video (video_animate needs a path, not the vision data URI).
+    pending_multimodal:
+        Mutex<HashMap<SessionKey, VecDeque<(Option<String>, Option<String>, Option<String>)>>>,
     /// Shared SessionQueue handle (D-03 — UQM holds Arc<SessionQueue>, NOT Arc<GatewayRunner>).
     session_queue: Arc<SessionQueue>,
     /// Outbound transport adapter for cap-hit UX (D-11).
@@ -69,7 +73,7 @@ impl UserQueueManager {
     pub async fn push_multimodal(
         &self,
         key: &SessionKey,
-        payload: (Option<String>, Option<String>),
+        payload: (Option<String>, Option<String>, Option<String>),
     ) {
         let mut map = self.pending_multimodal.lock().await;
         map.entry(key.clone()).or_default().push_back(payload);
@@ -85,7 +89,7 @@ impl UserQueueManager {
     pub async fn take_multimodal(
         &self,
         key: &SessionKey,
-    ) -> Option<(Option<String>, Option<String>)> {
+    ) -> Option<(Option<String>, Option<String>, Option<String>)> {
         let mut map = self.pending_multimodal.lock().await;
         map.get_mut(key).and_then(|q| q.pop_front())
     }
@@ -104,6 +108,7 @@ impl UserQueueManager {
         event: MessageEvent,
         text_prefix: Option<String>,
         image_data_uri: Option<String>,
+        image_cache_path: Option<String>,
     ) -> Result<DispatchOutcome, QueueError> {
         // Step 1 — Build full SessionKey (D-14, matches runner.rs:994-998 + handler.rs construction).
         let session_key =
@@ -143,8 +148,11 @@ impl UserQueueManager {
 
         // Step 4 — Push multimodal payload onto sidecar FIFO in lockstep with the event
         // (D-02 preservation, T-36.17.2-04: only push sidecar on successful try_push).
-        self.push_multimodal(&session_key, (text_prefix, image_data_uri))
-            .await;
+        self.push_multimodal(
+            &session_key,
+            (text_prefix, image_data_uri, image_cache_path),
+        )
+        .await;
 
         // Step 5 — Acquire workers map under tokio::sync::Mutex (D-18 — guard may cross await
         // safely because SessionQueue's std::sync::MutexGuard already dropped at end of Step 2).
@@ -353,7 +361,7 @@ mod tests {
 
         let key = SessionKey::new(Platform::Telegram, "chat1").with_user("user1");
         let result = manager
-            .dispatch(make_event("chat1", "msg1"), None, None)
+            .dispatch(make_event("chat1", "msg1"), None, None, None)
             .await;
         assert_eq!(result, Ok(DispatchOutcome::WorkerSpawned));
         assert_eq!(session_queue.len(&key), 1);
@@ -369,13 +377,13 @@ mod tests {
 
         // First dispatch — WorkerSpawned
         let r1 = manager
-            .dispatch(make_event("chat1", "msg1"), None, None)
+            .dispatch(make_event("chat1", "msg1"), None, None, None)
             .await;
         assert_eq!(r1, Ok(DispatchOutcome::WorkerSpawned));
 
         // Second dispatch — Accepted (worker registered from first dispatch)
         let r2 = manager
-            .dispatch(make_event("chat1", "msg2"), None, None)
+            .dispatch(make_event("chat1", "msg2"), None, None, None)
             .await;
         assert_eq!(r2, Ok(DispatchOutcome::Accepted));
 
@@ -394,10 +402,10 @@ mod tests {
         let manager = make_uqm(adapter.clone());
 
         let r1 = manager
-            .dispatch(make_event("chat1", "msg1"), None, None)
+            .dispatch(make_event("chat1", "msg1"), None, None, None)
             .await;
         let r2 = manager
-            .dispatch(make_event("chat2", "msg2"), None, None)
+            .dispatch(make_event("chat2", "msg2"), None, None, None)
             .await;
 
         assert_eq!(r1, Ok(DispatchOutcome::WorkerSpawned));
@@ -414,13 +422,13 @@ mod tests {
         let key = SessionKey::new(Platform::Telegram, "chat1").with_user("user1");
 
         let _r1 = manager
-            .dispatch(make_event("chat1", "msg1"), None, None)
+            .dispatch(make_event("chat1", "msg1"), None, None, None)
             .await;
         manager.remove(&key).await;
 
         // After remove, next dispatch should return WorkerSpawned (fresh worker needed)
         let r2 = manager
-            .dispatch(make_event("chat1", "msg2"), None, None)
+            .dispatch(make_event("chat1", "msg2"), None, None, None)
             .await;
         assert_eq!(
             r2,
@@ -447,7 +455,7 @@ mod tests {
 
         // dispatch should hit cap on try_push → fire ❌ reaction + chat reply → Err
         let result = manager
-            .dispatch(make_event("chat1", "overflow"), None, None)
+            .dispatch(make_event("chat1", "overflow"), None, None, None)
             .await;
 
         assert!(
@@ -491,10 +499,20 @@ mod tests {
         let manager = make_uqm(adapter.clone());
 
         let r1 = manager
-            .dispatch(make_event_with_sender("chat1", "msg1", "alice"), None, None)
+            .dispatch(
+                make_event_with_sender("chat1", "msg1", "alice"),
+                None,
+                None,
+                None,
+            )
             .await;
         let r2 = manager
-            .dispatch(make_event_with_sender("chat1", "msg2", "bob"), None, None)
+            .dispatch(
+                make_event_with_sender("chat1", "msg2", "bob"),
+                None,
+                None,
+                None,
+            )
             .await;
 
         assert_eq!(r1, Ok(DispatchOutcome::WorkerSpawned));
@@ -514,7 +532,7 @@ mod tests {
 
         // After dispatch: Some
         let _ = manager
-            .dispatch(make_event("chat1", "msg1"), None, None)
+            .dispatch(make_event("chat1", "msg1"), None, None, None)
             .await;
         assert!(
             manager.notify_for(&key).await.is_some(),
@@ -538,13 +556,20 @@ mod tests {
         let key = SessionKey::new(Platform::Telegram, "chat1").with_user("user1");
 
         let _ = manager
-            .dispatch(make_event("chat1", "msg1"), Some("prefix_A".into()), None)
+            .dispatch(
+                make_event("chat1", "msg1"),
+                Some("prefix_A".into()),
+                None,
+                None,
+            )
             .await;
         let _ = manager
             .dispatch(
                 make_event("chat1", "msg2"),
                 None,
                 Some("data:image/png;base64,IMG_B".into()),
+                // image_cache_path must survive the sidecar round-trip alongside the data URI.
+                Some("/cache/images/IMG_B.jpg".into()),
             )
             .await;
         let _ = manager
@@ -552,23 +577,29 @@ mod tests {
                 make_event("chat1", "msg3"),
                 Some("prefix_C".into()),
                 Some("data:image/png;base64,IMG_C".into()),
+                None,
             )
             .await;
 
         // FIFO pop order must match push order
         assert_eq!(
             manager.take_multimodal(&key).await,
-            Some((Some("prefix_A".into()), None))
+            Some((Some("prefix_A".into()), None, None))
         );
         assert_eq!(
             manager.take_multimodal(&key).await,
-            Some((None, Some("data:image/png;base64,IMG_B".into())))
+            Some((
+                None,
+                Some("data:image/png;base64,IMG_B".into()),
+                Some("/cache/images/IMG_B.jpg".into())
+            ))
         );
         assert_eq!(
             manager.take_multimodal(&key).await,
             Some((
                 Some("prefix_C".into()),
-                Some("data:image/png;base64,IMG_C".into())
+                Some("data:image/png;base64,IMG_C".into()),
+                None
             ))
         );
         // Sidecar drained — 4th take returns None
@@ -587,10 +618,13 @@ mod tests {
 
         // Dispatch one event with (None, None) payload
         let _ = manager
-            .dispatch(make_event("chat1", "msg1"), None, None)
+            .dispatch(make_event("chat1", "msg1"), None, None, None)
             .await;
-        // First take: Some((None, None))
-        assert_eq!(manager.take_multimodal(&key).await, Some((None, None)));
+        // First take: Some((None, None, None))
+        assert_eq!(
+            manager.take_multimodal(&key).await,
+            Some((None, None, None))
+        );
         // Second take: None (sidecar drained)
         assert_eq!(manager.take_multimodal(&key).await, None);
     }

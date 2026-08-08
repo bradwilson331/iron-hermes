@@ -61,6 +61,11 @@ pub enum CronCommands {
         deliver: Option<String>,
         #[arg(long = "skill")]
         skills: Vec<String>,
+        /// Remove all skills from the job. Mutually exclusive with --skill;
+        /// without this flag, passing no --skill leaves the existing skills
+        /// untouched (so there was previously no way to clear them).
+        #[arg(long, conflicts_with = "skills")]
+        clear_skills: bool,
     },
     /// Pause a job
     Pause {
@@ -120,7 +125,16 @@ pub async fn handle_cron_command(cmd: CronCommands) -> Result<()> {
             name,
             deliver,
             skills,
-        } => cmd_edit(job_id, schedule, prompt, name, deliver, skills),
+            clear_skills,
+        } => cmd_edit(
+            job_id,
+            schedule,
+            prompt,
+            name,
+            deliver,
+            skills,
+            clear_skills,
+        ),
         CronCommands::Pause { job_id } => cmd_pause(job_id),
         CronCommands::Resume { job_id } => cmd_resume(job_id),
         CronCommands::Run { job_id } => cmd_run(job_id),
@@ -186,6 +200,26 @@ pub(crate) fn resolve_cron_deliver(
     }
 }
 
+/// Reject tool names mistakenly passed as skills. A tool (e.g. `web_search`)
+/// is enabled via toolsets, not loaded as skill content — listing one in
+/// `skills[]` resolves to nothing at tick time and used to inject a misleading
+/// "skill was skipped" banner into the job prompt. Fail fast with guidance.
+fn reject_tool_names_in_skills(skills: &[String]) -> Result<()> {
+    let offenders = ironhermes_tools::tool_names_among(skills);
+    if !offenders.is_empty() {
+        eprintln!(
+            "{}: {} {} a tool, not a skill. Tools are available to cron jobs via toolsets \
+             (leave `enabled_toolsets` unset to grant all) — remove {} from --skill.",
+            "Error".red().bold(),
+            offenders.join(", "),
+            if offenders.len() == 1 { "is" } else { "are" },
+            if offenders.len() == 1 { "it" } else { "them" },
+        );
+        return Err(anyhow!("tool name(s) in skills: {}", offenders.join(", ")));
+    }
+    Ok(())
+}
+
 fn cmd_create(
     name: String,
     schedule: String,
@@ -198,6 +232,9 @@ fn cmd_create(
         eprintln!("{}: {}", "Error".red().bold(), e);
         return Err(anyhow!("Prompt blocked by security scanner"));
     }
+
+    // A1: a tool name is not a skill — reject before persisting.
+    reject_tool_names_in_skills(&skills)?;
 
     // Parse schedule
     let parsed =
@@ -272,6 +309,7 @@ fn cmd_edit(
     name: Option<String>,
     deliver: Option<String>,
     skills: Vec<String>,
+    clear_skills: bool,
 ) -> Result<()> {
     let mut store = open_store()?;
 
@@ -289,6 +327,9 @@ fn cmd_edit(
         return Err(anyhow!("Prompt blocked by security scanner"));
     }
 
+    // A1: a tool name is not a skill — reject before persisting.
+    reject_tool_names_in_skills(&skills)?;
+
     // Parse new schedule if provided
     let (parsed_schedule, schedule_display) = if let Some(ref sched_str) = schedule {
         let parsed = parse_schedule(sched_str)
@@ -303,14 +344,12 @@ fn cmd_edit(
         (None, None)
     };
 
-    let skills_opt = if skills.is_empty()
-        && schedule.is_none()
-        && prompt.is_none()
-        && name.is_none()
-        && deliver.is_none()
-    {
-        // If nothing provided, don't touch skills
-        None
+    // Skills resolution:
+    // - `--clear-skills` → set to empty (B: previously impossible via CLI)
+    // - one or more `--skill` → replace with that set
+    // - neither → leave existing skills untouched
+    let skills_opt = if clear_skills {
+        Some(Vec::new())
     } else if !skills.is_empty() {
         Some(skills)
     } else {
@@ -544,13 +583,15 @@ async fn build_cron_runner_ctx(
 
     Ok(ironhermes_cron_runner::CronRunnerContext {
         job_store,
-        skill_registry: None, // TODO: load SkillRegistry from HERMES_HOME for CLI cron
+        skill_registry: None, // TODO: load SkillRegistry from IRONHERMES_HOME for CLI cron
         tool_registry,
         memory_manager: None, // TODO: wire MemoryManager for CLI cron
         hook_registry: None,  // TODO: wire HookRegistry for CLI cron
         config: config.clone(),
-        mcp_manager: None, // TODO: wire McpManager for CLI cron
-        tg_client: None,   // CLI path is always standalone (no live TG adapter)
+        mcp_manager: None,      // TODO: wire McpManager for CLI cron
+        tg_client: None,        // CLI path is always standalone (no live TG adapter)
+        audio_dispatcher: None, // CLI cron path has no Telegram audio dispatcher
+        delivery_registry: ironhermes_cron::DeliveryRegistry::new(), // CLI path has no live adapters
     })
 }
 
@@ -789,5 +830,58 @@ mod tests {
         // Verify the error message shape cmd_get would produce:
         let err_msg = format!("Job not found: {}", "ghost");
         assert!(err_msg.contains("Job not found"));
+    }
+
+    // A1: tool names passed as skills are rejected before persisting.
+    #[test]
+    fn reject_tool_names_in_skills_flags_tools_only() {
+        // A genuine skill name passes.
+        assert!(reject_tool_names_in_skills(&["focus".to_string()]).is_ok());
+        // Empty passes.
+        assert!(reject_tool_names_in_skills(&[]).is_ok());
+        // A tool name (web_search) is rejected, and the error names it.
+        let err = reject_tool_names_in_skills(&["web_search".to_string()]).unwrap_err();
+        assert!(
+            err.to_string().contains("web_search"),
+            "error should name the offending tool: {err}"
+        );
+    }
+
+    // B: --clear-skills relies on JobUpdate { skills: Some(vec![]) } emptying
+    // the stored skills. Previously the CLI could never produce that value.
+    #[test]
+    fn job_update_with_empty_skills_clears_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = JobStore::open(dir.path().join("cron")).unwrap();
+        let job = store
+            .add_job(
+                "clearable",
+                "p",
+                ScheduleParsed::Interval {
+                    minutes: 5,
+                    display: "every 5m".to_string(),
+                },
+                "every 5m",
+                "local",
+                vec!["focus".to_string()],
+                None,
+            )
+            .unwrap();
+        assert_eq!(job.skills, vec!["focus".to_string()]);
+
+        let updated = store
+            .update_job(
+                &job.id,
+                JobUpdate {
+                    name: None,
+                    prompt: None,
+                    deliver: None,
+                    schedule: None,
+                    schedule_display: None,
+                    skills: Some(Vec::new()),
+                },
+            )
+            .unwrap();
+        assert!(updated.skills.is_empty(), "skills should be cleared");
     }
 }

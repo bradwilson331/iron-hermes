@@ -955,14 +955,14 @@ mod tests {
 
     #[test]
     fn test_cleanup_quarantine_safely_removes_under_quarantine_root() {
-        // Regression test for the macOS false-positive where HERMES_HOME lives
+        // Regression test for the macOS false-positive where IRONHERMES_HOME lives
         // outside env::temp_dir(). The fix accepts paths under
         // `<skills_root>/.hub/quarantine/` as a second safe root.
         let _env_guard = crate::test_env_lock().blocking_lock();
         let fake_home = tempfile::tempdir().unwrap();
-        let prev = std::env::var("HERMES_HOME").ok();
+        let prev = std::env::var("IRONHERMES_HOME").ok();
         unsafe {
-            std::env::set_var("HERMES_HOME", fake_home.path());
+            std::env::set_var("IRONHERMES_HOME", fake_home.path());
         }
 
         let qroot = crate::paths::quarantine_dir().unwrap();
@@ -980,8 +980,8 @@ mod tests {
 
         unsafe {
             match prev {
-                Some(v) => std::env::set_var("HERMES_HOME", v),
-                None => std::env::remove_var("HERMES_HOME"),
+                Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+                None => std::env::remove_var("IRONHERMES_HOME"),
             }
         }
     }
@@ -1094,9 +1094,9 @@ mod tests {
         // risk because tokio::sync::Mutex is designed for async tasks.
         let _env_guard = crate::test_env_lock().lock().await;
         let hermes_home = tempfile::tempdir().unwrap();
-        let prev_home = std::env::var("HERMES_HOME").ok();
+        let prev_home = std::env::var("IRONHERMES_HOME").ok();
         unsafe {
-            std::env::set_var("HERMES_HOME", hermes_home.path());
+            std::env::set_var("IRONHERMES_HOME", hermes_home.path());
         }
 
         let skills_root = hermes_home.path().join("skills");
@@ -1141,8 +1141,8 @@ mod tests {
 
         unsafe {
             match prev_home {
-                Some(v) => std::env::set_var("HERMES_HOME", v),
-                None => std::env::remove_var("HERMES_HOME"),
+                Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+                None => std::env::remove_var("IRONHERMES_HOME"),
             }
         }
     }
@@ -1156,9 +1156,9 @@ mod tests {
         // risk because tokio::sync::Mutex is designed for async tasks.
         let _env_guard = crate::test_env_lock().lock().await;
         let hermes_home = tempfile::tempdir().unwrap();
-        let prev_home = std::env::var("HERMES_HOME").ok();
+        let prev_home = std::env::var("IRONHERMES_HOME").ok();
         unsafe {
-            std::env::set_var("HERMES_HOME", hermes_home.path());
+            std::env::set_var("IRONHERMES_HOME", hermes_home.path());
         }
 
         let skills_root = hermes_home.path().join("skills");
@@ -1218,8 +1218,8 @@ mod tests {
 
         unsafe {
             match prev_home {
-                Some(v) => std::env::set_var("HERMES_HOME", v),
-                None => std::env::remove_var("HERMES_HOME"),
+                Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+                None => std::env::remove_var("IRONHERMES_HOME"),
             }
         }
     }

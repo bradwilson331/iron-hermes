@@ -214,6 +214,12 @@ pub struct AgentLoop {
     fallback_client: Option<AnyClient>,
     /// Whether fallback has already been activated (one-shot per D-11).
     fallback_activated: bool,
+    /// Cause E fix: canonical provider name of the fallback client, paired with
+    /// `fallback_client`. Applied to `self.provider_name` when failover fires so
+    /// `usage_events.provider` reflects the fallback's identity rather than the
+    /// primary's. `None` when no fallback is configured or when `with_fallback`
+    /// (unnamed variant) was used — leaves provider_name unchanged on failover.
+    fallback_provider_name: Option<String>,
     /// Progressive subdirectory context discovery (CTX-03/CTX-04).
     /// When set, file-access tools trigger context file discovery.
     subdir_discovery: Option<Arc<std::sync::Mutex<SubdirDiscovery>>>,
@@ -228,6 +234,10 @@ pub struct AgentLoop {
     pressure_tracker: Option<Arc<PressureTracker>>,
     /// Session id for routing pressure + pre_compress events.
     session_id: Option<String>,
+    /// Phase 45: optional approval gate for MCP mutation guardrail async approval.
+    /// None by default (fail-closed). Injected via `with_approval_gate` when the
+    /// gateway wires the approval coordinator (plan 04).
+    approval_gate: Option<std::sync::Arc<dyn ironhermes_core::ApprovalGate>>,
     /// Total context window size (used for ratio = estimated / context_length).
     context_length: usize,
     /// Runtime compression count passed into ContextStats (D-24 runaway guard).
@@ -259,6 +269,11 @@ pub struct AgentLoop {
     /// from each `run_*` function (CLI/REPL/gateway). Append site is in execute_tool_call.
     pub trajectory_writer:
         Option<std::sync::Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>,
+    /// Phase 39.2: black-box recorder handle. None = recording disabled.
+    /// Wired per-turn by AgentRuntime::run_turn via with_bb_recorder().
+    pub bb_recorder: Option<std::sync::Arc<ironhermes_blackbox::BlackBoxRecorder>>,
+    /// Phase 39.2: run_id for this turn (from TurnRequest.turn_id or fresh UUID).
+    pub bb_run_id: uuid::Uuid,
     /// Phase 25.3 D-T-1: 0-indexed turn counter — incremented per agent turn (one
     /// complete user-assistant exchange). Recorded in TrajectoryEntry.turn_index
     /// so Phase 25.4 Curator can correlate tool calls within a turn.
@@ -353,11 +368,13 @@ impl AgentLoop {
             last_pressure_tier_seen: PressureTier::None,
             fallback_client: None,
             fallback_activated: false,
+            fallback_provider_name: None,
             subdir_discovery: None,
             state_store: None,
             context_engine: None,
             pressure_tracker: None,
             session_id: None,
+            approval_gate: None,
             context_length: 128_000,
             compression_count: 0,
             memory_manager: None,
@@ -366,6 +383,9 @@ impl AgentLoop {
             // Phase 25.3 D-T-3 / D-T-1: trajectory ledger fields default to disabled / 0.
             trajectory_writer: None,
             turn_index: std::sync::atomic::AtomicUsize::new(0),
+            // Phase 39.2: black-box recorder disabled by default; set via with_bb_recorder().
+            bb_recorder: None,
+            bb_run_id: uuid::Uuid::nil(),
             // Phase 36.2 Plan 07: pricing registry loaded once at construction.
             // PricingRegistry::new() reads the bundled pricing.toml; no disk I/O.
             pricing_registry: Arc::new(PricingRegistry::new()),
@@ -431,6 +451,18 @@ impl AgentLoop {
         self
     }
 
+    /// Phase 39.2: attach a black-box recorder for Model-stage (LLM call) and
+    /// Tool-stage events. Called per-turn from `AgentRuntime::run_turn`.
+    pub fn with_bb_recorder(
+        mut self,
+        recorder: std::sync::Arc<ironhermes_blackbox::BlackBoxRecorder>,
+        run_id: uuid::Uuid,
+    ) -> Self {
+        self.bb_recorder = Some(recorder);
+        self.bb_run_id = run_id;
+        self
+    }
+
     /// Phase 18 Plan 06: inject a pre-chat context engine.
     /// Also populates context_length so ratio checks work correctly.
     pub fn with_context_engine(
@@ -452,6 +484,18 @@ impl AgentLoop {
     /// Phase 18 Plan 06: session id for transient drain + pre_compress routing.
     pub fn with_session_id(mut self, sid: impl Into<String>) -> Self {
         self.session_id = Some(sid.into());
+        self
+    }
+
+    /// Phase 45: inject an [`ironhermes_core::ApprovalGate`] for MCP mutation approval.
+    ///
+    /// Until plan 04 wires the `GatewayApprovalGate`, `approval_gate` remains `None`
+    /// and all `NeedsApproval` decisions resolve to `GateUnavailable` (fail-closed).
+    pub fn with_approval_gate(
+        mut self,
+        gate: std::sync::Arc<dyn ironhermes_core::ApprovalGate>,
+    ) -> Self {
+        self.approval_gate = Some(gate);
         self
     }
 
@@ -510,6 +554,25 @@ impl AgentLoop {
     }
     pub fn session_id(&self) -> Option<String> {
         self.session_id.clone()
+    }
+
+    /// Phase 36.3.12 CR-01 (Task 2): resolve this loop's session id for BOTH the
+    /// approval-gate pending-bucket lookup and session-scoped intercept dispatch. The
+    /// two call sites (the `NeedsApproval` approval-gate lookup and the
+    /// `dispatch_intercepts` call, both below) MUST resolve to the identical string —
+    /// an intercept registered by `AgentRuntime::run_turn` under `req.session_id` and a
+    /// dispatch performed by this same loop have to match, or every session-scoped
+    /// intercept ("terminal"/"execute_code") would miss on every call. Hoisted into one
+    /// helper so the two sites can never drift apart.
+    ///
+    /// LO-03 preserved: when this loop has no session id, the fallback is a PER-TURN
+    /// UNIQUE key (`bb_run_id`), never a shared literal — two concurrent session-less
+    /// turns must never collide into the same bucket.
+    fn resolved_session_id(&self) -> String {
+        match self.session_id.as_deref() {
+            Some(s) => s.to_string(),
+            None => format!("__no_session__{}", self.bb_run_id),
+        }
     }
     pub fn context_engine_threshold(&self) -> Option<f32> {
         self.context_engine.as_ref().map(|e| e.threshold())
@@ -800,6 +863,20 @@ impl AgentLoop {
     /// is swapped in and retries reset. Only fires once per agent run.
     pub fn with_fallback(mut self, client: AnyClient) -> Self {
         self.fallback_client = Some(client);
+        self
+    }
+
+    /// Cause E fix: like `with_fallback`, but also carries the fallback's
+    /// canonical provider name so `self.provider_name` is updated on failover
+    /// and `usage_events.provider` correctly reflects the fallback's identity.
+    /// Mirrors the `with_provider_name` builder shape.
+    pub fn with_fallback_named(
+        mut self,
+        client: AnyClient,
+        provider_name: impl Into<String>,
+    ) -> Self {
+        self.fallback_client = Some(client);
+        self.fallback_provider_name = Some(provider_name.into());
         self
     }
 
@@ -1684,8 +1761,21 @@ impl AgentLoop {
                             && !self.fallback_activated
                             && let Some(fallback) = self.fallback_client.take()
                         {
-                            warn!("Primary LLM failed, activating fallback provider: {err}");
+                            // Cause A fix: use {err:#} to emit the full anyhow cause
+                            // chain (not just the outermost context), mirroring the
+                            // retry warn! below. Also attach a structured error_kind
+                            // field so failover lines are greppable by kind.
+                            warn!(
+                                error_kind = provider_error.variant_name(),
+                                "Primary LLM failed, activating fallback provider: {err:#}"
+                            );
                             self.client = fallback;
+                            // Cause E fix: update provider_name to the fallback's
+                            // canonical name so usage_events rows after failover
+                            // carry the correct provider label (not the primary's).
+                            if let Some(name) = self.fallback_provider_name.take() {
+                                self.provider_name = name;
+                            }
                             self.fallback_activated = true;
                             retry_count = 0;
                             continue;
@@ -1870,6 +1960,21 @@ impl AgentLoop {
         messages: &[ChatMessage],
         tools: Option<&[ToolSchema]>,
     ) -> Result<(ChatMessage, Option<Usage>)> {
+        // Phase 39.2: emit llm_call_started before the LLM call.
+        let llm_start = std::time::Instant::now();
+        if let Some(ref rec) = self.bb_recorder {
+            rec.try_record(ironhermes_blackbox::BlackBoxRecorder::make_event(
+                self.bb_run_id,
+                ironhermes_blackbox::Stage::Model,
+                "llm_call_started",
+                "hermes-2026-06",
+                serde_json::json!({
+                    "model_id": self.client.model(),
+                    "provider": &self.provider_name,
+                }),
+            ));
+        }
+
         let response: ChatResponse = self
             .client
             .chat_completion(
@@ -1901,6 +2006,23 @@ impl AgentLoop {
             };
         }
 
+        // Phase 39.2: emit llm_call_completed with latency and token counts.
+        if let Some(ref rec) = self.bb_recorder {
+            rec.try_record(ironhermes_blackbox::BlackBoxRecorder::make_event(
+                self.bb_run_id,
+                ironhermes_blackbox::Stage::Model,
+                "llm_call_completed",
+                "hermes-2026-06",
+                serde_json::json!({
+                    "model_id": self.client.model(),
+                    "provider": &self.provider_name,
+                    "latency_ms": llm_start.elapsed().as_millis() as u64,
+                    "prompt_tokens": response.usage.as_ref().map(|u| u.prompt_tokens),
+                    "completion_tokens": response.usage.as_ref().map(|u| u.completion_tokens),
+                }),
+            ));
+        }
+
         Ok((message, response.usage))
     }
 
@@ -1910,6 +2032,22 @@ impl AgentLoop {
         messages: &[ChatMessage],
         tools: Option<&[ToolSchema]>,
     ) -> Result<(ChatMessage, Option<Usage>)> {
+        // Phase 39.2: emit llm_call_started before the streaming LLM call.
+        let llm_start = std::time::Instant::now();
+        if let Some(ref rec) = self.bb_recorder {
+            rec.try_record(ironhermes_blackbox::BlackBoxRecorder::make_event(
+                self.bb_run_id,
+                ironhermes_blackbox::Stage::Model,
+                "llm_call_started",
+                "hermes-2026-06",
+                serde_json::json!({
+                    "streaming": true,
+                    "model_id": self.client.model(),
+                    "provider": &self.provider_name,
+                    "message_count": messages.len(),
+                }),
+            ));
+        }
         let mut rx = self
             .client
             .chat_completion_stream(
@@ -1990,6 +2128,24 @@ impl AgentLoop {
             is_recall_context: false,
         };
 
+        // Phase 39.2: emit llm_call_completed with streaming latency and token counts.
+        if let Some(ref rec) = self.bb_recorder {
+            rec.try_record(ironhermes_blackbox::BlackBoxRecorder::make_event(
+                self.bb_run_id,
+                ironhermes_blackbox::Stage::Model,
+                "llm_call_completed",
+                "hermes-2026-06",
+                serde_json::json!({
+                    "streaming": true,
+                    "model_id": self.client.model(),
+                    "provider": &self.provider_name,
+                    "latency_ms": llm_start.elapsed().as_millis() as u64,
+                    "prompt_tokens": usage.as_ref().map(|u| u.prompt_tokens),
+                    "completion_tokens": usage.as_ref().map(|u| u.completion_tokens),
+                }),
+            ));
+        }
+
         Ok((message, usage))
     }
 
@@ -2005,6 +2161,190 @@ impl AgentLoop {
     ///
     /// Warn counts as Allow for event firing (D-08): the tool executes and both hook events
     /// fire. The tracing::warn! side-effect is owned by ToolRegistry::check_guardrails.
+    /// Phase 45 HI-02: shared "execute an already-allowed tool" path.
+    ///
+    /// Runs the tool via `registry.execute_tool` (which SKIPS the guardrail chain —
+    /// the caller has already cleared guardrails, either via the `Allow | Warn` arm
+    /// or via an operator `/approve`) and performs the full post-execution
+    /// bookkeeping: activity marking, trajectory append (success + failure),
+    /// `ToolCompleted` hook, `tool_result_callback`, subdirectory discovery, and the
+    /// blackbox `tool_completed` event — on BOTH the success and error paths.
+    ///
+    /// Extracted so the NeedsApproval `Approved` arm and the `Allow | Warn` arm share
+    /// identical bookkeeping. The Approved arm previously called `reg.dispatch`, which
+    /// RE-RAN the guardrail chain → `McpMutationGuardrail` returned `NeedsApproval`
+    /// again → the approved tool never executed; it also skipped ToolCompleted /
+    /// callbacks / trajectory, leaving a dangling ToolCalled invisible to hooks and
+    /// observability. Routing both arms through this helper fixes that (HI-02 / F3).
+    async fn execute_allowed_tool(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+        tool_call_id: &str,
+        bb_tool_start: std::time::Instant,
+    ) -> String {
+        // Save path for subdirectory discovery before args is moved.
+        let tool_path_arg = args.get("path").and_then(|v| v.as_str()).map(String::from);
+        let tool_start = std::time::Instant::now();
+
+        // Phase 32.1 Plan 02 Task 2: bump activity tracker before/after dispatch.
+        self.mark_activity(ActivityKind::ToolCall, Some(name.to_string()));
+
+        // Snapshot args for the trajectory append site BEFORE execute_tool consumes it.
+        let raw_args_for_traj = args.clone();
+        let dispatch_result = self.registry.read().await.execute_tool(name, args).await;
+        self.mark_activity(ActivityKind::ToolCall, None);
+        let duration_ms = tool_start.elapsed().as_millis() as u64;
+
+        match dispatch_result {
+            Ok(result) => {
+                // Phase 25.3 D-T-1 / D-T-3: append trajectory entry (success path).
+                if let Some(ref handle) = self.trajectory_writer {
+                    let registry_guard = self.registry.read().await;
+                    let redacted = if let Some(t) = registry_guard.get(name) {
+                        t.redact_args(&raw_args_for_traj)
+                    } else {
+                        raw_args_for_traj.clone()
+                    };
+                    drop(registry_guard);
+                    let entry = TrajectoryEntry::success(
+                        name,
+                        redacted,
+                        result.clone(),
+                        duration_ms,
+                        classify_impact_level(name),
+                        self.turn_index.load(std::sync::atomic::Ordering::Relaxed),
+                        tool_call_id.to_string(),
+                    );
+                    match serde_json::to_string(&entry) {
+                        Ok(line) => {
+                            if let Err(e) = handle.append_json_line(&line) {
+                                tracing::warn!(error = %e, tool = %name,
+                                    "Phase 25.3: trajectory append failed; ledger entry lost for this call");
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, tool = %name,
+                                "Phase 25.3: trajectory entry serialize failed; ledger entry skipped");
+                        }
+                    }
+                }
+
+                self.fire_hook(HookEventKind::ToolCompleted {
+                    tool_name: name.to_string(),
+                    success: true,
+                    result_preview: ironhermes_hooks::event::preview(&result, 200),
+                    duration_ms,
+                });
+                if let Some(ref cb) = self.tool_result_callback {
+                    cb(name, true);
+                }
+
+                // CTX-03/CTX-04: progressive subdirectory discovery for file-access tools
+                let mut final_result = result;
+                const FILE_ACCESS_TOOLS: &[&str] =
+                    &["read_file", "write_file", "patch", "search_files"];
+                if FILE_ACCESS_TOOLS.contains(&name)
+                    && let Some(ref disc) = self.subdir_discovery
+                    && let Some(ref path_str) = tool_path_arg
+                {
+                    let path = std::path::Path::new(path_str);
+                    if let Ok(mut discovery) = disc.lock()
+                        && let Some(ctx) = discovery.check_path(path)
+                    {
+                        debug!(tool = %name, path = %path_str, "Subdirectory context discovered");
+                        final_result.push_str(&ctx);
+                    }
+                }
+
+                // Phase 39.2: emit tool_completed for main dispatch success path.
+                if let Some(ref rec) = self.bb_recorder {
+                    let result_hash = {
+                        use sha2::Digest;
+                        format!("{:x}", sha2::Sha256::digest(final_result.as_bytes()))
+                    };
+                    rec.try_record(ironhermes_blackbox::BlackBoxRecorder::make_event(
+                        self.bb_run_id,
+                        ironhermes_blackbox::Stage::Tool,
+                        "tool_completed",
+                        "hermes-2026-06",
+                        serde_json::json!({
+                            "tool_name": name,
+                            "call_id": tool_call_id,
+                            "success": true,
+                            "result_hash": result_hash,
+                            "latency_ms": bb_tool_start.elapsed().as_millis() as u64,
+                        }),
+                    ));
+                }
+                final_result
+            }
+            Err(e) => {
+                let err_msg = format!("Tool '{}' failed: {}", name, e);
+                warn!(%err_msg);
+
+                // Phase 25.3 D-T-1 / D-T-3: append trajectory entry (failure path).
+                if let Some(ref handle) = self.trajectory_writer {
+                    let registry_guard = self.registry.read().await;
+                    let redacted = if let Some(t) = registry_guard.get(name) {
+                        t.redact_args(&raw_args_for_traj)
+                    } else {
+                        raw_args_for_traj.clone()
+                    };
+                    drop(registry_guard);
+                    let entry = TrajectoryEntry::failure(
+                        name,
+                        redacted,
+                        err_msg.clone(),
+                        duration_ms,
+                        classify_impact_level(name),
+                        self.turn_index.load(std::sync::atomic::Ordering::Relaxed),
+                        tool_call_id.to_string(),
+                    );
+                    match serde_json::to_string(&entry) {
+                        Ok(line) => {
+                            if let Err(append_err) = handle.append_json_line(&line) {
+                                tracing::warn!(error = %append_err, tool = %name,
+                                    "Phase 25.3: trajectory append failed (failure path)");
+                            }
+                        }
+                        Err(serr) => {
+                            tracing::warn!(error = %serr, tool = %name,
+                                "Phase 25.3: trajectory entry serialize failed (failure path); ledger entry skipped");
+                        }
+                    }
+                }
+
+                self.fire_hook(HookEventKind::ToolCompleted {
+                    tool_name: name.to_string(),
+                    success: false,
+                    result_preview: ironhermes_hooks::event::preview(&err_msg, 200),
+                    duration_ms,
+                });
+                if let Some(ref cb) = self.tool_result_callback {
+                    cb(name, false);
+                }
+
+                // Phase 39.2: emit tool_completed for main dispatch failure path.
+                if let Some(ref rec) = self.bb_recorder {
+                    rec.try_record(ironhermes_blackbox::BlackBoxRecorder::make_event(
+                        self.bb_run_id,
+                        ironhermes_blackbox::Stage::Tool,
+                        "tool_completed",
+                        "hermes-2026-06",
+                        serde_json::json!({
+                            "tool_name": name,
+                            "call_id": tool_call_id,
+                            "success": false,
+                            "latency_ms": bb_tool_start.elapsed().as_millis() as u64,
+                        }),
+                    ));
+                }
+                err_msg
+            }
+        }
+    }
+
     async fn execute_tool_call(&self, tool_call: &ToolCall) -> String {
         use ironhermes_hooks::GuardrailDecision;
 
@@ -2033,9 +2373,42 @@ impl AgentLoop {
             Err(e) => {
                 let err_msg = format!("Failed to parse tool arguments: {}", e);
                 warn!(tool = %name, error = %err_msg);
+                // Phase 39.2: emit tool_completed for parse-fail path (no valid args to hash).
+                if let Some(ref rec) = self.bb_recorder {
+                    rec.try_record(ironhermes_blackbox::BlackBoxRecorder::make_event(
+                        self.bb_run_id,
+                        ironhermes_blackbox::Stage::Tool,
+                        "tool_completed",
+                        "hermes-2026-06",
+                        serde_json::json!({
+                            "tool_name": name,
+                            "success": false,
+                            "blocked_by": "parse_error",
+                            "latency_ms": 0u64,
+                        }),
+                    ));
+                }
                 return err_msg;
             }
         };
+
+        // Phase 39.2: args parsed successfully — capture start time and emit tool_dispatched.
+        let bb_tool_start = std::time::Instant::now();
+        if let Some(ref rec) = self.bb_recorder {
+            let args_hash = ironhermes_blackbox::argument_hash(&args);
+            rec.try_record(ironhermes_blackbox::BlackBoxRecorder::make_event(
+                self.bb_run_id,
+                ironhermes_blackbox::Stage::Tool,
+                "tool_dispatched",
+                "hermes-2026-06",
+                serde_json::json!({
+                    "tool_name": name,
+                    "call_id": &tool_call.id,
+                    "arguments": &args,
+                    "arguments_hash": args_hash,
+                }),
+            ));
+        }
 
         // SKILL-06 / D-04..D-09: enforce allowed_tools from active skills
         {
@@ -2084,6 +2457,22 @@ impl AgentLoop {
                         cb(name, false);
                     }
 
+                    // Phase 39.2: emit tool_completed for skill-enforcement block.
+                    if let Some(ref rec) = self.bb_recorder {
+                        rec.try_record(ironhermes_blackbox::BlackBoxRecorder::make_event(
+                            self.bb_run_id,
+                            ironhermes_blackbox::Stage::Tool,
+                            "tool_completed",
+                            "hermes-2026-06",
+                            serde_json::json!({
+                                "tool_name": name,
+                                "call_id": &tool_call.id,
+                                "success": false,
+                                "blocked_by": "skill_enforcement",
+                                "latency_ms": bb_tool_start.elapsed().as_millis() as u64,
+                            }),
+                        ));
+                    }
                     return err_msg;
                 }
             }
@@ -2118,9 +2507,70 @@ impl AgentLoop {
                     cb(name, false);
                 }
 
+                // Phase 39.2: emit tool_completed for guardrail-block exit.
+                if let Some(ref rec) = self.bb_recorder {
+                    rec.try_record(ironhermes_blackbox::BlackBoxRecorder::make_event(
+                        self.bb_run_id,
+                        ironhermes_blackbox::Stage::Tool,
+                        "tool_completed",
+                        "hermes-2026-06",
+                        serde_json::json!({
+                            "tool_name": name,
+                            "call_id": &tool_call.id,
+                            "success": false,
+                            "blocked_by": "guardrail",
+                            "latency_ms": bb_tool_start.elapsed().as_millis() as u64,
+                        }),
+                    ));
+                }
+
                 // Return the formatted error as the tool_result so the LLM sees the
                 // same error-shaped string it saw pre-07.4.
                 err_msg
+            }
+            GuardrailDecision::NeedsApproval { reason } => {
+                // Phase 45 D-11 / T-45-05: fail-closed by default when no gate is wired.
+                // GateUnavailable is the outcome when no coordinator was injected.
+                // LO-03 / Phase 36.3.12 CR-01 Task 2: `resolved_session_id()` is the
+                // SAME helper the intercept dispatch site below uses, so an intercept
+                // registered under `req.session_id` and an approval bucketed here
+                // always resolve to the identical key. The per-turn-unique
+                // `__no_session__{bb_run_id}` fallback (LO-03) is preserved inside the
+                // helper — two concurrent session-less turns still never collide.
+                let sid = self.resolved_session_id();
+                let outcome = if let Some(ref gate) = self.approval_gate {
+                    gate.request_approval(&sid, name, &reason, &args).await
+                } else {
+                    ironhermes_core::ApprovalOutcome::GateUnavailable
+                };
+                match outcome {
+                    ironhermes_core::ApprovalOutcome::Approved => {
+                        // HI-02 / F3 fix: fire ToolCalled, then execute via the shared
+                        // execute_allowed_tool helper (which calls registry.execute_tool
+                        // — guardrails SKIPPED). Previously this called reg.dispatch,
+                        // which re-ran the guardrail chain → McpMutationGuardrail
+                        // returned NeedsApproval again → the approved tool never ran.
+                        // The helper also fires ToolCompleted / tool_result_callback /
+                        // bb tool_completed / trajectory append on both success and
+                        // error, so an approved mutation is visible to hooks and the
+                        // ledger instead of leaving a dangling ToolCalled.
+                        self.fire_hook(HookEventKind::ToolCalled {
+                            tool_name: name.to_string(),
+                            args_preview: ironhermes_hooks::event::preview(args_str, 200),
+                        });
+                        self.execute_allowed_tool(name, args.clone(), &tool_call.id, bb_tool_start)
+                            .await
+                    }
+                    ironhermes_core::ApprovalOutcome::AlreadyPending => {
+                        "An approval is already pending for this session — resolve it \
+                         before issuing additional tool calls."
+                            .to_string()
+                    }
+                    _ => {
+                        // Denied | TimedOut | GateUnavailable — fail-closed (D-11, T-45-05)
+                        "Tool was not approved and did not execute.".to_string()
+                    }
+                }
             }
             GuardrailDecision::Allow | GuardrailDecision::Warn { .. } => {
                 // D-05 Step 3: fire ToolCalled FIRST (this is the post-fix ordering).
@@ -2132,23 +2582,53 @@ impl AgentLoop {
 
                 // Phase 25 D-12: single intercept dispatch path replaces hardcoded session_search match.
                 // dispatch_intercepts returns Some(result) for intercepted tools, None to fall through.
+                // Phase 36.3.12 CR-01 Task 2: session_id comes from `resolved_session_id()` —
+                // the SAME helper the approval-gate site above uses — so a "terminal"/
+                // "execute_code" intercept registered by `run_turn` under `req.session_id`
+                // resolves here to the identical key instead of missing and fail-closing.
                 {
                     let reg = self.registry.read().await;
-                    if let Some(result) = reg.dispatch_intercepts(name, args.clone()).await {
-                        return match result {
+                    let sid = self.resolved_session_id();
+                    if let Some(result) = reg.dispatch_intercepts(name, &sid, args.clone()).await {
+                        // Phase 39.2: emit tool_completed for intercept path.
+                        let intercept_result_str = match result {
                             Ok(s) => s,
                             Err(e) => format!(
                                 r#"{{"error":"intercept_failed","reason":"{}"}}"#,
                                 e.to_string().replace('"', "'")
                             ),
                         };
+                        if let Some(ref rec) = self.bb_recorder {
+                            let result_hash = {
+                                use sha2::Digest;
+                                format!(
+                                    "{:x}",
+                                    sha2::Sha256::digest(intercept_result_str.as_bytes())
+                                )
+                            };
+                            rec.try_record(ironhermes_blackbox::BlackBoxRecorder::make_event(
+                                self.bb_run_id,
+                                ironhermes_blackbox::Stage::Tool,
+                                "tool_completed",
+                                "hermes-2026-06",
+                                serde_json::json!({
+                                    "tool_name": name,
+                                    "call_id": &tool_call.id,
+                                    "success": true,
+                                    "result_hash": result_hash,
+                                    "via": "intercept",
+                                    "latency_ms": bb_tool_start.elapsed().as_millis() as u64,
+                                }),
+                            ));
+                        }
+                        return intercept_result_str;
                     }
                 }
                 // fall through to existing dispatch path (registry.dispatch / guardrail chain)
 
-                // Save path for subdirectory discovery before args is moved
-                let tool_path_arg = args.get("path").and_then(|v| v.as_str()).map(String::from);
-
+                // HI-02: `tool_path_arg` (subdirectory discovery) now lives inside
+                // execute_allowed_tool. `tool_start` is retained here because the
+                // memory-provider intercept path below measures its own duration.
                 let tool_start = std::time::Instant::now();
 
                 // ── Phase 36.2 Plan 08 (D-CACHE-03 trigger 2): memory-edit ───
@@ -2202,6 +2682,27 @@ impl AgentLoop {
                                 if let Some(ref cb) = self.tool_result_callback {
                                     cb(name, true);
                                 }
+                                // Phase 39.2: emit tool_completed for memory-provider Ok path.
+                                if let Some(ref rec) = self.bb_recorder {
+                                    let result_hash = {
+                                        use sha2::Digest;
+                                        format!("{:x}", sha2::Sha256::digest(s.as_bytes()))
+                                    };
+                                    rec.try_record(ironhermes_blackbox::BlackBoxRecorder::make_event(
+                                        self.bb_run_id,
+                                        ironhermes_blackbox::Stage::Tool,
+                                        "tool_completed",
+                                        "hermes-2026-06",
+                                        serde_json::json!({
+                                            "tool_name": name,
+                                            "call_id": &tool_call.id,
+                                            "success": true,
+                                            "result_hash": result_hash,
+                                            "via": "memory_provider",
+                                            "latency_ms": bb_tool_start.elapsed().as_millis() as u64,
+                                        }),
+                                    ));
+                                }
                                 s
                             }
                             Err(e) => {
@@ -2214,6 +2715,22 @@ impl AgentLoop {
                                 if let Some(ref cb) = self.tool_result_callback {
                                     cb(name, false);
                                 }
+                                // Phase 39.2: emit tool_completed for memory-provider Err path.
+                                if let Some(ref rec) = self.bb_recorder {
+                                    rec.try_record(ironhermes_blackbox::BlackBoxRecorder::make_event(
+                                        self.bb_run_id,
+                                        ironhermes_blackbox::Stage::Tool,
+                                        "tool_completed",
+                                        "hermes-2026-06",
+                                        serde_json::json!({
+                                            "tool_name": name,
+                                            "call_id": &tool_call.id,
+                                            "success": false,
+                                            "via": "memory_provider",
+                                            "latency_ms": bb_tool_start.elapsed().as_millis() as u64,
+                                        }),
+                                    ));
+                                }
                                 e
                             }
                         };
@@ -2222,138 +2739,15 @@ impl AgentLoop {
                         .to_string();
                 }
 
-                // Phase 32.1 Plan 02 Task 2: bump activity tracker before tool dispatch.
-                // Before: record the in-flight tool name so the cron poller can see it.
-                // After: reset current_tool to None so a subsequent activity_summary()
-                // reflects that dispatch is finished.
-                self.mark_activity(ActivityKind::ToolCall, Some(name.clone()));
-
-                // Take an `args` snapshot for the trajectory append site BEFORE
-                // execute_tool consumes the original. Cheap clone — Plan 9 trades
-                // a JSON Value clone for a redaction seam (Plan 5 Tool::redact_args).
-                let raw_args_for_traj = args.clone();
-                let dispatch_result = self.registry.read().await.execute_tool(name, args).await;
-                // Phase 32.1 Plan 02 Task 2: reset current_tool after dispatch completes.
-                self.mark_activity(ActivityKind::ToolCall, None);
-                let duration_ms = tool_start.elapsed().as_millis() as u64;
-
-                match dispatch_result {
-                    Ok(result) => {
-                        // Phase 25.3 D-T-1 / D-T-3: append trajectory entry (success path).
-                        // Best-effort: append failure logs warn! and does NOT abort the turn.
-                        // Plan 6 cycle-break: trajectory_writer is Arc<dyn TrajectoryWriterHandle>.
-                        // We serialize the entry to a single JSONL line and hand it to the trait;
-                        // the impl (TrajectoryWriterHandleImpl in ironhermes-trajectory) handles
-                        // locking, write, and fsync.
-                        if let Some(ref handle) = self.trajectory_writer {
-                            // Look up the tool to call its redact_args override (Plan 5 trait extension).
-                            let registry_guard = self.registry.read().await;
-                            let redacted = if let Some(t) = registry_guard.get(name.as_str()) {
-                                t.redact_args(&raw_args_for_traj)
-                            } else {
-                                raw_args_for_traj.clone()
-                            };
-                            drop(registry_guard);
-                            let entry = TrajectoryEntry::success(
-                                name.as_str(),
-                                redacted,
-                                result.clone(),
-                                duration_ms,
-                                classify_impact_level(name.as_str()),
-                                self.turn_index.load(std::sync::atomic::Ordering::Relaxed),
-                                tool_call.id.clone(),
-                            );
-                            match serde_json::to_string(&entry) {
-                                Ok(line) => {
-                                    if let Err(e) = handle.append_json_line(&line) {
-                                        tracing::warn!(error = %e, tool = %name,
-                                            "Phase 25.3: trajectory append failed; ledger entry lost for this call");
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(error = %e, tool = %name,
-                                        "Phase 25.3: trajectory entry serialize failed; ledger entry skipped");
-                                }
-                            }
-                        }
-
-                        self.fire_hook(HookEventKind::ToolCompleted {
-                            tool_name: name.to_string(),
-                            success: true,
-                            result_preview: ironhermes_hooks::event::preview(&result, 200),
-                            duration_ms,
-                        });
-                        if let Some(ref cb) = self.tool_result_callback {
-                            cb(name, true);
-                        }
-
-                        // CTX-03/CTX-04: progressive subdirectory discovery for file-access tools
-                        let mut final_result = result;
-                        const FILE_ACCESS_TOOLS: &[&str] =
-                            &["read_file", "write_file", "patch", "search_files"];
-                        if FILE_ACCESS_TOOLS.contains(&name.as_str())
-                            && let Some(ref disc) = self.subdir_discovery
-                            && let Some(ref path_str) = tool_path_arg
-                        {
-                            let path = std::path::Path::new(path_str);
-                            if let Ok(mut discovery) = disc.lock()
-                                && let Some(ctx) = discovery.check_path(path)
-                            {
-                                debug!(tool = %name, path = %path_str, "Subdirectory context discovered");
-                                final_result.push_str(&ctx);
-                            }
-                        }
-                        final_result
-                    }
-                    Err(e) => {
-                        let err_msg = format!("Tool '{}' failed: {}", name, e);
-                        warn!(%err_msg);
-
-                        // Phase 25.3 D-T-1 / D-T-3: append trajectory entry (failure path).
-                        // Plan 6 cycle-break: serialize then hand to TrajectoryWriterHandle.
-                        if let Some(ref handle) = self.trajectory_writer {
-                            let registry_guard = self.registry.read().await;
-                            let redacted = if let Some(t) = registry_guard.get(name.as_str()) {
-                                t.redact_args(&raw_args_for_traj)
-                            } else {
-                                raw_args_for_traj.clone()
-                            };
-                            drop(registry_guard);
-                            let entry = TrajectoryEntry::failure(
-                                name.as_str(),
-                                redacted,
-                                err_msg.clone(),
-                                duration_ms,
-                                classify_impact_level(name.as_str()),
-                                self.turn_index.load(std::sync::atomic::Ordering::Relaxed),
-                                tool_call.id.clone(),
-                            );
-                            match serde_json::to_string(&entry) {
-                                Ok(line) => {
-                                    if let Err(append_err) = handle.append_json_line(&line) {
-                                        tracing::warn!(error = %append_err, tool = %name,
-                                            "Phase 25.3: trajectory append failed (failure path)");
-                                    }
-                                }
-                                Err(serr) => {
-                                    tracing::warn!(error = %serr, tool = %name,
-                                        "Phase 25.3: trajectory entry serialize failed (failure path); ledger entry skipped");
-                                }
-                            }
-                        }
-
-                        self.fire_hook(HookEventKind::ToolCompleted {
-                            tool_name: name.to_string(),
-                            success: false,
-                            result_preview: ironhermes_hooks::event::preview(&err_msg, 200),
-                            duration_ms,
-                        });
-                        if let Some(ref cb) = self.tool_result_callback {
-                            cb(name, false);
-                        }
-                        err_msg
-                    }
-                }
+                // HI-02: execute + full post-exec bookkeeping via the shared
+                // execute_allowed_tool helper — the SAME path the NeedsApproval
+                // Approved arm uses. Guardrails were already cleared above
+                // (Allow | Warn), so the helper calls registry.execute_tool (chain
+                // skipped). The helper owns trajectory append, ToolCompleted,
+                // tool_result_callback, subdirectory discovery, and the bb
+                // tool_completed event on both success and error.
+                self.execute_allowed_tool(name, args, &tool_call.id, bb_tool_start)
+                    .await
             }
         }
     }
@@ -3974,7 +4368,11 @@ mod memory_provider_wiring_tests {
 
         let reg = agent.registry.read().await;
         let result = reg
-            .dispatch_intercepts("session_search", serde_json::json!({"query": "test"}))
+            .dispatch_intercepts(
+                "session_search",
+                "any-session",
+                serde_json::json!({"query": "test"}),
+            )
             .await;
         assert!(
             result.is_some(),
@@ -4003,13 +4401,17 @@ mod memory_provider_wiring_tests {
 
         let reg = agent.registry.read().await;
         assert!(
-            reg.dispatch_intercepts("todo_write", serde_json::json!({"items": []}))
-                .await
-                .is_some(),
+            reg.dispatch_intercepts(
+                "todo_write",
+                "any-session",
+                serde_json::json!({"items": []})
+            )
+            .await
+            .is_some(),
             "todo_write must be registered via with_intercepts"
         );
         assert!(
-            reg.dispatch_intercepts("todo_read", serde_json::json!({}))
+            reg.dispatch_intercepts("todo_read", "any-session", serde_json::json!({}))
                 .await
                 .is_some(),
             "todo_read must be registered via with_intercepts"

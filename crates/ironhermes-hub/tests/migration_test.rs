@@ -1,8 +1,8 @@
 //! End-to-end tests for `migrate_from_hub_manifest` (D-15).
 //!
 //! Exercises the idempotent one-way migration from the 19.1
-//! `$HERMES_HOME/skills/.hub/lock.json` (`HubManifest`) schema to the 21.8
-//! `$HERMES_HOME/skills-lock.json` (`SkillLock`) schema.
+//! `$IRONHERMES_HOME/skills/.hub/lock.json` (`HubManifest`) schema to the 21.8
+//! `$IRONHERMES_HOME/skills-lock.json` (`SkillLock`) schema.
 //!
 //! Locks in:
 //! - First run with pre-seeded old manifest → Migrated(N) + new lock present
@@ -16,26 +16,26 @@ use ironhermes_hub::{MigrationOutcome, SkillLock, migrate_from_hub_manifest};
 use std::path::Path;
 use std::sync::Mutex;
 
-// HERMES_HOME mutates process-global env; serialize across tests.
+// IRONHERMES_HOME mutates process-global env; serialize across tests.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn with_test_hermes_home<F: FnOnce(&Path)>(f: F) {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     unsafe {
-        std::env::set_var("HERMES_HOME", tmp.path());
+        std::env::set_var("IRONHERMES_HOME", tmp.path());
     }
     f(tmp.path());
     unsafe {
         match prev {
-            Some(v) => std::env::set_var("HERMES_HOME", v),
-            None => std::env::remove_var("HERMES_HOME"),
+            Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+            None => std::env::remove_var("IRONHERMES_HOME"),
         }
     }
 }
 
-/// Seed a 19.1 `HubManifest` at `$HERMES_HOME/skills/.hub/lock.json` with the
+/// Seed a 19.1 `HubManifest` at `$IRONHERMES_HOME/skills/.hub/lock.json` with the
 /// given `(name, identifier)` entries.
 fn seed_old_manifest(home: &Path, entries: Vec<(&str, &str)>) {
     let hub_dir = home.join("skills").join(".hub");

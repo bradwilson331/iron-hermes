@@ -56,6 +56,7 @@ fn complete_task_with_dashboard_args_lands_in_done_status() {
             None,
             None,
             "ui",
+            None,
         )
         .expect("complete_task with dashboard args must succeed");
 
@@ -96,6 +97,7 @@ fn complete_task_with_expected_run_id_against_uninitialized_run_rejects() {
         Some("synthetic-run-id-that-does-not-match"),
         None,
         "ui",
+        None,
     );
 
     assert!(

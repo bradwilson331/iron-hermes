@@ -170,10 +170,25 @@ fn subagent_registry_attached_to_command_context_in_handle_slash_command() {
     // Pitfall 3 fix: gateway must call with_subagent_registry on its
     // CommandContext (was missing pre-Plan-04; Plan 03's cmd_agents
     // extension was unreachable via gateway until this attach).
+    //
+    // Phase 41.3 Plan 04 (D-11/D-12): handle_slash_command no longer calls
+    // `.with_subagent_registry(...)` directly — it populates
+    // `CoreContextHandles.subagent_registry` and the shared `build_core_context`
+    // factory (ironhermes-core) applies the builder internally. Anchored on the
+    // field assignment + factory call instead, preserving the original intent
+    // ("the gateway must actually attach a subagent registry so /agents reaches
+    // core"), which is exactly what D-12's own divergence gate
+    // (command_context_parity.rs) also verifies at runtime.
     assert!(
-        src.contains(".with_subagent_registry("),
-        "Phase 32.3 Plan 04 (RESEARCH Pitfall 3): handle_slash_command must call \
-         .with_subagent_registry() on CommandContext so /agents subcommands reach core"
+        src.contains("subagent_registry: subagent_registry_handle"),
+        "Phase 41.3 Plan 04 (D-11/D-12, revises Phase 32.3 Plan 04 Pitfall 3): \
+         handle_slash_command must populate CoreContextHandles.subagent_registry \
+         so /agents subcommands reach core via the shared build_core_context factory"
+    );
+    assert!(
+        src.contains("build_core_context("),
+        "Phase 41.3 Plan 04 (D-11/D-12): handle_slash_command must construct its \
+         CommandContext via build_core_context (the D-11 shared factory)"
     );
     assert!(
         src.contains("SubagentRegistryHandle::new"),

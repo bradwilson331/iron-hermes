@@ -3,6 +3,7 @@ use crate::tui::{ActivityState, CtrlCDecision, DoubleCtrlCState, StatusLineState
 use crate::tui::{CommandResult, KeybindingRegistry, dispatch_command};
 use crate::tui::{reset_terminal_visual, write_into_scroll_region};
 use anyhow::{Context, Result};
+use base64::Engine as _;
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use ironhermes_agent::budget::BudgetHandle;
@@ -14,26 +15,34 @@ use ironhermes_core::commands::CommandRouter;
 use ironhermes_core::commands::context::CommandContext;
 use ironhermes_core::commands::registry::build_registry as build_command_registry;
 use ironhermes_core::types::Platform;
-use ironhermes_core::{ChatMessage, Config, ProviderResolver};
+use ironhermes_core::{
+    ChatMessage, Config, ContentPart, ImageUrl, MessageContent, ProviderResolver, Role,
+};
 use ironhermes_gateway::GatewayRunner;
 use ironhermes_mcp::McpManager;
 use ironhermes_tools::ToolRegistry;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 // Phase 36.3.7 Plan 05 (D-26/D-20): Kanban worker prompt injection + tool registration.
-// When HERMES_KANBAN_TASK is present at process start, inject KANBAN_GUIDANCE into the
+// When IRONHERMES_KANBAN_TASK is present at process start, inject KANBAN_GUIDANCE into the
 // PromptBuilder and register the 6 kanban_* tools on the session's ToolRegistry.
 use ironhermes_kanban::tools::register_kanban_tools;
 use ironhermes_kanban::{KANBAN_GUIDANCE, KanbanStore};
 
+mod auth_cmd;
 mod batch;
+// Phase 47.6 Plan 04 (D-06/D-07): gated behind the same `buzz` feature as
+// `ironhermes-gateway`'s Nostr adapter — the default CLI build never sees
+// this module.
+#[cfg(feature = "buzz")]
+mod buzz_cmd;
 mod config_cli;
 mod cron;
 mod doctor;
@@ -47,6 +56,8 @@ mod provider_cmd;
 mod setup;
 mod toolset_cmd;
 mod tui;
+mod vault_cmd;
+mod web_cmd;
 
 /// Process-global serialization lock for tests that mutate the shared
 /// `IRONHERMES_HOME` env var. All env-mutating tests across the bin's module
@@ -78,6 +89,10 @@ pub(crate) fn test_env_lock_async() -> &'static tokio::sync::Mutex<()> {
 use ironhermes_cli::skills_cmd;
 // Phase 25.3 Plan 11: `hermes session export[-all]` (D-F-1 / D-F-2).
 use ironhermes_cli::session_cmd;
+// Phase 36.3.12 D-08/D-10/D-11: local-surface terminal/execute_code gating closures.
+use ironhermes_cli::approval_gate::{
+    build_gated_execute_code_intercept, build_gated_terminal_intercept,
+};
 
 #[derive(Parser)]
 #[command(
@@ -131,7 +146,7 @@ struct Cli {
     #[arg(long = "classic-tui")]
     classic_tui: bool,
 
-    /// Phase 24 (D-07): activate a named profile (isolated HERMES_HOME under
+    /// Phase 24 (D-07): activate a named profile (isolated IRONHERMES_HOME under
     /// ~/.ironhermes/profiles/<name>/). Wins over any pre-set IRONHERMES_HOME
     /// env var silently (D-02). Available on every subcommand including
     /// `gateway run` (D-07). Validated per ironhermes_core::profile::validate_profile_name.
@@ -176,11 +191,67 @@ enum Commands {
         /// Override Telegram bot token (or set TELEGRAM_BOT_TOKEN env var)
         #[arg(long)]
         token: Option<String>,
+        /// GAP-7 (46.9-14, D-06): skip the interactive setup wizard even if
+        /// no runnable LLM is detected — print an actionable stderr notice
+        /// and proceed instead of blocking on stdin. Auto-detected when
+        /// stdin is not a TTY (e.g. launched by a daemon/cron supervisor);
+        /// this flag lets an operator force it explicitly.
+        #[arg(long)]
+        non_interactive: bool,
     },
     /// Manage scheduled tasks
     Cron {
         #[command(subcommand)]
         command: cron::CronCommands,
+    },
+    /// Manage OAuth authentication for configured providers (Phase 43).
+    ///
+    /// Subcommands:
+    ///   login  --provider <name> [--browser | --device-code]  Authenticate with a provider
+    ///   status [--provider <name>]                            Show token presence + expiry
+    ///   list                                                  List all configured providers
+    Auth {
+        #[command(subcommand)]
+        command: auth_cmd::AuthCommands,
+    },
+    /// Manage the operator secret store (Phase 46.8, D-03).
+    ///
+    /// Subcommands:
+    ///   init            Initialize a new encrypted vault (rusty-vault backend)
+    ///   unlock          Unseal an initialized vault
+    ///   set <key>       Store a secret value under <key> (masked prompt, never argv)
+    ///   list [--prefix] List secret key NAMES only, optionally prefix-filtered
+    Vault {
+        #[command(subcommand)]
+        command: vault_cmd::VaultCommands,
+    },
+    /// Operator credential generation for the login boundary (Phase 47.3, D-08).
+    ///
+    /// Subcommands:
+    ///   set-password [--vault]  Prompt twice (masked), print an argon2id PHC
+    ///                           string naming web_ui.auth.password_hash; never
+    ///                           writes the operator's config. --vault stores it
+    ///                           via the configured secret vault instead.
+    ///
+    /// Registered as `Commands::Web { command }` in the dispatch match below.
+    Web {
+        #[command(subcommand)]
+        command: web_cmd::WebCommands,
+    },
+    /// Per-profile Nostr (Buzz) identity provisioning (Phase 47.6, D-06/D-07).
+    ///
+    /// Subcommands:
+    ///   keygen [--force]  Generate a fresh keypair, write it to the profile
+    ///                     .env under BUZZ_NSEC, and print the npub
+    ///   import [--force]  Import an externally generated nsec via a masked
+    ///                     prompt (bech32 or hex)
+    ///   pubkey            Print the active profile's npub + hex form
+    ///
+    /// Registered as `Commands::Buzz { command }` in the dispatch match below.
+    #[cfg(feature = "buzz")]
+    Buzz {
+        #[command(subcommand)]
+        command: buzz_cmd::BuzzCommands,
     },
     /// Run batch prompt processing
     Batch {
@@ -243,7 +314,7 @@ enum Commands {
     },
     /// Manage kanban board and tasks (Phase 36.3.7).
     Kanban {
-        /// Select board by slug (D-02 4-tier precedence: flag > HERMES_KANBAN_BOARD env > current-file > "default").
+        /// Select board by slug (D-02 4-tier precedence: flag > IRONHERMES_KANBAN_BOARD env > current-file > "default").
         /// Use "default" to explicitly open the legacy kanban.db (D-01 back-compat).
         #[arg(long, global = false)]
         board: Option<String>,
@@ -255,6 +326,12 @@ enum Commands {
     Tts {
         #[command(subcommand)]
         command: TtsCommands,
+    },
+    /// Speech-to-text CLI diagnostics (Phase 36.17.8 D-10).
+    /// NOT an LLM tool — calls build_stt_registry directly for operator UAT.
+    Stt {
+        #[command(subcommand)]
+        command: SttCommands,
     },
 }
 
@@ -284,6 +361,16 @@ enum TtsCommands {
         #[arg(long)]
         path: String,
     },
+}
+
+/// Phase 36.17.8 — STT diagnostic subcommands.
+/// CLI verbs for operator UAT; bypass the Tool trait and LLM machinery.
+/// The LLM-callable capture path is `run_conversation_loop` (in ironhermes-tools).
+#[derive(Subcommand)]
+enum SttCommands {
+    /// Print the selected STT provider name from config and exit 0.
+    /// Calls build_stt_registry directly — NOT an LLM tool.
+    Info,
 }
 
 #[derive(Subcommand)]
@@ -324,13 +411,13 @@ fn should_use_classic_tui(cli: &Cli) -> bool {
 }
 
 /// Phase 36.3.7 Plan 05 (D-26): Inject KANBAN_GUIDANCE into the PromptBuilder
-/// when the process was spawned as a Kanban worker (HERMES_KANBAN_TASK is set).
+/// when the process was spawned as a Kanban worker (IRONHERMES_KANBAN_TASK is set).
 ///
 /// Must be called AFTER `load_skills()` and BEFORE `build_system_message()` so the
 /// overlay is included in the cached prefix (slots 1-6) but does not affect
 /// non-worker sessions (zero footprint guarantee per D-26).
 fn inject_kanban_guidance_if_worker(prompt_builder: &mut PromptBuilder) {
-    if std::env::var("HERMES_KANBAN_TASK").is_ok() {
+    if ironhermes_kanban::kanban_env("TASK").is_some() {
         // activate_skill prepends (name, body) to skill_overlays which are
         // injected into the system message in build_system_message().
         prompt_builder.activate_skill("KANBAN_GUIDANCE", KANBAN_GUIDANCE);
@@ -339,10 +426,10 @@ fn inject_kanban_guidance_if_worker(prompt_builder: &mut PromptBuilder) {
 }
 
 /// Phase 36.3.7 Plan 05 (D-20): Register the 6 kanban_* tools on `registry`
-/// when the process is a Kanban worker (HERMES_KANBAN_TASK present) or when the
+/// when the process is a Kanban worker (IRONHERMES_KANBAN_TASK present) or when the
 /// "kanban" toolset is explicitly enabled in profile config.
 ///
-/// Worker mode (HERMES_KANBAN_TASK set): opens kanban.db and registers with
+/// Worker mode (IRONHERMES_KANBAN_TASK set): opens kanban.db and registers with
 /// `explicit_enable = false` — the tools gate on the env var themselves.
 ///
 /// Orchestrator mode (config.toolsets contains "kanban"): registers with
@@ -350,16 +437,33 @@ fn inject_kanban_guidance_if_worker(prompt_builder: &mut PromptBuilder) {
 async fn register_kanban_tools_if_applicable(
     registry: &Arc<RwLock<ToolRegistry>>,
     toolsets: &std::collections::HashSet<String>,
+    config: Arc<ironhermes_core::Config>,
 ) -> anyhow::Result<()> {
-    let worker_mode = std::env::var("HERMES_KANBAN_TASK").is_ok();
+    let worker_mode = ironhermes_kanban::kanban_env("TASK").is_some();
     let orchestrator_mode = toolsets.contains("kanban");
 
     if worker_mode || orchestrator_mode {
         // Phase 36.3.7.13 D-A1: env-bridged open so the store-Arc passed to
         // register_kanban_tools (which flows to ALL 13 tools, including
-        // decompose/specify via constructor injection) honors HERMES_KANBAN_DB.
+        // decompose/specify via constructor injection) honors IRONHERMES_KANBAN_DB.
+        //
+        // Phase 46.5 D-02 (fail-loud, defense-in-depth): a worker-mode
+        // process cannot register kanban_complete/kanban_block without an
+        // open store — silently returning Ok(()) here would let a worker run
+        // to completion with NO way to ever terminate its protocol. Split by
+        // mode: orchestrator/interactive-only (no worker env) keeps the
+        // soft-degrade (warn + Ok) since running without kanban tools is an
+        // acceptable degradation outside worker mode; worker_mode hard-errs,
+        // propagated via the `?` at the call site, so the worker process
+        // exits non-zero instead of running tool-less and silently stranded.
         let store = match KanbanStore::open_from_env() {
             Ok(s) => s,
+            Err(e) if worker_mode => {
+                return Err(anyhow::anyhow!(
+                    "kanban worker mode: failed to open kanban.db ({e}) — cannot register \
+                     kanban_complete/kanban_block; refusing to run without a completion path"
+                ));
+            }
             Err(e) => {
                 tracing::warn!(error = %e, "Failed to open kanban.db — kanban tools unavailable");
                 return Ok(());
@@ -374,7 +478,919 @@ async fn register_kanban_tools_if_applicable(
             "Kanban tools registered on session ToolRegistry"
         );
     }
+
+    // Phase 46.6 Plan 04 (D-01): explicit artifact-tool wiring at the kanban
+    // worker surface. RESEARCH Pitfall 4 — a registered-but-unwired tool is
+    // invisible to the kanban worker LLM even when it is present elsewhere;
+    // this call makes the presence independent of build_app_runtime_bundle's
+    // own wiring (Plan 04 Task 1), so this worker path keeps the tool even if
+    // a future refactor decouples worker registry construction from that
+    // shared factory. Registering twice on the same registry (HashMap insert
+    // in ToolRegistry::register) is a harmless no-op overwrite, not an error.
+    if worker_mode {
+        registry.write().await.register_artifact_tool(config);
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod register_kanban_tools_fail_loud_tests {
+    use super::*;
+
+    /// Force `KanbanStore::open_from_env()` to fail deterministically and
+    /// portably: point `IRONHERMES_KANBAN_DB` at a path whose parent
+    /// component is a FILE, not a directory, so the store's internal
+    /// `create_dir_all(parent)` errors before a `Connection::open` is ever
+    /// attempted. Kept alive via the returned `TempDir` guard.
+    fn unopenable_db_path() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let blocking_file = tmp.path().join("not_a_dir");
+        std::fs::write(&blocking_file, b"x").unwrap();
+        (tmp, blocking_file.join("kanban.db"))
+    }
+
+    /// D-02: worker-mode (`IRONHERMES_KANBAN_TASK` set) must fail loud
+    /// (`Err`) — not silently return `Ok(())` — when `open_from_env()` fails.
+    #[tokio::test]
+    async fn register_kanban_tools_worker_mode_fails_loud() {
+        let _lock = crate::test_env_lock_async().lock().await;
+        let (_tmp, bad_db_path) = unopenable_db_path();
+        unsafe {
+            std::env::set_var("IRONHERMES_KANBAN_TASK", "t_46_5_01_test");
+            std::env::set_var("IRONHERMES_KANBAN_DB", &bad_db_path);
+        }
+
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let toolsets: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let result = register_kanban_tools_if_applicable(
+            &registry,
+            &toolsets,
+            Arc::new(ironhermes_core::Config::default()),
+        )
+        .await;
+
+        unsafe {
+            std::env::remove_var("IRONHERMES_KANBAN_TASK");
+            std::env::remove_var("IRONHERMES_KANBAN_DB");
+        }
+
+        assert!(
+            result.is_err(),
+            "worker-mode register_kanban_tools_if_applicable must return Err (fail loud) \
+             on a KanbanStore::open_from_env() failure, not silently Ok(())"
+        );
+    }
+
+    /// D-02: orchestrator/interactive mode (no worker env) keeps the
+    /// pre-existing soft-degrade (`Ok(())` + warn) on the SAME forced
+    /// `open_from_env()` failure — the fail-loud change must not regress
+    /// this path.
+    #[tokio::test]
+    async fn register_kanban_tools_orchestrator_only_mode_soft_degrades() {
+        let _lock = crate::test_env_lock_async().lock().await;
+        let (_tmp, bad_db_path) = unopenable_db_path();
+        unsafe {
+            std::env::remove_var("IRONHERMES_KANBAN_TASK");
+            std::env::set_var("IRONHERMES_KANBAN_DB", &bad_db_path);
+        }
+
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let mut toolsets: std::collections::HashSet<String> = std::collections::HashSet::new();
+        toolsets.insert("kanban".to_string());
+        let result = register_kanban_tools_if_applicable(
+            &registry,
+            &toolsets,
+            Arc::new(ironhermes_core::Config::default()),
+        )
+        .await;
+
+        unsafe {
+            std::env::remove_var("IRONHERMES_KANBAN_DB");
+        }
+
+        assert!(
+            result.is_ok(),
+            "orchestrator-mode-only (no worker env) register_kanban_tools_if_applicable \
+             must keep the soft-degrade Ok(()) on the same forced open_from_env() failure"
+        );
+    }
+
+    /// Phase 46.6 Plan 04 (D-01): the kanban worker registry (worker_mode) must
+    /// include the `artifact` tool, closing the Pitfall-4 invisibility gap for
+    /// headless producers. Checks `list_tools()` (registration presence), not
+    /// `get_definitions()` (LLM-visibility) — the latter depends on the
+    /// operator's toolset config being merged, a separate concern already
+    /// covered by Plan 02's `artifact_toolset_visible_all_surfaces` test.
+    #[tokio::test]
+    async fn register_kanban_tools_worker_mode_registers_artifact_tool() {
+        let _lock = crate::test_env_lock_async().lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("kanban.db");
+        unsafe {
+            std::env::set_var("IRONHERMES_KANBAN_TASK", "t_artifact_presence_test");
+            std::env::set_var("IRONHERMES_KANBAN_DB", &db_path);
+        }
+
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let toolsets: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let result = register_kanban_tools_if_applicable(
+            &registry,
+            &toolsets,
+            Arc::new(ironhermes_core::Config::default()),
+        )
+        .await;
+
+        unsafe {
+            std::env::remove_var("IRONHERMES_KANBAN_TASK");
+            std::env::remove_var("IRONHERMES_KANBAN_DB");
+        }
+
+        result.expect("worker-mode registration should succeed on an openable db");
+
+        let names: Vec<String> = registry
+            .read()
+            .await
+            .list_tools()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "artifact"),
+            "artifact tool should be registered on the kanban worker registry; got {names:?}"
+        );
+    }
+
+    /// D-02 hardening (kanban image-task end-to-end follow-up): under a realistic production
+    /// toolset config that does NOT enable the "kanban" toolset, a worker's terminator tools
+    /// (`kanban_complete`/`kanban_block`) must remain visible after registration + goal-mode
+    /// filtering (proving the `get_definitions` kanban exemption), and a worker registry with
+    /// no visible terminators must fail loud rather than strand the worker.
+    #[tokio::test]
+    async fn worker_terminators_visible_after_registration_and_production_filter() {
+        let _lock = crate::test_env_lock_async().lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("kanban.db");
+        unsafe {
+            std::env::set_var("IRONHERMES_KANBAN_TASK", "t_vis_test");
+            std::env::set_var("IRONHERMES_KANBAN_DB", &db_path);
+        }
+
+        // Worker with kanban tools registered + a production toolset config that does NOT
+        // enable "kanban" → terminators must still be visible (layer-1 exemption).
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let toolsets: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let reg = register_kanban_tools_if_applicable(
+            &registry,
+            &toolsets,
+            Arc::new(ironhermes_core::Config::default()),
+        )
+        .await;
+        registry
+            .write()
+            .await
+            .set_toolset_config(Some(ironhermes_core::config::ToolsConfig::default()));
+        let filtered =
+            filter_for_goal_mode_if_applicable(&registry, &ironhermes_core::Config::default())
+                .await;
+        let visible = assert_worker_terminators_visible(&registry).await;
+
+        // A worker registry with NO kanban tools registered must fail loud.
+        let empty = Arc::new(RwLock::new(ToolRegistry::new()));
+        empty
+            .write()
+            .await
+            .set_toolset_config(Some(ironhermes_core::config::ToolsConfig::default()));
+        let stranded = assert_worker_terminators_visible(&empty).await;
+
+        unsafe {
+            std::env::remove_var("IRONHERMES_KANBAN_TASK");
+            std::env::remove_var("IRONHERMES_KANBAN_DB");
+        }
+
+        reg.expect("worker-mode registration should succeed on an openable db");
+        filtered.expect("goal-mode filter should no-op when goal mode is off");
+        visible.expect(
+            "kanban_complete/kanban_block must be visible after registration + production filter \
+             (get_definitions kanban exemption)",
+        );
+        assert!(
+            stranded.is_err(),
+            "a worker registry with no visible terminators must fail loud (not strand the worker)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 47 Plan 08 (D-11) — goal-mode gen-tool preset gating
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn goal_toolset_with_generation_appends_gen_tools_when_enabled() {
+        let restricted = goal_toolset_with_generation(GOAL_TOOLSET_RESTRICTED, true);
+        let extended = goal_toolset_with_generation(GOAL_TOOLSET_EXTENDED, true);
+        for name in GENERATION_TOOL_NAMES {
+            assert!(
+                restricted.contains(name),
+                "RESTRICTED must include '{name}' when kanban_goal_mode=true"
+            );
+            assert!(
+                extended.contains(name),
+                "EXTENDED must include '{name}' when kanban_goal_mode=true"
+            );
+        }
+    }
+
+    #[test]
+    fn goal_toolset_with_generation_omits_gen_tools_when_disabled() {
+        let restricted = goal_toolset_with_generation(GOAL_TOOLSET_RESTRICTED, false);
+        let extended = goal_toolset_with_generation(GOAL_TOOLSET_EXTENDED, false);
+        for name in GENERATION_TOOL_NAMES {
+            assert!(
+                !restricted.contains(name),
+                "RESTRICTED must NOT include '{name}' when kanban_goal_mode=false"
+            );
+            assert!(
+                !extended.contains(name),
+                "EXTENDED must NOT include '{name}' when kanban_goal_mode=false"
+            );
+        }
+        // The base presets themselves are untouched (same length as the consts).
+        assert_eq!(restricted.len(), GOAL_TOOLSET_RESTRICTED.len());
+        assert_eq!(extended.len(), GOAL_TOOLSET_EXTENDED.len());
+    }
+
+    /// End-to-end through `filter_for_goal_mode_if_applicable`: a goal-mode
+    /// worker's registry keeps the gen tools after filtering only when
+    /// `surfaces.kanban_goal_mode` is true.
+    #[tokio::test]
+    async fn goal_toolset_filter_retains_gen_tools_only_when_kanban_goal_mode_enabled() {
+        let _lock = crate::test_env_lock_async().lock().await;
+
+        struct StubTool {
+            name: &'static str,
+        }
+
+        #[async_trait::async_trait]
+        impl ironhermes_tools::registry::Tool for StubTool {
+            fn name(&self) -> &str {
+                self.name
+            }
+            fn toolset(&self) -> &str {
+                "test"
+            }
+            fn description(&self) -> &str {
+                "stub"
+            }
+            fn schema(&self) -> ironhermes_core::ToolSchema {
+                ironhermes_core::ToolSchema::new(
+                    self.name,
+                    "stub",
+                    serde_json::json!({"type": "object", "properties": {}}),
+                )
+            }
+            async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+                Ok("stub".to_string())
+            }
+        }
+
+        async fn registry_with_gen_tools() -> Arc<RwLock<ToolRegistry>> {
+            let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+            {
+                let mut r = registry.write().await;
+                for name in GENERATION_TOOL_NAMES {
+                    r.register(Box::new(StubTool { name }));
+                }
+                r.register(Box::new(StubTool { name: "read_file" }));
+                r.register(Box::new(StubTool { name: "write_file" }));
+            }
+            registry
+        }
+
+        unsafe {
+            std::env::set_var("IRONHERMES_KANBAN_TASK", "t_goal_gen_test");
+            std::env::set_var("IRONHERMES_KANBAN_GOAL_MODE", "1");
+            std::env::set_var("IRONHERMES_KANBAN_GOAL_TOOLSET", "restricted");
+        }
+
+        let mut enabled_config = ironhermes_core::Config::default();
+        enabled_config
+            .generation
+            .guardrails
+            .surfaces
+            .kanban_goal_mode = true;
+        let enabled_registry = registry_with_gen_tools().await;
+        filter_for_goal_mode_if_applicable(&enabled_registry, &enabled_config)
+            .await
+            .expect("filter must not error");
+        let enabled_names: Vec<String> = enabled_registry
+            .read()
+            .await
+            .list_tools()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+
+        let disabled_config = ironhermes_core::Config::default();
+        let disabled_registry = registry_with_gen_tools().await;
+        filter_for_goal_mode_if_applicable(&disabled_registry, &disabled_config)
+            .await
+            .expect("filter must not error");
+        let disabled_names: Vec<String> = disabled_registry
+            .read()
+            .await
+            .list_tools()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+
+        unsafe {
+            std::env::remove_var("IRONHERMES_KANBAN_TASK");
+            std::env::remove_var("IRONHERMES_KANBAN_GOAL_MODE");
+            std::env::remove_var("IRONHERMES_KANBAN_GOAL_TOOLSET");
+        }
+
+        for name in GENERATION_TOOL_NAMES {
+            assert!(
+                enabled_names.iter().any(|n| n == name),
+                "kanban_goal_mode=true must retain '{name}'; got {enabled_names:?}"
+            );
+            assert!(
+                !disabled_names.iter().any(|n| n == name),
+                "kanban_goal_mode=false must NOT retain '{name}'; got {disabled_names:?}"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 47 Plan 08 (D-08) — KanbanLedgerAdapter delegation
+    // -----------------------------------------------------------------------
+
+    /// `KanbanLedgerAdapter::try_reserve_pool` delegates to
+    /// `KanbanStore::try_reserve_generation_slot` keyed by whatever `root_id`
+    /// it is called with (the swarm root task id, or a solitary task's own
+    /// id — the caller resolves which via `find_root_task_id`).
+    #[tokio::test]
+    async fn kanban_ledger_adapter_delegates_to_store_and_respects_pool() {
+        use ironhermes_tools::gen_guardrail::GenerationLedger;
+
+        let _lock = crate::test_env_lock_async().lock().await;
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("kanban.db");
+        unsafe {
+            std::env::set_var("IRONHERMES_KANBAN_DB", &db_path);
+        }
+
+        let adapter = KanbanLedgerAdapter;
+        let first = adapter.try_reserve_pool("root_x", 1, "flux-2-pro", "t2i");
+        let second = adapter.try_reserve_pool("root_x", 1, "flux-2-pro", "t2i");
+
+        unsafe {
+            std::env::remove_var("IRONHERMES_KANBAN_DB");
+        }
+
+        assert!(
+            first.expect("first reservation should not error"),
+            "first reservation against pool=1 must be granted"
+        );
+        assert!(
+            !second.expect("second reservation should not error"),
+            "second reservation against pool=1 (already exhausted) must be blocked"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 46.5 D-08/D-09/Q6 — kanban worker image-perception plumbing
+// ---------------------------------------------------------------------------
+//
+// Workers have no eyes without this: a task's image attachments are copied
+// into the worker's workspace (46.4 D-05 `copy_attachments_into`), but a
+// file on disk is not vision. This section assembles the worker's FIRST LLM
+// turn as a `MessageContent::Parts` message carrying one base64
+// `data:<mime>;base64,<payload>` `image_url` part per qualifying image,
+// mirroring `ironhermes_gateway::handler::build_user_message` field-for-field.
+//
+// Sizing/downscaling lives in the shared
+// `ironhermes_gateway::multimodal::fit_image_for_vision` (46.5.1 follow-up:
+// hoisted out of this file so the gateway chat-vision path enforces the same
+// provider per-image send ceiling).
+
+#[cfg(test)]
+use ironhermes_gateway::multimodal::IMAGE_SEND_MAX_BYTES;
+use ironhermes_gateway::multimodal::fit_image_for_vision;
+
+/// Maximum number of qualifying images included in a single worker turn (D-09).
+const IMAGE_MAX_PER_TURN: usize = 4;
+
+/// Map a filename extension (case-insensitive) to its image MIME type.
+///
+/// Detection is by filename EXTENSION, not `content_type` — CLI-attached
+/// (`kanban attach`) images always carry `content_type: None`, so
+/// `content_type` can never be the gate (RESEARCH.md Pitfall 5). Unknown or
+/// non-image extensions return `None`.
+fn image_media_type_for_ext(ext: &str) -> Option<&'static str> {
+    match ext.to_ascii_lowercase().as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+/// Resolve `(bytes, filename)` for one task attachment, or `None` when it
+/// cannot be safely/successfully read (Task 2, D-08 wiring; T-46.5-01).
+///
+/// Confines every read to `ws_root.join(<filename-leaf>)` — the workspace
+/// copy `copy_attachments_into` (46.4 D-05) already placed there — or, only
+/// when that copy is absent, the attachment's DB `stored_path`. A filename
+/// with a path separator, a `".."` component, or an absolute prefix is
+/// REJECTED before it is ever joined into a path (never trusts the
+/// caller-controlled `filename`, mirroring the same defense-in-depth
+/// `file_name()`-only trust `copy_attachments_into` already applies).
+fn resolve_worker_attachment_bytes(
+    ws_root: Option<&std::path::Path>,
+    filename: &str,
+    stored_path: &str,
+) -> Option<(Vec<u8>, String)> {
+    let leaf = std::path::Path::new(filename);
+    let is_safe_leaf = leaf.components().count() == 1
+        && matches!(
+            leaf.components().next(),
+            Some(std::path::Component::Normal(_))
+        );
+    if !is_safe_leaf {
+        tracing::warn!(
+            filename = %filename,
+            "kanban worker image turn: skipping attachment with unsafe filename (traversal/absolute component)"
+        );
+        return None;
+    }
+
+    let workspace_copy = ws_root.map(|ws| ws.join(leaf));
+    let read_path: Option<std::path::PathBuf> = match &workspace_copy {
+        Some(p) if p.is_file() => Some(p.clone()),
+        _ => {
+            let stored = std::path::Path::new(stored_path);
+            stored.is_file().then(|| stored.to_path_buf())
+        }
+    };
+
+    match read_path {
+        Some(path) => match std::fs::read(&path) {
+            Ok(bytes) => Some((bytes, filename.to_string())),
+            Err(e) => {
+                tracing::warn!(
+                    filename = %filename,
+                    error = %e,
+                    "kanban worker image turn: failed to read attachment bytes, skipping"
+                );
+                None
+            }
+        },
+        None => {
+            tracing::warn!(
+                filename = %filename,
+                "kanban worker image turn: attachment not found in workspace or stored_path, skipping"
+            );
+            None
+        }
+    }
+}
+
+/// Build a kanban worker's first LLM turn `ChatMessage`, carrying `prompt`
+/// plus one base64 `image_url` content part per qualifying image (D-08).
+///
+/// `images` is `(bytes, filename)` pairs — bytes read from the workspace
+/// copy `copy_attachments_into` (46.4 D-05) already placed, filename used
+/// only for extension-based MIME detection and diagnostics (never as a
+/// filesystem path here).
+///
+/// D-09 bounds, applied in input order: an image whose extension is not a
+/// recognized image type is skipped; an image larger than
+/// [`IMAGE_SEND_MAX_BYTES`] is downscaled/re-encoded via the shared
+/// [`fit_image_for_vision`] so it is still perceived (only a genuinely
+/// undecodable / un-fittable image is skipped); once [`IMAGE_MAX_PER_TURN`]
+/// qualifying images have been included, the remainder are skipped. Every skip
+/// emits a `tracing::warn!` naming the file and reason.
+///
+/// 46.5.1 fail-loud: if `images` is non-empty but NONE could be included, the
+/// returned text turn carries an explicit "you cannot see the image — call
+/// `kanban_block`, do not guess" notice, so a perception failure blocks the
+/// task rather than inviting the worker to confabulate. When `images` is empty,
+/// a plain text-only `ChatMessage` is returned. This never panics.
+fn build_worker_turn_with_images(prompt: &str, images: &[(Vec<u8>, String)]) -> ChatMessage {
+    let mut parts = vec![ContentPart::Text {
+        text: prompt.to_string(),
+    }];
+
+    let mut included = 0usize;
+    for (bytes, filename) in images {
+        if included >= IMAGE_MAX_PER_TURN {
+            tracing::warn!(
+                filename = %filename,
+                max_per_turn = IMAGE_MAX_PER_TURN,
+                "kanban worker image turn: IMAGE_MAX_PER_TURN reached, skipping remaining image attachment(s)"
+            );
+            continue;
+        }
+
+        let ext = std::path::Path::new(filename)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("");
+        let Some(mime) = image_media_type_for_ext(ext) else {
+            tracing::warn!(
+                filename = %filename,
+                ext = %ext,
+                "kanban worker image turn: skipping non-image attachment"
+            );
+            continue;
+        };
+
+        // 46.5.1: downscale oversized images under the provider send ceiling
+        // instead of dropping them, so a realistic image (e.g. a 9 MiB ComfyUI
+        // character sheet) is actually perceived rather than silently omitted.
+        // Only a genuinely undecodable / un-fittable image is skipped here.
+        let Some((payload, send_mime)) = fit_image_for_vision(bytes, mime) else {
+            tracing::warn!(
+                filename = %filename,
+                size_bytes = bytes.len(),
+                "kanban worker image turn: image could not be decoded or fitted under the size ceiling; skipping"
+            );
+            continue;
+        };
+
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&payload);
+        let url = format!("data:{send_mime};base64,{encoded}");
+        parts.push(ContentPart::ImageUrl {
+            image_url: ImageUrl { url, detail: None },
+        });
+        included += 1;
+    }
+
+    if included == 0 {
+        // 46.5.1 fail-loud: if images were ATTACHED but none could be shown
+        // (all undecodable / un-fittable), do NOT silently degrade to a plain
+        // text turn — the worker would hallucinate a description of an image it
+        // never saw (the original incident). Tell it explicitly that it cannot
+        // see the image(s) and must block rather than guess.
+        if images.is_empty() {
+            return ChatMessage::user(prompt);
+        }
+        let note = format!(
+            "{prompt}\n\n[SYSTEM NOTICE — IMAGE PERCEPTION FAILURE]\n\
+             {n} image attachment(s) are associated with this task but could NOT be \
+             included in your context (they failed to decode or exceeded size limits). \
+             You CANNOT see them. Do NOT describe, summarize, or invent their visual \
+             contents under any circumstances. If completing this task requires seeing \
+             the image, call kanban_block(reason=\"attached image(s) could not be loaded \
+             for viewing\") and stop. Guessing image contents is a task failure.",
+            n = images.len(),
+        );
+        return ChatMessage::user(note);
+    }
+
+    ChatMessage {
+        role: Role::User,
+        content: Some(MessageContent::Parts(parts)),
+        tool_calls: None,
+        tool_call_id: None,
+        name: None,
+        is_recall_context: false,
+    }
+}
+
+/// Q6 mitigation: guard against the merge/codex `AnyClient::CodexResponses`
+/// client silently dropping image content.
+///
+/// `CodexClient::to_input_items` (`codex_client.rs`) calls
+/// `ChatMessage::content_text()` (`ironhermes-core/src/types.rs:399-401`),
+/// which returns only the `Text` part of a `MessageContent::Parts` message —
+/// any `ContentPart::ImageUrl` is discarded silently, no error, no log. This
+/// guard makes that failure loud: returns `Err` when the resolved client is
+/// `CodexResponses` and the worker turn carries one or more qualifying
+/// images, so a kanban image task never silently degrades to a
+/// caption-only, no-image turn that looks like a normal completion.
+fn guard_image_capable_client(is_codex: bool, image_count: usize) -> anyhow::Result<()> {
+    if is_codex && image_count > 0 {
+        anyhow::bail!(
+            "kanban worker: resolved client is AnyClient::CodexResponses, which silently \
+             drops image content (CodexClient::to_input_items -> ChatMessage::content_text, \
+             types.rs:399-401) — refusing to send {image_count} image(s) through a client that \
+             cannot deliver them to the model"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod worker_turn_image_tests {
+    use super::*;
+
+    fn png_bytes() -> Vec<u8> {
+        // Minimal but non-trivial payload; content is irrelevant to the
+        // builder, only byte length and filename extension matter.
+        vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+    }
+
+    #[test]
+    fn build_worker_turn_with_images_single_png_produces_parts_with_data_uri() {
+        let images = vec![(png_bytes(), "cat.png".to_string())];
+        let msg = build_worker_turn_with_images("describe this", &images);
+        match msg.content {
+            Some(MessageContent::Parts(parts)) => {
+                assert_eq!(parts.len(), 2, "expected [Text, ImageUrl]");
+                match &parts[0] {
+                    ContentPart::Text { text } => assert_eq!(text, "describe this"),
+                    other => panic!("expected Text part first, got {other:?}"),
+                }
+                match &parts[1] {
+                    ContentPart::ImageUrl { image_url } => {
+                        assert!(
+                            image_url.url.starts_with("data:image/png;base64,"),
+                            "url must start with data:image/png;base64, got {}",
+                            image_url.url
+                        );
+                    }
+                    other => panic!("expected ImageUrl part second, got {other:?}"),
+                }
+            }
+            other => panic!("expected MessageContent::Parts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_worker_turn_with_images_two_images_text_first_then_in_order() {
+        let images = vec![
+            (png_bytes(), "first.png".to_string()),
+            (png_bytes(), "second.jpg".to_string()),
+        ];
+        let msg = build_worker_turn_with_images("prompt", &images);
+        let MessageContent::Parts(parts) = msg.content.unwrap() else {
+            panic!("expected Parts");
+        };
+        assert_eq!(parts.len(), 3, "expected [Text, ImageUrl, ImageUrl]");
+        assert!(matches!(parts[0], ContentPart::Text { .. }));
+        match &parts[1] {
+            ContentPart::ImageUrl { image_url } => {
+                assert!(image_url.url.starts_with("data:image/png;base64,"))
+            }
+            other => panic!("expected ImageUrl, got {other:?}"),
+        }
+        match &parts[2] {
+            ContentPart::ImageUrl { image_url } => {
+                assert!(image_url.url.starts_with("data:image/jpeg;base64,"))
+            }
+            other => panic!("expected ImageUrl, got {other:?}"),
+        }
+    }
+
+    /// content_type is never available for CLI-attached images (always
+    /// `None`) — the builder must include the image purely from its
+    /// filename extension (Pitfall 5).
+    #[test]
+    fn build_worker_turn_with_images_includes_image_with_no_content_type_signal() {
+        let images = vec![(png_bytes(), "no_content_type.png".to_string())];
+        let msg = build_worker_turn_with_images("prompt", &images);
+        let MessageContent::Parts(parts) = msg.content.unwrap() else {
+            panic!("expected Parts (image included via extension detection alone)");
+        };
+        assert_eq!(parts.len(), 2);
+    }
+
+    /// A `side`×`side` PNG whose per-pixel values are pseudo-random (splitmix64)
+    /// so PNG cannot compress it away — at side²×3 raw bytes the encoded size
+    /// reliably clears the 4 MiB downscale trigger. 46.5.1.
+    fn incompressible_png(side: u32) -> Vec<u8> {
+        let img = image::RgbImage::from_fn(side, side, |x, y| {
+            let mut v = (x as u64)
+                .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                .wrapping_add((y as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
+            v ^= v >> 29;
+            v = v.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            v ^= v >> 32;
+            image::Rgb([
+                (v & 0xFF) as u8,
+                ((v >> 8) & 0xFF) as u8,
+                ((v >> 16) & 0xFF) as u8,
+            ])
+        });
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .expect("encode test png");
+        out.into_inner()
+    }
+
+    #[test]
+    fn build_worker_turn_with_images_downscales_oversized_decodable_image_instead_of_dropping() {
+        // Regression for the 46.5.1 incident: a realistic large image (encoded
+        // well over the downscale trigger, dimensions over IMAGE_MAX_EDGE) must
+        // be DOWNSCALED and INCLUDED as an image_url part, not dropped — the old
+        // 5 MiB hard skip made the worker confabulate.
+        // > IMAGE_MAX_EDGE (1568); 1800*1800*3 ≈ 9.3 MiB raw
+        let big = incompressible_png(1800);
+        assert!(
+            big.len() > IMAGE_SEND_MAX_BYTES,
+            "fixture must exceed the send ceiling to exercise the resize path (got {} bytes)",
+            big.len()
+        );
+        let images = vec![(big, "sheet.png".to_string())];
+        let msg = build_worker_turn_with_images("describe the image", &images);
+        let Some(MessageContent::Parts(parts)) = msg.content else {
+            panic!("expected Parts with the downscaled image, got text (image was dropped!)");
+        };
+        // 1 Text + exactly 1 (downscaled) image.
+        assert_eq!(parts.len(), 2, "expected text + one downscaled image part");
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, ContentPart::ImageUrl { .. })),
+            "the downscaled image must be present as an image_url part"
+        );
+    }
+
+    // Unit coverage of fit_image_for_vision itself (dense in-envelope re-encode,
+    // tiny-dims metadata bloat, >20 MiB downscale, JPEG fallback, undecodable →
+    // None) lives with the shared helper in
+    // ironhermes_gateway::multimodal::tests.
+
+    #[test]
+    fn build_worker_turn_with_images_undecodable_oversized_triggers_fail_loud_note() {
+        // 46.5.1: an oversized blob that is NOT a decodable image cannot be
+        // fitted, so it is dropped — but because it was the only attachment the
+        // turn carries an explicit block/no-guess notice, never a silent
+        // text-only turn (which previously invited confabulation).
+        let junk = vec![0u8; IMAGE_SEND_MAX_BYTES + 1];
+        let images = vec![(junk, "huge.png".to_string())];
+        let msg = build_worker_turn_with_images("describe the image", &images);
+        let Some(MessageContent::Text(text)) = msg.content else {
+            panic!("expected a text turn carrying the fail-loud notice");
+        };
+        assert!(
+            text.contains("kanban_block"),
+            "must instruct the worker to block; got: {text}"
+        );
+        assert!(
+            text.contains("CANNOT see"),
+            "must state the image is not visible; got: {text}"
+        );
+    }
+
+    #[test]
+    fn build_worker_turn_with_images_more_than_max_per_turn_keeps_only_first_four() {
+        let images: Vec<(Vec<u8>, String)> = (0..6)
+            .map(|i| (png_bytes(), format!("img{i}.png")))
+            .collect();
+        let msg = build_worker_turn_with_images("prompt", &images);
+        let MessageContent::Parts(parts) = msg.content.unwrap() else {
+            panic!("expected Parts");
+        };
+        // 1 Text + IMAGE_MAX_PER_TURN ImageUrl parts.
+        assert_eq!(parts.len(), 1 + IMAGE_MAX_PER_TURN);
+    }
+
+    #[test]
+    fn build_worker_turn_with_images_non_image_extension_is_skipped() {
+        let images = vec![(b"not an image".to_vec(), "notes.txt".to_string())];
+        let msg = build_worker_turn_with_images("prompt", &images);
+        assert!(matches!(msg.content, Some(MessageContent::Text(_))));
+    }
+
+    #[test]
+    fn image_media_type_for_ext_matches_known_extensions_case_insensitively() {
+        assert_eq!(image_media_type_for_ext("png"), Some("image/png"));
+        assert_eq!(image_media_type_for_ext("PNG"), Some("image/png"));
+        assert_eq!(image_media_type_for_ext("jpg"), Some("image/jpeg"));
+        assert_eq!(image_media_type_for_ext("jpeg"), Some("image/jpeg"));
+        assert_eq!(image_media_type_for_ext("JPEG"), Some("image/jpeg"));
+        assert_eq!(image_media_type_for_ext("gif"), Some("image/gif"));
+        assert_eq!(image_media_type_for_ext("webp"), Some("image/webp"));
+    }
+
+    #[test]
+    fn image_media_type_for_ext_unknown_extension_returns_none() {
+        assert_eq!(image_media_type_for_ext("txt"), None);
+        assert_eq!(image_media_type_for_ext("pdf"), None);
+        assert_eq!(image_media_type_for_ext(""), None);
+    }
+
+    #[test]
+    fn guard_codex_image_drop_errs_when_codex_and_images_present() {
+        assert!(guard_image_capable_client(true, 1).is_err());
+        assert!(guard_image_capable_client(true, 4).is_err());
+    }
+
+    #[test]
+    fn guard_codex_image_drop_ok_when_not_codex_or_no_images() {
+        assert!(guard_image_capable_client(false, 3).is_ok());
+        assert!(guard_image_capable_client(true, 0).is_ok());
+        assert!(guard_image_capable_client(false, 0).is_ok());
+    }
+
+    // -----------------------------------------------------------------
+    // Task 2 (D-08 wiring): resolve_worker_attachment_bytes + end-to-end
+    // fixture-workspace seam test (acceptance criteria).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn resolve_worker_attachment_bytes_prefers_workspace_copy() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("cat.png"), png_bytes()).unwrap();
+        // stored_path deliberately points somewhere that doesn't exist, to
+        // prove the workspace copy is preferred and stored_path is never touched.
+        let got =
+            resolve_worker_attachment_bytes(Some(ws.path()), "cat.png", "/nonexistent/cat.png");
+        let (bytes, filename) = got.expect("workspace copy must be found");
+        assert_eq!(bytes, png_bytes());
+        assert_eq!(filename, "cat.png");
+    }
+
+    #[test]
+    fn resolve_worker_attachment_bytes_falls_back_to_stored_path_when_workspace_copy_absent() {
+        let ws = tempfile::tempdir().unwrap();
+        let stored_dir = tempfile::tempdir().unwrap();
+        let stored_path = stored_dir.path().join("dog.jpg");
+        std::fs::write(&stored_path, png_bytes()).unwrap();
+        // No workspace copy exists for "dog.jpg" in `ws`.
+        let got = resolve_worker_attachment_bytes(
+            Some(ws.path()),
+            "dog.jpg",
+            stored_path.to_str().unwrap(),
+        );
+        let (bytes, filename) = got.expect("stored_path fallback must be found");
+        assert_eq!(bytes, png_bytes());
+        assert_eq!(filename, "dog.jpg");
+    }
+
+    /// T-46.5-01: a filename with a traversal component must be rejected
+    /// BEFORE any path join/read is attempted, regardless of workspace or
+    /// stored_path contents.
+    #[test]
+    fn resolve_worker_attachment_bytes_rejects_traversal_filename() {
+        let ws = tempfile::tempdir().unwrap();
+        // A real secret file elsewhere that traversal must never reach.
+        let secret_dir = tempfile::tempdir().unwrap();
+        std::fs::write(secret_dir.path().join("secret.png"), b"top secret").unwrap();
+        let traversal_filename = "../secret.png";
+
+        let got = resolve_worker_attachment_bytes(
+            Some(ws.path()),
+            traversal_filename,
+            secret_dir.path().join("secret.png").to_str().unwrap(),
+        );
+        assert!(
+            got.is_none(),
+            "a filename with a '..' component must be rejected, not read"
+        );
+    }
+
+    #[test]
+    fn resolve_worker_attachment_bytes_rejects_absolute_filename() {
+        let ws = tempfile::tempdir().unwrap();
+        let got = resolve_worker_attachment_bytes(Some(ws.path()), "/etc/passwd", "/etc/passwd");
+        assert!(got.is_none(), "an absolute filename must be rejected");
+    }
+
+    #[test]
+    fn resolve_worker_attachment_bytes_missing_file_returns_none() {
+        let ws = tempfile::tempdir().unwrap();
+        let got = resolve_worker_attachment_bytes(Some(ws.path()), "ghost.png", "/nonexistent");
+        assert!(got.is_none());
+    }
+
+    /// Seam/behavior test (acceptance criteria): from a fixture workspace
+    /// containing a PNG copy, through `resolve_worker_attachment_bytes` and
+    /// `build_worker_turn_with_images`, to the final assembled first
+    /// ChatMessage — asserts the Parts content whose image_url starts with
+    /// "data:image/png;base64,".
+    #[test]
+    fn worker_turn_image_end_to_end_from_fixture_workspace() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("attached.png"), png_bytes()).unwrap();
+
+        let pair =
+            resolve_worker_attachment_bytes(Some(ws.path()), "attached.png", "/db/stored/path")
+                .expect("fixture workspace copy must resolve");
+        let images = vec![pair];
+
+        let msg =
+            build_worker_turn_with_images("write a backstory for the attached image", &images);
+        let MessageContent::Parts(parts) = msg.content.unwrap() else {
+            panic!("expected Parts content for a worker turn with a qualifying image");
+        };
+        assert_eq!(parts.len(), 2, "expected [Text, ImageUrl]");
+        match &parts[1] {
+            ContentPart::ImageUrl { image_url } => {
+                assert!(
+                    image_url.url.starts_with("data:image/png;base64,"),
+                    "expected data:image/png;base64, prefix, got {}",
+                    image_url.url
+                );
+            }
+            other => panic!("expected ImageUrl part, got {other:?}"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -429,51 +1445,82 @@ const GOAL_TOOLSET_EXTENDED: &[&str] = &[
     "skill_manage", // +3 memory / skill tools
 ];
 
+/// Phase 47 Plan 08 (D-11): the four generation tool names, appended to
+/// whichever goal-mode preset is in effect ONLY when
+/// `guardrails.surfaces.kanban_goal_mode` is true. The base preset arrays
+/// (`GOAL_TOOLSET_RESTRICTED`/`GOAL_TOOLSET_EXTENDED`) are compile-time
+/// `const`s, so this runtime gate is applied at the `retain_by_name` call
+/// sites via this helper rather than by mutating the consts themselves.
+const GENERATION_TOOL_NAMES: &[&str] = &[
+    "image_gen",
+    "video_generate",
+    "video_animate",
+    "video_to_video",
+];
+
+/// Build the effective goal-mode retain-list: `base` plus the four gen tool
+/// names when `generation_enabled` is true, unchanged otherwise.
+fn goal_toolset_with_generation(
+    base: &[&'static str],
+    generation_enabled: bool,
+) -> Vec<&'static str> {
+    let mut list = base.to_vec();
+    if generation_enabled {
+        list.extend_from_slice(GENERATION_TOOL_NAMES);
+    }
+    list
+}
+
 /// Apply goal-mode toolset filtering to the tool registry.
 ///
 /// Called at BOTH worker-mode entry points (run_single + run_chat), immediately
 /// after `register_kanban_tools_if_applicable`, per D-B2 requirement.
 ///
 /// No-ops when:
-/// - `HERMES_KANBAN_TASK` is unset (not a kanban worker process)
-/// - `HERMES_KANBAN_GOAL_MODE` is not exactly "1" (non-goal task)
+/// - `IRONHERMES_KANBAN_TASK` is unset (not a kanban worker process)
+/// - `IRONHERMES_KANBAN_GOAL_MODE` is not exactly "1" (non-goal task)
 ///
-/// When `HERMES_KANBAN_GOAL_TOOLSET` is unset under goal_mode=1, this function
+/// When `IRONHERMES_KANBAN_GOAL_TOOLSET` is unset under goal_mode=1, this function
 /// emits a LOUD `tracing::warn!` and early-returns WITHOUT applying any filter.
 /// This surfaces dispatcher misconfiguration (D-E2 single-source-of-truth:
 /// the dispatcher is the only place that resolves NULL→"restricted"; the worker
 /// must NOT silently apply a second default — BLOCKER 3 from plan-checker).
 ///
 /// For the "full" preset: no-op (all registered tools remain visible).
-/// For "extended": retain_by_name(GOAL_TOOLSET_EXTENDED).
-/// For "restricted" (or any unrecognized value): retain_by_name(GOAL_TOOLSET_RESTRICTED).
+/// For "extended": retain_by_name(GOAL_TOOLSET_EXTENDED [+ gen tools, D-11]).
+/// For "restricted" (or any unrecognized value): retain_by_name(GOAL_TOOLSET_RESTRICTED [+ gen tools]).
 async fn filter_for_goal_mode_if_applicable(
     registry: &Arc<RwLock<ToolRegistry>>,
+    config: &Config,
 ) -> anyhow::Result<()> {
+    // Phase 47 Plan 08 (D-11): gen tool names join BOTH presets only when this
+    // surface toggle is true; independent of `surfaces.delegate`/`surfaces.chat`
+    // (GEN-04 adjacency — enabling one surface never enables another).
+    let generation_enabled = config.generation.guardrails.surfaces.kanban_goal_mode;
     // Gate 1: must be a kanban worker process.
-    let worker_mode = std::env::var("HERMES_KANBAN_TASK").is_ok();
+    let worker_mode = ironhermes_kanban::kanban_env("TASK").is_some();
     if !worker_mode {
         return Ok(());
     }
 
     // Gate 2: goal mode must be active for this task.
-    let goal_mode = std::env::var("HERMES_KANBAN_GOAL_MODE")
+    let goal_mode = ironhermes_kanban::kanban_env("GOAL_MODE")
         .map(|v| v == "1")
         .unwrap_or(false);
     if !goal_mode {
         return Ok(());
     }
 
-    // D-E2: HERMES_KANBAN_GOAL_TOOLSET must have been set by the dispatcher.
+    // D-E2: IRONHERMES_KANBAN_GOAL_TOOLSET must have been set by the dispatcher.
     // If absent under goal_mode=1, this is a dispatcher misconfiguration — warn
     // LOUD and early-return rather than applying a silent "restricted" default
     // (BLOCKER 3 fix: worker must not be a second resolver).
-    let preset = match std::env::var("HERMES_KANBAN_GOAL_TOOLSET") {
-        Ok(v) => v,
-        Err(_) => {
+    let preset = match ironhermes_kanban::kanban_env("GOAL_TOOLSET") {
+        Some(v) => v,
+        None => {
             tracing::warn!(
                 target: "kanban.goal_toolset",
-                "HERMES_KANBAN_GOAL_TOOLSET is unset under HERMES_KANBAN_GOAL_MODE=1 — \
+                "IRONIRONHERMES_KANBAN_GOAL_TOOLSET is unset under IRONIRONHERMES_KANBAN_GOAL_MODE=1 — \
                  dispatcher should have resolved NULL→\"restricted\" and emitted this var. \
                  Skipping toolset filter to avoid silent misconfiguration masking (D-E2)."
             );
@@ -491,7 +1538,8 @@ async fn filter_for_goal_mode_if_applicable(
             return Ok(());
         }
         "extended" => {
-            let n = registry.write().await.retain_by_name(GOAL_TOOLSET_EXTENDED);
+            let list = goal_toolset_with_generation(GOAL_TOOLSET_EXTENDED, generation_enabled);
+            let n = registry.write().await.retain_by_name(&list);
             tracing::info!(
                 target: "kanban.goal_mode",
                 preset = "extended",
@@ -508,10 +1556,8 @@ async fn filter_for_goal_mode_if_applicable(
                     "goal-mode: unrecognized toolset preset — falling back to \"restricted\""
                 );
             }
-            let n = registry
-                .write()
-                .await
-                .retain_by_name(GOAL_TOOLSET_RESTRICTED);
+            let list = goal_toolset_with_generation(GOAL_TOOLSET_RESTRICTED, generation_enabled);
+            let n = registry.write().await.retain_by_name(&list);
             tracing::info!(
                 target: "kanban.goal_mode",
                 preset = "restricted",
@@ -522,6 +1568,173 @@ async fn filter_for_goal_mode_if_applicable(
         }
     };
     let _ = removed; // logged above; suppress unused-variable lint
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 47 Plan 08 (D-08) — cross-process kanban generation ledger adapter
+// ---------------------------------------------------------------------------
+
+/// Concrete `GenerationLedger` (Plan 05 seam) over
+/// `KanbanStore::try_reserve_generation_slot` (Plan 03) — the crate-cycle-safe
+/// placement: `ironhermes-tools` cannot depend on `ironhermes-kanban` (which
+/// itself depends on `ironhermes-tools`), but `ironhermes-cli` already
+/// depends on both.
+struct KanbanLedgerAdapter;
+
+impl ironhermes_tools::gen_guardrail::GenerationLedger for KanbanLedgerAdapter {
+    fn try_reserve_pool(
+        &self,
+        root_id: &str,
+        pool: u32,
+        model: &str,
+        mode: &str,
+    ) -> anyhow::Result<bool> {
+        // Opens a fresh handle per call (mirrors the `KanbanStore::open_from_env()`
+        // idiom used throughout this file) — reaches kanban.db via the EXISTING
+        // `IRONHERMES_KANBAN_DB` env var; no new spawn-contract var is introduced
+        // (Plan 03 Pitfall 5 / this plan's explicit prohibition).
+        let mut store = ironhermes_kanban::KanbanStore::open_from_env()?;
+        // `per_child_cap` is enforced in-process by `GenerationGuardrail`
+        // itself (Plan 05) — the `0` here is inert; `try_reserve_generation_slot`'s
+        // own doc states it is "not enforced by this method... carried for
+        // signature symmetry" with the Plan 05 trait only.
+        match store.try_reserve_generation_slot(root_id, pool, 0, model, mode)? {
+            ironhermes_kanban::store::GenReserveOutcome::Granted { .. } => Ok(true),
+            ironhermes_kanban::store::GenReserveOutcome::PoolExhausted { .. } => Ok(false),
+        }
+    }
+}
+
+/// Rewire a kanban worker's four gen tools onto the cross-process
+/// kanban.db-backed guardrail (Phase 47 Plan 08, D-08/D-11).
+///
+/// A no-op outside kanban-worker mode — interactive chat / plain CLI runs
+/// keep the Root/in-process guardrail `build_app_runtime_bundle` already
+/// wired (Plan 08 Task 1). MUST be called AFTER
+/// `filter_for_goal_mode_if_applicable` (both call sites in this file already
+/// order it that way): a goal-mode worker whose preset excludes the gen tools
+/// (`surfaces.kanban_goal_mode = false`) had them REMOVED by that filter's
+/// `retain_by_name` — `ToolRegistry::register` is an upsert-by-name, so
+/// re-registering here unconditionally would silently ADD them back,
+/// defeating the goal-mode fail-closed gate. This function therefore skips
+/// entirely in that one case; every other case (goal-mode enabled, or
+/// regular/non-goal-mode kanban regardless of `surfaces.kanban`) rewires.
+///
+/// D-11 (regular kanban): the registry stays FULL either way (46.5 image
+/// tasks keep working, unlike delegate's registration-level fail-closed) —
+/// `surfaces.kanban = false` instead fail-closes at the GUARDRAIL level
+/// (`session_pool = 0` / `per_child_cap = 0`, blocking every reservation)
+/// rather than by removing tools.
+async fn rewire_kanban_generation_guardrail_if_applicable(
+    registry: &Arc<RwLock<ToolRegistry>>,
+    config: &Config,
+) -> anyhow::Result<()> {
+    let Some(task_id) = ironhermes_kanban::kanban_env("TASK") else {
+        return Ok(()); // not a kanban worker process
+    };
+
+    let goal_mode = ironhermes_kanban::kanban_env("GOAL_MODE")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    let (session_pool, per_child_cap) = if goal_mode {
+        if !config.generation.guardrails.surfaces.kanban_goal_mode {
+            // The goal-mode preset filter already removed the gen tools from
+            // the registry (D-11 registration-level fail-closed) — do not
+            // undo that by re-registering them here.
+            return Ok(());
+        }
+        (
+            config.generation.guardrails.session_pool,
+            config.generation.guardrails.per_child_cap,
+        )
+    } else if config.generation.guardrails.surfaces.kanban {
+        (
+            config.generation.guardrails.session_pool,
+            config.generation.guardrails.per_child_cap,
+        )
+    } else {
+        // D-11 fail-closed via the guardrail (registration stays full).
+        (0, 0)
+    };
+
+    // D-08: key the cross-process ledger by the swarm root task id, or this
+    // worker's own task id when solitary — `find_root_task_id` resolves both
+    // uniformly (see its doc comment; RESEARCH Open Question 2 verified).
+    let ledger_key = {
+        let store = ironhermes_kanban::KanbanStore::open_from_env()?;
+        store.find_root_task_id(&task_id)?
+    };
+
+    let guardrail = Arc::new(
+        ironhermes_tools::gen_guardrail::GenerationGuardrail::new(
+            session_pool,
+            per_child_cap,
+            ledger_key,
+        )
+        .with_ledger(Arc::new(KanbanLedgerAdapter)),
+    );
+    let kind = ironhermes_tools::gen_guardrail::ReservationKind::Descendant { child_id: task_id };
+    let gen_config = Arc::new(config.clone());
+
+    let mut reg = registry.write().await;
+    reg.register_image_gen_tool(
+        gen_config.clone(),
+        None,
+        None,
+        Some((guardrail.clone(), kind.clone())),
+    );
+    reg.register_video_gen_tools(
+        gen_config.clone(),
+        None,
+        None,
+        Some((guardrail.clone(), kind.clone())),
+    );
+    reg.register_video_to_video_tool(gen_config, None, None, Some((guardrail, kind)));
+
+    Ok(())
+}
+
+/// D-02 hardening (kanban image-task end-to-end follow-up): after tool registration +
+/// goal-mode filtering, verify a kanban worker can actually SEE its terminator tools
+/// (`kanban_complete` + `kanban_block`) in the LLM-visible schema.
+///
+/// The original D-02 guard only failed loud when the kanban DB could not be opened — it did
+/// NOT verify the tools survived the `get_definitions` toolset filter. A worker whose DB opened
+/// fine but whose kanban tools were filtered out (the `"kanban"` toolset was not exempt from the
+/// layer-1 filter) sailed into the LLM loop with zero terminators, improvised `kanban_show` as a
+/// shell command, and left the task `running` forever. This closes that gap: if a terminator is
+/// missing after all filtering, refuse to run rather than strand the worker.
+///
+/// No-op when not a kanban worker process (`IRONHERMES_KANBAN_TASK` unset).
+async fn assert_worker_terminators_visible(
+    registry: &Arc<RwLock<ToolRegistry>>,
+) -> anyhow::Result<()> {
+    if ironhermes_kanban::kanban_env("TASK").is_none() {
+        return Ok(());
+    }
+    let visible: std::collections::HashSet<String> = registry
+        .read()
+        .await
+        .get_definitions(None)
+        .into_iter()
+        .map(|s| s.function.name)
+        .collect();
+    const REQUIRED: &[&str] = &["kanban_complete", "kanban_block"];
+    let missing: Vec<&str> = REQUIRED
+        .iter()
+        .copied()
+        .filter(|n| !visible.contains(*n))
+        .collect();
+    if !missing.is_empty() {
+        return Err(anyhow::anyhow!(
+            "kanban worker mode: terminator tool(s) {missing:?} are not visible to the LLM after \
+             tool registration + toolset filtering — the worker would have no way to complete or \
+             block its task; refusing to run. (Check the kanban toolset exemption in \
+             ToolRegistry::get_definitions and the goal-mode allow-lists.)"
+        ));
+    }
     Ok(())
 }
 
@@ -555,7 +1768,7 @@ async fn main() -> Result<()> {
     // so pipes like `hermes -e "prompt" | jq` stay clean.
     if let Some(ref name) = active_profile {
         eprintln!(
-            "[profile: {}] HERMES_HOME={}",
+            "[profile: {}] IRONHERMES_HOME={}",
             name,
             ironhermes_core::display_hermes_home()
         );
@@ -632,7 +1845,25 @@ async fn main() -> Result<()> {
     ) && cli.execute.is_none()
         && !chat_has_query;
     if run_preflight {
-        preflight::run_preflight_check(&cli).await?;
+        // GAP-7 (46.9-14, D-06): a gateway launched by a daemon/cron
+        // supervisor has non-TTY stdin — an interactive stdin wizard prompt
+        // is always wrong for a long-running process. `interactive` starts
+        // from stdin TTY detection and is additionally forced false when the
+        // Gateway command's explicit --non-interactive flag is set. The
+        // Chat/None (interactive REPL) path is unaffected unless its stdin
+        // is also non-TTY. This does NOT change `run_preflight` above (the
+        // gate CONDITION deciding WHICH commands run preflight) — only the
+        // interactive argument passed into run_preflight_check.
+        use std::io::IsTerminal;
+        let interactive = std::io::stdin().is_terminal()
+            && !matches!(
+                cli.command,
+                Some(Commands::Gateway {
+                    non_interactive: true,
+                    ..
+                })
+            );
+        preflight::run_preflight_check(&cli, interactive).await?;
     }
 
     // GAP-6a: interactive REPL entry points (`hermes chat`, bare `hermes`) get a
@@ -647,12 +1878,21 @@ async fn main() -> Result<()> {
     let is_interactive_repl = matches!(cli.command, Some(Commands::Chat { .. }) | None)
         && cli.execute.is_none()
         && !chat_has_query;
+    // NF-1 (46.8-gap, D-15): vendored `rusty_vault` logs the master key + root
+    // token via `log::debug!` (rusty_vault-0.2.1/src/core.rs + token_store.rs),
+    // and `tracing-subscriber`'s default `tracing-log` bridge routes `log`
+    // records into this subscriber. Silence the `rusty_vault` target
+    // UNCONDITIONALLY (harmless no-op when the crate isn't compiled) so no
+    // `RUST_LOG` override — including an operator's `RUST_LOG=debug` — can
+    // leak secrets to stderr/log files. Applied AFTER `RUST_LOG` is honored so
+    // it always wins regardless of which arm above built the filter.
     let env_filter = match std::env::var("RUST_LOG") {
         Ok(_) => tracing_subscriber::EnvFilter::from_default_env(),
         Err(_) if is_interactive_repl => tracing_subscriber::EnvFilter::new("error"),
         Err(_) => tracing_subscriber::EnvFilter::from_default_env()
             .add_directive("ironhermes=info".parse().unwrap()),
-    };
+    }
+    .add_directive("rusty_vault=off".parse().expect("valid static directive"));
     // Phase 22.4 D-03/D-04 + Pitfall 2: ratatui chat path defers subscriber
     // install to run_chat_ratatui (which installs TuiTracingSubscriberLayer).
     // All other paths (non-chat commands + chat-when-classic-wins) install the
@@ -673,7 +1913,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Status(args)) => ironhermes_cli::status_cmd::run_status(args).await,
-        Some(Commands::Doctor) => doctor::run_doctor_check(),
+        Some(Commands::Doctor) => doctor::run_doctor_check().await,
         Some(Commands::Version) => cmd_version(),
         Some(Commands::Chat {
             ref message,
@@ -728,8 +1968,13 @@ async fn main() -> Result<()> {
                 .await
             }
         }
-        Some(Commands::Gateway { ref token }) => run_gateway(&cli, token.clone()).await,
+        Some(Commands::Gateway { ref token, .. }) => run_gateway(&cli, token.clone()).await,
         Some(Commands::Cron { command }) => cron::handle_cron_command(command).await,
+        Some(Commands::Auth { command }) => auth_cmd::handle_auth_command(command).await,
+        Some(Commands::Vault { command }) => vault_cmd::handle_vault_command(command).await,
+        Some(Commands::Web { command }) => web_cmd::handle_web_command(command).await,
+        #[cfg(feature = "buzz")]
+        Some(Commands::Buzz { command }) => buzz_cmd::handle_buzz_command(command).await,
         Some(Commands::Batch { command }) => batch::handle_batch_command(command).await,
         Some(Commands::Skills { action }) => {
             let config_path = ironhermes_core::Config::config_path();
@@ -823,6 +2068,17 @@ async fn main() -> Result<()> {
         Some(Commands::Tts {
             command: TtsCommands::Play { path },
         }) => match cmd_tts_play(path).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                eprintln!("error: {e:#}");
+                std::process::exit(1);
+            }
+        },
+        // Phase 36.17.8 — STT diagnostic CLI verbs (D-10).
+        // Calls build_stt_registry directly (NOT an LLM tool).
+        Some(Commands::Stt {
+            command: SttCommands::Info,
+        }) => match cmd_stt_info().await {
             Ok(()) => Ok(()),
             Err(e) => {
                 eprintln!("error: {e:#}");
@@ -957,6 +2213,45 @@ async fn cmd_tts_play(path: String) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Phase 36.17.8 — `hermes stt info` diagnostic subcommand.
+///
+/// Calls `build_stt_registry` directly (NOT an LLM tool) and prints the
+/// selected provider name.  This satisfies the acceptance criterion that
+/// `main.rs` contains `build_stt_registry` (plan 36.17.8-05 Task 3).
+async fn cmd_stt_info() -> anyhow::Result<()> {
+    use ironhermes_core::BUILTIN_STT_NAMES;
+    use ironhermes_tools::stt::{build_stt_registry, select_stt_provider};
+
+    let config = ironhermes_core::Config::load().unwrap_or_default();
+    let selected = select_stt_provider(&config.stt);
+    let registry = build_stt_registry(&config.stt);
+
+    println!(
+        "STT provider selected: {}",
+        selected
+            .as_deref()
+            .unwrap_or("<none — set GROQ_API_KEY or VOICE_TOOLS_OPENAI_KEY>")
+    );
+
+    for name in BUILTIN_STT_NAMES {
+        let available = registry
+            .get(name)
+            .map(|p| p.is_available())
+            .unwrap_or(false);
+        println!(
+            "  {} — {}",
+            name,
+            if available {
+                "available"
+            } else {
+                "unavailable"
+            }
+        );
+    }
+
+    Ok(())
+}
+
 fn cmd_version() -> Result<()> {
     println!(
         "{} v{}",
@@ -1038,12 +2333,12 @@ fn ensure_home_dirs() -> Result<()> {
 
 /// Run a single prompt and exit.
 async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()> {
-    let (client, mut config, resolver) = build_client(cli)?;
+    let (client, mut config, resolver) = build_client(cli).await?;
 
     // Phase 36.3.7.13 D-F1: clamp inner-loop iteration cap for goal-mode workers.
     // Applied HERE (before AgentRuntime::from_config captures the config) so the
     // clamped value is baked into the runtime's budget handle from the start.
-    if std::env::var("HERMES_KANBAN_GOAL_MODE")
+    if ironhermes_kanban::kanban_env("GOAL_MODE")
         .map(|v| v == "1")
         .unwrap_or(false)
     {
@@ -1068,6 +2363,13 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     let (yolo_enabled, _yolo_source) =
         ironhermes_cli::resolve_yolo(cli_yolo_flag, config.autonomous.yolo);
     ironhermes_cli::print_yolo_banner_to_stderr(yolo_enabled);
+
+    // Phase 36.3.12 Plan 10 (WR-01): load ApprovalsStore ONCE for the process
+    // lifetime so a `[s]ession` approval grant persists across every terminal/
+    // execute_code dispatch of this run — including every inner turn of a
+    // worker-mode goal loop — instead of being silently discarded by a fresh
+    // `ApprovalsStore::load()` per dispatch.
+    let approvals_store = std::sync::Arc::new(ironhermes_core::ApprovalsStore::load().await);
 
     // Phase 21.3: initialize global token estimator from model's encoding
     let main_ep = resolver.resolve_for_main();
@@ -1151,7 +2453,7 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         ironhermes_exec::process_registry::ProcessRegistry::new_for_session(session_id.clone()),
     ));
     // Plan 21.7-07 (D-03 / D-04 / D-05): session-scoped SubagentRegistry +
-    // HERMES_HOME for transcripts. The runner threads both into each
+    // IRONHERMES_HOME for transcripts. The runner threads both into each
     // `run_child` call so spawn/complete/cancel update state + transcripts.
     let subagent_registry = Arc::new(tokio::sync::RwLock::new(
         ironhermes_agent::subagent_registry::SubagentRegistry::new(),
@@ -1214,6 +2516,16 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     // Phase 27.1.1-gap-02: populate active_toolsets so the system-prompt skills
     // catalog text reflects the same enabled set as the API tool schemas.
     prompt_builder.set_active_toolsets(runtime.merged_tools().enabled_toolset_names());
+    // D-08 (Phase 46 Plan 04): populate connected_mcp_servers so requires_mcp_servers-gated
+    // skills (e.g. the Cloudflare skills) only surface when their MCP server is connected.
+    prompt_builder.set_connected_mcp_servers(
+        runtime
+            .mcp_manager()
+            .map(|m| m.connected_server_names().into_iter().collect())
+            .unwrap_or_default(),
+    );
+    // Phase 38.1 (D-04/D-05): freeze session timezone into PromptBuilder Timestamp slot.
+    prompt_builder.set_timezone(config.agent.timezone.clone());
     prompt_builder.load_memory().await;
     prompt_builder.load_skills();
     // Phase 36.3.7 Plan 05 (D-26): Inject KANBAN_GUIDANCE when worker-spawned.
@@ -1222,15 +2534,93 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
     register_kanban_tools_if_applicable(
         runtime.registry(),
         &runtime.merged_tools().enabled_toolset_names(),
+        Arc::new(config.clone()),
     )
     .await?;
     // Phase 36.3.7.13 F-03 / D-B2: apply goal-mode toolset filter after kanban tools
     // are registered. No-ops when not in goal-mode worker. BOTH main.rs call sites
     // (run_single:this + run_chat:~1700) must call this (D-B2 requirement).
-    filter_for_goal_mode_if_applicable(runtime.registry()).await?;
+    filter_for_goal_mode_if_applicable(runtime.registry(), &config).await?;
+    // Phase 47 Plan 08 (D-08): rewire kanban workers onto the cross-process
+    // kanban.db-backed guardrail (regular + goal-mode) — must run AFTER the
+    // goal-mode filter above, since goal-mode's registration-level gating
+    // (D-11) and this call's guardrail-level gating (D-11, regular kanban)
+    // are independent concerns applied in sequence.
+    rewire_kanban_generation_guardrail_if_applicable(runtime.registry(), &config).await?;
+    // D-02 hardening: fail loud if a worker's terminator tools got filtered out of the schema.
+    assert_worker_terminators_visible(runtime.registry()).await?;
     let system_msg = prompt_builder.build_system_message();
 
-    let user_msg = ChatMessage::user(prompt);
+    // Phase 46.5 D-08/D-09/Q6: assemble the worker's first LLM turn with
+    // image content blocks when this is a kanban worker task (worker_mode)
+    // carrying qualifying image attachments. worker_mode is hoisted here
+    // from its previous computation further below (Phase 36.3.7.12-04) so
+    // it's available before user_msg is built (it's a cheap kanban_env read,
+    // safe to compute once and reuse). When worker_mode is true, the
+    // KanbanStore is opened ONCE here and reused below as the goal-loop
+    // wrapper's kanban_store_arc — never opened a second time in one worker
+    // process (RESEARCH.md §2.3).
+    let worker_mode = ironhermes_kanban::kanban_env("TASK").is_some();
+    let kanban_store_arc: Option<
+        std::sync::Arc<tokio::sync::Mutex<ironhermes_kanban::KanbanStore>>,
+    > = if worker_mode {
+        Some(std::sync::Arc::new(tokio::sync::Mutex::new(
+            ironhermes_kanban::KanbanStore::open_from_env()
+                .context("open kanban store for worker image-turn assembly")?,
+        )))
+    } else {
+        None
+    };
+
+    let mut worker_images: Vec<(Vec<u8>, String)> = Vec::new();
+    if let Some(store_arc) = &kanban_store_arc {
+        let task_id_for_images = ironhermes_kanban::kanban_env("TASK").unwrap_or_default();
+        let attachments = store_arc.lock().await.list_attachments(&task_id_for_images);
+        match attachments {
+            Ok(metas) => {
+                // T-46.5-01: confine every read to the resolved worker
+                // workspace / attachment path — see
+                // resolve_worker_attachment_bytes for the traversal guard.
+                let ws_root = std::env::current_dir().ok();
+                for meta in metas {
+                    if let Some(pair) = resolve_worker_attachment_bytes(
+                        ws_root.as_deref(),
+                        &meta.filename,
+                        &meta.stored_path,
+                    ) {
+                        worker_images.push(pair);
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "kanban worker image turn: failed to list task attachments; proceeding text-only"
+                );
+            }
+        }
+    }
+
+    let user_msg = if !worker_images.is_empty() {
+        // Q6: never let a merge/codex CodexResponses client silently drop
+        // images (CodexClient::to_input_items -> content_text discards
+        // ImageUrl parts, types.rs:399-401). Loud-warn and still proceed —
+        // this is defense-in-depth insurance for a path not configured for
+        // any kanban profile today (RESEARCH.md Q6).
+        let is_codex = matches!(main_ep.api_mode, ironhermes_core::ApiMode::CodexResponses);
+        if let Err(e) = guard_image_capable_client(is_codex, worker_images.len()) {
+            tracing::warn!(
+                error = %e,
+                "kanban worker image turn: image-capable-client guard failed (Q6) — proceeding, \
+                 images may be silently dropped by the resolved client"
+            );
+        }
+        build_worker_turn_with_images(&prompt, &worker_images)
+    } else {
+        // D-09 degrade: no worker_mode, or no qualifying image attachments —
+        // unchanged non-worker / zero-image path.
+        ChatMessage::user(prompt)
+    };
     state_store
         .lock()
         .unwrap()
@@ -1261,17 +2651,19 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
 
     // Phase 36.3.7.12-04 Plan 04 Task 2 — goal-mode dispatch.
     //
-    // When the process is a kanban worker (HERMES_KANBAN_TASK set) AND the
-    // task carries goal_mode=true (signaled via HERMES_KANBAN_GOAL_MODE=1 in
+    // When the process is a kanban worker (IRONHERMES_KANBAN_TASK set) AND the
+    // task carries goal_mode=true (signaled via IRONHERMES_KANBAN_GOAL_MODE=1 in
     // the worker env per Plan 02), wrap `runtime.run_turn` in the budget-bounded
     // goal loop. The wrapper handles both goal_mode AND non-goal cases
     // internally — the non-goal branch is a single passthrough call so the
     // existing chat -q worker path stays byte-for-byte equivalent (D-06).
     //
-    // Outside worker mode (no HERMES_KANBAN_TASK), the wrapper is bypassed
+    // Outside worker mode (no IRONHERMES_KANBAN_TASK), the wrapper is bypassed
     // entirely so a normal `ironhermes chat -q "prompt"` invocation retains
     // its exact pre-Plan-04 semantics.
-    let worker_mode = std::env::var("HERMES_KANBAN_TASK").is_ok();
+    //
+    // worker_mode is computed above (Phase 46.5 D-08) so it's available
+    // before user_msg is built; reused here unchanged.
     // Wrap runtime in an Arc up-front so both the goal-loop wrapper's
     // TurnRunner closure (which needs to clone the runtime across turns)
     // and the post-loop `runtime.registry()` consumer (line ~1141) can
@@ -1282,14 +2674,16 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         let kanban_config = crate::kanban::commands::load_kanban_config(&config);
         let judge_fn = crate::kanban::commands::build_runtime_judge_fn(&kanban_config, &config)
             .context("build_runtime_judge_fn for worker-mode goal-loop wrapper")?;
-        let task_id = std::env::var("HERMES_KANBAN_TASK").unwrap_or_default();
-        let run_id = std::env::var("HERMES_KANBAN_RUN_ID").unwrap_or_default();
-        let claim_lock = std::env::var("HERMES_KANBAN_CLAIM_LOCK").unwrap_or_default();
-        // Phase 36.3.7.13 D-A1: env-bridged open closes F-01 (cross-profile
-        // DB mismatch) on the CLI one-shot dispatcher → worker bridge.
-        let kanban_store_for_loop = ironhermes_kanban::KanbanStore::open_from_env()
-            .context("open kanban store for goal-loop wrapper")?;
-        let kanban_store_arc = std::sync::Arc::new(tokio::sync::Mutex::new(kanban_store_for_loop));
+        let task_id = ironhermes_kanban::kanban_env("TASK").unwrap_or_default();
+        let run_id = ironhermes_kanban::kanban_env("RUN_ID").unwrap_or_default();
+        let claim_lock = ironhermes_kanban::kanban_env("CLAIM_LOCK").unwrap_or_default();
+        // Phase 46.5 D-08: reuse the SAME KanbanStore opened above (for the
+        // image-turn attachment lookup) rather than opening kanban.db a
+        // second time in this worker process (RESEARCH.md §2.3). worker_mode
+        // is true in this branch, so kanban_store_arc is always Some here.
+        let kanban_store_arc = kanban_store_arc.context(
+            "kanban store must already be open in worker_mode (opened above for image-turn assembly)",
+        )?;
 
         // The TurnRunner closure captures the runtime + per-call inputs and
         // produces the textual assistant output the judge will evaluate.
@@ -1301,6 +2695,10 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         let trajectory_for_runner = trajectory_writer.clone();
         let state_store_for_runner = state_store.clone();
         let scrubber_for_runner = scrubber_single.clone();
+        // Phase 36.3.12 Plan 10 (WR-01): clone the shared handle into the
+        // FnMut closure body so every goal-loop inner turn's builder calls
+        // observe the SAME session set (see approvals_store construction above).
+        let approvals_for_runner = approvals_store.clone();
         let initial_messages = messages.clone();
         let mut initial_taken = false;
         let turn_runner: crate::kanban::goal_loop::TurnRunner =
@@ -1319,6 +2717,7 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
                 let trajectory = trajectory_for_runner.clone();
                 let state_store = state_store_for_runner.clone();
                 let scrubber = scrubber_for_runner.clone();
+                let approvals = approvals_for_runner.clone();
                 let messages_for_call = if initial_taken {
                     // Subsequent turns: synthesize a user message from the
                     // judge's most-recent feedback (last entry in the textual
@@ -1335,9 +2734,16 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
                 };
                 initial_taken = true;
                 Box::pin(async move {
+                    // Phase 36.3.8 D-08: build the Local SessionKey before the struct
+                    // literal moves `session_id` into the request.
+                    let messaging_session_key = ironhermes_core::SessionKey {
+                        platform: ironhermes_core::types::Platform::Local,
+                        chat_id: session_id.clone(),
+                        user_id: None,
+                    };
                     let request = ironhermes_agent::TurnRequest {
                         messages: messages_for_call,
-                        session_id,
+                        session_id: session_id.clone(),
                         cancel_token: None,
                         stream: Some(Box::new(move |delta: &str| {
                             let visible = scrubber.lock().unwrap().feed(delta);
@@ -1355,6 +2761,42 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
                         state_store: Some(state_store),
                         compression_count: 0,
                         tts_wiring: None,
+                        turn_id: None, // Phase 39.2: worker mode, no TurnRegistry entry
+                        // Phase 36.3.8 D-08: Local surface — clarify uses the stdout
+                        // numbered fallback (clarify_dispatcher=None); fresh per-turn
+                        // registry (no external callback loop on Local).
+                        messaging_wiring: Some(ironhermes_agent::MessagingPerTurnWiring {
+                            session_key: messaging_session_key,
+                            message_dispatcher: None,
+                            clarify_dispatcher: None,
+                            clarify_registry: std::sync::Arc::new(
+                                ironhermes_tools::clarify_registry::PendingClarifyRegistry::new(),
+                            ),
+                            cancel_token: None,
+                        }),
+                        // Phase 45 D-11: Local worker surface — no approval gate.
+                        approval_gate: None,
+                        // Phase 36.3.12 D-08/D-10: gate the LLM's terminal/execute_code
+                        // calls through the same chokepoint every other surface uses —
+                        // this worker-mode path was one of the four ungated local sites.
+                        terminal_intercept: Some(build_gated_terminal_intercept(
+                            runtime.terminal_tool_arc(),
+                            runtime.config().clone(),
+                            session_id.clone(),
+                            "cli-worker",
+                            session_id.clone(),
+                            yolo_enabled,
+                            approvals.clone(),
+                        )),
+                        execute_code_intercept: Some(build_gated_execute_code_intercept(
+                            runtime.execute_code_tool_arc(),
+                            runtime.config().clone(),
+                            session_id.clone(),
+                            "cli-worker",
+                            session_id.clone(),
+                            yolo_enabled,
+                            approvals.clone(),
+                        )),
                     };
                     let agent_result = runtime.run_turn(request).await?;
                     // Extract the final assistant message text — the judge
@@ -1429,6 +2871,43 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
             state_store: Some(state_store.clone()),
             compression_count: 0,
             tts_wiring: None,
+            turn_id: None, // Phase 39.2: non-interactive chat -q, no TurnRegistry entry
+            // Phase 36.3.8 D-08: Local surface — stdout numbered clarify fallback.
+            messaging_wiring: Some(ironhermes_agent::MessagingPerTurnWiring {
+                session_key: ironhermes_core::SessionKey {
+                    platform: ironhermes_core::types::Platform::Local,
+                    chat_id: session_id.clone(),
+                    user_id: None,
+                },
+                message_dispatcher: None,
+                clarify_dispatcher: None,
+                clarify_registry: std::sync::Arc::new(
+                    ironhermes_tools::clarify_registry::PendingClarifyRegistry::new(),
+                ),
+                cancel_token: None,
+            }),
+            // Phase 45 D-11: Local single-shot surface — no approval gate.
+            approval_gate: None,
+            // Phase 36.3.12 D-08/D-10: gate the LLM's terminal/execute_code calls —
+            // this single-shot `chat -q` path was one of the four ungated local sites.
+            terminal_intercept: Some(build_gated_terminal_intercept(
+                runtime_handle.terminal_tool_arc(),
+                runtime_handle.config().clone(),
+                session_id.clone(),
+                "cli-single",
+                session_id.clone(),
+                yolo_enabled,
+                approvals_store.clone(),
+            )),
+            execute_code_intercept: Some(build_gated_execute_code_intercept(
+                runtime_handle.execute_code_tool_arc(),
+                runtime_handle.config().clone(),
+                session_id.clone(),
+                "cli-single",
+                session_id.clone(),
+                yolo_enabled,
+                approvals_store.clone(),
+            )),
         };
         runtime_handle.run_turn(request).await?
     };
@@ -1544,7 +3023,8 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
 #[allow(clippy::too_many_arguments)] // command context builder: each arg is a distinct session dependency; params-struct would add indirection with no clarity gain
 fn build_cmd_ctx(
     session_id: &str,
-    agent_running: Arc<AtomicBool>,
+    // Phase 39.1 (R39.1-06 / D-06): agent_running removed from CommandContext.
+    // Parameter removed — callers no longer pass a throwaway AtomicBool.
     mcp_manager: Option<&Arc<McpManager>>,
     subagent_registry: Arc<RwLock<ironhermes_agent::subagent_registry::SubagentRegistry>>,
     process_registry: Arc<RwLock<ironhermes_exec::process_registry::ProcessRegistry>>,
@@ -1565,52 +3045,47 @@ fn build_cmd_ctx(
     // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02): KanbanStoreReader handle for /kanban slash UI.
     // Best-effort — None when kanban DB is unavailable (matches cmd_cron fallback pattern).
     kanban_store: Option<Arc<dyn ironhermes_core::commands::context::KanbanStoreReader>>,
+    // Phase 41.3 Plan 04 (D-12): previously-missing core handle — the CLI never called
+    // .with_state_store() before this plan. Both call sites already have an
+    // Arc<Mutex<StateStore>> in scope (created at session start); wrapped below in
+    // ironhermes_state::StateStoreHandleAdapter, the same adapter the gateway
+    // (handler.rs) and Web (ws.rs) use.
+    state_store: Option<Arc<std::sync::Mutex<ironhermes_state::StateStore>>>,
 ) -> CommandContext {
-    let base = CommandContext::new(Platform::Local, session_id.to_string(), agent_running);
-    let base = if let Some(mgr) = mcp_manager {
-        base.with_mcp_reloader(mgr.clone())
-    } else {
-        base
+    use ironhermes_core::commands::context::{
+        CoreContextHandles, McpReloader, ProcessRegistrySnapshotHandle, StateStoreHandle,
+        SubagentListSnapshot, build_core_context,
     };
-    let ctx = base
-        .with_subagent_registry(Arc::new(
+
+    // Phase 41.3 Plan 04 (D-11/D-12): the nine core handles this build site owns are
+    // collected into CoreContextHandles and built via build_core_context. turn_registry
+    // is deliberately left None here — both call sites chain
+    // `.with_turn_registry(turn_registry.clone())` onto this function's return value,
+    // which remains correct against the factory (missing_core_handles() only cares
+    // about the final CommandContext, not which call installed a given handle).
+    let core_handles = CoreContextHandles {
+        subagent_registry: Some(Arc::new(
             ironhermes_agent::subagent_registry::SubagentRegistryHandle::new(subagent_registry),
-        ))
-        .with_process_registry(Arc::new(
+        ) as Arc<dyn SubagentListSnapshot>),
+        process_registry: Some(Arc::new(
             ironhermes_exec::process_registry::ProcessRegistryHandle::new(process_registry),
-        ))
+        ) as Arc<dyn ProcessRegistrySnapshotHandle>),
+        skill_registry,
+        state_store: state_store.map(|store| {
+            Arc::new(ironhermes_state::StateStoreHandleAdapter(store)) as Arc<dyn StateStoreHandle>
+        }),
+        toolset_session,
+        turn_registry: None,
+        workspace,
+        mcp_reloader: mcp_manager.map(|mgr| mgr.clone() as Arc<dyn McpReloader>),
+        trajectory_writer,
+    };
+
+    let ctx = build_core_context(Platform::Local, session_id.to_string(), core_handles)
         .with_budget(Arc::new(budget))
         .with_subagent_semaphore(subagent_semaphore)
         .with_max_concurrent_children(max_subagents);
-    // Phase 25.2 Plan 15 (UAT Issue 2 / Symptom 1 fix): conditionally attach the
-    // live ToolsetSessionHandle so /toolset list/show/enable/disable work in
-    // REPL + Telegram. EVERY existing .with_* call above is preserved verbatim.
-    let ctx = if let Some(handle) = toolset_session {
-        ctx.with_toolset_session(handle)
-    } else {
-        ctx
-    };
-    // Phase 25.3 D-W-2: attach the resolved Workspace so /sessions --workspace
-    // and Plan 11 /export-session see the frozen-snapshot project root.
-    let ctx = if let Some(ws) = workspace {
-        ctx.with_workspace(ws)
-    } else {
-        ctx
-    };
-    // Phase 25.3 D-T-3: attach the per-session TrajectoryWriter handle so
-    // slash dispatch sees the same writer that AgentLoop (Plan 9) consumes.
-    let ctx = if let Some(handle) = trajectory_writer {
-        ctx.with_trajectory_writer(handle)
-    } else {
-        ctx
-    };
-    // Phase 21.8.2: wire skill_registry so /skills list shows catalog and
-    // /skills reload returns SkillsReload for the REPL loop to process.
-    let ctx = if let Some(sr) = skill_registry {
-        ctx.with_skill_registry(sr)
-    } else {
-        ctx
-    };
+
     // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02): wire KanbanStoreReader so /kanban
     // slash dispatch reaches the kanban board. Best-effort — None if store unavailable.
     if let Some(handle) = kanban_store {
@@ -1673,12 +3148,12 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     io::stdout().flush().ok();
     io::stderr().flush().ok();
 
-    let (client, mut config, resolver) = build_client(cli)?;
+    let (client, mut config, resolver) = build_client(cli).await?;
 
     // Phase 36.3.7.13 D-F1: clamp inner-loop iteration cap for goal-mode workers.
     // Applied HERE (before AgentRuntime::from_config captures the config) so the
     // clamped value is baked into the runtime's budget handle from the start.
-    if std::env::var("HERMES_KANBAN_GOAL_MODE")
+    if ironhermes_kanban::kanban_env("GOAL_MODE")
         .map(|v| v == "1")
         .unwrap_or(false)
     {
@@ -1705,6 +3180,12 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     let (yolo_enabled, _yolo_source) =
         ironhermes_cli::resolve_yolo(cli_yolo_flag, config.autonomous.yolo);
     ironhermes_cli::print_yolo_banner_to_stderr(yolo_enabled);
+
+    // Phase 36.3.12 Plan 10 (WR-01): load ApprovalsStore ONCE for the process
+    // lifetime — outside the per-turn loop below — so a `[s]ession` approval
+    // grant persists across every REPL turn's terminal/execute_code dispatch
+    // instead of being discarded by a fresh `ApprovalsStore::load()` per turn.
+    let approvals_store = std::sync::Arc::new(ironhermes_core::ApprovalsStore::load().await);
 
     // Phase 21.3: initialize global token estimator from model's encoding
     let main_ep = resolver.resolve_for_main();
@@ -1788,7 +3269,7 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
         ironhermes_exec::process_registry::ProcessRegistry::new_for_session(session_id.clone()),
     ));
     // Plan 21.7-07 (D-03 / D-04 / D-05): session-scoped SubagentRegistry +
-    // HERMES_HOME for transcripts. Cloned into the runner (so lifecycle
+    // IRONHERMES_HOME for transcripts. Cloned into the runner (so lifecycle
     // events register/unregister + write transcripts) and into the
     // SubagentProgressCallback (so the pill refreshes on Started/Completed).
     let subagent_registry = Arc::new(tokio::sync::RwLock::new(
@@ -1859,8 +3340,8 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     // longer fragments mid-turn input (observed in Phase 21.7 UAT 1
     // re-run: "/ag  [subagent-3] Running: ...  ent"-style line breakage).
     // Phase 22.3 D-08 / UI-SPEC HIST-4: persist REPL history across restarts
-    // at $HERMES_HOME/repl_history. Phase 21.6 ensure_home_dirs() guarantees
-    // $HERMES_HOME exists; rustyline creates the file on first save.
+    // at $IRONHERMES_HOME/repl_history. Phase 21.6 ensure_home_dirs() guarantees
+    // $IRONHERMES_HOME exists; rustyline creates the file on first save.
     // Scope: run_chat only per CONTEXT D-15 (run_single / run_gateway have no
     // interactive REPL with up-arrow history).
     let (mut repl_input, external_printer) =
@@ -2007,23 +3488,49 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
     // Phase 27.1.1-gap-02: populate active_toolsets so the system-prompt skills
     // catalog text reflects the same enabled set as the API tool schemas.
     prompt_builder.set_active_toolsets(runtime.merged_tools().enabled_toolset_names());
+    // D-08 (Phase 46 Plan 04): populate connected_mcp_servers so requires_mcp_servers-gated
+    // skills (e.g. the Cloudflare skills) only surface when their MCP server is connected.
+    prompt_builder.set_connected_mcp_servers(
+        runtime
+            .mcp_manager()
+            .map(|m| m.connected_server_names().into_iter().collect())
+            .unwrap_or_default(),
+    );
+    // Phase 38.1 (D-04/D-05): freeze session timezone into PromptBuilder Timestamp slot.
+    prompt_builder.set_timezone(config.agent.timezone.clone());
     prompt_builder.load_memory().await;
     prompt_builder.load_skills();
     // Phase 36.3.7 Plan 05 (D-26): Inject KANBAN_GUIDANCE when worker-spawned.
     inject_kanban_guidance_if_worker(&mut prompt_builder);
     // Phase 36.3.7 Plan 05 (D-20): Register kanban tools when worker/orchestrator mode.
-    register_kanban_tools_if_applicable(&registry, &runtime.merged_tools().enabled_toolset_names())
-        .await?;
+    register_kanban_tools_if_applicable(
+        &registry,
+        &runtime.merged_tools().enabled_toolset_names(),
+        Arc::new(config.clone()),
+    )
+    .await?;
     // Phase 36.3.7.13 F-03 / D-B2: apply goal-mode toolset filter (second call site).
     // Mirrors the run_single site above — both must call this per D-B2 requirement.
-    filter_for_goal_mode_if_applicable(&registry).await?;
+    filter_for_goal_mode_if_applicable(&registry, &config).await?;
+    // Phase 47 Plan 08 (D-08): see the run_single call site's comment above.
+    rewire_kanban_generation_guardrail_if_applicable(&registry, &config).await?;
+    // D-02 hardening: fail loud if a worker's terminator tools got filtered out of the schema.
+    assert_worker_terminators_visible(&registry).await?;
     let system_msg = prompt_builder.build_system_message();
 
     let mut messages = vec![system_msg];
 
-    // Phase 21.1 Plan 02: unified CommandRouter and agent_running flag.
+    // Phase 21.1 Plan 02: unified CommandRouter.
     let command_router = CommandRouter::new(build_command_registry());
-    let agent_running = Arc::new(AtomicBool::new(false));
+    // Phase 39.1 Plan 04 (R39.1-01 / R39.1-06 / D-06): replace the bare AtomicBool
+    // running gate with a ConcurrencyLayer + TurnRegistry. The gate is gone — all
+    // Phase 39.1 Plan 06 (R39.1-06): agent_running AtomicBool removed from CommandContext.
+    // TurnRegistry is the sole source of turn tracking.
+    let turn_registry = Arc::new(ironhermes_core::concurrency::TurnRegistry::new());
+    let concurrency = ironhermes_core::concurrency::ConcurrencyLayer::new(
+        config.concurrency.session_turn_cap,
+        config.concurrency.global_turn_ceiling,
+    );
 
     // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02): open KanbanStore once at session start
     // for /kanban slash dispatch. Best-effort — failure logs a warning and leaves the
@@ -2068,6 +3575,9 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
             chat_cancel_token.clone(),
             state_store.clone(),       // Phase 25: session_search intercept
             trajectory_writer.clone(), // Phase 25.3 D-T-3
+            None,                      // Phase 39.2 Plan 04: no TurnRegistry entry for -q mode
+            yolo_enabled,              // Phase 36.3.12 D-08: gated terminal/execute_code intercepts
+            approvals_store.clone(), // Phase 36.3.12 Plan 10 (WR-01): shared process-lifetime store
         )
         .await?;
         // Persist assistant response
@@ -2184,6 +3694,13 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                     continue;
                 }
 
+                // Phase 41.1 Plan 05 (D-01): a one-shot skill run (the
+                // SkillActivated arm below) sets this to the run-turn content
+                // (`trigger_text`) and falls through — instead of `continue` —
+                // into the shared push-to-messages + spawn-turn block. Normal
+                // chat leaves it `None` and the typed `input` is the turn.
+                let mut turn_content: Option<String> = None;
+
                 // Phase 21.1 D-06/D-07/D-08: extension-first command dispatch via CommandRouter.
                 if let Some(slash_rest) = input.strip_prefix('/') {
                     let parts: Vec<&str> = slash_rest.split_whitespace().collect();
@@ -2208,9 +3725,10 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                     // sites (INV-21.7-08 / D-03 / D-04). Phase 25.3 Plan 8
                     // appends workspace + trajectory_writer for D-W-2 / D-T-3.
                     // Phase 21.8.2: skill_registry threaded through so /skills works.
+                    // Phase 39.1 Plan 04: turn_registry injected (R39.1-09).
+                    // Phase 39.1 Plan 06 (R39.1-06 / D-06): agent_running removed from build_cmd_ctx.
                     let cmd_ctx = build_cmd_ctx(
                         &session_id,
-                        agent_running.clone(),
                         mcp_manager.as_ref(),
                         subagent_registry.clone(),
                         process_registry.clone(),
@@ -2222,7 +3740,9 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                         trajectory_writer.clone(),
                         Some(skill_registry.clone()),
                         kanban_store_handle.clone(), // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02)
-                    );
+                        Some(state_store.clone()), // Phase 41.3 Plan 04 (D-12): previously missing
+                    )
+                    .with_turn_registry(turn_registry.clone());
 
                     // dispatch_command: extension-first -> CommandRouter -> skill catch-all
                     match dispatch_command(tui.extensions(), cmd, args, &command_router, &cmd_ctx) {
@@ -2390,17 +3910,61 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                             prompt_builder.set_skill_registry(new_registry);
                             continue;
                         }
-                        // Phase 21.8.2 D-07: SKILL-13 dynamic skill activation.
+                        // Phase 21.8.2 D-07 / Phase 41.1 Plan 05 (D-01): SKILL-13
+                        // dynamic skill activation, now one-shot activate+run. The
+                        // classic REPL activates the body into the prompt (as
+                        // before) AND fires the agent turn in the SAME command,
+                        // matching the TUI/Web/gateway surfaces.
+                        //
+                        // The legacy `tui::CommandResult::SkillActivated` carries no
+                        // `args` field (Plan 01 dropped core's `args` at the
+                        // core->legacy map boundary to stay dead_code-clean under
+                        // -D warnings), so the argued trailing text is reconstructed
+                        // here from the raw `input` in scope and fed through the
+                        // shared `build_skill_invocation` seam for the D-02
+                        // bare-vs-argued `trigger_text`.
                         CommandResult::SkillActivated { name, body } => {
                             prompt_builder.activate_skill(&name, &body);
-                            println!("Skill '{}' activated for this turn.", name);
-                            continue;
+                            // Argued trailing text after `/{name}` (trimmed,
+                            // non-empty) → argued invoke; else bare invoke.
+                            let args_display = input
+                                .strip_prefix(&format!("/{name}"))
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty());
+                            let invocation =
+                                ironhermes_core::commands::skill_dispatch::build_skill_invocation(
+                                    name.clone(),
+                                    body.clone(),
+                                    args_display.clone(),
+                                );
+                            // Run-turn meta line (UI-SPEC §C Copywriting
+                            // Contract) replaces the retired activation
+                            // acknowledgment copy.
+                            println!(
+                                "{}",
+                                run_skill_meta_line(&name, args_display.as_deref()).dimmed()
+                            );
+                            // Fall through (NO `continue`) into the shared
+                            // push-to-messages + spawn-turn block below, running
+                            // the skill in this same command (D-01).
+                            turn_content = Some(invocation.trigger_text);
                         }
                     }
                 }
 
-                repl_input.add_history(&input);
-                let user_msg = ChatMessage::user(&input);
+                // Phase 41.1 Plan 05 (D-01): a one-shot skill run falls through
+                // here with `turn_content = Some(trigger_text)`; normal chat
+                // leaves it `None` and uses the typed `input`. Skill runs already
+                // recorded their `/{skill}` slash line in rustyline history at the
+                // prompt-time dispatch site above, so skip the re-add for them.
+                let (turn_text, record_history) = match turn_content.take() {
+                    Some(trigger_text) => (trigger_text, false),
+                    None => (input.clone(), true),
+                };
+                if record_history {
+                    repl_input.add_history(&input);
+                }
+                let user_msg = ChatMessage::user(&turn_text);
                 let _ = state_store
                     .lock()
                     .unwrap()
@@ -2410,11 +3974,50 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                 // D-13: fresh user input resets the 1.5s debounce window.
                 double_ctrl_c.reset();
 
+                // Phase 39.1 Plan 04 (R39.1-01 / R39.1-05): acquire semaphore permits and
+                // register the turn before spawning. The CLI is sequential (one turn at a
+                // time) so we AWAIT a permit rather than error on exhaustion — CLI users
+                // never burst; waiting is the correct UX (D-09 accepted: T-39.1-04-02).
+                let (cli_per_permit, cli_global_permit) = {
+                    // Try non-blocking first; fall back to awaiting if at cap.
+                    match concurrency.try_acquire() {
+                        Some(p) => p,
+                        None => {
+                            // Per-session or global cap exhausted — await a permit.
+                            // This is the correct CLI behavior per plan comment above.
+                            let per = concurrency
+                                .per_session
+                                .clone()
+                                .acquire_owned()
+                                .await
+                                .expect("per_session semaphore never closed");
+                            let global = concurrency
+                                .global
+                                .clone()
+                                .acquire_owned()
+                                .await
+                                .expect("global semaphore never closed");
+                            (per, global)
+                        }
+                    }
+                };
+                let cli_turn_id = ironhermes_core::concurrency::TurnId::new_v4();
+                let cli_turn_cancel = chat_cancel_parent.child_token();
+                {
+                    let entry = ironhermes_core::concurrency::TurnEntry {
+                        turn_id: cli_turn_id,
+                        session_id: session_id.clone(),
+                        surface: ironhermes_core::concurrency::Surface::Cli,
+                        started_at: std::time::Instant::now(),
+                        cancel: cli_turn_cancel.clone(),
+                    };
+                    turn_registry.register(entry).await;
+                }
+
                 // Plan 21-03 Task 2: wrap in-flight agent turn in tokio::select!
                 // racing against tokio::signal::ctrl_c() per D-10.
                 // The future is pinned outside the select loop so a CancelTurn
                 // decision can `continue` and the agent sees the cancelled token.
-                agent_running.store(true, std::sync::atomic::Ordering::SeqCst);
                 let mut run_fut = Box::pin(run_agent_turn(
                     &runtime,
                     &mut messages,
@@ -2425,6 +4028,9 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                     chat_cancel_token.clone(),
                     state_store.clone(), // Phase 25: session_search intercept
                     trajectory_writer.clone(), // Phase 25.3 D-T-3
+                    Some(cli_turn_id),   // Phase 39.2 Plan 04: TurnRegistry UUID for bb correlation
+                    yolo_enabled, // Phase 36.3.12 D-08: gated terminal/execute_code intercepts
+                    approvals_store.clone(), // Phase 36.3.12 Plan 10 (WR-01): shared process-lifetime store
                 ));
 
                 // Plan 21.7-11 (GAP-21.7-01): prime a mid-turn prompt request
@@ -2602,9 +4208,10 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                                     // Phase 25.3 Plan 8: workspace + trajectory_writer threaded
                                     // through the mid-turn slash dispatch site (D-W-2 / D-T-3).
                                     // Phase 21.8.2: skill_registry threaded through so /skills works.
+                                    // Phase 39.1 Plan 04: turn_registry injected (R39.1-09).
+                                    // Phase 39.1 Plan 06 (R39.1-06 / D-06): agent_running removed from build_cmd_ctx.
                                     let cmd_ctx = build_cmd_ctx(
                                         &session_id,
-                                        agent_running.clone(),
                                         mcp_manager.as_ref(),
                                         subagent_registry.clone(),
                                         process_registry.clone(),
@@ -2616,7 +4223,8 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                                         trajectory_writer.clone(),
                                         Some(skill_registry.clone()),
                                         kanban_store_handle.clone(), // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02)
-                                    );
+                                        Some(state_store.clone()), // Phase 41.3 Plan 04 (D-12): previously missing
+                                    ).with_turn_registry(turn_registry.clone());
                                     match dispatch_command(
                                         tui.extensions(),
                                         cmd,
@@ -2690,12 +4298,24 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                                                 "/skills reload ignored mid-turn — retry after the turn ends".dimmed()
                                             );
                                         }
-                                        CommandResult::SkillActivated { .. } => {
-                                            // Mid-turn skill activation is deferred — body injection mid-stream
-                                            // would race the in-flight agent's system-prompt assembly.
+                                        // Phase 41.1 Plan 05 (D-01): one-shot
+                                        // activate+run is a PROMPT-TIME behavior
+                                        // (the arm at the top of the loop falls
+                                        // into the spawn-turn block). Mid-turn we
+                                        // cannot start a second turn — the CLI is
+                                        // sequential and a concurrent turn would
+                                        // race the in-flight agent's `messages`
+                                        // vec, the same reason ClearSession /
+                                        // McpReload / SkillsReload are all deferred
+                                        // here. Stay deferred and bind the fields
+                                        // explicitly (no `{ .. }` rest) so a future
+                                        // core-enum field can't silently ride
+                                        // through (Pitfall 4); the legacy variant
+                                        // carries no `args` field to bind.
+                                        CommandResult::SkillActivated { name: _, body: _ } => {
                                             println!(
                                                 "{}",
-                                                "/<skill> activation ignored mid-turn — retry after the turn ends".dimmed()
+                                                "/<skill> run ignored mid-turn — retry after the turn ends".dimmed()
                                             );
                                         }
                                     }
@@ -2732,7 +4352,11 @@ async fn run_chat(cli: &Cli, initial_message: Option<String>, cli_yolo_flag: boo
                 // so dropping it is a no-op against an exhausted future.
                 drop(run_fut);
 
-                agent_running.store(false, std::sync::atomic::Ordering::SeqCst);
+                // Phase 39.1 Plan 04: deregister turn and drop permits (RAII).
+                // The AtomicBool gate is GONE — deregister is the only post-turn cleanup.
+                turn_registry.deregister(cli_turn_id).await;
+                drop(cli_per_permit);
+                drop(cli_global_permit);
 
                 // Plan 21.7-11 (T-21.7-11-01): drain any buffered mid-turn
                 // input that arrived AFTER the turn resolved but before this
@@ -2918,6 +4542,9 @@ async fn run_agent_turn(
     cancel_token: CancellationToken,
     state_store: std::sync::Arc<std::sync::Mutex<ironhermes_state::StateStore>>, // Phase 25: session_search intercept
     trajectory_writer: Option<Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle>>, // Phase 25.3 D-T-3
+    cli_turn_id: Option<uuid::Uuid>, // Phase 39.2 Plan 04: TurnRegistry UUID for bb correlation
+    yolo: bool, // Phase 36.3.12 D-08: effective yolo flag for the gated terminal/execute_code intercepts
+    approvals: std::sync::Arc<ironhermes_core::ApprovalsStore>, // Phase 36.3.12 Plan 10 (WR-01): process-lifetime store, shared across every REPL turn
 ) -> Result<Option<String>> {
     // Phase 18-14: seed the TurnRequest's compression_count from the shared
     // session-scoped counter so the summarizing engine's prior-summary chain
@@ -2936,6 +4563,14 @@ async fn run_agent_turn(
     // Plan 28.1-04: build TurnRequest and call runtime.run_turn.
     // run_turn owns budget reset, AgentLoop build, fallback wiring, and
     // attach_context_engine — DO NOT duplicate those here.
+    // Phase 36.3.8 D-08/T-36.3.8-02: clone the turn cancel token before the
+    // struct literal moves it, so /stop also reaches a suspended clarify.
+    let messaging_cancel_token = cancel_token.clone();
+    let messaging_session_key = ironhermes_core::SessionKey {
+        platform: ironhermes_core::types::Platform::Local,
+        chat_id: session_id.to_string(),
+        user_id: None,
+    };
     let request = ironhermes_agent::TurnRequest {
         messages: messages.clone(),
         session_id: session_id.to_string(),
@@ -2979,6 +4614,40 @@ async fn run_agent_turn(
         state_store: Some(state_store),
         compression_count: starting_count, // Phase 18-14: carry compression chain across turns
         tts_wiring: None,
+        turn_id: cli_turn_id, // Phase 39.2 Plan 04: TurnRegistry UUID for bb correlation
+        // Phase 36.3.8 D-08: Local REPL — stdout numbered clarify fallback, with
+        // the turn's cancel token threaded so /stop reaches a suspended clarify.
+        messaging_wiring: Some(ironhermes_agent::MessagingPerTurnWiring {
+            session_key: messaging_session_key,
+            message_dispatcher: None,
+            clarify_dispatcher: None,
+            clarify_registry: std::sync::Arc::new(
+                ironhermes_tools::clarify_registry::PendingClarifyRegistry::new(),
+            ),
+            cancel_token: Some(messaging_cancel_token),
+        }),
+        // Phase 45 D-11: Local REPL surface — no approval gate.
+        approval_gate: None,
+        // Phase 36.3.12 D-08/D-10: gate the LLM's terminal/execute_code calls —
+        // this REPL turn path was one of the four ungated local sites.
+        terminal_intercept: Some(build_gated_terminal_intercept(
+            runtime.terminal_tool_arc(),
+            runtime.config().clone(),
+            session_id.to_string(),
+            "cli-repl",
+            session_id.to_string(),
+            yolo,
+            approvals.clone(),
+        )),
+        execute_code_intercept: Some(build_gated_execute_code_intercept(
+            runtime.execute_code_tool_arc(),
+            runtime.config().clone(),
+            session_id.to_string(),
+            "cli-repl",
+            session_id.to_string(),
+            yolo,
+            approvals.clone(),
+        )),
     };
 
     let result = runtime.run_turn(request).await?;
@@ -3037,7 +4706,7 @@ async fn run_agent_turn(
 
 /// Start the Telegram gateway bot.
 async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
-    let (_, mut config, resolver) = build_client(cli)?;
+    let (_, mut config, resolver) = build_client(cli).await?;
     // Phase 21.7 Plan 08 (D-12 / INV-21.7-05): gateway reads yolo from the
     // on-disk config ONLY. NO per-request field, NO CLI flag — the clap
     // `Gateway` variant intentionally omits `--yolo`. `resolve_yolo(false, ...)`
@@ -3084,7 +4753,7 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
         ironhermes_exec::process_registry::ProcessRegistry::new_for_session("gateway".to_string()),
     ));
     // Plan 21.7-07 (D-03 / D-04 / D-05): gateway-scoped SubagentRegistry +
-    // HERMES_HOME for transcripts. Per-request run_agent threads the same
+    // IRONHERMES_HOME for transcripts. Per-request run_agent threads the same
     // registry via GatewayMessageHandler::set_subagent_registry (below).
     // Transcripts key by the per-request gw_session_id so they don't
     // collide between users.
@@ -3214,9 +4883,29 @@ async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     std::sync::Arc::new(runner).start().await
 }
 
-fn build_client(cli: &Cli) -> Result<(AnyClient, Config, ProviderResolver)> {
+async fn build_client(cli: &Cli) -> Result<(AnyClient, Config, ProviderResolver)> {
     let config = Config::load().unwrap_or_default();
-    let resolver = ProviderResolver::build(&config)?;
+    let mut resolver = ProviderResolver::build(&config)?;
+
+    // Phase 46.8 NF-2 close-out: apply the vault fallback to the resolver as the
+    // FINAL provider-key source (after config/env resolution inside
+    // `ProviderResolver::build`) — and BEFORE the client/endpoint is constructed
+    // below, so a vault-only key is present when `build_main_client` /
+    // `build_provider_client` reads `endpoint.api_key`. This is the shared CLI
+    // resolver factory for `run_gateway`, `run_chat`, and `run_single`, so wiring
+    // it here closes all three agent-running CLI paths in one place — mirroring the
+    // embedded-server (`server/state.rs`), cron-runner, and subagent sites.
+    //
+    // D-10: guarded on `vault.enabled` (default false) — default builds construct
+    // no store and this is a byte-for-byte no-op. D-07: a sealed/broken ENABLED
+    // vault propagates loudly via `?` (hard error) rather than silently running
+    // keyless. Routing through the shared `ironhermes_core::resolve_vault_config`
+    // fills the empty `rusty_vault.data_dir` sentinel so a DEFAULT-configured vault
+    // opens the same on-disk location `vault init` wrote to (G-46.8-1 fix).
+    if config.vault.enabled {
+        let store = ironhermes_vault::open_store(&ironhermes_core::resolve_vault_config(&config))?;
+        resolver.apply_vault_fallback(&*store).await?;
+    }
 
     // Provider/model resolution (Phase 26 SC-3 fix):
     // - --model + --provider → explicit provider+model
@@ -3265,7 +4954,61 @@ async fn build_mcp_manager(
     }
 
     let n = mcp_configs.len();
-    let mgr = Arc::new(McpManager::new(registry));
+
+    // 46.1-03 (D-04): build ns -> server-url map for the real rmcp-backed
+    // RefreshFn — only configs that carry both oauth_provider and url can refresh.
+    let ns_to_url: HashMap<String, String> = mcp_configs
+        .values()
+        .filter_map(|cfg| {
+            let ns = cfg.oauth_provider.as_deref()?;
+            let url = cfg.url.as_deref()?;
+            Some((ns.to_string(), url.to_string()))
+        })
+        .collect();
+
+    // 44-05 / 46.1-03: open auth store for OAuth-enabled MCP servers, wired to
+    // the REAL rmcp-backed refresh function (D-04, D-05) — not the stub.
+    // Non-fatal: OAuth servers are skipped with warn when store is unavailable (D-04).
+    let auth_store: Option<Arc<ironhermes_core::auth::AuthStore>> =
+        match ironhermes_mcp::open_auth_store_with_mcp_refresh(
+            ironhermes_core::constants::get_hermes_home().join("auth.json"),
+            ns_to_url,
+        )
+        .await
+        {
+            Ok(store) => Some(store),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "MCP: could not open OAuth token store; OAuth servers will be skipped (D-04)"
+                );
+                None
+            }
+        };
+
+    // Spawn Phase 41 proactive refresh tasks for cached MCP OAuth namespaces
+    // that actually have refresh capability (D-04: a namespace with no
+    // refresh_token is never scheduled into a repeating failing refresh).
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(ref store) = auth_store {
+        for cfg in mcp_configs.values() {
+            if let Some(ns) = cfg.oauth_provider.as_deref()
+                && let Some(tok) = store.get_token(ns).await
+                && tok.refresh_token.is_some()
+            {
+                ironhermes_core::auth::AuthStore::spawn_refresh_task(store.clone(), ns.to_string());
+            }
+        }
+    }
+
+    let mgr = Arc::new(
+        McpManager::new(registry)
+            .with_auth_store(auth_store)
+            // 46.1 BL-01: wire the config-driven global issuer allowlist here too —
+            // gateway auto-start must trust the same non-baseline OAuth issuers as
+            // the agent runtime, or D-01 is inert at this surface.
+            .with_global_issuer_allowlist(config.mcp_oauth.issuer_allowlist.clone()),
+    );
     let mgr_clone = mgr.clone();
     let configs_clone = mcp_configs.clone();
 
@@ -3337,6 +5080,30 @@ fn print_help() {
     );
 }
 
+/// Phase 41.1 Plan 05 (UI-SPEC §C / Copywriting Contract): the run-turn meta
+/// line printed before a classic-REPL skill run. Bare invoke → `▶ Ran skill
+/// /{name}`; argued invoke → `▶ Ran skill /{name} · "{args}"`, with `args`
+/// truncated to 40 chars (char-safe) and an inner `…` appended only when
+/// truncated. Mirrors `tui_rata::run_turn_meta_chip` exactly so all surfaces
+/// share one copy. `args_display` is the trimmed, non-empty trailing text, or
+/// `None` for a bare invoke.
+fn run_skill_meta_line(name: &str, args_display: Option<&str>) -> String {
+    match args_display {
+        None => format!("▶ Ran skill /{name}"),
+        Some(args) => {
+            const MAX: usize = 40;
+            let mut chars = args.chars();
+            let head: String = chars.by_ref().take(MAX).collect();
+            let truncated = chars.next().is_some();
+            if truncated {
+                format!("▶ Ran skill /{name} · \"{head}…\"")
+            } else {
+                format!("▶ Ran skill /{name} · \"{head}\"")
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tui_extension_wiring_tests {
     /// INV-22.1-01: run_chat uses new_with_extensions (not bare TuiHandle::new)
@@ -3356,6 +5123,58 @@ mod tui_extension_wiring_tests {
         assert!(
             src.contains("dispatch_command("),
             "run_chat must use dispatch_command for command routing"
+        );
+    }
+
+    /// Phase 41.1 Plan 05 (D-01): the classic-REPL run-turn meta line matches
+    /// the UI-SPEC Copywriting Contract and `tui_rata::run_turn_meta_chip` —
+    /// bare form, argued form, and char-safe 40-char truncation with an inner
+    /// ellipsis only when the args actually overflow.
+    #[test]
+    fn run_skill_meta_line_copy_and_truncation() {
+        assert_eq!(
+            super::run_skill_meta_line("gsd-config", None),
+            "▶ Ran skill /gsd-config"
+        );
+        assert_eq!(
+            super::run_skill_meta_line("gsd-config", Some("show me the config")),
+            "▶ Ran skill /gsd-config · \"show me the config\"",
+        );
+        // Exactly 40 chars → no ellipsis; 41 → truncated to 40 + `…`.
+        let exactly_40 = "x".repeat(40);
+        assert_eq!(
+            super::run_skill_meta_line("gsd-config", Some(&exactly_40)),
+            format!("▶ Ran skill /gsd-config · \"{}\"", "x".repeat(40)),
+        );
+        let long = "x".repeat(50);
+        assert_eq!(
+            super::run_skill_meta_line("gsd-config", Some(&long)),
+            format!("▶ Ran skill /gsd-config · \"{}…\"", "x".repeat(40)),
+        );
+    }
+
+    /// Phase 41.1 Plan 05 (D-01): the classic REPL's SkillActivated arm fires a
+    /// real agent turn instead of activating-then-waiting. Source assertions
+    /// (the REPL is a monolithic async `tokio::select!` loop with no unit-test
+    /// seam): the arm sets `turn_content` (falls into the shared spawn block),
+    /// prints the run-turn meta line, and the retired "activated for this turn"
+    /// acknowledgment copy is gone. The needle for the retired copy is assembled
+    /// from parts so this test's own source does not match it.
+    #[test]
+    fn classic_repl_skill_arm_runs_turn_not_activate_only() {
+        let src = include_str!("main.rs");
+        assert!(
+            src.contains("turn_content = Some(invocation.trigger_text)"),
+            "SkillActivated arm must fall into the shared spawn block via turn_content"
+        );
+        assert!(
+            src.contains("run_skill_meta_line(&name, args_display.as_deref())"),
+            "SkillActivated arm must print the run-turn meta line"
+        );
+        let retired = ["activated", "for", "this", "turn."].join(" ");
+        assert!(
+            !src.contains(&retired),
+            "the retired skill-activation acknowledgment copy must be gone"
         );
     }
 
@@ -3415,23 +5234,39 @@ mod tui_extension_wiring_tests {
         );
     }
 
-    /// INV-21.1-02: run_chat constructs a CommandContext
+    /// INV-21.1-02: run_chat constructs a CommandContext.
+    ///
+    /// Phase 41.3 Plan 04 (D-11/D-12): `build_cmd_ctx` (called from `run_chat`) no
+    /// longer calls `CommandContext::new(` directly — construction now goes through
+    /// the shared `build_core_context` factory so all four surfaces stay in parity.
+    /// This assertion is rewritten to target the factory call instead of the raw
+    /// constructor, preserving the original intent ("the chat path must actually
+    /// construct a command context") against the new construction seam.
     #[test]
     fn run_chat_constructs_command_context() {
         let src = include_str!("main.rs");
         assert!(
-            src.contains("CommandContext::new("),
-            "run_chat must construct CommandContext::new() for command dispatch"
+            src.contains("build_core_context("),
+            "run_chat must construct its CommandContext via build_core_context() \
+             (D-11 shared factory) for command dispatch"
         );
     }
 
-    /// INV-21.1-03: run_chat has agent_running flag
+    /// INV-21.1-03: run_chat uses TurnRegistry for turn tracking (Phase 39.1 Plans 04+06).
+    ///
+    /// The bare AtomicBool agent_running gate was REMOVED in Plan 04 (R39.1-06 / D-06).
+    /// Plan 06 completes teardown: the field is removed from CommandContext and the
+    /// throwaway AtomicBool is removed from run_chat. TurnRegistry is the sole tracker.
     #[test]
     fn run_chat_has_agent_running_flag() {
         let src = include_str!("main.rs");
         assert!(
-            src.contains("agent_running"),
-            "run_chat must track agent_running state"
+            src.contains("TurnRegistry::new()"),
+            "run_chat must construct a TurnRegistry (Phase 39.1 Plan 04 — AtomicBool gate removed)"
+        );
+        assert!(
+            src.contains("with_turn_registry(turn_registry.clone())"),
+            "run_chat must inject turn_registry into CommandContext via with_turn_registry"
         );
     }
 
@@ -3551,7 +5386,7 @@ mod ensure_home_dirs_tests {
         }
     }
 
-    /// D-05 (Phase 21.7): `$HERMES_HOME/subagent-transcripts/` must be part of
+    /// D-05 (Phase 21.7): `$IRONHERMES_HOME/subagent-transcripts/` must be part of
     /// the first-run scaffold so downstream writers can
     /// `tokio::fs::write(subagent_transcripts_dir.join(...))` without existence
     /// checks.
@@ -3565,7 +5400,7 @@ mod ensure_home_dirs_tests {
         ensure_home_dirs().unwrap();
         assert!(
             tmp.path().join("subagent-transcripts").is_dir(),
-            "D-05: $HERMES_HOME/subagent-transcripts must exist after first-run scaffold"
+            "D-05: $IRONHERMES_HOME/subagent-transcripts must exist after first-run scaffold"
         );
         ensure_home_dirs().unwrap();
         unsafe {
@@ -3573,7 +5408,7 @@ mod ensure_home_dirs_tests {
         }
     }
 
-    // Phase 26.3 UDD-04: ensure_home_dirs() creates $HERMES_HOME/browser-profile.
+    // Phase 26.3 UDD-04: ensure_home_dirs() creates $IRONHERMES_HOME/browser-profile.
     #[test]
     fn home_dirs_includes_browser_profile() {
         let _guard = crate::test_env_lock();
@@ -3584,7 +5419,7 @@ mod ensure_home_dirs_tests {
         ensure_home_dirs().unwrap();
         assert!(
             tmp.path().join("browser-profile").is_dir(),
-            "Phase 26.3 UDD-04: $HERMES_HOME/browser-profile must exist after first-run scaffold"
+            "Phase 26.3 UDD-04: $IRONHERMES_HOME/browser-profile must exist after first-run scaffold"
         );
         ensure_home_dirs().unwrap(); // idempotent
         unsafe {
@@ -3887,6 +5722,90 @@ mod agent_runtime_migration_gate_28_1_04 {
             count >= 2,
             "T-28.1-08: expected ≥2 run_turn( call sites (run_single + run_agent_turn); got {}",
             count
+        );
+    }
+}
+
+/// NF-1 (46.8-gap, D-15): the vendored `rusty_vault 0.2.1` crate leaks the
+/// master key + root token via `log::debug!` (see `46.8-SECURITY.md`), and
+/// `tracing-subscriber`'s default `tracing-log` bridge routes `log` records
+/// into whichever subscriber is installed. All three subscriber-install
+/// sites (`main.rs`, `tui_rata/event_loop.rs`, `iron_hermes_ui/logging.rs`)
+/// now append an unconditional `rusty_vault=off` directive AFTER honoring
+/// `RUST_LOG`, so an operator's own `RUST_LOG=debug` / `RUST_LOG=rusty_vault=debug`
+/// override cannot re-enable the leaking target. This test proves the
+/// directive-composition mechanism itself works — the identical pattern
+/// (`<filter>.add_directive("rusty_vault=off".parse()...)`) is used at all
+/// three sites, so one focused runtime test covers the shared mechanism
+/// rather than duplicating three near-identical `#[test]`s across binaries
+/// with no shared harness.
+#[cfg(test)]
+mod nf1_rusty_vault_log_silence_46_8_gap {
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// Minimal capturing layer: records `target::message` for every event
+    /// that actually reaches it (i.e. survived the upstream `EnvFilter`),
+    /// so the test asserts on real subscriber-observed output, not just on
+    /// the filter directive string.
+    #[derive(Clone, Default)]
+    struct CaptureLayer(Arc<Mutex<Vec<String>>>);
+
+    struct MessageVisitor(String);
+    impl tracing::field::Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+
+    impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visitor = MessageVisitor(String::new());
+            event.record(&mut visitor);
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("{}::{}", event.metadata().target(), visitor.0));
+        }
+    }
+
+    #[test]
+    fn rusty_vault_off_directive_suppresses_debug_events_even_under_explicit_rust_log() {
+        let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let capture_layer = CaptureLayer(captured.clone());
+
+        // Mirror production composition order (RUST_LOG-derived filter first,
+        // `rusty_vault=off` appended after) with an operator-supplied
+        // RUST_LOG that WOULD enable rusty_vault debug logs absent the fix.
+        let env_filter = tracing_subscriber::EnvFilter::new("rusty_vault=debug,ironhermes=info")
+            .add_directive("rusty_vault=off".parse().expect("valid static directive"));
+
+        let subscriber = tracing_subscriber::registry()
+            .with(env_filter)
+            .with(capture_layer);
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::debug!(target: "rusty_vault", "master_key: DEADBEEF-SECRET-MARKER");
+            tracing::info!(target: "ironhermes", "unrelated info event");
+        });
+
+        let events = captured.lock().unwrap();
+        assert!(
+            !events.iter().any(|e| e.contains("SECRET-MARKER")),
+            "rusty_vault debug event leaked through despite the `rusty_vault=off` \
+             directive: {events:?}"
+        );
+        assert!(
+            events.iter().any(|e| e.starts_with("ironhermes::")),
+            "sanity check failed: the filter suppressed everything, not just the \
+             rusty_vault target: {events:?}"
         );
     }
 }

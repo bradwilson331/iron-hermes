@@ -6,7 +6,6 @@
 //! Tests follow the cmd_agents_and_stop.rs pattern exactly.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use ironhermes_core::commands::context::{CommandContext, CronJobReader};
 use ironhermes_core::commands::handlers::dispatch;
@@ -105,21 +104,12 @@ impl CronJobReader for FakeCronJobReader {
 // =============================================================================
 
 fn base_ctx() -> CommandContext {
-    CommandContext::new(
-        Platform::Local,
-        "test-session".to_string(),
-        Arc::new(AtomicBool::new(false)),
-    )
+    CommandContext::new(Platform::Local, "test-session".to_string())
 }
 
 fn make_test_ctx_with_cron_store(jobs: Vec<FakeCronJob>) -> CommandContext {
     let store: Arc<dyn CronJobReader> = Arc::new(FakeCronJobReader { jobs });
-    CommandContext::new(
-        Platform::Local,
-        "test-session".to_string(),
-        Arc::new(AtomicBool::new(false)),
-    )
-    .with_cron_store(store)
+    CommandContext::new(Platform::Local, "test-session".to_string()).with_cron_store(store)
 }
 
 fn find_cmd(name: &str) -> CommandDef {

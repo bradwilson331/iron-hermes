@@ -34,6 +34,15 @@ use std::collections::HashSet;
 ///   (UI-SPEC §6.5 — disallowed transitions + move confirmations).
 /// - `archive_modal_task`: Plan 03 archive-confirm modal target. Plan 02
 ///   sets `Some(task_id)` on archived drop; Plan 03 reads + opens modal.
+/// - `active_profile`: Phase 47.4 Plan 09 (D-05) — pure pass-through of
+///   the board PROFILE lens from `ScreenKanban` to every `KanbanColumn`,
+///   which uses it only to compute each card's dimmed state. This prop
+///   was not in Plan 09's own declared `files_modified` (card.rs,
+///   column.rs, kanban.rs only) — `board.rs` is the necessary
+///   intermediate hop in `ScreenKanban -> KanbanBoard -> KanbanColumn ->
+///   KanbanCard`, and this change mirrors the exact pass-through pattern
+///   already used for `dragged_task_id`/`pending_task_ids`/`toast_msg`/
+///   etc. below (Rule 3 deviation — see 47.4-09-SUMMARY.md).
 #[component]
 pub fn KanbanBoard(
     tasks: Signal<Vec<TaskRow>>,
@@ -46,6 +55,7 @@ pub fn KanbanBoard(
     archive_modal_task: Signal<Option<String>>,
     // Plan 03 (D-12): TRIAGE-card decompose/specify action handler.
     on_triage_action: EventHandler<(String, DecomposeOrSpecify)>,
+    active_profile: ReadSignal<Option<String>>,
 ) -> Element {
     let show_archived = *archived_visible.read();
     rsx! {
@@ -63,6 +73,7 @@ pub fn KanbanBoard(
                 live_region_msg: live_region_msg,
                 archive_modal_task: archive_modal_task,
                 on_triage_action: on_triage_action,
+                active_profile: active_profile,
             }
             KanbanColumn {
                 status: KanbanColumnStatus::Todo,
@@ -74,6 +85,7 @@ pub fn KanbanBoard(
                 live_region_msg: live_region_msg,
                 archive_modal_task: archive_modal_task,
                 on_triage_action: on_triage_action,
+                active_profile: active_profile,
             }
             KanbanColumn {
                 status: KanbanColumnStatus::Ready,
@@ -85,6 +97,7 @@ pub fn KanbanBoard(
                 live_region_msg: live_region_msg,
                 archive_modal_task: archive_modal_task,
                 on_triage_action: on_triage_action,
+                active_profile: active_profile,
             }
             KanbanColumn {
                 status: KanbanColumnStatus::InProgress,
@@ -96,6 +109,7 @@ pub fn KanbanBoard(
                 live_region_msg: live_region_msg,
                 archive_modal_task: archive_modal_task,
                 on_triage_action: on_triage_action,
+                active_profile: active_profile,
             }
             KanbanColumn {
                 status: KanbanColumnStatus::Blocked,
@@ -107,6 +121,7 @@ pub fn KanbanBoard(
                 live_region_msg: live_region_msg,
                 archive_modal_task: archive_modal_task,
                 on_triage_action: on_triage_action,
+                active_profile: active_profile,
             }
             KanbanColumn {
                 status: KanbanColumnStatus::Done,
@@ -118,6 +133,7 @@ pub fn KanbanBoard(
                 live_region_msg: live_region_msg,
                 archive_modal_task: archive_modal_task,
                 on_triage_action: on_triage_action,
+                active_profile: active_profile,
             }
             if show_archived {
                 KanbanColumn {
@@ -130,6 +146,7 @@ pub fn KanbanBoard(
                     live_region_msg: live_region_msg,
                     archive_modal_task: archive_modal_task,
                     on_triage_action: on_triage_action,
+                    active_profile: active_profile,
                 }
             }
         }

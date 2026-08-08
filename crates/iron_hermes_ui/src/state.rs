@@ -600,7 +600,7 @@ use serde::{Deserialize, Serialize};
 
 /// Top-level screens addressable by the wheel + Settings sub-nav.
 ///
-/// 14 variants. The 11 wedge-reachable screens correspond 1-to-1 with
+/// 16 variants. The 11 wedge-reachable screens correspond 1-to-1 with
 /// `WheelWedge`; `Soul`, `Schedules`, `Office` are reachable via the
 /// Settings screen's "Other Screens" sub-nav (Plan 07's
 /// `SettingsScreenLink`) — they are not wheel wedges per CONTEXT D-10.
@@ -608,6 +608,11 @@ use serde::{Deserialize, Serialize};
 /// `Kanban` is the 11th wheel-reachable screen, added in Phase
 /// 36.3.7.11 Plan 04 per D-02. Plan 01 will wire the live dashboard;
 /// until then a minimal `ScreenKanban` placeholder is rendered.
+///
+/// `Artifacts` and `ArtifactViewer` (Phase 46.6 Plan 05, D-07) are NOT
+/// wheel wedges either — they are reached from the Sessions page's
+/// `▤ ARTIFACTS` affordance (gallery → row click → viewer), like a
+/// sub-screen pair rather than a top-level wheel destination.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum Screen {
     #[default]
@@ -625,6 +630,10 @@ pub enum Screen {
     Settings,
     Providers,
     Kanban,
+    /// Phase 46.6 Plan 05 (D-07): lean artifacts gallery, reached from Sessions.
+    Artifacts,
+    /// Phase 46.6 Plan 05 (D-02/D-07): sandboxed artifact viewer chrome.
+    ArtifactViewer,
 }
 
 /// The 11 wheel wedges in CONTEXT D-10 + Phase 36.3.7.11 D-02 canonical order:
@@ -829,6 +838,52 @@ pub struct ThemeContext(pub Signal<String>);
 #[derive(Clone, Copy)]
 pub struct SessionIdContext(pub Signal<String>);
 
+// ---------------------------------------------------------------------------
+// Phase 36.17.9 freeze post-mortem: the SAME ambiguity that motivated the
+// String newtypes above also applied to the bare `Signal<bool>` and
+// `Signal<u64>` providers HermesApp registered. By Phase 36.17.9 there were
+// THREE `Signal<bool>` providers (is_ws_connected, voice_mode_active,
+// wake_word_matched) and TWO `Signal<u64>` providers (next_id,
+// subagent_events). `use_context::<Signal<bool>>()` / `<Signal<u64>>()`
+// resolved to whichever was registered LAST, so ScreenAgents silently read
+// wake_word_matched instead of is_ws_connected (poll cadence never backed off
+// to 5 s) and ScreenChat read subagent_events instead of next_id (history
+// bubble-id collisions). The newtypes below force per-signal disambiguation,
+// exactly like ThemeContext / SessionIdContext.
+
+#[allow(dead_code)] // context-provider newtype; consumed via use_context::<WsConnectedContext>() in ScreenAgents
+#[derive(Clone, Copy)]
+pub struct WsConnectedContext(pub Signal<bool>);
+
+#[allow(dead_code)] // context-provider newtype; voice-mode overlay flag
+#[derive(Clone, Copy)]
+pub struct VoiceModeActiveContext(pub Signal<bool>);
+
+#[allow(dead_code)] // context-provider newtype; consumed via use_context::<WakeWordMatchedContext>() in voice_loop
+#[derive(Clone, Copy)]
+pub struct WakeWordMatchedContext(pub Signal<bool>);
+
+#[allow(dead_code)] // context-provider newtype; consumed via use_context::<NextIdContext>() in ScreenChat
+#[derive(Clone, Copy)]
+pub struct NextIdContext(pub Signal<u64>);
+
+#[allow(dead_code)] // context-provider newtype; consumed via use_context::<SubagentEventsContext>() in ScreenAgents
+#[derive(Clone, Copy)]
+pub struct SubagentEventsContext(pub Signal<u64>);
+
+// ---------------------------------------------------------------------------
+// Phase 46.6 Plan 05 (D-07): selected-artifact context — the gallery writes
+// the clicked row's `ArtifactInfo` here before switching `active_screen` to
+// `Screen::ArtifactViewer`; the viewer reads it to render its chrome + iframe
+// `src`. A dedicated newtype (not a bare `Signal<Option<ArtifactInfo>>`)
+// per the same B-03 disambiguation discipline as the other context types
+// above — provided at the HermesApp root only (Dioxus context-panic rule:
+// child providers panic ancestor/sibling consumers).
+#[allow(dead_code)]
+// context-provider newtype; consumed via use_context::<SelectedArtifactCtx>() in ScreenArtifacts / ArtifactViewer
+#[derive(Clone, Copy)]
+pub struct SelectedArtifactCtx(pub Signal<Option<crate::server::api::ArtifactInfo>>);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -967,8 +1022,16 @@ mod tests {
         // Plan 09 Wave-0 contract: every Screen variant survives a
         // serialise → deserialise cycle. Test name is grep-locked by
         // VALIDATION.md Per-Task Verification Map.
+        //
+        // Phase 47.3 Plan 07 (D-12): was 13/16 (missing Kanban, Artifacts,
+        // ArtifactViewer). Rust has no compile-time enum-variant count without
+        // a derive macro, so the drift guard below is length-based (asserted
+        // against the doc comment on `enum Screen` above, which states "16
+        // variants") rather than exhaustive — it will not catch a 17th variant
+        // added without updating ALL, but it does force this constant's own
+        // array length to be re-examined whenever it's touched.
         use crate::state::Screen;
-        const ALL: [Screen; 13] = [
+        const ALL: [Screen; 16] = [
             Screen::Chat,
             Screen::Sessions,
             Screen::Agents,
@@ -982,7 +1045,11 @@ mod tests {
             Screen::Office,
             Screen::Settings,
             Screen::Providers,
+            Screen::Kanban,
+            Screen::Artifacts,
+            Screen::ArtifactViewer,
         ];
+        assert_eq!(ALL.len(), 16);
         for s in ALL.iter() {
             let json = serde_json::to_string(s).expect("Screen serializes");
             let back: Screen = serde_json::from_str(&json).expect("Screen deserializes");

@@ -4,6 +4,9 @@ use async_trait::async_trait;
 use ironhermes_core::{Attachment, MessageEvent, MessageResponse, Platform};
 // TgSendApi trait now lives in ironhermes-cron::adapter (Phase 32.1 Plan 06)
 pub use ironhermes_cron::TgSendApi;
+// DeliverySend also lives in ironhermes-cron::adapter (Phase 47.6 Plan 07) —
+// same dependency-cycle reason as TgSendApi above.
+pub use ironhermes_cron::DeliverySend;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -73,6 +76,25 @@ impl TgSendApi for TelegramAdapter {
     ) -> anyhow::Result<()> {
         // Phase 36.17.2.2-04: discard MessageResponse — preserve TgSendApi contract.
         self.send_file_multipart("sendDocument", "document", chat_id, path, thread_id)
+            .await
+            .map(|_| ())
+    }
+}
+
+// Phase 47.6 Plan 07: `DeliverySend` is `ironhermes-cron`'s platform-keyed
+// text-delivery trait — the registry TEXT path for every platform, Telegram
+// included, resolves through it. `TgSendApi` above stays the MEDIA-capable
+// trait; this impl just delegates to the exact same `PlatformAdapter::send_message`
+// call `TgSendApi::send_message` already uses.
+#[async_trait]
+impl DeliverySend for TelegramAdapter {
+    async fn send_text(
+        &self,
+        chat_id: &str,
+        content: &str,
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        <Self as PlatformAdapter>::send_message(self, chat_id, content, thread_id)
             .await
             .map(|_| ())
     }
@@ -504,7 +526,7 @@ const SIZE_CAP_50_MB: u64 = 50 * 1024 * 1024;
 /// Per-method handling:
 /// - **`MediaSource::Path(p)`** — runs the D-15 size pre-check
 ///   (`tokio::fs::metadata`), then the T-INPUT-MEDIA-PATH canonicalization
-///   security gate (canonicalize + allow-list against `HERMES_HOME` and
+///   security gate (canonicalize + allow-list against `IRONHERMES_HOME` and
 ///   `/tmp`), then forwards to `send_file_multipart` for multipart upload.
 ///   Rejected paths log the FILENAME ONLY via `tracing::warn!` per the
 ///   phase threat model's T-LOG-LEAK row (no parent directories leaked).
@@ -654,7 +676,8 @@ async fn check_size_cap(path: &Path, cap: u64) -> Result<()> {
 ///
 /// Canonicalize `path` (resolves symlinks and `..` components), then assert
 /// the resolved absolute path is contained under one of the allowed roots:
-/// - `$HERMES_HOME` if the env var is set, AND
+/// - `$IRONHERMES_HOME` (resolved via `get_hermes_home()`, default
+///   `~/.ironhermes`), AND
 /// - `/tmp` (literal).
 ///
 /// On rejection, log a `warn!` with the FILENAME ONLY (no parent dirs) per
@@ -666,9 +689,14 @@ fn canonicalize_under_allowed_roots(path: &Path) -> Result<PathBuf> {
         .with_context(|| format!("Failed to canonicalize media path: {}", path.display()))?;
 
     let mut allowed_roots: Vec<PathBuf> = Vec::new();
-    if let Ok(home) = std::env::var("HERMES_HOME")
-        && let Ok(canon_home) = PathBuf::from(&home).canonicalize()
-    {
+    // IronHermes home root (where app-generated media lives, e.g. TTS output in
+    // `$IRONHERMES_HOME/audio_cache/`). Resolve via the canonical helper, NOT a
+    // raw env var: get_hermes_home() honors IRONHERMES_HOME and falls back to
+    // ~/.ironhermes, so the home root is always present even when no env var is
+    // set. The previous check read a non-canonical env var directly with no
+    // default, collapsing the allowlist to just /tmp and false-rejecting
+    // audio_cache files (T-INPUT-MEDIA-PATH dropped voice notes).
+    if let Ok(canon_home) = ironhermes_core::constants::get_hermes_home().canonicalize() {
         allowed_roots.push(canon_home);
     }
     if let Ok(canon_tmp) = PathBuf::from("/tmp").canonicalize() {
@@ -742,6 +770,30 @@ struct TelegramResponse<T> {
 pub struct TgUpdate {
     pub update_id: i64,
     pub message: Option<TgMessage>,
+    /// Phase 36.3.8 Plan 03 — NET-NEW: button-tap callback from inline_keyboard.
+    /// `Option` + serde default handles existing `getUpdates` responses that
+    /// don't include `callback_query` (Pitfall 6 — no `#[serde(default)]`
+    /// annotation needed because Option already deserialises as None when absent).
+    pub callback_query: Option<TgCallbackQuery>,
+}
+
+/// Phase 36.3.8 Plan 03 — callback_query payload from a Telegram inline-keyboard
+/// button tap.
+///
+/// Telegram Bot API reference: <https://core.telegram.org/bots/api#callbackquery>
+///
+/// `id` must be acknowledged via `answerCallbackQuery` within a few seconds
+/// or the Telegram client shows a spinning indicator on the button (Pitfall 3).
+#[derive(Debug, Clone, Deserialize)]
+pub struct TgCallbackQuery {
+    /// Unique identifier for this callback query — passed to `answerCallbackQuery`.
+    pub id: String,
+    /// The user who pressed the button.
+    pub from: TgUser,
+    /// The message that contained the inline keyboard (if still available).
+    pub message: Option<TgMessage>,
+    /// The `callback_data` string embedded in the button that was pressed.
+    pub data: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -886,5 +938,187 @@ impl ironhermes_tools::AudioDispatcher for TelegramAdapter {
     ) -> anyhow::Result<()> {
         // Use inherent send_audio (takes &Path, returns Result<MessageResponse>)
         self.send_audio(chat_id, path, thread_id).await.map(|_| ())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 36.3.8 Plan 03 — MessageDispatcher impl for TelegramAdapter (D-02/D-03)
+// ---------------------------------------------------------------------------
+
+/// Deliver plain text or a local-file attachment to any Telegram chat.
+///
+/// `send_text` uses `sendMessage`; `send_attachment` delegates to the existing
+/// `send_file_multipart` with method `sendDocument` / field `document` (the
+/// safest fallback for arbitrary file types). The attachment path is guarded by
+/// `canonicalize_under_allowed_roots` (T-36.3.8-MEDIA: path traversal mitigation)
+/// before the multipart upload begins.
+///
+/// Orphan-rule note: trait (`MessageDispatcher`) is defined in `ironhermes-tools`;
+/// this impl lives in `ironhermes-gateway` (same crate as `TelegramAdapter`), which
+/// is exactly the same split used by `AudioDispatcher` above.
+#[async_trait::async_trait]
+impl ironhermes_tools::MessageDispatcher for TelegramAdapter {
+    async fn send_text(
+        &self,
+        chat_id: &str,
+        text: &str,
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let mut params = serde_json::json!({
+            "chat_id": chat_id,
+            "text": text,
+        });
+        if let Some(tid) = thread_id {
+            params["message_thread_id"] = serde_json::Value::String(tid.to_string());
+        }
+        let _: TgMessage = self.api_call("sendMessage", &params).await?;
+        Ok(())
+    }
+
+    async fn send_attachment(
+        &self,
+        chat_id: &str,
+        path: &std::path::Path,
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        // T-36.3.8-MEDIA: canonicalize and enforce the IRONHERMES_HOME / /tmp
+        // allow-list BEFORE opening the file (mirrors MediaSender path guard).
+        let validated = canonicalize_under_allowed_roots(path)?;
+        self.send_file_multipart("sendDocument", "document", chat_id, &validated, thread_id)
+            .await
+            .map(|_| ())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 36.3.8 Plan 03 — ClarifyDispatcher impl for TelegramAdapter (D-04)
+// ---------------------------------------------------------------------------
+
+/// Send a multiple-choice question as a Telegram `sendMessage` with an
+/// `inline_keyboard` reply markup.
+///
+/// Each choice becomes one button row. The `callback_data` embedded in each
+/// button follows the compact Plan-02 grammar:
+/// `"clarify:<clarify_id>:<choice_index>"` so the runner dispatch loop can
+/// route the user's tap back to the correct suspended `ClarifyTool` awaiter
+/// (Plan 03 Task 3) without carrying the label in `callback_data` (Telegram
+/// 64-byte limit).
+#[async_trait::async_trait]
+impl ironhermes_tools::ClarifyDispatcher for TelegramAdapter {
+    async fn send_question(
+        &self,
+        chat_id: &str,
+        thread_id: Option<&str>,
+        question: &str,
+        choices: &[String],
+        clarify_id: &str,
+    ) -> anyhow::Result<()> {
+        // Build one button row per choice (each row = one-element Vec).
+        let inline_keyboard: Vec<Vec<serde_json::Value>> = choices
+            .iter()
+            .enumerate()
+            .map(|(i, label)| {
+                vec![serde_json::json!({
+                    "text": label,
+                    "callback_data": ironhermes_tools::clarify_callback_data(clarify_id, i),
+                })]
+            })
+            .collect();
+
+        let mut params = serde_json::json!({
+            "chat_id": chat_id,
+            "text": question,
+            "reply_markup": { "inline_keyboard": inline_keyboard },
+        });
+        if let Some(tid) = thread_id {
+            params["message_thread_id"] = serde_json::Value::String(tid.to_string());
+        }
+        let _: TgMessage = self.api_call("sendMessage", &params).await?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 36.3.8 Plan 03 — answer_callback_query (T-36.3.8-STUCK mitigation)
+// ---------------------------------------------------------------------------
+
+impl TelegramAdapter {
+    /// Acknowledge a Telegram inline-keyboard button tap.
+    ///
+    /// MUST be called immediately upon receiving any `callback_query` update,
+    /// BEFORE any other async work on that update (Pitfall 3). Failure to ack
+    /// within a few seconds leaves the Telegram button in a spinning state
+    /// (T-36.3.8-STUCK: availability / UX denial).
+    ///
+    /// The `answerCallbackQuery` Bot API call returns a `bool` (always `true`
+    /// on success); we discard it and return `()`.
+    pub async fn answer_callback_query(&self, callback_query_id: &str) -> anyhow::Result<()> {
+        let params = serde_json::json!({ "callback_query_id": callback_query_id });
+        let _: bool = self.api_call("answerCallbackQuery", &params).await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod media_path_guard_tests {
+    use super::*;
+
+    /// Regression: TTS audio lives in `$IRONHERMES_HOME/audio_cache/` (default
+    /// `~/.ironhermes/audio_cache/`). The T-INPUT-MEDIA-PATH guard must allow it.
+    /// Before the fix the guard resolved its home root from a non-canonical env
+    /// var with no default, so with nothing set the allowlist collapsed to `/tmp`
+    /// and `<attach kind=Audio>` voice notes were rejected ("media path outside
+    /// allowed roots") and dropped.
+    #[test]
+    fn audio_cache_under_ironhermes_home_is_allowed() {
+        let base = std::env::temp_dir().join(format!("ih-guard-allow-{}", std::process::id()));
+        let audio_cache = base.join("audio_cache");
+        std::fs::create_dir_all(&audio_cache).expect("create audio_cache");
+        let audio_file = audio_cache.join("voice.mp3");
+        std::fs::write(&audio_file, b"fake-audio").expect("write audio file");
+
+        // Point IRONHERMES_HOME at the temp home. nextest runs each test in its
+        // own process, so this env mutation does not race other tests.
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", &base);
+        }
+
+        let result = canonicalize_under_allowed_roots(&audio_file);
+
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(
+            result.is_ok(),
+            "audio file under $IRONHERMES_HOME/audio_cache must be allowed; got {:?}",
+            result.err()
+        );
+    }
+
+    /// The guard must still reject paths outside every allowed root (the security
+    /// boundary the gate exists to enforce).
+    #[test]
+    fn path_outside_all_roots_is_rejected() {
+        let base = std::env::temp_dir().join(format!("ih-guard-deny-{}", std::process::id()));
+        std::fs::create_dir_all(&base).expect("create temp home");
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", &base);
+        }
+
+        // /etc/hosts exists on macOS and Linux and is outside both the temp home
+        // and /tmp, so it must be rejected.
+        let result = canonicalize_under_allowed_roots(std::path::Path::new("/etc/hosts"));
+
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(
+            result.is_err(),
+            "a path outside all allowed roots must be rejected, but it was accepted"
+        );
     }
 }

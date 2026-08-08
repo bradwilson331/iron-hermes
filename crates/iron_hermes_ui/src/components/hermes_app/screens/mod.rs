@@ -9,6 +9,10 @@
 
 pub mod agents;
 pub mod agents_diff;
+// Phase 46.6 Plan 05 (D-07): lean artifacts gallery + sandboxed viewer,
+// reached from the Sessions screen's `▤ ARTIFACTS` affordance.
+pub mod artifact_viewer;
+pub mod artifacts;
 pub mod chat;
 pub mod gateway;
 pub mod memory;
@@ -25,3 +29,5 @@ pub mod tools;
 // Plan 01 (D-02) supplies the live KanbanBoard + child components (board /
 // column / card). Plans 02-03 add drawer + modals + drag-and-drop.
 pub mod kanban;
+
+pub mod voice_mode;

@@ -135,6 +135,16 @@ pub enum CommandResult {
     /// Phase 21.8.2 Plan 02: skills reload signal. Plan 03 lands the REPL arm.
     SkillsReload,
     /// Phase 21.8.2 Plan 02: skill activation signal. Plan 03 lands the REPL arm.
+    ///
+    /// Phase 41.1 Plan 05 (Pitfall 5): this legacy (classic crossterm+rustyline)
+    /// variant is INTENTIONALLY activate-only and carries NO `args` field — the
+    /// one-shot activate+run behavior (D-01) lives entirely in the classic REPL's
+    /// consumer in `main.rs::run_chat`, which reconstructs the argued trailing
+    /// text from the raw slash input. No run-fire wiring (activate_skill /
+    /// spawn_turn / pending_tx) belongs in the `tui/` module; every behavioral
+    /// edit this phase lands under `tui_rata/` only. Plan 01 deliberately dropped
+    /// core's `args` at the core→legacy boundary (see `tui/commands.rs`) so this
+    /// variant stays `dead_code`-clean under `-D warnings`.
     SkillActivated { name: String, body: String },
 }
 

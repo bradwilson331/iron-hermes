@@ -15,11 +15,23 @@
 use dioxus::prelude::*;
 
 #[cfg(feature = "server")]
+use std::sync::Arc;
+
+#[cfg(feature = "server")]
+use ironhermes_kanban::decomposer::{
+    decompose_triage_task, specify_triage_task, ChildSpec, DecomposeFn, DecomposeOutput,
+    DecomposeRequest,
+};
+#[cfg(feature = "server")]
 use ironhermes_kanban::store::{CreateTaskOptions, KanbanStore, ListFilters};
+#[cfg(feature = "server")]
+use ironhermes_kanban::KanbanConfig;
+#[cfg(feature = "server")]
+use tokio::sync::Mutex as TokioMutex;
 
 use crate::protocol::{
-    CommentRow, CreateTaskPayload, DecomposeOrSpecify, DecomposeResult, KanbanEventRow,
-    KanbanStatus, PromptPayload, TaskRow, TaskRunRow, WorkerContextEnvelope,
+    AttachmentRow, CommentRow, CreateTaskPayload, DecomposeOrSpecify, DecomposeResult,
+    KanbanEventRow, KanbanStatus, PromptPayload, TaskRow, TaskRunRow, WorkerContextEnvelope,
 };
 
 // Phase 36.3.7.11 Plan 02 (D-14): server-side defense-in-depth — the
@@ -75,6 +87,7 @@ pub async fn fetch_board(
                     created_at: t.created_at,
                     started_at: t.started_at,
                     ended_at: t.ended_at,
+                    output_path: t.output_path,
                 })
                 .collect())
         })
@@ -507,6 +520,7 @@ pub async fn patch_task_status(
                             None,
                             None,
                             "ui",
+                            None, // output_path: operator web-complete is read-only (Plan 06).
                         )
                         .map_err(|e| format!("complete_task: {e}"))?;
                 }
@@ -629,6 +643,7 @@ pub async fn patch_task_status(
                 created_at: updated.created_at,
                 started_at: updated.started_at,
                 ended_at: updated.ended_at,
+                output_path: updated.output_path,
             })
         })
         .await
@@ -749,6 +764,7 @@ pub async fn create_task(
                 created_at: task.created_at,
                 started_at: task.started_at,
                 ended_at: task.ended_at,
+                output_path: task.output_path,
             })
         })
         .await
@@ -766,10 +782,360 @@ pub async fn create_task(
 }
 
 // ---------------------------------------------------------------------------
+// attach_file / fetch_attachments — Phase 46.4 Plan 06 (D-03 / D-04 / D-19)
+// ---------------------------------------------------------------------------
+
+/// Phase 46.4 Plan 06 (D-03/D-04/T-46.4-06): the 10MB cap enforced on the
+/// decoded (post-base64) attachment payload, both here (server, authoritative)
+/// and client-side in card.rs (pre-check, UX only — never trust the client).
+#[cfg(feature = "server")]
+const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+
+/// Phase 46.4 Plan 06 (D-03/D-04): attach a file to a task from the web
+/// board. Base64-in-JSON transport (RESEARCH Facet 2 — NOT FileStream) —
+/// the wasm client base64-encodes the picked/dropped file's bytes and posts
+/// them as a JSON string field. The decoded length is enforced against
+/// `MAX_ATTACHMENT_BYTES` BEFORE the store call; over-cap payloads are
+/// rejected and never written to disk.
+///
+/// D-05 prohibition (enforced by omission): this fn ONLY calls
+/// `KanbanStore::add_attachment` — the SAME traversal-safe writer the CLI's
+/// `kanban attach` verb uses (46.4-05). It never builds an on-disk path
+/// itself and never copies the file into any task workspace — workspace
+/// copy-in is Plan 04's spawn-time concern, not a web-request concern.
+#[server]
+pub async fn attach_file(
+    task_id: String,
+    board: Option<String>,
+    filename: String,
+    content_b64: String,
+) -> Result<AttachmentRow, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        use base64::Engine;
+
+        let task_id_owned = task_id.clone();
+        let board_owned = board.clone();
+        let row = tokio::task::spawn_blocking(move || -> Result<AttachmentRow, String> {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(content_b64.as_bytes())
+                .map_err(|e| format!("attach_file: invalid base64 payload: {e}"))?;
+            // UAT gap fix: authoritative empty-payload reject, alongside the
+            // existing 10MB cap check — never trust the client-side guard.
+            if bytes.is_empty() {
+                return Err(format!("{filename}: empty attachment — not uploaded"));
+            }
+            if bytes.len() > MAX_ATTACHMENT_BYTES {
+                return Err(format!(
+                    "{filename} exceeds the {}MB attachment limit",
+                    MAX_ATTACHMENT_BYTES / (1024 * 1024)
+                ));
+            }
+            let content_type = content_type_from_ext(&filename);
+            // Phase 36.3.7.13 D-A2: env wins; slug is fallback hint.
+            let mut store = KanbanStore::open_from_env_or_board(board_owned.as_deref())
+                .map_err(|e| format!("open_from_env_or_board({:?}): {e}", board_owned))?;
+            let meta = store
+                .add_attachment(
+                    &task_id_owned,
+                    &filename,
+                    &bytes,
+                    content_type.as_deref(),
+                    Some("ui"),
+                )
+                .map_err(|e| format!("add_attachment: {e}"))?;
+            Ok(AttachmentRow {
+                id: meta.id,
+                task_id: meta.task_id,
+                filename: meta.filename,
+                size_bytes: meta.size_bytes,
+                content_type: meta.content_type,
+                uploaded_by: meta.uploaded_by,
+                created_at: meta.created_at,
+            })
+        })
+        .await
+        .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
+        .map_err(ServerFnError::new)?;
+        Ok(row)
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = (task_id, board, filename, content_b64);
+        Err(ServerFnError::new(
+            "attach_file unavailable without `server` feature",
+        ))
+    }
+}
+
+/// Phase 46.4 Plan 06 (D-03/D-04): read-side list of a task's attachments,
+/// backing the card's attachment chip strip. Ordered by `created_at` ASC
+/// (oldest-first — matches `list_attachments`'s SQL order).
+#[server]
+pub async fn fetch_attachments(
+    task_id: String,
+    board: Option<String>,
+) -> Result<Vec<AttachmentRow>, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        let task_id_owned = task_id.clone();
+        let board_owned = board.clone();
+        let rows = tokio::task::spawn_blocking(move || -> Result<Vec<AttachmentRow>, String> {
+            let store = KanbanStore::open_from_env_or_board(board_owned.as_deref())
+                .map_err(|e| format!("open_from_env_or_board({:?}): {e}", board_owned))?;
+            let metas = store
+                .list_attachments(&task_id_owned)
+                .map_err(|e| format!("list_attachments: {e}"))?;
+            Ok(metas
+                .into_iter()
+                .map(|m| AttachmentRow {
+                    id: m.id,
+                    task_id: m.task_id,
+                    filename: m.filename,
+                    size_bytes: m.size_bytes,
+                    content_type: m.content_type,
+                    uploaded_by: m.uploaded_by,
+                    created_at: m.created_at,
+                })
+                .collect())
+        })
+        .await
+        .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
+        .map_err(ServerFnError::new)?;
+        Ok(rows)
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = (task_id, board);
+        Err(ServerFnError::new(
+            "fetch_attachments unavailable without `server` feature",
+        ))
+    }
+}
+
+/// Phase 46.4 Plan 06: best-effort MIME sniff from the filename extension —
+/// display metadata only (stored in `task_attachments.content_type`, never
+/// used for any security decision). Unknown extensions return `None`.
+#[cfg(feature = "server")]
+fn content_type_from_ext(filename: &str) -> Option<String> {
+    let ext = filename.rsplit('.').next()?.to_ascii_lowercase();
+    let mime = match ext.as_str() {
+        "txt" | "md" => "text/plain",
+        "json" => "application/json",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "pdf" => "application/pdf",
+        "csv" => "text/csv",
+        "zip" => "application/zip",
+        _ => return None,
+    };
+    Some(mime.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// load_kanban_config / build_decompose_fn — Phase 46.3 Plan 01 (D-02 / D-06)
+// ---------------------------------------------------------------------------
+//
+// Ported VERBATIM (per plan directive) from the CLI's
+// `crates/ironhermes-cli/src/kanban/commands.rs:1480` (`load_kanban_config`)
+// and `:1498` (`build_runtime_decompose_fn`). The web crate has NO dependency
+// on `ironhermes-cli` — this is a copy, not an import. Both helpers are
+// `#[cfg(feature = "server")]`-only; the wasm client build never sees them.
+//
+// D-06 discretion (resolver strategy): REUSES `state.resolver` (the
+// `Arc<ProviderResolver>` already built once at `AppState::init` from the
+// same `Config` — config never hot-reloads) rather than rebuilding a fresh
+// `ProviderResolver::build(&config)` registry on every click. This is why
+// `build_decompose_fn` below takes `&ProviderResolver`, not `&Config`.
+
+/// Load the operator's `KanbanConfig` from the main config.yaml's `kanban:`
+/// block. Fails gracefully to `KanbanConfig::default()` when the block is
+/// absent or malformed — mirrors the CLI / gateway runner behavior.
+#[cfg(feature = "server")]
+fn load_kanban_config(main_config: &ironhermes_core::config::Config) -> KanbanConfig {
+    serde_yaml::from_value(main_config.kanban.clone()).unwrap_or_default()
+}
+
+/// Build the production `DecomposeFn` from operator config, reusing the
+/// AppState's already-constructed `ProviderResolver` (D-06 / A1).
+///
+/// Three-tier cascade (mirrors CLI `build_runtime_decompose_fn`):
+///   Tier 1: `kanban_config.decomposer_model` — kanban-local override (non-empty wins).
+///   Tier 2: `resolver.resolve_role("kanban_decomposer")` — per-role override.
+///   Tier 3: `resolver.resolve_for_main()` — main provider's default model.
+///
+/// Returns `Err` (with the exact CLI bail message) when no API key can be
+/// resolved for the chosen endpoint — the caller (Task 2) maps this to
+/// `DecomposeResult::NotWired`, never a boot-time panic (D-06 fail-soft).
+#[cfg(feature = "server")]
+fn build_decompose_fn(
+    kanban_config: &KanbanConfig,
+    resolver: &ironhermes_core::provider::ProviderResolver,
+) -> anyhow::Result<DecomposeFn> {
+    use ironhermes_agent::client::LlmClient;
+    use ironhermes_core::ChatMessage;
+
+    // Tier 1: kanban-local model override.
+    // Tier 2: model.roles["kanban_decomposer"].model.
+    // Tier 3: main provider's default model.
+    let (endpoint, resolved_model): (_, String) = if !kanban_config.decomposer_model.is_empty() {
+        // Tier 1: kanban.decomposer_model is set — use main provider with this model.
+        let ep = resolver.resolve_for_main().clone();
+        let model = kanban_config.decomposer_model.clone();
+        (ep, model)
+    } else if let Some(ep) = resolver.resolve_role("kanban_decomposer") {
+        // Tier 2: model.roles["kanban_decomposer"] resolves (carries endpoint + model).
+        let model = ep.default_model.clone();
+        (ep, model)
+    } else {
+        // Tier 3: fall back to main provider's default model.
+        let ep = resolver.resolve_for_main().clone();
+        let model = ep.default_model.clone();
+        (ep, model)
+    };
+
+    // Verify we have an API key (empty key → reject clearly).
+    // CR-03 fix: fail closed regardless of scheme — ported verbatim so a
+    // misconfigured HTTP endpoint can never silently send triage prose over
+    // plaintext or surface a generic LLM auth error instead of this
+    // actionable "missing key" guard.
+    let api_key = endpoint.api_key.clone().unwrap_or_default();
+    if api_key.is_empty() {
+        anyhow::bail!(
+            "decomposer model not configured — set `kanban.decomposer_model` in \
+             config.yaml OR `auxiliary.kanban_decomposer` OR ensure `model.default` \
+             is set with a valid API key (endpoint: {})",
+            endpoint.base_url
+        );
+    }
+
+    let base_url = endpoint.base_url.clone();
+    let model_for_closure: String = resolved_model;
+
+    // Build the closure (captures owned data — no lifetime issues).
+    let decompose_fn: DecomposeFn = Arc::new(move |req: DecomposeRequest| {
+        let base_url = base_url.clone();
+        let api_key = api_key.clone();
+        let model = model_for_closure.clone();
+
+        Box::pin(async move {
+            let client = LlmClient::new(&base_url, &api_key, &model);
+
+            // System prompt: instructs the LLM to produce JSON output per the
+            // canonical Markdown body schema.
+            // T-46.3-01: system prompt is TRUSTED (not user-supplied);
+            // task title/body below is UNTRUSTED and treated as user message content.
+            let system_prompt = "You are a kanban task decomposer. \
+                Given a one-line triage task, produce a detailed task specification as JSON. \
+                The JSON must have EXACTLY these fields:\n\
+                {\n\
+                  \"new_title\": \"<concise rewritten title (≤ 60 chars)>\",\n\
+                  \"new_body\": \"<Markdown body with sections: ## Goal, ## Approach, ## Acceptance Criteria, ## Work Breakdown, ## Risk Register, ## Suggested Skills>\",\n\
+                  \"children\": [\n\
+                    {\"title\": \"<child task title>\", \"assignee\": \"\", \"body\": null}\n\
+                  ]\n\
+                }\n\
+                `children` may be an empty array for the specify path.\n\
+                Respond with ONLY the JSON object — no prose, no markdown fences.";
+
+            let user_prompt = format!(
+                "Task ID: {}\nTitle: {}\nBody: {}\nAssignee: {}",
+                req.task_id,
+                req.title,
+                req.body.as_deref().unwrap_or("(none)"),
+                req.assignee,
+            );
+
+            let messages = vec![
+                ChatMessage::system(system_prompt),
+                ChatMessage::user(&user_prompt),
+            ];
+
+            let response = client
+                .chat_completion(&messages, None, None, Some(4096), Some(0.2), None)
+                .await
+                .map_err(|e| ironhermes_kanban::KanbanError::Other(anyhow::anyhow!("{}", e)))?;
+
+            // Extract text content from the first choice.
+            let raw_text = response
+                .choices
+                .first()
+                .and_then(|c| c.message.content.as_ref())
+                .and_then(|mc| mc.as_text())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+
+            // Parse JSON response → DecomposeOutput.
+            // On parse failure → Err so kernel appends DecomposeFailed event.
+            // T-46.3 CR-01 fix: use char-boundary-aware truncate
+            // (raw_text.chars().take(N)) rather than a byte-slice — multi-byte
+            // UTF-8 (emoji, non-English LLM output) would otherwise panic
+            // with `byte index N is not a char boundary`.
+            let preview: String = raw_text.chars().take(200).collect();
+            let parsed: serde_json::Value = serde_json::from_str(&raw_text).map_err(|e| {
+                ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
+                    "parse_error: LLM response is not valid JSON: {} (raw: {})",
+                    e,
+                    preview
+                ))
+            })?;
+
+            // T-46.3-02 CR-02 fix: reject the LLM output when required fields
+            // are missing, rather than silently substituting `(untitled)` /
+            // `""` defaults. The latter would permanently overwrite the
+            // operator's original triage body with the empty string AND
+            // promote `triage → todo` in the same transaction — silent data
+            // loss. Bubble up `Err(...)` so the kernel appends a
+            // `decompose_failed` event and the task is retained in `triage`.
+            let new_title = parsed["new_title"]
+                .as_str()
+                .ok_or_else(|| {
+                    ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
+                        "schema_error: LLM response missing required `new_title` field"
+                    ))
+                })?
+                .to_string();
+            let new_body = parsed["new_body"]
+                .as_str()
+                .ok_or_else(|| {
+                    ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
+                        "schema_error: LLM response missing required `new_body` field"
+                    ))
+                })?
+                .to_string();
+
+            let empty_vec = vec![];
+            let children: Vec<ChildSpec> = parsed["children"]
+                .as_array()
+                .unwrap_or(&empty_vec)
+                .iter()
+                .map(|c| ChildSpec {
+                    title: c["title"].as_str().unwrap_or("(child)").to_string(),
+                    assignee: c["assignee"].as_str().unwrap_or("").to_string(),
+                    body: c["body"].as_str().map(|s: &str| s.to_string()),
+                })
+                .collect();
+
+            Ok(DecomposeOutput {
+                new_title,
+                new_body,
+                children,
+            })
+        })
+    });
+
+    Ok(decompose_fn)
+}
+
+// ---------------------------------------------------------------------------
 // run_decompose_or_specify — D-13 / Q9 BRANCH
 // ---------------------------------------------------------------------------
 
-// Q9 BRANCH (b): AppState lacks the kernel's `DecomposeFn` aux client.
+// Q9 BRANCH (a): AppState's `state.resolver` (Arc<ProviderResolver>) is
+// reused (D-06/A1) to build a live `DecomposeFn` on demand inside this fn
+// body — never stored on AppState, never built at boot (fail-soft).
 //
 // Kernel signatures consulted (verified in this worktree):
 //   - crates/ironhermes-kanban/src/decomposer.rs:238
@@ -789,30 +1155,17 @@ pub async fn create_task(
 //         config: &KanbanConfig,
 //     ) -> Result<DecomposedIds>
 //
-// AppState audit (crates/iron_hermes_ui/src/server/state.rs):
-//   - `resolver: Arc<ProviderResolver>` — yes, but `DecomposeFn` is a
-//     closure that calls an LLM and parses structured JSON output. Building
-//     it requires a request builder + provider client + JSON parser glue
-//     that does NOT live in iron_hermes_ui today.
-//   - `runtime: Arc<AgentRuntime>` — exposes a `.client()` provider client,
-//     but `AgentRuntime::run_turn` is an agent-loop entry, not a one-shot
-//     structured-output call.
-//   - No `decompose_fn: DecomposeFn` field — wiring it is the same
-//     unresolved gap the LLM `kanban_decompose` tool flags as `no_aux_client`.
-//
-// Branch (b) is therefore the correct v1 behavior: surface a `NotWired`
-// envelope pointing the operator at the CLI. The dashboard UI renders
-// this as a tooltip on the Decompose / Specify buttons. Branch (a)
-// (wiring the DecomposeFn from `runtime.client()`) is a future-phase
-// upgrade — explicitly out of scope per CONTEXT v1.
+// A missing/invalid decomposer model surfaces as `Ok(DecomposeResult::NotWired
+// { message })` (D-05) preserving the actionable CLI bail text — NEVER an
+// `Err`, and NEVER a server-boot panic (D-06). A runtime LLM/parse/DB failure
+// from the kernel call itself maps to `Err(ServerFnError)` (D-05 second branch).
 
-/// Phase 36.3.7.11 Plan 02 (D-13 / Q9): invoke the decomposer / specifier
-/// kernel for a triage task.
+/// Phase 46.3 Plan 01 (D-01 / D-02 / D-05 / D-06 / Q9): invoke the real
+/// decomposer / specifier kernel for a triage task.
 ///
-/// Q9 BRANCH (b) — see comment above. The dashboard's `AppState` does not
-/// expose a kernel-compatible `DecomposeFn`, so this fn returns
-/// `DecomposeResult::NotWired` with the equivalent CLI command. The UI
-/// surfaces the message as a tooltip on the Decompose / Specify buttons.
+/// Q9 BRANCH (a) — see comment above. Ported from the CLI's
+/// `build_runtime_decompose_fn` (commands.rs:1498); reuses `state.resolver`
+/// rather than rebuilding a `ProviderResolver` registry per click.
 #[server]
 pub async fn run_decompose_or_specify(
     task_id: String,
@@ -821,14 +1174,70 @@ pub async fn run_decompose_or_specify(
 ) -> Result<DecomposeResult, ServerFnError> {
     #[cfg(feature = "server")]
     {
-        // Q9 BRANCH (b): no DecomposeFn available on AppState; return
-        // NotWired with the CLI hint. The kernel signatures live at
-        // decomposer.rs:238 (`decompose_triage_task`) and decomposer.rs:161
-        // (`specify_triage_task`).
-        let slug = action.slug();
-        let message = format!("Use: hermes kanban {} {}", slug, task_id);
-        let _ = board; // unused in branch (b) — kept for D-19 signature
-        Ok(DecomposeResult::NotWired { message })
+        // Q9 BRANCH (a): decomposer.rs:238 (`decompose_triage_task`) and
+        // decomposer.rs:161 (`specify_triage_task`) are invoked below via a
+        // DecomposeFn built on demand from `state.resolver` (D-06).
+        let state = crate::server::state::global_app_state();
+        let kanban_config = load_kanban_config(&state.config);
+
+        let store = KanbanStore::open_from_env_or_board(board.as_deref())
+            .map_err(|e| ServerFnError::new(format!("open_from_env_or_board({:?}): {e}", board)))?;
+        let store_arc = Arc::new(TokioMutex::new(store));
+
+        // D-06: built on demand, fail-soft — never an AppState field, never
+        // constructed at boot. A missing/invalid model becomes the D-05
+        // NotWired branch below, not an Err.
+        let decompose_fn = match build_decompose_fn(&kanban_config, &state.resolver) {
+            Ok(f) => f,
+            Err(e) => {
+                return Ok(DecomposeResult::NotWired {
+                    message: e.to_string(),
+                });
+            }
+        };
+
+        let result = match action {
+            DecomposeOrSpecify::Decompose => {
+                decompose_triage_task(store_arc.clone(), &task_id, &decompose_fn, &kanban_config)
+                    .await
+            }
+            DecomposeOrSpecify::Specify => {
+                specify_triage_task(store_arc.clone(), &task_id, &decompose_fn, &kanban_config)
+                    .await
+            }
+        };
+
+        match result {
+            Ok(ids) => {
+                let summary = match action {
+                    DecomposeOrSpecify::Decompose => {
+                        format!(
+                            "{} child task(s) created{}",
+                            ids.child_ids.len(),
+                            if ids.root_promoted {
+                                " — parent promoted to todo"
+                            } else {
+                                " — parent already processed"
+                            }
+                        )
+                    }
+                    DecomposeOrSpecify::Specify => {
+                        if ids.root_promoted {
+                            "Task rewritten and promoted to todo".to_string()
+                        } else {
+                            "Task already processed (no changes applied)".to_string()
+                        }
+                    }
+                };
+                Ok(DecomposeResult::Ok {
+                    children_count: ids.child_ids.len() as u32,
+                    summary,
+                })
+            }
+            // D-05 runtime-failure branch: LLM/parse/DB error from the kernel
+            // call itself — NEVER downgraded to NotWired.
+            Err(e) => Err(ServerFnError::new(format!("{} failed: {e}", action.slug()))),
+        }
     }
     #[cfg(not(feature = "server"))]
     {

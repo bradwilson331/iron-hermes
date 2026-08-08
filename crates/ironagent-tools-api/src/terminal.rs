@@ -22,8 +22,17 @@ const MAX_OUTPUT_LEN: usize = 50_000;
 /// the tool returns a structured `{"process_id": "...", "pid": ...}` JSON
 /// immediately. Foreground mode (`background=false` or absent) keeps the
 /// original synchronous output-capture path exactly as before.
+///
+/// Phase 42 EXEC-03 (D-04/D-06): both spawn paths call `env_clear()` then
+/// `build_terminal_safe_env()` so that secrets in the parent process env (e.g.
+/// `CLOUDFLARE_API_TOKEN`) cannot be exfiltrated by a subprocess that runs
+/// `env`, `printenv`, or `curl -d "$(env)"`.
 pub struct TerminalTool {
     cwd: Option<PathBuf>,
+    /// Phase 42 EXEC-03 / D-05: global operator allowlist for terminal subprocesses.
+    /// Empty by default — only `SAFE_ENV_KEYS` + XDG_* vars pass through.
+    /// Populated via `with_env_allowlist()` from `TerminalConfig.terminal_env_allowlist`.
+    env_allowlist: Vec<String>,
     /// Plan 21.7-06: Optional registry handle for background spawns. `None`
     /// leaves background-mode requests erroring out — foreground mode is
     /// always available regardless.
@@ -34,6 +43,7 @@ impl TerminalTool {
     pub fn new() -> Self {
         Self {
             cwd: None,
+            env_allowlist: vec![],
             process_registry: None,
         }
     }
@@ -41,6 +51,7 @@ impl TerminalTool {
     pub fn with_cwd(cwd: PathBuf) -> Self {
         Self {
             cwd: Some(cwd),
+            env_allowlist: vec![],
             process_registry: None,
         }
     }
@@ -50,6 +61,18 @@ impl TerminalTool {
     /// Foreground dispatch is unchanged regardless of this setter.
     pub fn with_process_registry(mut self, reg: Arc<RwLock<ProcessRegistry>>) -> Self {
         self.process_registry = Some(reg);
+        self
+    }
+
+    /// Phase 42 EXEC-03 / D-05: install a per-instance env allowlist so that
+    /// operator-opted-in vars (from `TerminalConfig.terminal_env_allowlist`) pass
+    /// through to the child subprocess via `build_terminal_safe_env()`.
+    ///
+    /// Both the foreground and background spawn paths consult this list.
+    /// Empty by default — only `SAFE_ENV_KEYS` (PATH/HOME/USER/…) + XDG_* pass.
+    /// Must be called BEFORE `execute()` or the registry method creates a new instance.
+    pub fn with_env_allowlist(mut self, allowlist: Vec<String>) -> Self {
+        self.env_allowlist = allowlist;
         self
     }
 }
@@ -149,10 +172,15 @@ impl Tool for TerminalTool {
                 .map(PathBuf::from)
                 .or_else(|| self.cwd.clone());
 
+            // EXEC-03 / D-06: pre-sanitize the env for the background SpawnSpec.
+            // ProcessRegistry::spawn() will call env_clear() before applying this
+            // list, so the child sees ONLY the safe allowlist (Task 2 wires that).
             let spec = SpawnSpec {
                 command: command.to_string(),
                 cwd: cwd_override,
-                env: vec![],
+                env: ironhermes_core::build_terminal_safe_env(&self.env_allowlist, &[])
+                    .into_iter()
+                    .collect(),
                 watch_patterns,
             };
 
@@ -198,6 +226,12 @@ impl Tool for TerminalTool {
             if let Some(ref dir) = self.cwd {
                 cmd.current_dir(dir);
             }
+            // EXEC-03 / D-06: clear the inherited parent env then apply ONLY the
+            // sanitized allowlist. env_clear() MUST precede envs() — calling envs()
+            // first is additive-only and leaves all inherited secrets in place
+            // (Anti-Pattern 6 from 42-RESEARCH.md / canonical worker_spawn.rs).
+            cmd.env_clear();
+            cmd.envs(ironhermes_core::build_terminal_safe_env(&self.env_allowlist, &[]));
             let output = cmd.output().await?;
 
             let mut combined = String::new();

@@ -51,8 +51,8 @@ pub struct AgentSubagentRunner {
     /// call registers its subagent on entry and unregisters on exit so the
     /// `agents: N/M` pill and `/agents list` reflect live state.
     subagent_registry: Option<Arc<RwLock<SubagentRegistry>>>,
-    /// Plan 21.7-07 (D-05): HERMES_HOME root used to compose transcript
-    /// paths. Together with `session_id` forms `$HERMES_HOME/subagent-transcripts/<session>/<sub>.jsonl`.
+    /// Plan 21.7-07 (D-05): IRONHERMES_HOME root used to compose transcript
+    /// paths. Together with `session_id` forms `$IRONHERMES_HOME/subagent-transcripts/<session>/<sub>.jsonl`.
     hermes_home: Option<PathBuf>,
     /// Plan 21.7-07 (D-05): session id used in the transcript path.
     session_id: Option<String>,
@@ -121,8 +121,16 @@ impl AgentSubagentRunner {
 
     /// Test-only constructor that creates a runner with dummy client state.
     /// Used to test field initialization and builder methods without network calls.
+    ///
+    /// Phase 46.8 Plan 07 (D-07/D-13): this is the only `ProviderResolver::build`
+    /// call site in this file — production subagents never build their own
+    /// resolver; `AgentRuntime::from_config` clones the already-vault-topped-up
+    /// parent resolver into `AgentSubagentRunner::new` (agent_runtime.rs), so the
+    /// vault fallback reaches subagents transitively. This helper mirrors the
+    /// same guarded top-up pattern for parity; with the default `Config` (vault
+    /// disabled), it is a byte-for-byte no-op (D-10).
     #[cfg(test)]
-    fn new_for_test() -> Self {
+    async fn new_for_test() -> Self {
         use crate::client::LlmClient;
         let dummy_client = AnyClient::ChatCompletions(LlmClient::new(
             "http://localhost:9999",
@@ -132,8 +140,20 @@ impl AgentSubagentRunner {
         // SAFETY: ProviderResolver is only used in run_child, which is not called
         // in field-inspection tests. We build a real resolver from a minimal Config.
         let config = ironhermes_core::Config::default();
-        let resolver = ironhermes_core::ProviderResolver::build(&config)
+        let mut resolver = ironhermes_core::ProviderResolver::build(&config)
             .expect("default Config should produce a valid resolver");
+        if config.vault.enabled {
+            // UAT gap G-46.8-1 fix (parity with the production sites): route
+            // through the shared resolver rather than passing the empty
+            // rusty_vault.data_dir sentinel straight through unresolved.
+            let store =
+                ironhermes_vault::open_store(&ironhermes_core::resolve_vault_config(&config))
+                    .expect("vault store should open for test config");
+            resolver
+                .apply_vault_fallback(&*store)
+                .await
+                .expect("vault fallback should apply for test config");
+        }
         Self::new(dummy_client, resolver, None)
     }
 }
@@ -424,15 +444,15 @@ mod tests {
     use super::*;
 
     /// Build a minimal `AgentSubagentRunner` for field-inspection tests.
-    fn make_runner() -> AgentSubagentRunner {
-        AgentSubagentRunner::new_for_test()
+    async fn make_runner() -> AgentSubagentRunner {
+        AgentSubagentRunner::new_for_test().await
     }
 
-    #[test]
-    fn test_default_current_depth_is_zero() {
+    #[tokio::test]
+    async fn test_default_current_depth_is_zero() {
         // Phase 32.2 D-04: new() must initialise current_depth=0 (root caller)
         // and caller_subagent_id=None (no parent).
-        let runner = make_runner();
+        let runner = make_runner().await;
         assert_eq!(
             runner.current_depth, 0,
             "default current_depth must be 0 (root caller)"
@@ -443,20 +463,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_with_current_depth_sets_field() {
+    #[tokio::test]
+    async fn test_with_current_depth_sets_field() {
         // Phase 32.2 D-04: with_current_depth(N) must set current_depth to N.
-        let runner = make_runner().with_current_depth(2);
+        let runner = make_runner().await.with_current_depth(2);
         assert_eq!(
             runner.current_depth, 2,
             "with_current_depth(2) must set field to 2"
         );
     }
 
-    #[test]
-    fn test_with_caller_id_sets_field() {
+    #[tokio::test]
+    async fn test_with_caller_id_sets_field() {
         // Phase 32.2 D-10: with_caller_id(id) must set caller_subagent_id to Some(id).
-        let runner = make_runner().with_caller_id("sub_abc123".to_string());
+        let runner = make_runner().await.with_caller_id("sub_abc123".to_string());
         assert_eq!(
             runner.caller_subagent_id,
             Some("sub_abc123".to_string()),

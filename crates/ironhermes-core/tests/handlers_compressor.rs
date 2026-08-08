@@ -10,7 +10,7 @@ use ironhermes_core::commands::handlers::dispatch;
 use ironhermes_core::commands::registry::build_registry;
 use ironhermes_core::commands::{CommandResult, CommandRouter};
 use ironhermes_core::types::Platform;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::Arc;
 
 // =============================================================================
 // StubContextEngine — fake ContextCompressorHandle (PATTERNS.md Cat-5B)
@@ -37,20 +37,11 @@ impl ContextCompressorHandle for StubContextEngine {
 
 fn make_test_ctx_with_compressor() -> CommandContext {
     let engine: Arc<dyn ContextCompressorHandle> = Arc::new(StubContextEngine);
-    CommandContext::new(
-        Platform::Local,
-        "test-session".to_string(),
-        Arc::new(AtomicBool::new(false)),
-    )
-    .with_context_compressor(engine)
+    CommandContext::new(Platform::Local, "test-session".to_string()).with_context_compressor(engine)
 }
 
 fn make_ctx_no_compressor() -> CommandContext {
-    CommandContext::new(
-        Platform::Local,
-        "test-session".to_string(),
-        Arc::new(AtomicBool::new(false)),
-    )
+    CommandContext::new(Platform::Local, "test-session".to_string())
 }
 
 fn make_router() -> CommandRouter {

@@ -29,14 +29,15 @@ fn main_rs_calls_register_kanban_tools_if_applicable() {
     );
 }
 
-/// The HERMES_KANBAN_TASK env var check must appear at least twice in main.rs:
-/// once for the guidance injection and once for the tool registration helper.
+/// The kanban task env-var check must appear at least twice in main.rs via
+/// `kanban_env("TASK")` (dual-read resolver): once for guidance injection and
+/// once for the tool-registration helper (INV-36.3.7-05-03).
 #[test]
 fn main_rs_checks_hermes_kanban_task_env() {
-    let count = MAIN_RS.matches("HERMES_KANBAN_TASK").count();
+    let count = MAIN_RS.matches(r#"kanban_env("TASK")"#).count();
     assert!(
         count >= 2,
-        "INV-36.3.7-05-03: HERMES_KANBAN_TASK must appear ≥ 2 times in main.rs \
+        "INV-36.3.7-05-03: kanban_env(\"TASK\") must appear ≥ 2 times in main.rs \
          (guidance injection + tool registration), found {count}"
     );
 }

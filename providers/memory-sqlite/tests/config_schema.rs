@@ -32,7 +32,7 @@ fn sqlite_provider_config_schema_shape() {
     assert!(db_path.env_var.is_none());
     assert_eq!(
         db_path.default,
-        Some(serde_json::json!("$HERMES_HOME/memory.db")),
+        Some(serde_json::json!("$IRONHERMES_HOME/memory.db")),
     );
 }
 

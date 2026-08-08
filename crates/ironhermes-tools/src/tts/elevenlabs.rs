@@ -125,6 +125,15 @@ impl TtsProvider for ElevenLabsProvider {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to read ElevenLabs response body: {}", e))?;
 
+        // Never persist an empty audio body: a 200 with no bytes would write a
+        // silent 0-byte mp3 that is reported as success (debug:
+        // web-tts-zero-byte-audio). Surface it as an error instead.
+        if bytes.is_empty() {
+            return Err(anyhow::anyhow!(
+                "ElevenLabs returned an empty audio body (HTTP {status})"
+            ));
+        }
+
         tokio::fs::write(output_path, &bytes)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to write audio file: {}", e))?;

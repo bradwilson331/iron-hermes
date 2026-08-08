@@ -37,14 +37,80 @@ chrono = { workspace = true }
 tokio-util = { workspace = true }
 pdf-extract = { workspace = true }
 base64 = { workspace = true }
+# Shared fit-for-vision image downscale/re-encode (multimodal.rs): keeps every
+# per-image payload sent to a vision provider under the ~5 MB per-image limit.
+# Also consumed by ironhermes-cli's kanban worker image turn (46.5.1). Already
+# resolved transitively via dioxus-desktop at 0.25.10; minimal codec features
+# match the image types both paths accept.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 nix = { workspace = true, features = ["signal"] }
 tempfile = "3"
 serenity = { version = "0.12.5", default-features = false, features = ["client", "gateway", "http", "model", "cache", "rustls_backend"] }
 slack-morphism = { version = "2.22.0", features = ["axum"] }
+# Phase 47.6 Plan 01 (P1-3, D-09): Nostr client for the Buzz platform, feature-gated
+# behind `buzz` (mirrors the `rusty-vault` precedent in ironhermes-vault/Cargo.toml).
+# `nostr-sdk` 0.45.0 has NO `nip59` feature of its own (verified against the published
+# crate — a correction to 47.6-RESEARCH.md's assumed Cargo snippet, which named `nip59`
+# as an nostr-sdk feature). NIP-59 gift wrap lives on the `nostr` crate instead, so
+# `nostr` is added directly at the SAME "0.45" line nostr-sdk pulls in transitively —
+# Cargo's feature unification (same package, same normal-dependency kind, same
+# platform) compiles one shared `nostr` instance with `nip59` turned on for the whole
+# graph, so `nostr_sdk::prelude::{UnwrappedGift, GiftWrapBuilder, ...}` become visible.
+# This plan (channels only) does not call the gift-wrap API; plan 05 (DMs) is the
+# actual consumer — declaring the dependency shape now avoids churn later.
+nostr-sdk = { version = "0.45.0", optional = true }
+nostr = { version = "0.45.0", optional = true, features = ["nip59"] }
+# BuzzAdapter's own inbound loop consumes `Client::notifications()` (a
+# `Stream`) via `StreamExt::next`; the harness's in-test relay (dev-only)
+# also needs `Sink`/`Stream` combinators. Promoted here (rather than
+# dev-dependencies only) because production code (buzz.rs) uses it too.
+futures = { workspace = true, optional = true }
+# D-06: resolve_buzz_nsec's profile .env fallback reads through
+# `dotenvy::from_path_iter` — the same primitive `dispatch_gate.rs` and
+# `profile_api.rs` already use elsewhere in the workspace.
+dotenvy = { workspace = true, optional = true }
+# Phase 47.6 Plan 08: BuzzAdapter::connect dials the relay over `wss://` via
+# nostr-sdk, which uses rustls 0.23. Declared the same unversioned-feature
+# way `ironhermes-tools` declares it (default features already pull in
+# `aws-lc-rs` — see that crate's Cargo.toml). Optional and folded into the
+# `buzz` feature below (rather than unconditional like ironhermes-tools'
+# copy) because the only consumer, `buzz::ensure_tls_crypto_provider`, lives
+# entirely inside the `#[cfg(feature = "buzz")]`-gated `buzz` module.
+rustls = { version = "0.23", optional = true }
 
 [dev-dependencies]
+# tokio test-util for tokio::time::pause/advance in approval_tests (EXEC-05-f/h)
+tokio = { workspace = true, features = ["test-util"] }
+# Phase 47.6 Plan 09: enables `AgentRuntime::for_tests_with_base_url` (gated
+# `#[cfg(any(test, feature = "test-support"))]` in ironhermes-agent) so
+# integration tests can drive a REAL `AgentRuntime::run_turn` against a
+# wiremock-served canned response instead of a stub `MessageHandler`. Cargo
+# unifies features across the dependency graph for test builds, so the main
+# (non-dev) `ironhermes-agent` dependency above is unaffected in a release
+# build — this feature only becomes reachable when building gateway's own
+# test targets.
+ironhermes-agent = { path = "../ironhermes-agent", features = ["test-support"] }
+wiremock = { workspace = true }
 # tempfile promoted to [dependencies] — needed at runtime for write_gateway_pid atomic write (Phase 24 D-10)
 # Phase 36.17.1 D-07: proptest powers the #[cfg(test)] SplitSlotQueue parity suite in session_queue.rs.
 # Dev-only — zero runtime cost. ASSUMED legitimate per RESEARCH.md Package Legitimacy Audit.
 proptest = "1"
 tracing-subscriber = { workspace = true }
+# Phase 47.6 Plan 01 (D-10/D-09) — VERSION-ALIGNMENT FALLBACK triggered:
+# `nostr-relay-builder` has exactly two releases on the "0.45" line shared with
+# `nostr-sdk`/`nostr` 0.45.0 (0.45.0-alpha.2 and 0.45.0-alpha.3, the latest).
+# BOTH fail to compile against the published `nostr` 0.45.0 crate — they were
+# built against a pre-release `nostr` snapshot that still had
+# `SingleLetterTag::lowercase(Alphabet::P)` and an `Events` type, both removed
+# before `nostr` 0.45.0 shipped (verified: `cargo check` on a scratch project
+# against each alpha reproduces the identical `E0599`/`E0433` errors — recorded
+# verbatim in this plan's SUMMARY). Per the plan's explicit fallback ("do not
+# block the tracer... write a small local test-relay wrapper in the test
+# file"), this dependency is replaced by an in-file minimal NIP-01 relay (see
+# `buzz_relay_roundtrip.rs`'s `local_relay` module) built on `tokio-tungstenite`
+# (already resolved elsewhere in the workspace dependency graph) plus the
+# `futures` promoted to [dependencies] above.
+tokio-tungstenite = "0.28"
+
+[features]
+buzz = ["dep:nostr-sdk", "dep:nostr", "dep:futures", "dep:dotenvy", "dep:rustls"]

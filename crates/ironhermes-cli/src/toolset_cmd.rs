@@ -11,11 +11,21 @@ use ironhermes_core::{DEFAULT_TOOLSETS, ToolsConfig, config_setter, profile};
 use ironhermes_tools::ToolRegistry;
 use std::path::Path;
 
-/// D-01/D-04: The nine concrete toolsets shipped — browser added in Phase 25.1,
+/// D-01/D-04: The concrete toolsets shipped — browser added in Phase 25.1,
 /// learning added in Phase 33 (autonomous skill creation, LEARN-03..05).
 /// voice added in Phase 36.17.6 (TTS toolset — text_to_speech + send_audio).
+/// messaging added in Phase 36.3.8 (send_message + clarify).
 const KNOWN_TOOLSETS: &[&str] = &[
-    "web", "code", "memory", "agent", "skills", "session", "browser", "learning", "voice",
+    "web",
+    "code",
+    "memory",
+    "agent",
+    "skills",
+    "session",
+    "browser",
+    "learning",
+    "voice",
+    "messaging",
 ];
 
 #[derive(Subcommand)]
@@ -290,6 +300,8 @@ fn toolset_members_map() -> std::collections::HashMap<&'static str, &'static [&'
     );
     // Phase 36.17.6: voice toolset — TTS tools wired for CLI inspection path.
     m.insert("voice", &["text_to_speech", "send_audio"]);
+    // Phase 36.3.8: messaging toolset — first-class send_message + clarify.
+    m.insert("messaging", &["send_message", "clarify"]);
     m
 }
 
@@ -567,8 +579,20 @@ mod tests {
         );
         assert_eq!(
             KNOWN_TOOLSETS.len(),
-            9,
-            "KNOWN_TOOLSETS must have exactly 9 entries after Phase 36.17.6 addition of voice toolset"
+            10,
+            "KNOWN_TOOLSETS must have exactly 10 entries after Phase 36.3.8 addition of messaging toolset"
+        );
+    }
+
+    /// Phase 36.3.8 regression: `messaging` must appear in KNOWN_TOOLSETS so that
+    /// `hermes toolset enable/show messaging` works and the send_message + clarify
+    /// tools are not silently filtered out of the LLM tool list.
+    #[test]
+    fn messaging_in_known_set() {
+        assert!(
+            KNOWN_TOOLSETS.contains(&"messaging"),
+            "Phase 36.3.8: 'messaging' must be in KNOWN_TOOLSETS (got: {:?})",
+            KNOWN_TOOLSETS
         );
     }
 

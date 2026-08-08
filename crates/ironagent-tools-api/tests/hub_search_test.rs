@@ -239,14 +239,14 @@ async fn hub_search_no_filesystem_mutation() {
     use ironhermes_tools::registry::Tool;
     use std::sync::Mutex;
 
-    // Set up an isolated HERMES_HOME
+    // Set up an isolated IRONHERMES_HOME
     static ENV_LOCK: Mutex<()> = Mutex::new(());
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let tmp = tempfile::tempdir().unwrap();
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     unsafe {
-        std::env::set_var("HERMES_HOME", tmp.path());
+        std::env::set_var("IRONHERMES_HOME", tmp.path());
     }
 
     // Snapshot the directory state before the call
@@ -263,14 +263,14 @@ async fn hub_search_no_filesystem_mutation() {
 
     unsafe {
         match prev {
-            Some(v) => std::env::set_var("HERMES_HOME", v),
-            None => std::env::remove_var("HERMES_HOME"),
+            Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+            None => std::env::remove_var("IRONHERMES_HOME"),
         }
     }
 
     assert_eq!(
         snapshot_before, snapshot_after,
-        "hub_search must not mutate HERMES_HOME (D-13 filesystem invariant)"
+        "hub_search must not mutate IRONHERMES_HOME (D-13 filesystem invariant)"
     );
 }
 

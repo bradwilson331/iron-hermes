@@ -50,9 +50,14 @@ pub fn install_web_logger_subscriber() -> (Option<WorkerGuard>, Option<WorkerGua
 
     let log_dir = ironhermes_core::constants::get_hermes_home().join("logs");
 
+    // NF-1 (46.8-gap, D-15): silence the vendored `rusty_vault` crate's
+    // debug-level secret logging unconditionally — see
+    // `ironhermes-cli/src/main.rs`'s matching comment for the full rationale.
+    // Applied after RUST_LOG is honored so no override can leak secrets.
     let app_filter = || {
         EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new("ironhermes=info,iron_hermes_ui=info"))
+            .add_directive("rusty_vault=off".parse().expect("valid static directive"))
     };
 
     let console_layer = fmt::layer()

@@ -43,7 +43,7 @@ fn profile_doctor() {
 
 /// D-07/D-08: first-run auto-detection triggers setup when no API key and no local endpoint.
 ///
-/// Seeds a temp HERMES_HOME with a minimally-valid config.yaml (passes validate()) but
+/// Seeds a temp IRONHERMES_HOME with a minimally-valid config.yaml (passes validate()) but
 /// NO runnable LLM signal: no OPENROUTER/ANTHROPIC/OPENAI env vars, no .env API key,
 /// no localhost base_url. Expects the setup wizard to launch (D-07 fires).
 ///

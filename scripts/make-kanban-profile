@@ -1,0 +1,185 @@
+#!/usr/bin/env bash
+# =============================================================================
+# make-kanban-profile — scaffold an ironhermes profile usable by the kanban dispatcher
+# =============================================================================
+# A kanban "profile" is just an ironhermes profile (~/.ironhermes/profiles/<name>/)
+# that you assign as a task's --assignee. Kanban workers are spawned as
+# `ironhermes --profile <name> chat -q ...`, which is NON-interactive and therefore
+# SKIPS the first-run setup wizard. So the profile must already contain:
+#   • config.yaml                      (model.default etc.; also makes it show in `status`)
+#   • .env with a provider API key     (the worker env is scrubbed, so this is the ONLY
+#                                        source of OPENROUTER_API_KEY for the judge LLM)
+# Without these the worker crashes at build_runtime_judge_fn ("judge model not
+# configured … valid API key") ~1s after spawn, leaving an EMPTY workspace and a bare
+# "crashed" line in the dispatch log.
+#
+# This script seeds both — inheriting LLM provider keys from the root ~/.ironhermes/.env
+# (or prompting if none) — then verifies with `ironhermes --profile <name> doctor`.
+#
+# Usage:
+#   scripts/make-kanban-profile <name> [--force] [--all-keys] [--keys "VAR1 VAR2 ..."]
+#
+# Options:
+#   --force        Overwrite an existing profile's config.yaml/.env (default: never clobber)
+#   --all-keys     Inherit every *_API_KEY / *_KEY / *_TOKEN line from the root .env
+#                  (default: LLM provider keys only — keeps Telegram/Fal/etc. out)
+#   --keys "..."   Explicit space-separated list of env var names to inherit
+#                  (overrides the default allowlist)
+#
+# Notes:
+#   • Profiles always live under $HOME/.ironhermes/profiles/<name> — the ironhermes
+#     binary hardcodes that path (it ignores a pre-set IRONHERMES_HOME for the profile
+#     base), so this script does too.
+#   • Profile names must match `validate_profile_name`: lowercase letters/digits/hyphens,
+#     must not start with '-', <=64 chars, and not one of: default, current, none.
+# =============================================================================
+set -euo pipefail
+
+# --- LLM provider keys inherited by default (OPENROUTER is the one the judge needs) ---
+DEFAULT_KEYS="OPENROUTER_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY GROQ_API_KEY OLLAMA_API_KEY"
+
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+note() { printf '  %s\n' "$*"; }
+
+# --- Parse args ---------------------------------------------------------------
+NAME=""
+FORCE=0
+ALL_KEYS=0
+KEYS_OVERRIDE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force)    FORCE=1; shift ;;
+    --all-keys) ALL_KEYS=1; shift ;;
+    --keys)     [[ $# -ge 2 ]] || die "--keys requires an argument"; KEYS_OVERRIDE="$2"; shift 2 ;;
+    -h|--help)  sed -n '2,40p' "$0"; exit 0 ;;
+    -*)         die "unknown option: $1" ;;
+    *)          [[ -z "$NAME" ]] || die "unexpected extra argument: $1"; NAME="$1"; shift ;;
+  esac
+done
+[[ -n "$NAME" ]] || die "usage: make-kanban-profile <name> [--force] [--all-keys] [--keys \"VARS\"]"
+
+# --- Validate the profile name (mirrors ironhermes_core::profile::validate_profile_name) ---
+case "$NAME" in
+  default|current|none) die "'$NAME' is a reserved profile name" ;;
+esac
+[[ ${#NAME} -le 64 ]]            || die "profile name too long (max 64): '$NAME'"
+[[ "$NAME" =~ ^[a-z0-9][a-z0-9-]*$ ]] \
+  || die "invalid profile name '$NAME' — use lowercase letters, digits, hyphens; must not start with '-'"
+
+# --- Resolve paths ------------------------------------------------------------
+ROOT="$HOME/.ironhermes"
+ROOT_ENV="$ROOT/.env"
+ROOT_CFG="$ROOT/config.yaml"
+PROFILE_DIR="$ROOT/profiles/$NAME"
+PROFILE_ENV="$PROFILE_DIR/.env"
+PROFILE_CFG="$PROFILE_DIR/config.yaml"
+
+printf 'Creating kanban profile "%s" at %s\n' "$NAME" "$PROFILE_DIR"
+
+if [[ -d "$PROFILE_DIR" && $FORCE -eq 0 ]]; then
+  if [[ -f "$PROFILE_CFG" || -f "$PROFILE_ENV" ]]; then
+    die "profile '$NAME' already exists (use --force to overwrite its config.yaml/.env)"
+  fi
+fi
+mkdir -p "$PROFILE_DIR"
+
+# --- Seed config.yaml ---------------------------------------------------------
+if [[ -f "$PROFILE_CFG" && $FORCE -eq 0 ]]; then
+  note "config.yaml: kept existing (use --force to replace)"
+elif [[ -f "$ROOT_CFG" ]]; then
+  cp "$ROOT_CFG" "$PROFILE_CFG"
+  note "config.yaml: copied from $ROOT_CFG"
+else
+  note "config.yaml: SKIPPED — no $ROOT_CFG to copy (run \`ironhermes --profile $NAME\` once to generate one)"
+fi
+
+# --- Determine which env-var names to inherit ---------------------------------
+extract_names_from_root_env() {
+  # Print VAR names (no values) for lines matching the given egrep pattern.
+  grep -oE "$1" "$ROOT_ENV" 2>/dev/null | sed 's/=$//' | sort -u
+}
+if [[ -n "$KEYS_OVERRIDE" ]]; then
+  KEY_NAMES="$KEYS_OVERRIDE"
+elif [[ $ALL_KEYS -eq 1 ]]; then
+  KEY_NAMES="$(extract_names_from_root_env '^[A-Z0-9_]+_(API_KEY|KEY|TOKEN)=' | tr '\n' ' ')"
+else
+  KEY_NAMES="$DEFAULT_KEYS"
+fi
+
+# --- Collect <VAR>=<value> lines from the root .env (values never printed) -----
+env_value_for() {
+  # Echo the raw value for VAR from root .env (last definition wins); empty if absent/blank.
+  local var="$1" line
+  line="$(grep -E "^${var}=" "$ROOT_ENV" 2>/dev/null | tail -n1 || true)"
+  printf '%s' "${line#*=}"
+}
+
+declare -a OUT_LINES=()
+declare -a INHERITED=()
+have_llm_key=0
+if [[ -f "$ROOT_ENV" ]]; then
+  for var in $KEY_NAMES; do
+    val="$(env_value_for "$var")"
+    [[ -n "$val" ]] || continue
+    OUT_LINES+=("${var}=${val}")
+    INHERITED+=("$var")
+    case "$var" in OPENROUTER_API_KEY|ANTHROPIC_API_KEY|OPENAI_API_KEY) have_llm_key=1 ;; esac
+  done
+else
+  note ".env: no root $ROOT_ENV to inherit from"
+fi
+
+# --- Fall back to prompting for OPENROUTER_API_KEY when no LLM key was found ----
+if [[ $have_llm_key -eq 0 ]]; then
+  if [[ -t 0 ]]; then
+    printf '  No LLM key inherited. ' >&2
+    read -rs -p "Paste OPENROUTER_API_KEY (input hidden): " entered_key
+    printf '\n' >&2
+    [[ -n "$entered_key" ]] || die "no API key provided — profile would crash at judge-build"
+    OUT_LINES+=("OPENROUTER_API_KEY=${entered_key}")
+    INHERITED+=("OPENROUTER_API_KEY")
+  else
+    die "no OPENROUTER_API_KEY (or ANTHROPIC/OPENAI) found in $ROOT_ENV and stdin is not a TTY to prompt.
+       Re-run interactively, or add the key to the root .env, or pass --keys \"OPENROUTER_API_KEY\"."
+  fi
+fi
+
+# --- Write the profile .env atomically with 0600 perms ------------------------
+if [[ -f "$PROFILE_ENV" && $FORCE -eq 0 ]]; then
+  note ".env: kept existing (use --force to replace) — verify it has a provider key"
+else
+  tmp="$(mktemp "${PROFILE_DIR}/.env.XXXXXX")"
+  chmod 600 "$tmp"
+  {
+    printf '# Generated by make-kanban-profile for profile "%s"\n' "$NAME"
+    printf '# Provider keys inherited from %s — workers run with a scrubbed env, so this\n' "$ROOT_ENV"
+    printf '# file is the only source of the kanban judge/agent API key.\n'
+    printf '%s\n' "${OUT_LINES[@]}"
+  } > "$tmp"
+  mv "$tmp" "$PROFILE_ENV"
+  chmod 600 "$PROFILE_ENV"
+  note ".env: wrote $PROFILE_ENV (0600) with keys: ${INHERITED[*]}"
+fi
+
+# --- Verify with the binary's own doctor (non-interactive; won't trigger wizard) ---
+echo
+if command -v ironhermes >/dev/null 2>&1; then
+  echo "Verifying with: ironhermes --profile $NAME doctor"
+  if ironhermes --profile "$NAME" doctor; then
+    :
+  else
+    note "doctor reported issues — review the output above"
+  fi
+else
+  note "ironhermes not on PATH — skipped 'doctor' verification"
+fi
+
+# --- Next steps ---------------------------------------------------------------
+cat <<EOF
+
+Done. Profile "$NAME" is ready. Assign kanban work to it with:
+
+  ironhermes kanban create "your task title" --assignee $NAME [--goal]
+  # or reassign an existing task:
+  ironhermes kanban assign <task_id> $NAME
+EOF

@@ -12,6 +12,11 @@ ironhermes-hub = { path = "../ironhermes-hub" }
 ironhermes-cron = { path = "../ironhermes-cron" }
 ironhermes-hooks = { path = "../ironhermes-hooks" }
 ironhermes-exec = { path = "../ironhermes-exec" }
+ironhermes-artifacts = { path = "../ironhermes-artifacts" } # Phase 46.6 D-01/D-03
+# Phase 41.3 D-19: leaf-crate dep, zero-cycle (ironhermes-vault has no dependency
+# on ironhermes-tools) — see credentials.rs for the resolution seam.
+ironhermes-vault = { path = "../ironhermes-vault" }
+secrecy = { version = "0.10.3", features = ["serde"] } # Phase 41.3 D-19 credential snapshot
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -38,6 +43,8 @@ tempfile = "3"
 msedge-tts = { workspace = true }   # Phase 36.17.5 D-03 / Edge TTS
 rodio = { workspace = true }        # Phase 36.17.5 D-15 Local arm
 rustls = "0.23"
+cpal = "0.18.1"                     # Phase 36.17.8 D-08 — mic capture backend
+hound = "3.5.1"                     # Phase 36.17.8 D-08 — WAV read/write for STT
 [dev-dependencies]
 # Phase 21.7 Plan 08 Task 8-03: tracing-test with `no-env-filter` so
 # `#[traced_test]` captures logs from any target (not just the test

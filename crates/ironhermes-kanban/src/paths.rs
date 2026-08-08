@@ -27,21 +27,80 @@ pub fn kanban_workspace_for(task_id: &str) -> PathBuf {
     kanban_workspaces_root().join(task_id)
 }
 
-/// `~/.ironhermes/logs/kanban/` — directory holding per-task worker logs.
+/// `~/.ironhermes/kanban/attachments/<task_id>/` — files a worker uploads
+/// while working a task; copied into the resolved workspace at spawn time
+/// (D-05).
+pub fn kanban_attachments_dir(task_id: &str) -> PathBuf {
+    ironhermes_core::get_hermes_home()
+        .join("kanban")
+        .join("attachments")
+        .join(task_id)
+}
+
+/// `~/.ironhermes/kanban/worktrees/<task_id>/` — dispatcher-managed `git
+/// worktree` checkout for a `project:<path>` workspace (D-06/D-07).
+/// Deliberately OUTSIDE any referenced repo and distinct from the GSD
+/// `.claude/worktrees/` namespace — this is a kanban-owned worktree root.
+pub fn kanban_worktree_for(task_id: &str) -> PathBuf {
+    ironhermes_core::get_hermes_home()
+        .join("kanban")
+        .join("worktrees")
+        .join(task_id)
+}
+
+/// `~/.ironhermes/logs/kanban/` — legacy root directory for per-task worker
+/// logs. Retained for back-compat reads (logs written before the
+/// profile-scoped layout) and as the empty-profile fallback for
+/// [`kanban_logs_dir_for_profile`]. New worker logs are written under the
+/// assignee's profile via [`kanban_log_stdout_for`] / [`kanban_log_stderr_for`].
 pub fn kanban_logs_dir() -> PathBuf {
     ironhermes_core::get_hermes_home()
         .join("logs")
         .join("kanban")
 }
 
-/// `~/.ironhermes/logs/kanban/<task_id>.stdout.log` — worker stdout (D-19).
+/// `~/.ironhermes/logs/kanban/<task_id>.stdout.log` — legacy root worker
+/// stdout (D-19). Read-side fallback; see [`kanban_log_stdout_for`].
 pub fn kanban_log_stdout(task_id: &str) -> PathBuf {
     kanban_logs_dir().join(format!("{task_id}.stdout.log"))
 }
 
-/// `~/.ironhermes/logs/kanban/<task_id>.stderr.log` — worker stderr (D-19).
+/// `~/.ironhermes/logs/kanban/<task_id>.stderr.log` — legacy root worker
+/// stderr (D-19). Read-side fallback; see [`kanban_log_stderr_for`].
 pub fn kanban_log_stderr(task_id: &str) -> PathBuf {
     kanban_logs_dir().join(format!("{task_id}.stderr.log"))
+}
+
+/// `~/.ironhermes/profiles/<profile>/logs/kanban/` — per-task worker logs,
+/// co-located with the rest of that agent's profile-scoped artifacts
+/// (sessions, memories, state) instead of the root `~/.ironhermes/logs/kanban/`.
+///
+/// `profile` is the task's assignee slug. An empty `profile` falls back to the
+/// legacy root [`kanban_logs_dir`] so a task with no assignee still resolves to
+/// a valid (if unscoped) location. The profiles root is derived from
+/// `get_hermes_home()` (the dispatcher runs unscoped), mirroring how
+/// `resolve_and_set_profile` composes a profile home in the CLI.
+pub fn kanban_logs_dir_for_profile(profile: &str) -> PathBuf {
+    if profile.is_empty() {
+        return kanban_logs_dir();
+    }
+    ironhermes_core::get_hermes_home()
+        .join(ironhermes_core::PROFILES_SUBDIR)
+        .join(profile)
+        .join("logs")
+        .join("kanban")
+}
+
+/// `~/.ironhermes/profiles/<profile>/logs/kanban/<task_id>.stdout.log` —
+/// profile-scoped worker stdout (D-19).
+pub fn kanban_log_stdout_for(profile: &str, task_id: &str) -> PathBuf {
+    kanban_logs_dir_for_profile(profile).join(format!("{task_id}.stdout.log"))
+}
+
+/// `~/.ironhermes/profiles/<profile>/logs/kanban/<task_id>.stderr.log` —
+/// profile-scoped worker stderr (D-19).
+pub fn kanban_log_stderr_for(profile: &str, task_id: &str) -> PathBuf {
+    kanban_logs_dir_for_profile(profile).join(format!("{task_id}.stderr.log"))
 }
 
 /// `~/.ironhermes/skills/` — bundled skills root (D-30).
@@ -55,10 +114,20 @@ pub fn kanban_skills_dir() -> PathBuf {
 /// absolute filesystem path. Relative tails (e.g. `dir:../foo`, `dir:./bar`,
 /// `dir:foo`) are rejected with [`KanbanError::RelativeDirWorkspace`].
 ///
-/// Non-`dir:` workspaces (`scratch`, `worktree`, `worktree:<path>`) are
-/// passed through unchanged — their validation lives elsewhere.
+/// The same gate applies to `project:<path>` workspace strings (D-06):
+/// a relative tail (e.g. `project:../foo`, `project:foo`) is rejected
+/// identically.
+///
+/// Non-`dir:`/`project:` workspaces (`scratch`, `worktree`,
+/// `worktree:<path>`) are passed through unchanged — their validation
+/// lives elsewhere.
 pub fn validate_dir_workspace(workspace: &str) -> Result<()> {
     if let Some(tail) = workspace.strip_prefix("dir:")
+        && !Path::new(tail).is_absolute()
+    {
+        return Err(KanbanError::RelativeDirWorkspace(workspace.to_string()));
+    }
+    if let Some(tail) = workspace.strip_prefix("project:")
         && !Path::new(tail).is_absolute()
     {
         return Err(KanbanError::RelativeDirWorkspace(workspace.to_string()));
@@ -183,6 +252,24 @@ mod tests {
     }
 
     #[test]
+    fn project_relative_rejected() {
+        assert!(matches!(
+            validate_dir_workspace("project:../foo"),
+            Err(KanbanError::RelativeDirWorkspace(_))
+        ));
+        assert!(matches!(
+            validate_dir_workspace("project:foo"),
+            Err(KanbanError::RelativeDirWorkspace(_))
+        ));
+    }
+
+    #[test]
+    fn project_absolute_accepted() {
+        #[cfg(unix)]
+        assert!(validate_dir_workspace("project:/abs/path").is_ok());
+    }
+
+    #[test]
     fn paths_under_hermes_home() {
         // Paths derive from get_hermes_home(); we don't assert the actual
         // home (may be a tmp dir in CI) — just that each helper produces a
@@ -190,10 +277,31 @@ mod tests {
         assert!(kanban_db_path().ends_with("kanban.db"));
         assert!(kanban_workspaces_root().ends_with("workspaces"));
         assert!(kanban_workspace_for("t_abc").ends_with("t_abc"));
+        assert!(kanban_attachments_dir("t_abc").ends_with("attachments/t_abc"));
+        assert!(kanban_worktree_for("t_abc").ends_with("worktrees/t_abc"));
         assert!(kanban_logs_dir().ends_with("kanban"));
         assert!(kanban_log_stdout("t_abc").ends_with("t_abc.stdout.log"));
         assert!(kanban_log_stderr("t_abc").ends_with("t_abc.stderr.log"));
         assert!(kanban_skills_dir().ends_with("skills"));
+
+        // Profile-scoped worker logs live under profiles/<profile>/logs/kanban.
+        let plog = kanban_logs_dir_for_profile("unassigned");
+        assert!(plog.ends_with("logs/kanban"));
+        let s = plog.to_string_lossy();
+        assert!(
+            s.contains("/profiles/unassigned/logs/kanban")
+                || s.ends_with("profiles/unassigned/logs/kanban"),
+            "profile logs dir should nest under profiles/<profile>, got {plog:?}"
+        );
+        assert!(kanban_log_stdout_for("unassigned", "t_abc").ends_with("t_abc.stdout.log"));
+        assert!(kanban_log_stderr_for("unassigned", "t_abc").ends_with("t_abc.stderr.log"));
+        // Empty profile falls back to the legacy root logs dir (no profiles/ segment).
+        assert_eq!(kanban_logs_dir_for_profile(""), kanban_logs_dir());
+        assert!(
+            !kanban_log_stdout_for("", "t_abc")
+                .to_string_lossy()
+                .contains("/profiles/")
+        );
     }
 
     // -----------------------------------------------------------------------

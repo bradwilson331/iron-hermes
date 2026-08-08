@@ -94,7 +94,7 @@ fn make_browser_registry(
         config.browser.no_sandbox = true;
     }
     // Per-invocation unique Chromium profile dir. Without this, every browser test
-    // shares the default `$HERMES_HOME/browser-profile`, and nextest (which runs each
+    // shares the default `$IRONHERMES_HOME/browser-profile`, and nextest (which runs each
     // test as a separate parallel PROCESS) makes two launches collide on Chrome's
     // per-profile SingletonLock ("Failed to create .../SingletonLock: File exists").
     // Using an absolute path under the OS temp dir keyed by pid + an atomic counter

@@ -10,7 +10,6 @@
 //! `/kanban list` now routes to `cmd_kanban` (NOT `todo_stub`).
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use ironhermes_core::commands::context::{CommandContext, KanbanStoreReader};
 use ironhermes_core::commands::handlers::dispatch;
@@ -67,20 +66,11 @@ impl KanbanStoreReader for FakeKanbanStoreReader {
 
 fn make_ctx_with_store() -> CommandContext {
     let store: Arc<dyn KanbanStoreReader> = Arc::new(FakeKanbanStoreReader);
-    CommandContext::new(
-        Platform::Local,
-        "test-session".to_string(),
-        Arc::new(AtomicBool::new(false)),
-    )
-    .with_kanban_store(store)
+    CommandContext::new(Platform::Local, "test-session".to_string()).with_kanban_store(store)
 }
 
 fn make_ctx_without_store() -> CommandContext {
-    CommandContext::new(
-        Platform::Local,
-        "test-session".to_string(),
-        Arc::new(AtomicBool::new(false)),
-    )
+    CommandContext::new(Platform::Local, "test-session".to_string())
 }
 
 fn find_kanban_cmd() -> CommandDef {

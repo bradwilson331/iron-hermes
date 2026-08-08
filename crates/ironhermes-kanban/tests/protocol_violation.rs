@@ -177,10 +177,10 @@ async fn impostor_worker_run_id_mismatch_emits_rejection() {
     }
 
     // Old worker (impostor) tries to complete with stale_run_id.
-    // HERMES_KANBAN_DB points the tool's open_from_env_or_board at this
+    // IRONHERMES_KANBAN_DB points the tool's open_from_env_or_board at this
     // test's tempfile DB instead of ~/.ironhermes/kanban.db.
     unsafe {
-        std::env::set_var("HERMES_KANBAN_DB", &db_path);
+        std::env::set_var("IRONHERMES_KANBAN_DB", &db_path);
     }
     let tool = KanbanCompleteTool::new(store_arc.clone(), true);
     let result = tool
@@ -192,7 +192,7 @@ async fn impostor_worker_run_id_mismatch_emits_rejection() {
         .await
         .unwrap();
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_DB");
+        std::env::remove_var("IRONHERMES_KANBAN_DB");
     }
 
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
@@ -238,10 +238,10 @@ async fn phantom_created_cards_emits_completion_rejected_event() {
         )
     };
 
-    // Set the profile env so the tool reads the right profile. HERMES_KANBAN_DB
+    // Set the profile env so the tool reads the right profile. IRONHERMES_KANBAN_DB
     // points the tool's open_from_env_or_board at this test's tempfile DB.
     unsafe {
-        std::env::set_var("HERMES_KANBAN_DB", &db_path);
+        std::env::set_var("IRONHERMES_KANBAN_DB", &db_path);
         std::env::set_var("HERMES_PROFILE", "bot-worker");
     }
 
@@ -258,7 +258,7 @@ async fn phantom_created_cards_emits_completion_rejected_event() {
         .unwrap();
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_DB");
+        std::env::remove_var("IRONHERMES_KANBAN_DB");
         std::env::remove_var("HERMES_PROFILE");
     }
 
@@ -325,10 +325,10 @@ async fn wrong_profile_created_cards_emits_completion_rejected_event() {
         )
     };
 
-    // HERMES_KANBAN_DB points the tool's open_from_env_or_board at this test's
+    // IRONHERMES_KANBAN_DB points the tool's open_from_env_or_board at this test's
     // tempfile DB instead of ~/.ironhermes/kanban.db.
     unsafe {
-        std::env::set_var("HERMES_KANBAN_DB", &db_path);
+        std::env::set_var("IRONHERMES_KANBAN_DB", &db_path);
         std::env::set_var("HERMES_PROFILE", "bot-worker");
     }
 
@@ -344,7 +344,7 @@ async fn wrong_profile_created_cards_emits_completion_rejected_event() {
         .unwrap();
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_DB");
+        std::env::remove_var("IRONHERMES_KANBAN_DB");
         std::env::remove_var("HERMES_PROFILE");
     }
 
@@ -378,11 +378,11 @@ async fn idempotency_key_dedup_prevents_duplicate_tasks() {
 
     let idem_key = "smoke-idem-key-001";
 
-    // HERMES_KANBAN_DB points the tool's open_from_env_or_board at this test's
+    // IRONHERMES_KANBAN_DB points the tool's open_from_env_or_board at this test's
     // tempfile DB instead of ~/.ironhermes/kanban.db (both create calls must
     // land in the same DB the count assertion below reads via store_arc).
     unsafe {
-        std::env::set_var("HERMES_KANBAN_DB", &db_path);
+        std::env::set_var("IRONHERMES_KANBAN_DB", &db_path);
     }
 
     let tool = KanbanCreateTool::new(store_arc.clone(), true);
@@ -421,7 +421,7 @@ async fn idempotency_key_dedup_prevents_duplicate_tasks() {
     );
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_DB");
+        std::env::remove_var("IRONHERMES_KANBAN_DB");
     }
 
     // Only one row must exist in the tasks table.
@@ -496,12 +496,12 @@ async fn claim_lock_gated_write_emits_claim_expired() {
     }
 
     // Inject stale claim_lock in env so the comment tool reads it.
-    // HERMES_KANBAN_DB points the tool's open_from_env_or_board at this test's
+    // IRONHERMES_KANBAN_DB points the tool's open_from_env_or_board at this test's
     // tempfile DB instead of ~/.ironhermes/kanban.db.
     unsafe {
-        std::env::set_var("HERMES_KANBAN_DB", &db_path);
-        std::env::set_var("HERMES_KANBAN_TASK", &task_id);
-        std::env::set_var("HERMES_KANBAN_CLAIM_LOCK", "lock-A");
+        std::env::set_var("IRONHERMES_KANBAN_DB", &db_path);
+        std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id);
+        std::env::set_var("IRONHERMES_KANBAN_CLAIM_LOCK", "lock-A");
     }
 
     let tool = KanbanCommentTool::new(store_arc.clone(), false);
@@ -513,9 +513,9 @@ async fn claim_lock_gated_write_emits_claim_expired() {
         .unwrap();
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_DB");
-        std::env::remove_var("HERMES_KANBAN_TASK");
-        std::env::remove_var("HERMES_KANBAN_CLAIM_LOCK");
+        std::env::remove_var("IRONHERMES_KANBAN_DB");
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
+        std::env::remove_var("IRONHERMES_KANBAN_CLAIM_LOCK");
     }
 
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();

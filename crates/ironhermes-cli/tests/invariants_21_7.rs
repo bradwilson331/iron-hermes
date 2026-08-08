@@ -156,13 +156,23 @@ fn invariant_21_7_08_subagent_registry_on_context_and_runner_sites() {
     //   - 1 runner site in agent_runtime.rs (covers run_single + run_chat + run_gateway)
     //   - 1 CommandContext site in main.rs (run_chat slash commands)
     // Expected: main.rs >= 1 (CommandContext), agent_runtime.rs >= 1 (runner).
-    let main_count = MAIN_RS.matches("with_subagent_registry").count();
+    //
+    // Phase 41.3 Plan 04 (D-11/D-12): main.rs's build_cmd_ctx no longer calls
+    // `.with_subagent_registry(...)` directly — it populates
+    // `CoreContextHandles.subagent_registry` and the shared `build_core_context`
+    // factory (ironhermes-core) applies the builder. The literal
+    // `with_subagent_registry` text therefore moved out of main.rs. Anchored on
+    // `SubagentRegistryHandle::new` instead — main.rs's unique subagent-registry
+    // construction site — which preserves the original intent ("main.rs must
+    // actually attempt to wire a subagent registry into its CommandContext").
+    let main_count = MAIN_RS.matches("SubagentRegistryHandle::new").count();
     let runtime_count = AGENT_RUNTIME_RS.matches("with_subagent_registry").count();
     let count = main_count + runtime_count;
     assert!(
         main_count >= 1,
-        "INV-21.7-08 / D-03 / D-04 (Phase 28.1-04): main.rs must have >= 1 \
-         with_subagent_registry site (CommandContext::new in run_chat). Found {main_count}."
+        "INV-21.7-08 / D-03 / D-04 (Phase 28.1-04, revised Phase 41.3 Plan 04): \
+         main.rs must have >= 1 SubagentRegistryHandle::new site (build_cmd_ctx \
+         populating CoreContextHandles.subagent_registry for run_chat). Found {main_count}."
     );
     assert!(
         runtime_count >= 1,

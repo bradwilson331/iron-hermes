@@ -74,15 +74,38 @@ impl McpTool {
 /// MUST be the single source of truth for this transformation — both
 /// sides of the lifecycle depend on byte-for-byte agreement.
 pub fn sanitize_server_name(name: &str) -> String {
-    name.replace(['-', '.', '@', '/'], "_")
+    // Allowlist, not denylist: map every character outside `[A-Za-z0-9_]` to
+    // `_`. The old denylist (`-.@/`) let other characters through — notably
+    // `:` from URL-keyed server names (e.g. `https://mcp.twilio.com/docs`),
+    // which produced tool names Anthropic rejects with a 400
+    // (`^[a-zA-Z0-9_-]{1,128}$`), dropping the whole request. Hyphens still
+    // fold to `_`, preserving prior behavior for existing names.
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "_".to_string()
+    } else {
+        sanitized
+    }
 }
 
 /// D-06: Build the prefixed name `server__tool` with sanitization.
 ///
-/// Hyphens, dots, `@`, and `/` in server or tool names are replaced with
-/// underscores before joining with double-underscore. This matches
-/// hermes-agent's `_convert_mcp_schema` sanitization and covers real-world
-/// npm package identifiers like `@modelcontextprotocol/server-filesystem`.
+/// Every character outside `[A-Za-z0-9_]` in the server or tool name is
+/// replaced with an underscore before joining with double-underscore, and the
+/// joined name is capped at 128 chars. This keeps the result inside the
+/// Anthropic/OpenAI tool-name charset (`^[a-zA-Z0-9_-]{1,128}$`) — a URL-keyed
+/// server name like `https://mcp.twilio.com/docs` (note the `:`) would
+/// otherwise emit an invalid name and get the entire request rejected. Covers
+/// real-world npm package identifiers like `@modelcontextprotocol/server-filesystem`.
 ///
 /// Delegates to [`sanitize_server_name`] so the transform is single-source.
 ///
@@ -94,11 +117,20 @@ pub fn sanitize_server_name(name: &str) -> String {
 /// assert_eq!(make_prefixed_name("a.b.c", "x.y"), "a_b_c__x_y");
 /// assert_eq!(make_prefixed_name("@modelcontextprotocol/server-filesystem", "read_file"),
 ///     "_modelcontextprotocol_server_filesystem__read_file");
+/// // URL-keyed server names (colon, slashes) are fully neutralized:
+/// assert_eq!(make_prefixed_name("https://mcp.twilio.com/docs", "twilio__search"),
+///     "https___mcp_twilio_com_docs__twilio__search");
 /// ```
 pub fn make_prefixed_name(server_name: &str, tool_name: &str) -> String {
     let safe_server = sanitize_server_name(server_name);
     let safe_tool = sanitize_server_name(tool_name);
-    format!("{safe_server}__{safe_tool}")
+    let mut prefixed = format!("{safe_server}__{safe_tool}");
+    // Anthropic/OpenAI cap tool names at 128 chars. Sanitization guarantees
+    // pure-ASCII output, so truncating on a byte boundary is char-safe.
+    if prefixed.len() > 128 {
+        prefixed.truncate(128);
+    }
+    prefixed
 }
 
 #[async_trait]
@@ -108,7 +140,9 @@ impl Tool for McpTool {
     }
 
     fn toolset(&self) -> &str {
-        "mcp"
+        // Single source of truth shared with the registry's toolset-filter exemption
+        // (get_definitions): dynamic MCP tools bypass the built-in toolset-enabled filter.
+        ironhermes_tools::registry::MCP_TOOLSET
     }
 
     fn description(&self) -> &str {
@@ -182,6 +216,30 @@ mod tests {
     #[test]
     fn sanitize_server_name_replaces_at_and_slash() {
         assert_eq!(sanitize_server_name("@scope/pkg"), "_scope_pkg");
+    }
+
+    #[test]
+    fn sanitize_server_name_replaces_colon_space_and_other_chars() {
+        // Anthropic tool-name charset is [a-zA-Z0-9_-]; a URL-keyed server name
+        // (colon + slashes) must not leak an invalid character to the wire.
+        assert_eq!(
+            sanitize_server_name("https://mcp.twilio.com/docs"),
+            "https___mcp_twilio_com_docs"
+        );
+        assert_eq!(sanitize_server_name("has space"), "has_space");
+        assert_eq!(sanitize_server_name(""), "_");
+    }
+
+    #[test]
+    fn make_prefixed_name_url_keyed_server_is_valid() {
+        let name = make_prefixed_name("https://mcp.twilio.com/docs", "twilio__search");
+        assert_eq!(name, "https___mcp_twilio_com_docs__twilio__search");
+        // Must satisfy the Anthropic/OpenAI tool-name pattern.
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        );
+        assert!(name.len() <= 128);
     }
 
     #[test]

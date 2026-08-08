@@ -4,7 +4,7 @@
 // pricing.toml with the on-disk cache and renders a table. `cmd_refresh`
 // fetches from models.dev (compile-time-hardcoded URL — threat T-36.2-09-URL
 // mitigation), validates the response is non-empty (unless --force), and
-// writes `$HERMES_HOME/pricing-cache.json` only on success.
+// writes `$IRONHERMES_HOME/pricing-cache.json` only on success.
 
 use anyhow::Result;
 use clap::Subcommand;
@@ -26,7 +26,7 @@ pub enum PricingSubcommand {
     /// Show current pricing table (static table + cache overlay merged).
     List,
     /// Fetch latest pricing from an upstream source and merge into
-    /// `$HERMES_HOME/pricing-cache.json`. Defaults to models.dev; pass
+    /// `$IRONHERMES_HOME/pricing-cache.json`. Defaults to models.dev; pass
     /// `--source openrouter` to pull OpenRouter slugs like
     /// `google/gemini-3.5-flash`.
     Refresh {
@@ -260,7 +260,7 @@ async fn cmd_backfill(dry_run: bool, clean_orphans: bool) -> Result<()> {
     let pre_merge_cache_entries = cache.entries.len();
     registry.merge_cache(cache.into_pricing_map());
 
-    // Open the production StateStore at $HERMES_HOME/state.db.
+    // Open the production StateStore at $IRONHERMES_HOME/state.db.
     let mut store = ironhermes_state::StateStore::open_default()
         .map_err(|e| anyhow::anyhow!("open StateStore: {e}"))?;
 

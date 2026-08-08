@@ -4,7 +4,7 @@
 //! These tests parse argv through a local `TestCli` wrapper using clap-derive
 //! to verify that the `KanbanCommands::Swarm { ... }` variant is reachable
 //! from the top-level CLI subcommand surface. They do NOT exercise
-//! `cmd_swarm` end-to-end (that would require a tempfile-scoped HERMES_HOME
+//! `cmd_swarm` end-to-end (that would require a tempfile-scoped IRONHERMES_HOME
 //! and is covered by the LLM-tool's tools_smoke tests, which share the same
 //! `KanbanStore::create_swarm` path).
 

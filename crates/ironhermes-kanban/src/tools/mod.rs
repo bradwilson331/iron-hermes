@@ -12,7 +12,7 @@
 //! scope them in / out via `scope_to(&["kanban"])`.
 //!
 //! Tools gate visibility on:
-//! - Worker mode: `HERMES_KANBAN_TASK` env var is set (D-20).
+//! - Worker mode: `IRONIRONHERMES_KANBAN_TASK` env var is set (D-20).
 //! - Orchestrator mode: `explicit_enable = true` passed at registration (D-20).
 
 pub mod block;
@@ -56,7 +56,7 @@ use crate::store::KanbanStore;
 /// backend portability — no CLI shelling).
 ///
 /// `explicit_enable` mirrors the orchestrator-mode gate: when `true`, tools are
-/// available even without `HERMES_KANBAN_TASK` set.  Plan 05 passes `true` when
+/// available even without `IRONIRONHERMES_KANBAN_TASK` set.  Plan 05 passes `true` when
 /// the session is constructed with an explicit kanban toolset enable.
 pub fn register_kanban_tools(
     registry: &mut ironhermes_tools::ToolRegistry,

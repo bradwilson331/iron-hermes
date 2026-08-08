@@ -509,7 +509,7 @@ pre.code .v  { color: var(--text); }
 /* Schedules table */
 .sched-row {
   display: grid;
-  grid-template-columns: 22px 1fr 160px 200px 130px 90px;
+  grid-template-columns: 22px 1fr 150px 140px 110px 90px 220px;
   align-items: center;
   gap: 14px;
   padding: 12px 14px;
@@ -527,6 +527,7 @@ pre.code .v  { color: var(--text); }
   text-transform: uppercase;
   color: var(--gray);
 }
+.sched-row.is-invalid { opacity: 0.55; }
 .sched-cron {
   font-family: var(--font);
   color: var(--teal);
@@ -537,6 +538,23 @@ pre.code .v  { color: var(--text); }
   border: 1px solid var(--border-faint);
   display: inline-block;
   width: max-content;
+}
+/* Phase 46.9 Plan 04 (D-06): STATE column pill + .tgl toggle, ACTIONS column
+   (RUN NOW / EDIT / DELETE). Added to wire the previously-static pill into a
+   real control without disturbing the existing 6-column visual vocabulary
+   above (dot/JOB/SCHEDULE/DELIVERY/LAST RUN kept byte-for-byte). */
+.sched-state {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+.sched-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 /* Gateway platform cards */
@@ -694,6 +712,9 @@ pre.code .v  { color: var(--text); }
   min-height: 0;
   flex: 1;
   width: 100%;
+  /* Phase 46.7 Plan 05 (D-05): anchor for the absolutely-positioned
+     .chat-drop-overlay shown while an OS file is dragged over the pane. */
+  position: relative;
 }
 .chat-mini > .chat-main {
   display: flex;
@@ -732,6 +753,22 @@ pre.code .v  { color: var(--text); }
 }
 .chat-msg.assistant .chat-bubble { border-left: 2px solid var(--teal); }
 .chat-msg.user .chat-bubble { background: rgba(57,197,207,0.06); border-color: var(--teal-faint); }
+/* Phase 41.1 Plan 03 (SKILL-13 web / D-06, UI-SPEC §C): DIM run-turn meta chip.
+   A single left-aligned metadata row that precedes a one-shot skill run's
+   streaming reply — NO bubble background, NO avatar, deliberately secondary to
+   both the user message and the assistant reply. */
+.chat-meta { display: block; width: 100%; align-self: stretch; }
+.chat-meta-chip {
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  line-height: 1.5;
+  letter-spacing: 0.02em;
+  padding: 0 2px;
+  background: none;
+  border: none;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
 .chat-progress {
   margin-top: 10px;
   display: flex;
@@ -756,7 +793,7 @@ pre.code .v  { color: var(--text); }
 
 .chat-input-pill {
   display: flex;
-  gap: 0;
+  gap: 8px;
   align-items: stretch;
   margin-top: 14px;
 }
@@ -764,8 +801,7 @@ pre.code .v  { color: var(--text); }
   flex: 1;
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-right: none;
-  border-radius: 999px 0 0 999px;
+  border-radius: 999px;
   padding: 12px 18px;
   font-family: var(--font);
   font-size: 12px;
@@ -774,10 +810,64 @@ pre.code .v  { color: var(--text); }
   resize: none;
   min-height: 44px;
 }
-.chat-input-pill button {
+
+/* Phase 36.17.10 UAT — segmented composer action oval: Mic | Free | Send.
+   A single rounded pill with rounded ends only on the outer (Mic/Send)
+   edges and thin vertical dividers between segments. `position: relative`
+   anchors the absolutely-placed MicButton status text so it cannot stretch
+   the oval. Inner-segment overrides beat .mic-btn (voice.css, 0,1,0) and the
+   legacy `.chat-input-pill button` rule (0,1,1) via 0,2,0 specificity. */
+.composer-oval {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg-card);
+  flex: 0 0 auto;
+}
+/* Mic — left rounded end (overrides voice.css squared .mic-btn corners). */
+.composer-oval .mic-btn {
+  border: none;
+  border-radius: 999px 0 0 999px;
+}
+/* Free — middle segment, no rounding; accent-secondary to distinguish it. */
+.composer-oval .composer-free-btn {
+  border: none;
+  border-radius: 0;
+  background: color-mix(in oklab, var(--accent-secondary) 8%, transparent);
+  color: var(--accent-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 0 18px;
+  min-height: 44px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: background 0.12s, color 0.12s;
+}
+.composer-oval .composer-free-btn:hover[aria-disabled="false"] {
+  background: var(--accent-secondary);
+  color: var(--bg);
+}
+.composer-oval .composer-free-btn[aria-disabled="true"] {
+  color: var(--fg-disabled);
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+.composer-oval .composer-free-btn:focus-visible {
+  outline: 2px solid var(--accent-secondary);
+  outline-offset: 2px;
+}
+/* Send — right rounded end. */
+.composer-oval .composer-send-btn {
   background: var(--teal);
   color: var(--bg);
-  border: 1px solid var(--teal);
+  border: none;
   border-radius: 0 999px 999px 0;
   padding: 0 22px;
   font-family: var(--font);
@@ -785,10 +875,247 @@ pre.code .v  { color: var(--text); }
   letter-spacing: 0.14em;
   font-size: 10px;
   cursor: pointer;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 8px;
 }
+/* Thin vertical dividers between segments. */
+.composer-oval .composer-divider {
+  width: 1px;
+  align-self: stretch;
+  margin: 8px 0;
+  background: var(--border);
+  flex: 0 0 auto;
+}
+/* Keep the MicButton inline status from stretching the oval — float it below. */
+.composer-oval .mic-status {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: 0;
+  margin-top: 0;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* Phase 46.7 Plan 05 (D-05/D-06/D-08/D-16/D-24) — web-chat attachment
+   composer, sent-bubble/history chips, artifact chip, workspace-path chip,
+   and error toast. Port of the 46.4 kn-attach-* state machine (card.rs) —
+   only the token family changes (screens.css var(--bg-card)/--text-dim/
+   --teal/--red/--amber/--green, NOT kanban.css's --w-*/--fg-dim/--warn/
+   --danger). Zero new hex literals. */
+
+/* Attach button — a SEPARATE 4th element to the LEFT of .composer-oval
+   inside .chat-input-pill (does not join the oval). */
+.chat-attach-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--teal);
+  font-size: 16px;
+  cursor: pointer;
+}
+.chat-attach-btn:hover { border-color: var(--teal-dim); }
+.chat-attach-input-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* OS-file drop-target overlay — shown only while a file is dragged over
+   .chat-mini (no idle-state chrome; UI-SPEC Copywriting Contract). */
+.chat-mini[data-drop-active="true"] { position: relative; }
+.chat-drop-overlay {
+  position: absolute;
+  inset: 6px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--teal);
+  border-radius: 12px;
+  background: var(--teal-faint);
+  color: var(--teal);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+
+/* Pending-attach-chips row — renders ABOVE .chat-input-pill as its own row
+   when non-empty (D-06); no wrapper markup when empty (collapses to zero
+   height naturally — the `if has_pending_attachments` guard in chat.rs
+   never renders this div at all in the empty case). */
+.chat-attach-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  padding: var(--sp-2) 0;
+}
+.chat-attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 4px var(--sp-2);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+.chat-attach-chip.is-uploading { border-color: var(--amber); color: var(--amber); }
+.chat-attach-chip.is-error { border-color: var(--red); color: var(--red); }
+.chat-attach-chip .size { font-size: 10px; line-height: 1.4; color: var(--text-dim); }
+.chat-attach-remove,
+.chat-attach-retry {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 11px;
+}
+.chat-attach-retry { color: var(--teal); }
+
+/* Sent-bubble / history non-image attachment chip — compact, download-only
+   (mirrors the pending chip's visual language; no error/uploading states
+   apply once a message has actually sent). */
+.chat-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 4px var(--sp-2);
+  margin-top: 6px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  text-decoration: none;
+  cursor: pointer;
+}
+.chat-file-chip:hover { border-color: var(--teal-dim); color: var(--teal); }
+
+/* Resumed-history persisted-attachments strip (D-11) — sits below the
+   "─── Earlier ───" divider label. */
+.chat-attach-history-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-1);
+  margin-top: 6px;
+}
+.chat-attach-history-strip .hint {
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-right: 4px;
+}
+
+/* Assistant-bubble artifact chip (D-16) — last element inside
+   .chat-bubble.is-assistant, opens the 46.6 sandboxed viewer. */
+.chat-artifact-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 4px var(--sp-2);
+  background: transparent;
+  border: 1px solid var(--teal-faint);
+  border-radius: 8px;
+  color: var(--teal);
+  font-family: var(--font);
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.chat-artifact-chip:hover { border-color: var(--teal-dim); background: rgba(57,197,207,0.06); }
+
+/* Workspace-path chip (D-24) — screen-header actions row, next to SID/TOK.
+   Path display only — no file-browser panel. */
+.chat-workspace-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px var(--sp-2);
+}
+.chat-workspace-chip .hint {
+  font-size: 10px;
+  line-height: 1.4;
+  color: var(--gray);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+.chat-workspace-chip-path {
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.chat-workspace-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: var(--teal);
+  cursor: pointer;
+  font-size: 12px;
+}
+.chat-workspace-copy[data-copied="true"] { color: var(--green); }
+
+/* Attachment-error toast (D-08) — fires alongside the inline chip error
+   state; auto-dismisses after 4s or on manual "×" dismiss. */
+.chat-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 14px;
+  background: var(--bg-card);
+  border: 1px solid var(--red);
+  border-radius: 10px;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.4;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+}
+.chat-toast-dismiss {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+}
+
 .chat-side {
   display: flex;
   flex-direction: column;

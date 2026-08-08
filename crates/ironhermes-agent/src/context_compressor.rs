@@ -150,7 +150,12 @@ impl ContextCompressor {
     /// Prune old tool results to reduce token usage.
     fn prune_tool_results(&self, messages: &mut [ChatMessage]) {
         let total = messages.len();
-        if total <= self.protect_first_n {
+        // Phase 47.5 (D-05): the protected front is conversation SCAFFOLDING
+        // (the leading system-message run) only — the configured
+        // `protect_first_n` is an upper bound on that run's length, not a raw
+        // message count.
+        let front = Self::system_prefix_len(messages).min(self.protect_first_n);
+        if total <= front {
             return;
         }
 
@@ -165,9 +170,10 @@ impl ContextCompressor {
             tail_tokens += msg_tokens;
             tail_start = i;
         }
+        let tail_start = tail_start.max(front);
 
         // Prune tool results in the middle section
-        for msg in messages[self.protect_first_n..tail_start].iter_mut() {
+        for msg in messages[front..tail_start].iter_mut() {
             if msg.tool_call_id.is_some()
                 && let Some(ref content) = msg.content
             {
@@ -189,7 +195,10 @@ impl ContextCompressor {
     /// Drop middle messages when tool result pruning isn't enough.
     fn drop_middle_messages(&self, messages: &mut Vec<ChatMessage>) {
         let total = messages.len();
-        if total <= self.protect_first_n + 4 {
+        // Phase 47.5 (D-05): re-key on the role-aware front (see
+        // `prune_tool_results`) instead of the raw configured count.
+        let front = Self::system_prefix_len(messages).min(self.protect_first_n);
+        if total <= front + 4 {
             return;
         }
 
@@ -205,14 +214,14 @@ impl ContextCompressor {
             tail_start = i;
         }
 
-        let tail_start = tail_start.max(self.protect_first_n + 1);
+        let tail_start = tail_start.max(front + 1);
 
-        if tail_start <= self.protect_first_n + 1 {
+        if tail_start <= front + 1 {
             return;
         }
 
         // Count what we're dropping
-        let dropped_count = tail_start - self.protect_first_n;
+        let dropped_count = tail_start - front;
 
         // Create summary message
         let summary = format!(
@@ -222,8 +231,8 @@ impl ContextCompressor {
         );
 
         // Replace middle with summary
-        let mut new_messages = Vec::with_capacity(self.protect_first_n + 1 + (total - tail_start));
-        new_messages.extend_from_slice(&messages[..self.protect_first_n]);
+        let mut new_messages = Vec::with_capacity(front + 1 + (total - tail_start));
+        new_messages.extend_from_slice(&messages[..front]);
         new_messages.push(ChatMessage::system(summary));
         new_messages.extend_from_slice(&messages[tail_start..]);
 
@@ -307,18 +316,47 @@ impl ContextCompressor {
         self.compress(messages)
     }
 
+    /// Phase 47.5 (D-05): the count of leading messages whose `role` is
+    /// `Role::System` — i.e. the length of the leading system-message run.
+    ///
+    /// The protected front is conversation SCAFFOLDING (system prompt) only —
+    /// the first user/assistant pair is content and must be prunable like
+    /// everything else. This is a pure role scan with no notion of
+    /// `protect_first_n`; callers cap the result against the configured
+    /// value themselves.
+    pub fn system_prefix_len(messages: &[ChatMessage]) -> usize {
+        messages
+            .iter()
+            .take_while(|m| m.role == ironhermes_core::Role::System)
+            .count()
+    }
+
     /// Phase 18 D-15: compute the index where the protected tail segment begins.
     /// Walks from end-of-vec accumulating message tokens until `protect_last_tokens`
-    /// would be exceeded. Floored at `protect_first_n`. Exposed for `tool_pair`
-    /// adaptive shift math; callers use it to decide whether a tool pair straddles
-    /// the boundary.
+    /// would be exceeded.
+    ///
+    /// Phase 47.5 (D-05): the floor is no longer the raw `protect_first_n`
+    /// message count — it is `system_prefix_len(messages).min(protect_first_n)`,
+    /// i.e. `protect_first_n` is now an UPPER BOUND on the protected leading
+    /// system-message run, not a literal count of messages to pin. Two
+    /// deliberate consequences:
+    /// 1. `protect_first_n: 0` still means "protect nothing" — unchanged from
+    ///    the pre-47.5 raw count, since `min(0)` is always `0`.
+    /// 2. When a conversation has MORE leading system messages than the
+    ///    configured cap, only `protect_first_n` of them are protected — the
+    ///    cap is deliberately an upper bound, so an unusual multi-system-
+    ///    message prompt can have its tail system messages pruned.
+    ///
+    /// Exposed for `tool_pair` adaptive shift math; callers use it to decide
+    /// whether a tool pair straddles the boundary.
     pub fn compute_protect_start(
         messages: &[ChatMessage],
         protect_last_tokens: usize,
         protect_first_n: usize,
     ) -> usize {
+        let front = Self::system_prefix_len(messages).min(protect_first_n);
         let total = messages.len();
-        if total <= protect_first_n {
+        if total <= front {
             return total;
         }
         let mut tail_tokens = 0;
@@ -331,7 +369,7 @@ impl ContextCompressor {
             tail_tokens += msg_tokens;
             tail_start = i;
         }
-        tail_start.max(protect_first_n)
+        tail_start.max(front)
     }
 
     pub fn with_protect(mut self, first_n: usize, last_tokens: usize) -> Self {
@@ -567,6 +605,43 @@ mod tests {
         assert_eq!(cc.last_total_tokens.load(Ordering::SeqCst), 150);
         assert_eq!(cc.last_cache_read_tokens.load(Ordering::SeqCst), 8_000);
         assert_eq!(cc.last_cache_creation_tokens.load(Ordering::SeqCst), 4_000);
+    }
+
+    /// Regression test for review WR-01: `prune_tool_results`'s tail-protection
+    /// walk starts `tail_start` at `total` and walks backward; when
+    /// `protect_last_tokens` is large enough to cover the entire message list,
+    /// the walk never breaks and `tail_start` lands at `0`. With a leading
+    /// system message, `front >= 1`, so the unclamped slice
+    /// `messages[front..tail_start]` would panic ("slice index starts at 1 but
+    /// ends at 0"). Confirmed RED: temporarily reverting the
+    /// `tail_start.max(front)` clamp reproduces exactly that panic message on
+    /// this fixture; the clamp (mirroring `drop_middle_messages` and
+    /// `compute_protect_start`) makes it a no-op front..front range instead.
+    #[test]
+    fn prune_tool_results_does_not_panic_when_tail_budget_covers_everything() {
+        let cc = ContextCompressor::new(100_000, 0.5).with_protect(3, 100_000);
+        let mut messages = vec![
+            ChatMessage::system("You are Hermes."),
+            ChatMessage::user("hello"),
+            ChatMessage::assistant("hi there"),
+        ];
+        let before: Vec<Option<String>> = messages
+            .iter()
+            .map(|m| m.content_text().map(|s| s.to_string()))
+            .collect();
+
+        // Must not panic.
+        cc.prune_tool_results(&mut messages);
+
+        let after: Vec<Option<String>> = messages
+            .iter()
+            .map(|m| m.content_text().map(|s| s.to_string()))
+            .collect();
+        assert_eq!(
+            before, after,
+            "no tool-result messages present, content must be unchanged"
+        );
+        assert_eq!(messages.len(), 3, "message count must be unchanged");
     }
 
     /// Phase 36.2 Plan 07 Task 1 — behavior 3:

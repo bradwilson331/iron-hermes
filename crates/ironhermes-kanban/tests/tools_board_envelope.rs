@@ -96,10 +96,10 @@ async fn show_success_has_board_fields() {
     let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let (task_id, _run_id) = seed_running_task_in_default("show-success");
-    unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id) };
+    unsafe { std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id) };
     let tool = KanbanShowTool::new(make_dummy_store(), true);
     let result = tool.execute(json!({})).await.unwrap();
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK") };
+    unsafe { std::env::remove_var("IRONHERMES_KANBAN_TASK") };
     assert_board_fields(&result);
 }
 
@@ -107,8 +107,8 @@ async fn show_success_has_board_fields() {
 async fn show_rejection_missing_task_id_has_board_fields() {
     let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
-    // No task_id arg and HERMES_KANBAN_TASK not set → structured missing_task_id rejection.
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK") };
+    // No task_id arg and IRONHERMES_KANBAN_TASK not set → structured missing_task_id rejection.
+    unsafe { std::env::remove_var("IRONHERMES_KANBAN_TASK") };
     let tool = KanbanShowTool::new(make_dummy_store(), true);
     let result = tool.execute(json!({})).await.unwrap();
     assert_board_fields(&result);
@@ -152,13 +152,13 @@ async fn comment_success_has_board_fields() {
     let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let (task_id, _run_id) = seed_running_task_in_default("comment-success");
-    unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id) };
+    unsafe { std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id) };
     let tool = KanbanCommentTool::new(make_dummy_store(), true);
     let result = tool
         .execute(json!({"task_id": task_id, "body": "progress note"}))
         .await
         .unwrap();
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK") };
+    unsafe { std::env::remove_var("IRONHERMES_KANBAN_TASK") };
     assert_board_fields(&result);
 }
 
@@ -166,8 +166,8 @@ async fn comment_success_has_board_fields() {
 async fn comment_rejection_missing_task_id_has_board_fields() {
     let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
-    // No task_id arg and HERMES_KANBAN_TASK not set → missing_task_id rejection.
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK") };
+    // No task_id arg and IRONHERMES_KANBAN_TASK not set → missing_task_id rejection.
+    unsafe { std::env::remove_var("IRONHERMES_KANBAN_TASK") };
     let tool = KanbanCommentTool::new(make_dummy_store(), true);
     let result = tool.execute(json!({"body": "note"})).await.unwrap();
     assert_board_fields(&result);
@@ -186,15 +186,15 @@ async fn complete_success_has_board_fields() {
     let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let (task_id, run_id) = seed_running_task_in_default("complete-success");
-    unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id) };
-    unsafe { std::env::set_var("HERMES_KANBAN_RUN_ID", &run_id) };
+    unsafe { std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id) };
+    unsafe { std::env::set_var("IRONHERMES_KANBAN_RUN_ID", &run_id) };
     let tool = KanbanCompleteTool::new(make_dummy_store(), true);
     let result = tool
         .execute(json!({"task_id": task_id, "expected_run_id": run_id, "summary": "done"}))
         .await
         .unwrap();
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK") };
-    unsafe { std::env::remove_var("HERMES_KANBAN_RUN_ID") };
+    unsafe { std::env::remove_var("IRONHERMES_KANBAN_TASK") };
+    unsafe { std::env::remove_var("IRONHERMES_KANBAN_RUN_ID") };
     assert_board_fields(&result);
 }
 
@@ -203,14 +203,14 @@ async fn complete_rejection_stale_run_id_has_board_fields() {
     let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let (task_id, _run_id) = seed_running_task_in_default("complete-stale");
-    unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id) };
+    unsafe { std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id) };
     let tool = KanbanCompleteTool::new(make_dummy_store(), true);
     // Use expected_run_id (the correct arg name, per D-22).
     let result = tool
         .execute(json!({"task_id": task_id, "expected_run_id": "stale_run_xyz", "summary": "done"}))
         .await
         .unwrap();
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK") };
+    unsafe { std::env::remove_var("IRONHERMES_KANBAN_TASK") };
     assert_board_fields(&result);
     assert!(
         result.contains("stale_run_id") || result.contains("rejected"),
@@ -227,8 +227,8 @@ async fn block_success_has_board_fields() {
     let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let (task_id, run_id) = seed_running_task_in_default("block-success");
-    unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id) };
-    unsafe { std::env::set_var("HERMES_KANBAN_RUN_ID", &run_id) };
+    unsafe { std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id) };
+    unsafe { std::env::set_var("IRONHERMES_KANBAN_RUN_ID", &run_id) };
     let tool = KanbanBlockTool::new(make_dummy_store(), true);
     let result = tool
         .execute(
@@ -236,8 +236,8 @@ async fn block_success_has_board_fields() {
         )
         .await
         .unwrap();
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK") };
-    unsafe { std::env::remove_var("HERMES_KANBAN_RUN_ID") };
+    unsafe { std::env::remove_var("IRONHERMES_KANBAN_TASK") };
+    unsafe { std::env::remove_var("IRONHERMES_KANBAN_RUN_ID") };
     assert_board_fields(&result);
 }
 
@@ -246,14 +246,14 @@ async fn block_rejection_stale_run_id_has_board_fields() {
     let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let (task_id, _run_id) = seed_running_task_in_default("block-stale");
-    unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id) };
+    unsafe { std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id) };
     let tool = KanbanBlockTool::new(make_dummy_store(), true);
     // Use expected_run_id (the correct arg name, per D-22/D-23).
     let result = tool
         .execute(json!({"task_id": task_id, "expected_run_id": "stale_run_xyz", "reason": "dep"}))
         .await
         .unwrap();
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK") };
+    unsafe { std::env::remove_var("IRONHERMES_KANBAN_TASK") };
     assert_board_fields(&result);
     assert!(
         result.contains("stale_run_id") || result.contains("rejected"),
@@ -301,15 +301,15 @@ async fn heartbeat_success_has_board_fields() {
     let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
     let (task_id, run_id) = seed_running_task_in_default("heartbeat-success");
-    unsafe { std::env::set_var("HERMES_KANBAN_TASK", &task_id) };
-    unsafe { std::env::set_var("HERMES_KANBAN_RUN_ID", &run_id) };
+    unsafe { std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id) };
+    unsafe { std::env::set_var("IRONHERMES_KANBAN_RUN_ID", &run_id) };
     let tool = KanbanHeartbeatTool::new(make_dummy_store(), true);
     let result = tool
         .execute(json!({"task_id": task_id, "note": "still running"}))
         .await
         .unwrap();
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK") };
-    unsafe { std::env::remove_var("HERMES_KANBAN_RUN_ID") };
+    unsafe { std::env::remove_var("IRONHERMES_KANBAN_TASK") };
+    unsafe { std::env::remove_var("IRONHERMES_KANBAN_RUN_ID") };
     assert_board_fields(&result);
     assert!(result.contains("event_id"), "unexpected: {result}");
 }
@@ -318,8 +318,8 @@ async fn heartbeat_success_has_board_fields() {
 async fn heartbeat_rejection_missing_task_id_has_board_fields() {
     let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
-    // No task_id arg and HERMES_KANBAN_TASK not set → missing_task_id rejection.
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK") };
+    // No task_id arg and IRONHERMES_KANBAN_TASK not set → missing_task_id rejection.
+    unsafe { std::env::remove_var("IRONHERMES_KANBAN_TASK") };
     let tool = KanbanHeartbeatTool::new(make_dummy_store(), true);
     let result = tool.execute(json!({})).await.unwrap();
     assert_board_fields(&result);
@@ -476,8 +476,8 @@ async fn swarm_rejection_missing_workers_has_board_fields() {
 async fn mention_success_has_board_fields() {
     let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
-    // Ensure HERMES_KANBAN_TASK is not set from a previous test in the process.
-    unsafe { std::env::remove_var("HERMES_KANBAN_TASK") };
+    // Ensure IRONHERMES_KANBAN_TASK is not set from a previous test in the process.
+    unsafe { std::env::remove_var("IRONHERMES_KANBAN_TASK") };
     // Seed a parent task in the default board so mention can attach children.
     let mut store = KanbanStore::open_default().unwrap();
     let parent = store
@@ -550,11 +550,11 @@ async fn create_with_explicit_board_flag_shows_flag_source() {
 async fn list_with_explicit_board_env_shows_env_source() {
     let _guard = ENV_LOCK.lock().await;
     let _home = setup_home();
-    unsafe { std::env::set_var("HERMES_KANBAN_BOARD", "default") };
+    unsafe { std::env::set_var("IRONHERMES_KANBAN_BOARD", "default") };
     let tool = KanbanListTool::new(make_dummy_store(), true);
     // No board arg — should pick up env.
     let result = tool.execute(json!({})).await.unwrap();
-    unsafe { std::env::remove_var("HERMES_KANBAN_BOARD") };
+    unsafe { std::env::remove_var("IRONHERMES_KANBAN_BOARD") };
     let v: Value = serde_json::from_str(&result).unwrap();
     assert_eq!(v["board"], "default", "unexpected: {result}");
     assert_eq!(v["board_source"], "env", "expected source=env: {result}");

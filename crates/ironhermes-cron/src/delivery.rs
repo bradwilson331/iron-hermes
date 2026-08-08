@@ -28,7 +28,7 @@ pub struct DeliveryTarget {
 /// This prevents env-var enumeration via crafted `deliver` values
 /// (e.g. `deliver = "stripe_secret"` would otherwise read `STRIPE_SECRET_HOME_CHANNEL`).
 pub const KNOWN_DELIVERY_PLATFORMS: &[&str] = &[
-    "telegram", "discord", "slack", "matrix", "whatsapp", "webhook", "qq",
+    "telegram", "discord", "slack", "matrix", "whatsapp", "webhook", "qq", "buzz",
 ];
 
 // ---------------------------------------------------------------------------
@@ -44,6 +44,7 @@ fn home_channel_env_var(platform: &str) -> Option<&'static str> {
         "whatsapp" => Some("WHATSAPP_HOME_CHANNEL"),
         "webhook" => Some("WEBHOOK_HOME_CHANNEL"),
         "qq" => Some("QQ_HOME_CHANNEL"),
+        "buzz" => Some("BUZZ_HOME_CHANNEL"),
         _ => None,
     }
 }
@@ -64,6 +65,7 @@ fn home_channel_thread_env_var(platform: &str) -> Option<&'static str> {
         "whatsapp" => Some("WHATSAPP_HOME_CHANNEL_THREAD_ID"),
         "webhook" => Some("WEBHOOK_HOME_CHANNEL_THREAD_ID"),
         "qq" => Some("QQ_HOME_CHANNEL_THREAD_ID"),
+        "buzz" => Some("BUZZ_HOME_CHANNEL_THREAD_ID"),
         _ => None,
     }
 }
@@ -1384,5 +1386,91 @@ mod telegram_whitelist_fallback_tests {
             targets[0].chat_id, "origin-1",
             "origin routing must win over config whitelist fallback"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests — buzz delivery platform (Phase 47.6 Plan 07)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod buzz_delivery_platform_tests {
+    use super::*;
+    use crate::job::{JobState, RepeatConfig, ScheduleParsed};
+
+    /// Serialise all env-mutating tests to avoid races.
+    fn env_lock() -> tokio::sync::MutexGuard<'static, ()> {
+        crate::test_env_lock().blocking_lock()
+    }
+
+    #[test]
+    fn buzz_is_a_known_delivery_platform() {
+        assert!(KNOWN_DELIVERY_PLATFORMS.contains(&"buzz"));
+    }
+
+    #[test]
+    fn buzz_home_channel_env_var_is_mapped() {
+        assert_eq!(home_channel_env_var("buzz"), Some("BUZZ_HOME_CHANNEL"));
+        assert_eq!(
+            home_channel_thread_env_var("buzz"),
+            Some("BUZZ_HOME_CHANNEL_THREAD_ID")
+        );
+    }
+
+    #[test]
+    fn unknown_platform_still_reads_no_env_var() {
+        // Re-pins the pre-existing allowlist guard for an arbitrary token —
+        // adding "buzz" to KNOWN_DELIVERY_PLATFORMS must not weaken the gate
+        // for tokens that are still unknown.
+        assert_eq!(home_channel_env_var("mastodon"), None);
+        assert_eq!(home_channel_thread_env_var("mastodon"), None);
+        assert!(!KNOWN_DELIVERY_PLATFORMS.contains(&"mastodon"));
+    }
+
+    #[test]
+    fn buzz_bare_platform_uses_home_channel() {
+        let _guard = env_lock();
+        unsafe {
+            std::env::set_var("BUZZ_HOME_CHANNEL", "buzz-home-channel");
+        }
+        let job = CronJob {
+            id: "buzz-job".to_string(),
+            name: "Buzz Job".to_string(),
+            prompt: "do something".to_string(),
+            skills: vec![],
+            schedule: ScheduleParsed::Interval {
+                minutes: 60,
+                display: "every 60m".to_string(),
+            },
+            schedule_display: "every 60m".to_string(),
+            repeat: RepeatConfig::default(),
+            enabled: true,
+            state: JobState::Scheduled,
+            paused_at: None,
+            paused_reason: None,
+            deliver: "buzz".to_string(),
+            origin: None,
+            created_at: Utc::now(),
+            next_run_at: None,
+            last_run_at: None,
+            last_status: None,
+            last_error: None,
+            model: None,
+            provider: None,
+            base_url: None,
+            script: None,
+            no_agent: false,
+            context_from: None,
+            enabled_toolsets: None,
+            workdir: None,
+            last_delivery_error: None,
+        };
+        let targets = resolve_delivery_targets(&job);
+        unsafe {
+            std::env::remove_var("BUZZ_HOME_CHANNEL");
+        }
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].platform, "buzz");
+        assert_eq!(targets[0].chat_id, "buzz-home-channel");
     }
 }

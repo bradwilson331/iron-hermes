@@ -23,14 +23,79 @@ use crate::state::{Screen, SessionIdContext, WheelState};
 use crate::ui_prefs::{self, UiPrefs};
 use dioxus::prelude::*;
 
+/// Phase 36.17.9 (D-14): client-side mirror of the server's VoiceStatus snapshot.
+///
+/// Populated on every `ChatStreamEvent::VoiceStatus` frame received from the server.
+/// Provided via `use_context_provider` so all voice components (ScreenChat, VoiceModeScreen,
+/// VoiceSettings) consume it by lookup. Defaults to all-false / None so pre-connect
+/// renders show the mic as unavailable rather than crashing.
+///
+/// Server-driven only — client MUST NOT write availability back to the server
+/// (T-36.17.9-01-01 mitigated here by the one-directional data flow).
+#[derive(Clone, Default, PartialEq)]
+// Populated from the protocol VoiceStatus event by the web WS client handler and
+// read by the web voice UI; native dead-code analysis cannot reach those web-gated
+// sites. Keep it (web-live) and silence native-only dead_code.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub struct VoiceStatusState {
+    pub stt_available: bool,
+    pub stt_provider: Option<String>,
+    /// Plan 03: active STT model name derived from provider + per-provider config.
+    pub stt_model: Option<String>,
+    pub tts_available: bool,
+    pub tts_provider: Option<String>,
+    pub ffmpeg_present: bool,
+    /// Plan 03 (VOICE-02): VAD silence duration in seconds (config.voice.silence_duration).
+    /// None until first VoiceStatus event — voice_loop falls back to vad_params::SILENCE_POLLS.
+    pub silence_duration_secs: Option<f64>,
+    /// Plan 03 (VOICE-02): Web Audio RMS threshold (config.voice.web_silence_threshold_rms).
+    pub web_silence_threshold_rms: Option<f32>,
+    /// Plan 03 (VOICE-02): Speech-confirm window in ms (hardcoded 500ms from VoiceStatus).
+    pub speech_confirm_ms: Option<u32>,
+    /// Plan 03 (VOICE-02): Auto-TTS flag (config.voice.auto_tts).
+    pub auto_tts: Option<bool>,
+}
+
+/// Phase 47.3 Plan 06 (D-17, CONTEXT.md Correction 2): whether the WASM
+/// shell currently believes it holds a live session.
+///
+/// Initialized `true` — by construction, the shell only ever loaded because
+/// `root_handler` (Plan 01, D-07) already authenticated the `GET /` that
+/// served it. There is NO client-side login screen and NO mount-time
+/// `/auth/session` probe (the superseded `login_gate.rs` draft did this;
+/// reintroducing it would signal the WASM shell is expected to load before
+/// auth, which D-07 explicitly rejects). This context exists ONLY for two
+/// consumers: the D-17 session-death redirect (flips to `false` on a 401 or
+/// WS close, then hard-navigates to `/`) and the `/logout` palette action.
+///
+/// Newtype (not a bare `Signal<bool>`) per the context-newtype discipline
+/// this file already documents for `Signal<bool>`/`Signal<u64>` providers
+/// (Phase 36.17.9 post-mortem, see `is_ws_connected` / `voice_mode_active` /
+/// `wake_word_matched` below) — without it, `use_context::<Signal<bool>>()`
+/// would silently resolve to whichever provider was registered last.
+#[allow(dead_code)] // context-provider newtype; consumed via use_context::<AuthedContext>() in ScreenChat (D-17 expiry redirect / /logout)
+#[derive(Clone, Copy)]
+pub struct AuthedContext(pub Signal<bool>);
+
 pub mod app_footer;
+pub mod avatar_logic;
 pub mod breadcrumb;
+// Phase 41.1 Plan 06 (D-05): Web `/` command palette, ported into hermes_app
+// (adapted from the feature-gated shell_legacy::CommandPalette).
+pub mod command_palette;
 pub mod hud_chrome;
+// Phase 46.9 Plan 05 (D-02): brand-new Kanban config embedded panel.
+pub mod kanban_config;
+pub mod mic_button;
+pub mod orb_canvas;
+pub mod realtime_session;
 pub mod screen_router;
 pub mod screens;
 pub mod sys_meta;
 pub mod theme_effects;
 pub mod tweaks_panel;
+pub mod voice_loop;
+pub mod voice_settings;
 pub mod wheel;
 pub mod wheel_rail;
 
@@ -48,6 +113,90 @@ pub fn HermesApp() -> Element {
     let mut wheel_state = use_signal(WheelState::default);
     let active_screen = use_signal(|| Screen::Chat);
     let mut hydrated = use_signal(|| false);
+    // Phase 47.3 Plan 06 (D-17): starts authenticated — see AuthedContext's
+    // doc comment above for why. Only the D-17 expiry redirect and /logout
+    // ever flip this to `false`.
+    let authed = use_signal(|| true);
+    // Phase 40.2 Plan 04 (FE-01, D-01, D-03): avatar mode preferences signal.
+    // Declared here (before the hydration use_effect) so the effect can capture it.
+    let mut avatar_prefs = use_signal(crate::ui_prefs::AvatarPrefs::default);
+    // Phase 40.2 Plan 04 (FE-05, D-11): per-session avatar-error notice flag.
+    // Set by orb_canvas when window.__ihAvatarError fires; consumed by voice_mode.
+    // NOT persisted — once-per-session (Research Open Q 3).
+    let avatar_error_notice = use_signal(|| false);
+
+    // Phase 40.5 Plan 01 (D-04, D-05, D-07, D-09, D-10): orb customisation + per-identity
+    // voice signals. Declared BEFORE the hydration use_effect so the effect can write
+    // identity-derived defaults on first load (ORB_PRESET_REGISTRY lookup + active_identity).
+    // All 11 are provided via context at the root providers block below (Dioxus context-panic
+    // rule: child providers panic ancestor/sibling consumers — see MEMORY.md).
+    //
+    // Identity voice-edit target — default "orb_classic" until localStorage is read.
+    // `mut` needed: .set() is called on these inside the hydration use_effect below.
+    let mut voice_edit_target = use_signal(|| "orb_classic".to_string());
+    // Per-identity TTS/realtime overrides — None = inherit global config.tts/voice.
+    // Not seeded in hydration (no localStorage for per-identity overrides in this plan);
+    // Plans 02 and 06 write to these via VoiceEditTargetCtx consumers.
+    let identity_tts_provider: Signal<Option<String>> = use_signal(|| None);
+    let identity_tts_voice: Signal<Option<String>> = use_signal(|| None);
+    let identity_realtime_voice: Signal<Option<String>> = use_signal(|| None);
+    // Orb appearance — seeded from ORB_PRESET_REGISTRY["orb_classic"] defaults.
+    // `mut` needed: hydration effect overwrites these from the stored active_identity.
+    let mut orb_style = use_signal(|| "classic".to_string());
+    let mut orb_base_hue: Signal<u16> = use_signal(|| 186u16);
+    let mut orb_size: Signal<f32> = use_signal(|| 1.0f32);
+    let mut orb_glow: Signal<f32> = use_signal(|| 0.5f32);
+    // Phase 41.2 Plan 01 (D-03): orb style-switch "settling" flag — ephemeral,
+    // never persisted. Written by the orb_canvas.rs OrbStyleCtx bridge, read
+    // by OrbAppearanceSection's transient "Switching style…" label.
+    let orb_settling = use_signal(|| false);
+    // Session lifecycle flags — ephemeral (once-per-session, never persisted).
+    let wake_session_active = use_signal(|| false);
+    let wake_session_stop = use_signal(|| false);
+    let audio_playback_active = use_signal(|| false);
+    // Beep/chime toggle. The SIGNAL must live at the HermesApp root (not inside the
+    // VoiceSettings child) because voice_loop — turn-based, running under
+    // VoiceModeScreen, a non-descendant of VoiceSettings — consumes BeepEnabledCtx
+    // for the wake chime. Previously provided in VoiceSettings → "Could not find
+    // context BeepEnabledCtx" panic on entering turn-based voice. VoiceSettings now
+    // consumes this signal and sets it from the snapshot.
+    let beep_enabled = use_signal(|| true);
+
+    // G-41.2-11 (full persistence): load the SAVED per-identity orb appearance from
+    // config at startup so the live voice-mode orb reflects persisted
+    // Style/hue/size/glow on EVERY reload — not only after the Voice Settings panel
+    // opens. The hydration effect below seeds ONLY ORB_PRESET_REGISTRY defaults; this
+    // applies the active identity's saved `IdentityOverride.appearance` on top when
+    // present. Applied exactly once (via `orb_appearance_hydrated`); `.peek()` on
+    // `avatar_prefs` avoids re-running on later active-identity changes (D-12: those
+    // take effect next conversation, not mid-session) and never fights the Settings
+    // panel's own edit-target rehydrate (it writes the same shared orb signals).
+    let mut orb_appearance_hydrated = use_signal(|| false);
+    let orb_config_resource =
+        use_resource(move || async move { crate::server::api::get_voice_config().await });
+    use_effect(move || {
+        if *orb_appearance_hydrated.peek() {
+            return;
+        }
+        if let Some(Ok(snapshot)) = orb_config_resource.read().as_ref() {
+            let active = avatar_prefs.peek().active_identity.clone();
+            if let Some(ov) = snapshot.identity_overrides.iter().find(|o| o.slug == active) {
+                if let Some(ref style) = ov.appearance_style {
+                    orb_style.set(style.clone());
+                }
+                if let Some(hue) = ov.appearance_base_hue {
+                    orb_base_hue.set(hue);
+                }
+                if let Some(size) = ov.appearance_size {
+                    orb_size.set(size);
+                }
+                if let Some(glow) = ov.appearance_glow {
+                    orb_glow.set(glow);
+                }
+            }
+            orb_appearance_hydrated.set(true);
+        }
+    });
 
     // Context providers — four root signals exposed to descendants.
     //
@@ -81,6 +230,48 @@ pub fn HermesApp() -> Element {
         if let Some(ws) = ui_prefs::read_json::<WheelState>(ui_prefs::KEY_WHEEL) {
             wheel_state.set(ws);
         }
+        // Phase 40.2 Plan 04 (FE-01, D-03, T-40.2-04-01): hydrate avatar prefs.
+        // Phase 40.5 Plan 01 (D-17): also seed orb appearance from ORB_PRESET_REGISTRY
+        // using the stored active_identity, and seed voice_edit_target.
+        //
+        // Validate head_id against PRESET_REGISTRY after deserialization — a tampered
+        // blob with an unknown head_id falls back to the registry default (defense-in-depth).
+        if let Some(ap) = ui_prefs::read_json::<crate::ui_prefs::AvatarPrefs>(ui_prefs::KEY_AVATAR)
+        {
+            // Phase 40.5 (D-17): seed orb appearance BEFORE consuming `ap` via .set().
+            // Clone to avoid borrow-after-move when avatar_prefs.set(ap) consumes `ap`.
+            let active_slug = ap.active_identity.clone();
+            if let Some(preset) = crate::components::hermes_app::avatar_logic::ORB_PRESET_REGISTRY
+                .iter()
+                .find(|p| p.id == active_slug.as_str())
+            {
+                // orb-type identity: seed all four appearance signals from the preset.
+                voice_edit_target.set(active_slug.clone());
+                orb_style.set(preset.default_style.to_string());
+                orb_base_hue.set(preset.default_hue);
+                orb_size.set(preset.default_size);
+                orb_glow.set(preset.default_glow);
+            } else if crate::components::hermes_app::avatar_logic::is_known_identity(&active_slug) {
+                // Head-rig identity — no orb preset to seed; just update the edit target.
+                // Orb appearance signals keep their "orb_classic" defaults.
+                voice_edit_target.set(active_slug);
+            }
+            // else: unknown/tampered slug — voice_edit_target stays "orb_classic" default.
+
+            let valid_id = crate::components::hermes_app::avatar_logic::PRESET_REGISTRY
+                .iter()
+                .any(|p| p.id == ap.head_id);
+            if valid_id {
+                avatar_prefs.set(ap);
+            } else {
+                // Unknown head_id — keep enabled flag but reset to default head.
+                avatar_prefs.set(crate::ui_prefs::AvatarPrefs {
+                    enabled: ap.enabled,
+                    head_id: "facecap".to_string(),
+                    active_identity: "orb_classic".to_string(),
+                });
+            }
+        }
         hydrated.set(true);
     });
 
@@ -111,6 +302,17 @@ pub fn HermesApp() -> Element {
         ui_prefs::write_json(ui_prefs::KEY_WHEEL, &ws);
     });
 
+    // Phase 40.2 Plan 04 (FE-01, D-03): persist avatar prefs on change.
+    // Mirrors the wheel_state persist-on-change pattern above (Analog C).
+    // Pattern B: read into owned local, drop borrow at `;` — no borrow-across-await.
+    use_effect(move || {
+        if !*hydrated.read() {
+            return;
+        }
+        let ap = avatar_prefs.read().clone();
+        ui_prefs::write_json(ui_prefs::KEY_AVATAR, &ap);
+    });
+
     // -----------------------------------------------------------------
     // Plan 06 — Chat signal hub (HOISTED at HermesApp root per
     // RESEARCH Pitfall 5: `use_websocket` MUST live in a component that
@@ -121,7 +323,26 @@ pub fn HermesApp() -> Element {
     let mut streaming_id = use_signal(|| Option::<u64>::None);
     let mut next_id = use_signal(|| 1u64);
     let mut session_id = use_signal(|| "pending".to_string());
-    let mut tokens = use_signal(|| (0u32, 128_000u32));
+    // Phase 46.9 Plan 03 (D-08/D-09): denominator starts at 0 (pre-resolve
+    // placeholder — renders "TOK 0 / 0" for the few ms before the fetch
+    // below resolves) and is overwritten with the active model's real
+    // context_length once `config_summary` resolves. No hardcoded default literal.
+    let mut tokens = use_signal(|| (0u32, 0u32));
+
+    // Phase 46.9 Plan 03 (D-08/D-09): fetch the active model's real
+    // context_length ONCE on mount from the existing `get_config_summary`
+    // server fn. RESEARCH Open Question 1 (resolved): no web-UI mid-session
+    // model-switch affordance exists (`switch_model`/`set_model` grep for
+    // `iron_hermes_ui` returns nothing) and config writes require a restart
+    // (D-10), so the active model is frozen for the session — a single
+    // mount-time fetch is the correct source, not a new `ChatStreamEvent`
+    // field on every `ws.rs` Finished emit site.
+    let config_summary = use_server_future(crate::server::api::get_config_summary)?;
+    use_effect(move || {
+        if let Some(Ok(summary)) = config_summary() {
+            tokens.with_mut(|t| t.1 = summary.context_length);
+        }
+    });
 
     // Phase 26.7.1 Plan 01 — context for ScreenAgents (D-07 / D-08).
     // Phase 26.7.1 Plan 02 — recv loop wires .set() calls on both signals.
@@ -135,6 +356,30 @@ pub fn HermesApp() -> Element {
     // QueueUpdated event from the server (Plan 02 protocol variant). Consumed by
     // AppFooter via use_context.
     let mut queue_state = use_signal(|| (0u32, false));
+
+    // Phase 36.17.9 (D-14): voice availability from server VoiceStatus snapshot.
+    // Defaults to all-false so pre-connect renders show mic as unavailable.
+    let mut voice_status = use_signal(VoiceStatusState::default);
+
+    // Phase 36.17.9 (D-14): voice mode overlay active flag. False by default;
+    // set to true by the voice entry button in ScreenChat.
+    let mut voice_mode_active = use_signal(|| false);
+
+    // Phase 36.17.9 (D-12, Wave D): wake-word match result signal.
+    // Set to true by the WakeWordResult { matched: true } WS arm;
+    // voice_loop observes this to transition Armed → Listening for a full turn.
+    // Reset to false by voice_loop after it arms the turn.
+    let mut wake_word_matched = use_signal(|| false);
+
+    // Phase 36.17.10 (UAT crash fix): wake-word config signals must be provided
+    // at the HermesApp root — a common ancestor of BOTH the VoiceSettings panel
+    // (which edits them) AND the VoiceModeScreen overlay / start_voice_loop
+    // (which read them via use_context). They were previously provided inside
+    // VoiceSettings only, so launching hands-free mode from the composer "Free"
+    // segment (without the settings panel mounted) panicked with
+    // "Could not find context WakeWordPhraseCtx". Single source of truth here.
+    let wake_word_enabled = use_signal(|| false);
+    let wake_word_phrase = use_signal(|| "hey hermes".to_string());
 
     // Bootstrap the chat session via the existing server fn from
     // Phase 25.5 (D-02 — no edits to the server file). Mirrors
@@ -187,7 +432,7 @@ pub fn HermesApp() -> Element {
                             Err(_) => continue, // Skip malformed frames silently.
                         };
                         match event {
-                            crate::protocol::ChatStreamEvent::Delta { text } => {
+                            crate::protocol::ChatStreamEvent::Delta { text, .. } => {
                                 let sid = *streaming_id.read();
                                 if let Some(id) = sid {
                                     let mut bs = bubbles.write();
@@ -204,7 +449,9 @@ pub fn HermesApp() -> Element {
                                     bubbles.write().push(ChatBubble::assistant(id, text));
                                 }
                             }
-                            crate::protocol::ChatStreamEvent::ToolCallStart { name, args } => {
+                            crate::protocol::ChatStreamEvent::ToolCallStart {
+                                name, args, ..
+                            } => {
                                 let sid = *streaming_id.read();
                                 if let Some(id) = sid {
                                     let mut bs = bubbles.write();
@@ -218,7 +465,9 @@ pub fn HermesApp() -> Element {
                                     }
                                 }
                             }
-                            crate::protocol::ChatStreamEvent::ToolCallEnd { name, success } => {
+                            crate::protocol::ChatStreamEvent::ToolCallEnd {
+                                name, success, ..
+                            } => {
                                 let sid = *streaming_id.read();
                                 if let Some(id) = sid {
                                     let mut bs = bubbles.write();
@@ -233,11 +482,16 @@ pub fn HermesApp() -> Element {
                                     }
                                 }
                             }
-                            crate::protocol::ChatStreamEvent::Finished { total_tokens } => {
-                                tokens.set((total_tokens, 128_000));
+                            crate::protocol::ChatStreamEvent::Finished { total_tokens, .. } => {
+                                // T-46.9-09: clamp the numerator into [0, denominator] so a
+                                // compression race (this Finished frame racing the next
+                                // denominator write) never renders a numerator above the
+                                // real context window. u32 cannot go negative; the risk is
+                                // an over-denominator value, not NaN.
+                                tokens.with_mut(|t| t.0 = total_tokens.min(t.1));
                                 streaming_id.set(None);
                             }
-                            crate::protocol::ChatStreamEvent::Error { message } => {
+                            crate::protocol::ChatStreamEvent::Error { message, .. } => {
                                 let id = {
                                     let n = *next_id.read();
                                     next_id.set(n + 1);
@@ -256,10 +510,94 @@ pub fn HermesApp() -> Element {
                             crate::protocol::ChatStreamEvent::QueueUpdated { depth, paused } => {
                                 queue_state.set((depth, paused));
                             }
+                            // Phase 36.17.9 (D-14): VoiceStatus snapshot pushed by the server
+                            // on connect. All five fields are Copy/Clone — destructured into locals
+                            // so no borrow is held across any .await (Pattern B / clippy.toml rule).
+                            crate::protocol::ChatStreamEvent::VoiceStatus {
+                                stt_available,
+                                stt_provider,
+                                stt_model,
+                                tts_available,
+                                tts_provider,
+                                ffmpeg_present,
+                                silence_duration_secs,
+                                web_silence_threshold_rms,
+                                speech_confirm_ms,
+                                auto_tts,
+                            } => {
+                                voice_status.set(VoiceStatusState {
+                                    stt_available,
+                                    stt_provider,
+                                    stt_model,
+                                    tts_available,
+                                    tts_provider,
+                                    ffmpeg_present,
+                                    silence_duration_secs,
+                                    web_silence_threshold_rms,
+                                    speech_confirm_ms,
+                                    auto_tts,
+                                });
+                            }
                             // Phase 36.17.7 D-02-a: AudioOut arrives as Message::Binary (see arm below).
                             // This Text-path arm is a silent no-op — if somehow AudioOut arrives as Text,
                             // it is acknowledged here for exhaustive-match compliance only.
                             crate::protocol::ChatStreamEvent::AudioOut { .. } => {}
+                            // Phase 01-04 (DLV-03 web): ImageOut arrives as Message::Binary
+                            // (see the Binary arm below). This Text-path arm is a silent
+                            // no-op for exhaustive-match compliance only.
+                            crate::protocol::ChatStreamEvent::ImageOut { .. } => {}
+                            // Phase 36.3.3 (D-08 web): VideoOut arrives as Message::Binary
+                            // (see the Binary arm below). This Text-path arm is a silent
+                            // no-op for exhaustive-match compliance only.
+                            crate::protocol::ChatStreamEvent::VideoOut { .. } => {}
+                            // Phase 36.17.9 (D-12, Wave D): wake-word STT-polling result.
+                            // matched=true → transition Armed state to Listening for a full turn.
+                            // matched=false → remain in Armed waiting state (loop idles on).
+                            // Signalled via wake_word_matched context signal read by voice_loop.
+                            crate::protocol::ChatStreamEvent::WakeWordResult { matched } => {
+                                let matched_val = matched;
+                                // Read current signal value before set (Pattern B: no borrow across .await).
+                                let cur = *wake_word_matched.read();
+                                // Only update when the value changes to avoid spurious re-renders.
+                                if cur != matched_val {
+                                    wake_word_matched.set(matched_val);
+                                }
+                            }
+                            // Phase 36.17.9: voice turns are transcribed server-side and run
+                            // there directly, so the client never saw the user's text. The
+                            // server echoes it here purely for display — push a user bubble,
+                            // mirroring the typed-message path. Do NOT submit (the server
+                            // already ran the turn); the assistant reply streams in via the
+                            // Delta arm above and lands in its own bubble.
+                            crate::protocol::ChatStreamEvent::UserTranscript { text } => {
+                                let id = {
+                                    let n = *next_id.read();
+                                    next_id.set(n + 1);
+                                    n
+                                };
+                                bubbles.write().push(ChatBubble::user(id, text));
+                            }
+                            // Phase 41.1 Plan 03 (SKILL-13 web / D-06, UI-SPEC §C): DIM
+                            // run-turn meta chip for a one-shot skill run. Emitted by the
+                            // server BEFORE the run turn's first Delta, so pushing it here
+                            // (it does NOT touch streaming_id) lands it ABOVE the assistant
+                            // reply bubble the next Delta opens. Metadata only — never a
+                            // user/assistant message bubble.
+                            crate::protocol::ChatStreamEvent::RunTurnMeta { text } => {
+                                let id = {
+                                    let n = *next_id.read();
+                                    next_id.set(n + 1);
+                                    n
+                                };
+                                bubbles.write().push(ChatBubble::meta(id, text));
+                            }
+                            // Phase 39.1 Plan 02 (R39.1-08): concurrent turn lifecycle events.
+                            // HermesApp does not yet render per-turn concurrency indicators
+                            // in the chat surface — future plan will wire these to UI state.
+                            // Silent no-ops for exhaustive-match compliance.
+                            crate::protocol::ChatStreamEvent::TurnStarted { .. } => {}
+                            crate::protocol::ChatStreamEvent::TurnEnded { .. } => {}
+                            crate::protocol::ChatStreamEvent::TurnCancelled { .. } => {}
                         }
                     }
                     // Phase 36.17.7 D-02-a/b HIGH 4 + HIGH 7 fix:
@@ -299,6 +637,54 @@ pub fn HermesApp() -> Element {
                                             next_id.set(n + 1);
                                             n
                                         };
+                                        // Phase 36.17.9 Plan 03 (D-03 / T-36.17.9-03-03):
+                                        // Tap the speaking-state AnalyserNode for orb FFT.
+                                        // Construct an HtmlAudioElement from the Blob URL so
+                                        // createMediaElementSource can route it through the
+                                        // Web Audio graph (source → analyser → destination).
+                                        // MUST connect to destination or audio goes silent.
+                                        // Guard: VOICE_LOOP_SLOT empty → tap is a no-op.
+                                        #[cfg(target_arch = "wasm32")]
+                                        if let Ok(audio_el) =
+                                            web_sys::HtmlAudioElement::new_with_src(&url)
+                                        {
+                                            use wasm_bindgen::JsCast as _;
+                                            crate::components::hermes_app::voice_loop::tap_speaking_analyser(&audio_el);
+                                            // Plan 04 (D-22): set AudioPlaybackActiveCtx = true so
+                                            // the voice_loop 'session / 'outer half-duplex gate pauses
+                                            // mic capture while TTS audio plays. Cleared on ended/error.
+                                            let mut pb_start = audio_playback_active;
+                                            pb_start.set(true);
+                                            // ended: playback completed normally → resume capture.
+                                            let ended_cb = {
+                                                let mut pb = audio_playback_active;
+                                                wasm_bindgen::closure::Closure::<dyn FnMut()>::wrap(
+                                                    Box::new(move || {
+                                                        pb.set(false);
+                                                    }),
+                                                )
+                                            };
+                                            // error: playback failed → also resume capture.
+                                            let error_cb = {
+                                                let mut pb = audio_playback_active;
+                                                wasm_bindgen::closure::Closure::<dyn FnMut()>::wrap(
+                                                    Box::new(move || {
+                                                        pb.set(false);
+                                                    }),
+                                                )
+                                            };
+                                            let _ = audio_el.add_event_listener_with_callback(
+                                                "ended",
+                                                ended_cb.as_ref().unchecked_ref(),
+                                            );
+                                            let _ = audio_el.add_event_listener_with_callback(
+                                                "error",
+                                                error_cb.as_ref().unchecked_ref(),
+                                            );
+                                            // Keep closures alive until they fire (not dropped early).
+                                            ended_cb.forget();
+                                            error_cb.forget();
+                                        }
                                         bubbles.write().push(ChatBubble::audio(id, url, mime));
                                     }
                                 }
@@ -307,6 +693,87 @@ pub fn HermesApp() -> Element {
                             {
                                 // Server-side render path: no Blob API; suppress unused warnings.
                                 let _ = (mime, audio_bytes);
+                            }
+                        }
+                        // Phase 01-04 (DLV-03 web): ImageOut arrives as Message::Binary too
+                        // (mirrors AudioOut). Build a Blob URL from the bytes and push an
+                        // image bubble so the generated image renders inline as an <img> —
+                        // never as raw `<MEDIA:>` text (the tag was extracted server-side).
+                        else if let crate::protocol::ChatStreamEvent::ImageOut {
+                            mime,
+                            uuid: _uuid,
+                            bytes: image_bytes,
+                        } = event
+                        {
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                let uint8_array = js_sys::Uint8Array::from(image_bytes.as_slice());
+                                let parts = js_sys::Array::new();
+                                parts.push(&uint8_array);
+                                let opts = web_sys::BlobPropertyBag::new();
+                                opts.set_type(&mime);
+                                if let Ok(blob) =
+                                    web_sys::Blob::new_with_u8_array_sequence_and_options(
+                                        &parts, &opts,
+                                    )
+                                {
+                                    if let Ok(url) =
+                                        web_sys::Url::create_object_url_with_blob(&blob)
+                                    {
+                                        let id = {
+                                            let n = *next_id.read();
+                                            next_id.set(n + 1);
+                                            n
+                                        };
+                                        bubbles.write().push(ChatBubble::image(id, url));
+                                    }
+                                }
+                            }
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                // Server-side render path: no Blob API; suppress unused warnings.
+                                let _ = (mime, image_bytes);
+                            }
+                        }
+                        // Phase 36.3.3 (D-08 web): VideoOut arrives as Message::Binary too
+                        // (mirrors ImageOut). Build a Blob URL from the bytes and push a
+                        // video bubble so the generated video renders inline as a
+                        // <video controls> — never as raw `<MEDIA:>` text (extracted server-side).
+                        // Dioxus reactivity: use .read() (not .peek()) for render-path reads.
+                        else if let crate::protocol::ChatStreamEvent::VideoOut {
+                            mime,
+                            uuid: _uuid,
+                            bytes: video_bytes,
+                        } = event
+                        {
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                let uint8_array = js_sys::Uint8Array::from(video_bytes.as_slice());
+                                let parts = js_sys::Array::new();
+                                parts.push(&uint8_array);
+                                let opts = web_sys::BlobPropertyBag::new();
+                                opts.set_type(&mime);
+                                if let Ok(blob) =
+                                    web_sys::Blob::new_with_u8_array_sequence_and_options(
+                                        &parts, &opts,
+                                    )
+                                {
+                                    if let Ok(url) =
+                                        web_sys::Url::create_object_url_with_blob(&blob)
+                                    {
+                                        let id = {
+                                            let n = *next_id.read();
+                                            next_id.set(n + 1);
+                                            n
+                                        };
+                                        bubbles.write().push(ChatBubble::video(id, url));
+                                    }
+                                }
+                            }
+                            #[cfg(not(target_arch = "wasm32"))]
+                            {
+                                // Server-side render path: no Blob API; suppress unused warnings.
+                                let _ = (mime, video_bytes);
                             }
                         }
                     }
@@ -339,44 +806,84 @@ pub fn HermesApp() -> Element {
     // purely-visual commands; server-side dispatch reserved for future
     // server-effecting commands and requires a follow-up phase that lifts
     // D-02" (the 26.2.1 D-02 server-untouched constraint).
-    let send = EventHandler::new(move |text: String| {
-        let trimmed = text.trim().to_string();
-        if trimmed.is_empty() {
-            return;
-        }
-        if trimmed.starts_with('/') && dispatch_slash(&trimmed, &mut bubbles, &mut next_id) {
-            return;
-        }
-        let sid = session_id.read().clone();
-        let id = {
-            let n = *next_id.read();
-            next_id.set(n + 1);
-            n
-        };
-        bubbles.write().push(ChatBubble::user(id, trimmed.clone()));
-        let req = crate::protocol::ChatRequest {
-            session_id: sid,
-            message: trimmed,
-        };
-        // Let-else early-return on serialization failure — no silent
-        // unwrap_or_default(); surface the failure as an error bubble.
-        let Ok(json) = serde_json::to_string(&req) else {
-            let err_id = {
+    //
+    // Phase 46.7 Plan 05 (D-05/D-06/D-07): the handler now takes a
+    // `(text, attachments)` tuple — ChatSendHandler's inner EventHandler
+    // type widened in chat.rs to carry the composer's settled
+    // pending-attached rows alongside the message text (D-06 sent-bubble
+    // render + D-07 attachment-only send).
+    let send = EventHandler::new(
+        move |(text, attachments): (String, Vec<crate::protocol::ChatAttachmentRow>)| {
+            let trimmed = text.trim().to_string();
+            // D-07: an attachment-only message (empty text, non-empty
+            // attachments) is a valid turn — only bail when BOTH are empty.
+            if trimmed.is_empty() && attachments.is_empty() {
+                return;
+            }
+            if trimmed.starts_with('/') && dispatch_slash(&trimmed, &mut bubbles, &mut next_id) {
+                return;
+            }
+            let sid = session_id.read().clone();
+            let id = {
                 let n = *next_id.read();
                 next_id.set(n + 1);
                 n
             };
-            bubbles.write().push(ChatBubble::error(
-                err_id,
-                "Failed to send message: serialization error".to_string(),
+            bubbles.write().push(ChatBubble::user_with_attachments(
+                id,
+                trimmed.clone(),
+                attachments.clone(),
             ));
-            return;
-        };
+            // Phase 40.5 Plan 08 (D-17): read active identity (Pattern B — owned local,
+            // borrow dropped before the spawn so no GenerationalRef crosses async).
+            let active_ident: Option<String> = {
+                let slug = avatar_prefs.read().active_identity.clone();
+                if crate::components::hermes_app::avatar_logic::is_known_identity(&slug) {
+                    Some(slug)
+                } else {
+                    None
+                }
+            };
+            let req = crate::protocol::ChatRequest {
+                session_id: sid,
+                message: trimmed,
+                active_identity: active_ident,
+                // Phase 46.7 Plan 05 (D-05/D-06/D-07): the composer's settled,
+                // queued-to-send attachment ids — wired end-to-end.
+                attachment_ids: attachments.iter().map(|a| a.id.clone()).collect(),
+            };
+            // Let-else early-return on serialization failure — no silent
+            // unwrap_or_default(); surface the failure as an error bubble.
+            let Ok(json) = serde_json::to_string(&req) else {
+                let err_id = {
+                    let n = *next_id.read();
+                    next_id.set(n + 1);
+                    n
+                };
+                bubbles.write().push(ChatBubble::error(
+                    err_id,
+                    "Failed to send message: serialization error".to_string(),
+                ));
+                return;
+            };
+            spawn(async move {
+                let _ = ws.send_raw(dioxus_fullstack::Message::Text(json)).await;
+            });
+        },
+    );
+    let send_handler = ChatSendHandler(send);
+
+    // Phase 36.17.8 Plan 06 (D-13/D-14): audio binary send handler.
+    // Receives the JSON-encoded AudioInFrame bytes from MicButton and sends
+    // them as Message::Binary to the server's STT pipeline.
+    let audio_send = EventHandler::new(move |bytes: Vec<u8>| {
         spawn(async move {
-            let _ = ws.send_raw(dioxus_fullstack::Message::Text(json)).await;
+            let _ = ws
+                .send_raw(dioxus_fullstack::Message::Binary(bytes.into()))
+                .await;
         });
     });
-    let send_handler = ChatSendHandler(send);
+    let audio_send_handler = mic_button::AudioSendHandler(audio_send);
 
     // Plan 06 context providers — five new signals reachable from any
     // descendant screen. `session_id` is wrapped in the B-03
@@ -387,21 +894,169 @@ pub fn HermesApp() -> Element {
     use_context_provider(|| SessionIdContext(session_id));
     use_context_provider(|| tokens);
     use_context_provider(|| send_handler);
+    use_context_provider(|| audio_send_handler);
     // Phase 26.7.2 (D-06): next_id exposed via context so ScreenChat's
     // history-load use_effect can allocate bubble IDs that don't collide
     // with IDs already assigned by the WS receive loop.
-    use_context_provider(|| next_id);
+    // Newtype-wrapped per the freeze post-mortem (see state.rs): next_id,
+    // subagent_events, is_ws_connected, voice_mode_active, and wake_word_matched
+    // are all `Signal<bool>`/`Signal<u64>` and MUST be disambiguated by type or
+    // `use_context` resolves to whichever was registered last.
+    use_context_provider(|| crate::state::NextIdContext(next_id));
     // Phase 26.7.1 Plan 01 — context for ScreenAgents (D-07 / D-08). subagent_events drives push-restart in Plan 02; is_ws_connected drives dynamic poll cadence.
-    use_context_provider(|| subagent_events);
-    use_context_provider(|| is_ws_connected);
+    use_context_provider(|| crate::state::SubagentEventsContext(subagent_events));
+    use_context_provider(|| crate::state::WsConnectedContext(is_ws_connected));
     // Phase 36.17.4 (D-03a): expose queue_state to AppFooter via context.
     use_context_provider(|| queue_state);
+
+    // Phase 36.17.9 (D-14): expose voice availability + mode flag to all descendants.
+    // VoiceStatusState is consumed by: ScreenChat (stt_available → MicButton),
+    // VoiceModeScreen, VoiceSettings. voice_mode_active drives the overlay render.
+    use_context_provider(|| voice_status);
+    use_context_provider(|| crate::state::VoiceModeActiveContext(voice_mode_active));
+
+    // Phase 36.17.9 (D-12, Wave D): expose wake-word match result to voice_loop.
+    // voice_loop polls this via use_context to transition Armed → Listening on match.
+    use_context_provider(|| crate::state::WakeWordMatchedContext(wake_word_matched));
+
+    // Phase 36.17.10 (UAT crash fix): provide wake-word config at the root so the
+    // hands-free overlay (VoiceModeScreen / start_voice_loop) and the VoiceSettings
+    // panel share one source of truth. VoiceSettings consumes these via use_context.
+    use_context_provider(|| voice_settings::WakeWordEnabledCtx(wake_word_enabled));
+    use_context_provider(|| voice_settings::WakeWordPhraseCtx(wake_word_phrase));
+
+    // Phase 40.2 Plan 04 (FE-01, D-03): provide avatar contexts at HermesApp root.
+    // AvatarModeCtx wraps the avatar_prefs signal so VoiceSettings (toggle/dropdown)
+    // and orb_canvas (init/swap) share one source of truth. MUST be here — a child
+    // provider panics ancestor/sibling consumers (Dioxus context-panic rule / MEMORY.md).
+    // AvatarErrorNoticeCtx is the per-session orb-restore notice flag (FE-05/D-11).
+    use_context_provider(|| voice_settings::AvatarModeCtx(avatar_prefs));
+    use_context_provider(|| voice_settings::AvatarErrorNoticeCtx(avatar_error_notice));
+
+    // Phase 36.17.12 Plan 04 (CR-01 gap closure): provide barge-in mode + realtime-
+    // degraded flag at the root so the VoiceModeScreen overlay and the VoiceSettings
+    // panel share one source of truth. VoiceSettings consumes these via use_context.
+    // Previously they were only provided inside VoiceSettings (a child of
+    // VoiceModeScreen), which caused a Dioxus "Could not find context BargeInModeCtx"
+    // panic on every voice-mode entry — identical to the prior WakeWordPhraseCtx panic
+    // fixed above. Initialized to the same defaults VoiceSettings used previously.
+    let barge_in_mode = use_signal(|| "push_to_interrupt".to_string());
+    let realtime_degraded = use_signal(|| false);
+    use_context_provider(|| voice_settings::BargeInModeCtx(barge_in_mode));
+    use_context_provider(|| voice_settings::RealtimeDegradedCtx(realtime_degraded));
+
+    // Phase 39.3 Plan 05 (D-03/D-05a): approval-pending + in-flight contexts for the
+    // realtime voice card (Plan 05). Hoisted to HermesApp root — MUST live here so
+    // VoiceModeScreen (consumer) resolves them without "could not find context" panic
+    // (Dioxus context-panic rule per MEMORY.md: child-provided contexts panic
+    // ancestor/sibling consumers; only root providers are safe for cross-tree consumers).
+    //
+    // RealtimeApprovalCtx: Some(ApprovalPendingInfo{call_id, turn_id, tool_name,
+    //   arguments}) while a tool call awaits operator Approve/Deny; None at rest.
+    //   Plan 04 raises it on ApprovalPending; Plan 05 renders the approval card from it.
+    // RealtimeInFlightCtx: true while a background async tool/research turn is running;
+    //   false at rest. Plan 04 sets it on relay-start/clear; Plan 05 renders the badge.
+    let approval_pending_sig: Signal<
+        Option<crate::components::hermes_app::realtime_session::ApprovalPendingInfo>,
+    > = use_signal(|| None);
+    let in_flight_sig: Signal<bool> = use_signal(|| false);
+    use_context_provider(|| voice_settings::RealtimeApprovalCtx(approval_pending_sig));
+    use_context_provider(|| voice_settings::RealtimeInFlightCtx(in_flight_sig));
+
+    // Phase 46.6 Plan 05 (D-07): selected-artifact signal for the
+    // Artifacts gallery → viewer row-click navigation. MUST live at the
+    // HermesApp root (not inside ScreenArtifacts) — a child provider
+    // would panic the sibling ArtifactViewer consumer (Dioxus
+    // context-panic rule / MEMORY.md: child providers panic
+    // ancestor/sibling consumers).
+    let selected_artifact_sig: Signal<Option<crate::server::api::ArtifactInfo>> =
+        use_signal(|| None);
+    use_context_provider(|| crate::state::SelectedArtifactCtx(selected_artifact_sig));
+
+    // Phase 47.3 Plan 06 (D-17): AuthedContext MUST live at the HermesApp
+    // root — ScreenChat (the D-17 expiry-redirect + /logout consumer) is not
+    // in an ancestor/descendant relationship with any earlier provider that
+    // could otherwise host it, and a child-level provider panics sibling
+    // consumers (Dioxus context-panic rule, see MEMORY.md).
+    use_context_provider(|| AuthedContext(authed));
+
+    // Phase 40.5 Plan 01 (D-04, D-05, D-07, D-09, D-10): orb customisation + per-identity
+    // voice contexts. Provided at HermesApp root (Dioxus context-panic rule: child providers
+    // panic ancestor/sibling consumers — see MEMORY.md). Signals declared early in this
+    // function so the hydration use_effect could seed orb appearance from ORB_PRESET_REGISTRY.
+    use_context_provider(|| voice_settings::VoiceEditTargetCtx(voice_edit_target));
+    use_context_provider(|| voice_settings::IdentityTtsProviderCtx(identity_tts_provider));
+    use_context_provider(|| voice_settings::IdentityTtsVoiceCtx(identity_tts_voice));
+    use_context_provider(|| voice_settings::IdentityRealtimeVoiceCtx(identity_realtime_voice));
+    use_context_provider(|| voice_settings::OrbStyleCtx(orb_style));
+    use_context_provider(|| voice_settings::OrbBaseHueCtx(orb_base_hue));
+    use_context_provider(|| voice_settings::OrbSizeCtx(orb_size));
+    use_context_provider(|| voice_settings::OrbGlowCtx(orb_glow));
+    // Phase 41.2 Plan 01 (D-03): must live at HermesApp root (Dioxus
+    // context-panic rule) — the orb_canvas.rs bridge (writer) and
+    // OrbAppearanceSection (reader) are not in an ancestor/descendant
+    // relationship, so a child-level provider would panic one of them.
+    use_context_provider(|| voice_settings::OrbSettlingCtx(orb_settling));
+    use_context_provider(|| voice_settings::WakeSessionActiveCtx(wake_session_active));
+    use_context_provider(|| voice_settings::WakeSessionStopCtx(wake_session_stop));
+    use_context_provider(|| voice_settings::AudioPlaybackActiveCtx(audio_playback_active));
+    use_context_provider(|| voice_settings::BeepEnabledCtx(beep_enabled));
+
+    // Phase 36.17.9 (D-06): read voice signals into locals before rsx!
+    // Pattern B -- no signal borrow held across the rsx! tree.
+    let voice_active = *voice_mode_active.read();
+
+    // Phase 46.9 Plan 03 (D-07/D-09), extended Plan 10 (GAP-2/GAP-3): drop the
+    // config_summary resource into owned locals before the render tree so
+    // `SysMeta` renders the real active-model id, active provider, and real
+    // server uptime — the SAME `get_config_summary` fetch that seeds the
+    // tokens denominator above (single source, D-09).
+    let (active_model, active_provider, server_uptime_secs) = match config_summary() {
+        Some(Ok(summary)) => (summary.model, summary.provider, summary.uptime_secs),
+        _ => ("…".to_string(), "…".to_string(), 0u64),
+    };
+
+    // Phase 46.9 Plan 10 (GAP-2/D-07): client-side 1Hz uptime ticker, seeded
+    // once from the mount-time `server_uptime_secs` value above so the web
+    // "UP" value advances live instead of freezing until reload. Mirrors
+    // `app_footer.rs`'s clock ticker (`use_future` + wasm/native cfg split,
+    // borrow-safe: no signal borrow across `.await`). HermesApp never
+    // unmounts, so the loop never leaks (T-46.9-25).
+    let mut uptime_ticker = use_signal(|| server_uptime_secs);
+    use_future(move || async move {
+        loop {
+            #[cfg(target_arch = "wasm32")]
+            {
+                gloo_timers::future::TimeoutFuture::new(1000).await;
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            }
+            uptime_ticker.with_mut(|u| *u += 1);
+        }
+    });
+    let ticking_uptime_secs = *uptime_ticker.read();
 
     rsx! {
         hud_chrome::HudChrome {}
         breadcrumb::Breadcrumb {}
-        sys_meta::SysMeta {}
         div { class: "app", id: "app",
+            // GAP-11 (47.4-16 Task 3): SysMeta now lives inside `div.app`
+            // rather than as its sibling. `.app` (screens.css) is
+            // `position: relative` with a non-`auto` z-index, which makes
+            // it a stacking context — a sibling readout can never be
+            // layered against anything inside that context no matter what
+            // z-index it carries. That's why a `position: fixed` drawer
+            // (z-index: 200, inside `.app`) was painting UNDER `.sys-meta`
+            // (z-index: 70, a root sibling) despite the numbers saying
+            // otherwise. Reparenting puts both in one stacking context so
+            // the authored layer values finally resolve as intended.
+            sys_meta::SysMeta {
+                model: active_model,
+                provider: active_provider,
+                uptime_secs: ticking_uptime_secs,
+            }
             screen_router::ScreenRouter {}
         }
         app_footer::AppFooter {}
@@ -409,6 +1064,19 @@ pub fn HermesApp() -> Element {
         wheel::Wheel {}
         theme_effects::ThemeEffects {}
         tweaks_panel::TweaksPanel {}
+
+        // Phase 36.17.10 UAT: the global floating voice-entry-btn was removed —
+        // hands-free voice mode is now launched from the composer action oval's
+        // "✦ FREE" segment (screens/chat.rs), which performs the same
+        // AudioContext-resume user-gesture unlock before setting voice_mode_active.
+
+        // Phase 36.17.9 (D-04): Full-screen voice-mode overlay.
+        // Rendered on top of the entire app tree when voice_mode_active is true.
+        if voice_active {
+            screens::voice_mode::VoiceModeScreen {
+                on_exit: move |_| voice_mode_active.set(false),
+            }
+        }
     }
 }
 

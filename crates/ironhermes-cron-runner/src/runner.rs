@@ -1,10 +1,13 @@
 use anyhow::{Result, anyhow};
 use ironhermes_agent::budget::BudgetHandle;
 use ironhermes_agent::{
-    AgentLoop, MemoryManager, PromptBuilder, build_main_client, wire_fallback_if_configured,
+    AgentLoop, MemoryManager, PromptBuilder, build_main_client_with_model,
+    wire_fallback_if_configured,
 };
 use ironhermes_core::{ChatMessage, Config, ProviderResolver, SkillRegistry};
-use ironhermes_cron::{CronJob, JobStore, TgSendApi, complete_job_run, resolve_delivery_targets};
+use ironhermes_cron::{
+    CronJob, DeliveryRegistry, JobStore, TgSendApi, complete_job_run, resolve_delivery_targets,
+};
 use ironhermes_hooks::HookRegistry;
 use ironhermes_mcp::McpManager;
 use ironhermes_tools::ToolRegistry;
@@ -34,9 +37,23 @@ pub struct CronRunnerContext {
     pub hook_registry: Option<Arc<HookRegistry>>,
     pub config: Config,
     pub mcp_manager: Option<Arc<McpManager>>,
-    /// Telegram-only adapter. A future phase replaces this with an
-    /// `AdapterRegistry` once a second platform's send adapter exists.
+    /// Telegram's MEDIA-capable sender (`send_voice`/`send_image_file`/
+    /// `send_video`/`send_document`). The TEXT path for every platform —
+    /// Telegram included — goes through `delivery_registry` below (Phase
+    /// 47.6 Plan 07); this field now exists solely for `route_media_payload`
+    /// media routing, which `DeliverySend` deliberately does not cover.
     pub tg_client: Option<Arc<dyn TgSendApi>>,
+    /// RC-2 / D-03: AudioDispatcher for cron TTS wiring. Populated by the
+    /// gateway from TelegramAdapter (clone-cast). None for cron-only
+    /// construction paths (tick_loop, test fixtures).
+    pub audio_dispatcher: Option<Arc<dyn ironhermes_tools::AudioDispatcher>>,
+    /// Phase 47.6 Plan 07: platform-keyed text-delivery sender registry.
+    /// Every `dispatch_all_targets` text send (telegram AND buzz) resolves
+    /// its sender from here — see `DeliveryRegistry`'s own doc comment in
+    /// `ironhermes-cron` for why it lives in that crate. Defaults to an
+    /// empty registry for construction sites that pass no senders (CLI cron,
+    /// cron-only test fixtures).
+    pub delivery_registry: DeliveryRegistry,
 }
 
 // ---------------------------------------------------------------------------
@@ -115,6 +132,27 @@ async fn complete_and_dispatch(
     // Resolve all delivery targets via Plan 04's plural API
     let targets = resolve_delivery_targets(job);
     if targets.is_empty() {
+        // RC-3 / REQ-37.2-05: record traceable empty-target failure instead of
+        // returning silently (T-37.2-03-03 mitigation).
+        warn!(
+            job_id = %job.id,
+            had_text = true,
+            delivered = false,
+            target = "none",
+            reason = "no_delivery_targets_resolved",
+            "turn-end: cron job has no resolvable delivery targets — recording as delivery error"
+        );
+        {
+            let mut store = ctx
+                .job_store
+                .lock()
+                .map_err(|e| anyhow!("job store mutex poisoned: {}", e))?;
+            if let Some(j) = store.jobs_mut().iter_mut().find(|j| j.id == job.id) {
+                j.last_delivery_error =
+                    Some("no delivery targets resolved (deliver=origin, origin=null?)".to_string());
+            }
+            store.save()?;
+        }
         return Ok(());
     }
 
@@ -126,6 +164,7 @@ async fn complete_and_dispatch(
             job,
             &ctx.config,
             ctx.tg_client.as_ref(),
+            &ctx.delivery_registry,
         )
         .await
     })
@@ -254,7 +293,23 @@ pub async fn run_cron_job(job: &CronJob, ctx: &CronRunnerContext) -> Result<()> 
     // -----------------------------------------------------------------------
     // (4) Construct AgentLoop with per-job overrides
     // -----------------------------------------------------------------------
-    let resolver = ProviderResolver::build(&ctx.config)?;
+    let mut resolver = ProviderResolver::build(&ctx.config)?;
+    // Phase 46.8 D-07: additive top-up — the vault becomes the last-resort
+    // provider-key source (after config/env resolution above) when enabled.
+    // A sealed/broken enabled vault propagates loudly via `?` (D-07 hard
+    // error) rather than running the job with a misleading missing-key
+    // state. D-10: when vault.enabled is false (default), no store is
+    // constructed and this is a no-op — byte-for-byte unchanged behavior.
+    //
+    // UAT gap G-46.8-1 fix: route through the shared resolver so a
+    // DEFAULT-configured vault (empty rusty_vault.data_dir sentinel) opens
+    // the same on-disk location `vault init` wrote to, instead of the
+    // sentinel reaching `open_store` unresolved.
+    if ctx.config.vault.enabled {
+        let store =
+            ironhermes_vault::open_store(&ironhermes_core::resolve_vault_config(&ctx.config))?;
+        resolver.apply_vault_fallback(&*store).await?;
+    }
     let max_turns = ctx.config.agent.max_turns;
     let default_model = resolver.resolve_for_main().default_model.clone();
     let model = job.model.as_deref().unwrap_or(&default_model).to_string();
@@ -271,24 +326,83 @@ pub async fn run_cron_job(job: &CronJob, ctx: &CronRunnerContext) -> Result<()> 
     if let Some(skill_reg) = &ctx.skill_registry {
         prompt_builder.set_skill_registry(skill_reg.clone());
     }
+    // Phase 38.1 (D-04/D-05): freeze session timezone into PromptBuilder Timestamp slot.
+    // Cron uses the full build_system_message() path (not skip_context_files), so this
+    // reaches the ephemeral Timestamp slot — daily-news/podcast jobs see the weekday.
+    prompt_builder.set_timezone(ctx.config.agent.timezone.clone());
     prompt_builder.load_memory().await;
     let system_msg = prompt_builder.build_system_message();
 
-    let client = build_main_client(&resolver)?;
+    // Per-job model override (D-CONTEXT §Per-job runtime overrides): `model`
+    // resolves to `job.model` or the provider default. Build the client WITH
+    // that model so the override actually reaches inference — previously the
+    // resolved model was only fed to the PromptBuilder and the client silently
+    // used the provider default. Same provider/endpoint as the default; only
+    // the request model string is swapped.
+    let client = build_main_client_with_model(&resolver, &model)?;
 
     // Per D-CONTEXT §Per-job runtime overrides: enabled_toolsets ⇒ scoped
-    // tool registry. If Some and non-empty, build a filtered view that only
-    // exposes the named toolsets. The shared Arc<RwLock<ToolRegistry>> is
-    // NOT mutated — each job gets its own independent scoped view.
-    let tool_registry_scoped = match &job.enabled_toolsets {
-        Some(names) if !names.is_empty() => {
-            let reg = ctx.tool_registry.read().await;
-            let scoped = reg.scope_to(names);
-            drop(reg);
-            Arc::new(tokio::sync::RwLock::new(scoped))
+    // tool registry. The shared Arc<RwLock<ToolRegistry>> is NOT mutated —
+    // always produce a per-job OWNED copy so register_tts_tools does not
+    // mutate the shared ctx.tool_registry (Pitfall 3 / T-37.2-03-01).
+    //
+    // ToolRegistry does not implement Clone (guardrails hold Box<dyn Trait>),
+    // so we use scope_to() to produce an owned copy. For the no-filter case,
+    // scope_to with all registered toolsets preserves all tools. Guardrails
+    // and intercepts are NOT carried over by scope_to — consistent with the
+    // existing enabled_toolsets branch behaviour (no regression).
+    let tool_registry_scoped = {
+        let reg = ctx.tool_registry.read().await;
+        let all_toolsets = reg.list_toolsets();
+        let owned = reg.scope_to(&all_toolsets);
+        drop(reg);
+        let owned_arc = Arc::new(tokio::sync::RwLock::new(owned));
+
+        match &job.enabled_toolsets {
+            Some(names) if !names.is_empty() => {
+                let reg = owned_arc.read().await;
+                let scoped = reg.scope_to(names);
+                drop(reg);
+                Arc::new(tokio::sync::RwLock::new(scoped))
+            }
+            _ => owned_arc,
         }
-        _ => ctx.tool_registry.clone(),
     };
+
+    // RC-2 / REQ-37.2-04: register TTS tools on the per-job owned registry
+    // before running the agent. SessionKey is derived from the first resolved
+    // DeliveryTarget (D-04). Only telegram is handled today — non-telegram
+    // targets skip TTS registration with a warn (D-04, no cron Slack/Discord
+    // surface yet). Do NOT mutate ctx.tool_registry (T-37.2-03-01).
+    let targets_for_tts = resolve_delivery_targets(job);
+    if let Some(first_target) = targets_for_tts.first() {
+        let session_key_opt = match first_target.platform.as_str() {
+            "telegram" => Some(ironhermes_core::SessionKey::new(
+                ironhermes_core::Platform::Telegram,
+                &first_target.chat_id,
+            )),
+            other => {
+                warn!(
+                    job_id = %job.id,
+                    platform = %other,
+                    "cron TTS: non-telegram target, skipping TTS registration"
+                );
+                None
+            }
+        };
+
+        if let Some(session_key) = session_key_opt {
+            let mut reg = tool_registry_scoped.write().await;
+            reg.register_tts_tools(
+                session_key,
+                ctx.audio_dispatcher.clone(),
+                Arc::new(ctx.config.clone()),
+            );
+            drop(reg);
+        }
+    }
+    // If targets_for_tts is empty → no TTS registration;
+    // REQ-37.2-05 fires in complete_and_dispatch.
 
     let mut agent = AgentLoop::new(client, tool_registry_scoped, max_turns);
     // Install the cron-distinct budget (§6.4). This budget is separate from any
@@ -381,6 +495,18 @@ pub async fn run_cron_job(job: &CronJob, ctx: &CronRunnerContext) -> Result<()> 
             },
         ));
     }
+
+    // REQ-37.2-06: structured turn-end record after dispatch.
+    // Emit before complete_and_dispatch so the trace fires even if dispatch errors.
+    let tts_targets = resolve_delivery_targets(job);
+    info!(
+        job_id = %job.id,
+        had_text = %success,
+        delivered = true,
+        target = %tts_targets.first().map(|t| t.chat_id.as_str()).unwrap_or("none"),
+        reason = "dispatched",
+        "turn-end: cron job dispatched"
+    );
 
     complete_and_dispatch(ctx, job, &output, success).await
 }
@@ -522,6 +648,8 @@ mod tests {
             config: Config::default(),
             mcp_manager: None,
             tg_client: None,
+            audio_dispatcher: None, // RC-2 addition — None for test paths
+            delivery_registry: DeliveryRegistry::new(), // Plan 07 addition — empty for test paths
         }
     }
 

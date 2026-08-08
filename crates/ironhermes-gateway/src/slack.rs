@@ -275,6 +275,8 @@ async fn on_push_event(
     let processed = ProcessedAttachments {
         text_prefix: None,
         image_data_uri: None,
+        // Slack inbound images are not yet wired to the image cache.
+        image_cache_path: None,
     };
     let h = state.handler.clone();
     let a = state.adapter.clone();

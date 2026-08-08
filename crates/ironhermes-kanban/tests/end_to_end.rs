@@ -17,8 +17,8 @@
 //!
 //! # Env-var race note
 //!
-//! The spawn_fn uses `std::env::set_var` to set `HERMES_KANBAN_TASK`,
-//! `HERMES_KANBAN_RUN_ID`, `HERMES_KANBAN_CLAIM_LOCK`, and `HERMES_PROFILE`
+//! The spawn_fn uses `std::env::set_var` to set `IRONHERMES_KANBAN_TASK`,
+//! `IRONHERMES_KANBAN_RUN_ID`, `IRONHERMES_KANBAN_CLAIM_LOCK`, and `HERMES_PROFILE`
 //! before calling the tool, then removes them on drop. This is safe in a
 //! single-threaded test but would race if this test ran concurrently with
 //! other tests that also touch those env vars. Run with `--test-threads=1`
@@ -108,14 +108,14 @@ async fn full_lifecycle_via_tools_layer() {
             let assignee = task.assignee.clone();
 
             Box::pin(async move {
-                // Set the env vars the tool reads (D-17 / D-22). HERMES_KANBAN_DB
+                // Set the env vars the tool reads (D-17 / D-22). IRONHERMES_KANBAN_DB
                 // points the tool's own KanbanStore::open_from_env_or_board at this
                 // test's tempfile DB instead of ~/.ironhermes/kanban.db.
                 unsafe {
-                    std::env::set_var("HERMES_KANBAN_DB", &db_path);
-                    std::env::set_var("HERMES_KANBAN_TASK", &task_id);
-                    std::env::set_var("HERMES_KANBAN_RUN_ID", &run_id);
-                    std::env::set_var("HERMES_KANBAN_CLAIM_LOCK", &claim_lock);
+                    std::env::set_var("IRONHERMES_KANBAN_DB", &db_path);
+                    std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id);
+                    std::env::set_var("IRONHERMES_KANBAN_RUN_ID", &run_id);
+                    std::env::set_var("IRONHERMES_KANBAN_CLAIM_LOCK", &claim_lock);
                     std::env::set_var("HERMES_PROFILE", &assignee);
                 }
 
@@ -131,10 +131,10 @@ async fn full_lifecycle_via_tools_layer() {
 
                 // Clean up env vars before returning regardless of tool result.
                 unsafe {
-                    std::env::remove_var("HERMES_KANBAN_DB");
-                    std::env::remove_var("HERMES_KANBAN_TASK");
-                    std::env::remove_var("HERMES_KANBAN_RUN_ID");
-                    std::env::remove_var("HERMES_KANBAN_CLAIM_LOCK");
+                    std::env::remove_var("IRONHERMES_KANBAN_DB");
+                    std::env::remove_var("IRONHERMES_KANBAN_TASK");
+                    std::env::remove_var("IRONHERMES_KANBAN_RUN_ID");
+                    std::env::remove_var("IRONHERMES_KANBAN_CLAIM_LOCK");
                     std::env::remove_var("HERMES_PROFILE");
                 }
 
@@ -152,11 +152,10 @@ async fn full_lifecycle_via_tools_layer() {
         },
     );
 
-    let ctx = Arc::new(DispatcherContext::with_spawn_fn(
-        store_arc.clone(),
-        KanbanConfig::default(),
-        spawn_fn,
-    ));
+    let ctx = Arc::new(
+        DispatcherContext::with_spawn_fn(store_arc.clone(), KanbanConfig::default(), spawn_fn)
+            .with_gate_fn(allow_all_gate()),
+        );
 
     // ---- Step 3: dispatcher tick — claims + invokes spawn_fn ----
     run_dispatch_tick(&ctx)
@@ -247,7 +246,7 @@ async fn duplicate_completion_is_rejected() {
     // tempfile DB instead of ~/.ironhermes/kanban.db (kept set for the whole
     // tool-call span; process-global, so requires --test-threads=1).
     unsafe {
-        std::env::set_var("HERMES_KANBAN_DB", &db_path);
+        std::env::set_var("IRONHERMES_KANBAN_DB", &db_path);
     }
 
     // Create and manually seed a running task with a known run_id.
@@ -322,6 +321,15 @@ async fn duplicate_completion_is_rejected() {
     }
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_DB");
+        std::env::remove_var("IRONHERMES_KANBAN_DB");
     }
+}
+
+/// Allow-all dispatch gate for tests exercising dispatcher steps OTHER than
+/// the Phase 47.4 pre-spawn gate. The production default is the real
+/// fail-closed predicate, which resolves `$IRONHERMES_HOME/profiles/<assignee>/`;
+/// these tests use synthetic assignees with no profile directory. The gate is
+/// covered against the REAL predicate in `tests/dispatch_gate_loop.rs`.
+fn allow_all_gate() -> ironhermes_kanban::dispatcher::DispatchGateFn {
+    std::sync::Arc::new(|_assignee: &str| ironhermes_core::dispatch_gate::DispatchDecision::Allow)
 }

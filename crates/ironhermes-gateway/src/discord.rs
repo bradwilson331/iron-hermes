@@ -215,6 +215,8 @@ impl EventHandler for DiscordEventHandler {
         let processed = ProcessedAttachments {
             text_prefix: None,
             image_data_uri: None,
+            // Discord inbound images are not yet wired to the image cache.
+            image_cache_path: None,
         };
         if let Err(e) = self
             .handler

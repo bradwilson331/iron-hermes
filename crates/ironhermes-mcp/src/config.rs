@@ -33,6 +33,22 @@ pub struct McpServerConfig {
     pub enabled_tools: Option<Vec<String>>,
     /// Optional auth token or bearer credential.
     pub auth: Option<String>,
+    /// OAuth provider namespace for the rmcp DCR/discovery OAuth path (D-03, Phase 44).
+    ///
+    /// When `Some`, `server_task` routes to `connect_http_oauth` and the value names
+    /// the `auth.json` token namespace (`tokens.<ns>`). DCR is persisted under
+    /// `clients.<server-url>`. Does NOT cross-reference `auth.providers.<name>` (D-03).
+    /// Never log this value alongside token data (A-1).
+    pub oauth_provider: Option<String>,
+    /// Phase 46.1 D-01: per-server issuer pin for MCP-OAuth PRM validation (B-4).
+    ///
+    /// When `Some`, this single issuer host is **authoritative** for this server —
+    /// the global `Config.mcp_oauth.issuer_allowlist` is NOT consulted, and the
+    /// built-in baseline is bypassed too (tightest posture: this server can only
+    /// talk to its own declared issuer). An empty/whitespace-only value is treated
+    /// as absent (falls back to baseline ∪ global) rather than an empty allowlist
+    /// (V5 input validation, fail-safe). See `security::resolve_allowed_issuers`.
+    pub allowed_issuer: Option<String>,
     /// Sampling/createMessage configuration.
     pub sampling: Option<SamplingConfig>,
 }
@@ -50,6 +66,8 @@ impl Default for McpServerConfig {
             enabled: true,
             enabled_tools: None,
             auth: None,
+            oauth_provider: None,
+            allowed_issuer: None,
             sampling: None,
         }
     }
@@ -114,6 +132,12 @@ pub fn interpolate_config(config: &mut McpServerConfig) {
     config.headers = hdr_copy;
     if let Some(ref mut auth) = config.auth {
         *auth = interpolate_env(auth);
+    }
+    if let Some(ref mut ns) = config.oauth_provider {
+        *ns = interpolate_env(ns);
+    }
+    if let Some(ref mut pin) = config.allowed_issuer {
+        *pin = interpolate_env(pin);
     }
 }
 
@@ -298,5 +322,88 @@ auth: "${IH_MCP_TEST_TOKEN}"
         );
         assert_eq!(cfg.auth.as_deref(), Some("test_token_value"));
         unsafe { std::env::remove_var("IH_MCP_TEST_TOKEN") };
+    }
+
+    // -------------------------------------------------------------------------
+    // oauth_provider field tests (D-03, Phase 44)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_mcp_server_config_oauth_provider_roundtrip() {
+        let yaml = r#"
+url: "https://docs.mcp.cloudflare.com/mcp"
+oauth_provider: "cloudflare_mcp_docs"
+"#;
+        let cfg: McpServerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.oauth_provider.as_deref(), Some("cloudflare_mcp_docs"));
+        // Confirm existing auth field unaffected (D-03: no cross-reference to auth.providers)
+        assert!(cfg.auth.is_none());
+    }
+
+    #[test]
+    fn test_mcp_server_config_oauth_provider_default_none() {
+        let cfg = McpServerConfig::default();
+        assert!(cfg.oauth_provider.is_none());
+    }
+
+    #[test]
+    fn test_cloudflare_mcp_server_entries_roundtrip() {
+        // D-04/CFL-02 (Phase 46): the 4 Cloudflare control-plane servers.
+        // `cloudflare_api`'s url is the ROOT domain, NOT api.mcp.cloudflare.com
+        // (which does not resolve — RESEARCH Pitfall 4).
+        let cases = [
+            (
+                r#"
+url: "https://mcp.cloudflare.com/mcp"
+oauth_provider: "cloudflare_api"
+"#,
+                "https://mcp.cloudflare.com/mcp",
+                "cloudflare_api",
+            ),
+            (
+                r#"
+url: "https://bindings.mcp.cloudflare.com/mcp"
+oauth_provider: "cloudflare_bindings"
+"#,
+                "https://bindings.mcp.cloudflare.com/mcp",
+                "cloudflare_bindings",
+            ),
+            (
+                r#"
+url: "https://observability.mcp.cloudflare.com/mcp"
+oauth_provider: "cloudflare_observability"
+"#,
+                "https://observability.mcp.cloudflare.com/mcp",
+                "cloudflare_observability",
+            ),
+            (
+                r#"
+url: "https://builds.mcp.cloudflare.com/mcp"
+oauth_provider: "cloudflare_builds"
+"#,
+                "https://builds.mcp.cloudflare.com/mcp",
+                "cloudflare_builds",
+            ),
+        ];
+
+        for (yaml, expected_url, expected_oauth_provider) in cases {
+            let cfg: McpServerConfig = serde_yaml::from_str(yaml).unwrap();
+            assert_eq!(cfg.url.as_deref(), Some(expected_url));
+            assert_eq!(cfg.oauth_provider.as_deref(), Some(expected_oauth_provider));
+        }
+    }
+
+    #[test]
+    fn test_interpolate_config_expands_oauth_provider() {
+        // SAFETY: test-only env mutation; unique key unlikely to conflict with parallel tests.
+        unsafe { std::env::set_var("IH_MCP_TEST_NS", "cf_docs") };
+        let yaml = r#"
+url: "https://docs.mcp.cloudflare.com/mcp"
+oauth_provider: "${IH_MCP_TEST_NS}"
+"#;
+        let mut cfg: McpServerConfig = serde_yaml::from_str(yaml).unwrap();
+        interpolate_config(&mut cfg);
+        assert_eq!(cfg.oauth_provider.as_deref(), Some("cf_docs"));
+        unsafe { std::env::remove_var("IH_MCP_TEST_NS") };
     }
 }

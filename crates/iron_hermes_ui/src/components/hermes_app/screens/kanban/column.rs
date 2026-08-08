@@ -105,6 +105,12 @@ impl KanbanColumnStatus {
 ///   error / disallowed transitions.
 /// - `archive_modal_task`: Plan 03 modal target (helper sets Some(id)
 ///   when target == Archived).
+/// - `active_profile`: Phase 47.4 Plan 09 (D-05) — the board PROFILE
+///   lens, forwarded unchanged from `ScreenKanban`. Used ONLY to compute
+///   each card's `lens_dimmed` flag below — never threaded into the
+///   `.kn-column-count` derivation and never used to filter/retain the
+///   card iteration (D-05: dimming, not removal; true totals, not
+///   filtered counts).
 #[component]
 pub fn KanbanColumn(
     status: KanbanColumnStatus,
@@ -119,6 +125,7 @@ pub fn KanbanColumn(
     // KanbanCard renders the buttons only on TRIAGE cards; the screen
     // owns the actual `run_decompose_or_specify` spawn.
     on_triage_action: EventHandler<(String, DecomposeOrSpecify)>,
+    active_profile: ReadSignal<Option<String>>,
 ) -> Element {
     let status_str = status.as_str();
     let target_status = status.to_kanban_status();
@@ -166,6 +173,12 @@ pub fn KanbanColumn(
         None
     };
     let _ = drag_source_current; // captured for potential keyboard-DnD reuse
+
+    // Phase 47.4 Plan 09 (D-05): snapshot the lens once per render — read
+    // outside the card loop so the loop body is a pure comparison, no
+    // repeated signal reads. `None` (ALL PROFILES) always yields
+    // lens_dimmed == false for every card, matching the "no lens" state.
+    let lens_profile: Option<String> = active_profile.read().clone();
 
     rsx! {
         section {
@@ -217,6 +230,16 @@ pub fn KanbanColumn(
                             let task_id_for_card = task.id.clone();
                             // Check optimistic-pending state for this card.
                             let is_pending = pending_task_ids.read().contains(&task_id_for_card);
+                            // Phase 47.4 Plan 09 (D-05): dimmed iff a lens
+                            // is active AND this card's assignee does not
+                            // match it. `None` (ALL PROFILES) => false for
+                            // every card. This is a pure comparison over
+                            // already-fetched data — no I/O, no filtering
+                            // of `filtered` itself.
+                            let lens_dimmed = lens_profile
+                                .as_deref()
+                                .map(|name| task.assignee != name)
+                                .unwrap_or(false);
                             rsx! {
                                 KanbanCard {
                                     key: "{task_id_for_card}",
@@ -224,6 +247,7 @@ pub fn KanbanColumn(
                                     on_open_drawer: on_open_drawer,
                                     dragged_task_id: dragged_task_id,
                                     is_pending: is_pending,
+                                    lens_dimmed: lens_dimmed,
                                     on_triage_action: on_triage_action,
                                 }
                             }

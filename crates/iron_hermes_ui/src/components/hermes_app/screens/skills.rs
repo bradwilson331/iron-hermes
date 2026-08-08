@@ -5,6 +5,15 @@
 //! driven by optimistic toggle_states HashMap signal (Phase 26.7.3 Plan 03).
 //! Toggle persists via toggle_skill #[server] fn; on Err the flip reverts
 //! and an inline error message appears inside the card.
+//!
+//! ── ENABLED tab reactivity (Phase 41.1 Plan 09 / G-41.1-4 fix) ──────────
+//! The ENABLED tab count/filter deliberately reads server-CONFIRMED state,
+//! not the optimistic `toggle_states` flip (26.7.3-RESEARCH Pitfall 6) —
+//! `confirmed_states` (same HashMap<name, enabled> shape as toggle_states)
+//! is seeded once at mount alongside it and advanced only in `on_toggle`'s
+//! `Ok(_)` branch. This does NOT call `skills_resource.restart()` — that is
+//! a documented hook-order-crash trap for this screen (see providers.rs
+//! header comment + repo MEMORY feedback_dioxus_use_server_future_restart_trap).
 
 use dioxus::prelude::*;
 use std::collections::HashMap;
@@ -46,25 +55,35 @@ pub fn ScreenSkills(is_active: bool) -> Element {
 
     // Optimistic toggle state — HashMap<name, enabled> owned by this screen
     let mut toggle_states: Signal<HashMap<String, bool>> = use_signal(HashMap::new);
+    // Server-confirmed toggle state — same HashMap<name, enabled> shape as
+    // toggle_states, but written ONLY in on_toggle's Ok(_) branch (G-41.1-4
+    // fix). The ENABLED tab count/filter read this, not toggle_states, per
+    // Pitfall 6 — see module header and
+    // .planning/debug/41.1-skills-enabled-tab-reactivity.md.
+    let mut confirmed_states: Signal<HashMap<String, bool>> = use_signal(HashMap::new);
     // Per-skill error messages — populated on server Err, cleared on next click
     let mut toggle_errors: Signal<HashMap<String, String>> = use_signal(HashMap::new);
 
-    // Seed toggle_states from skills_list on first non-empty load (Pitfall 3).
-    // use_effect re-runs each render; guard ensures we only seed once and
-    // do not overwrite optimistic flips after the initial seed.
+    // Seed toggle_states and confirmed_states from skills_list on first
+    // non-empty load (Pitfall 3). use_effect re-runs each render; guard
+    // ensures we only seed once and do not overwrite optimistic flips (or
+    // already-confirmed toggles) after the initial seed.
     {
         let sl = skills_list.clone();
         use_effect(move || {
             if !sl.is_empty() && toggle_states.read().is_empty() {
                 let mut map = toggle_states.write();
+                let mut confirmed = confirmed_states.write();
                 for s in &sl {
                     map.insert(s.name.clone(), s.enabled);
+                    confirmed.insert(s.name.clone(), s.enabled);
                 }
             }
         });
     }
 
-    // Live tab counts — computed from skills_list (server-sourced per Pitfall 6)
+    // Live tab counts — ALL/BUNDLED/INSTALLED read skills_list directly
+    // (category is static per load). Computed from skills_list.
     let count_all = skills_list.len();
     let count_bundled = skills_list
         .iter()
@@ -74,10 +93,20 @@ pub fn ScreenSkills(is_active: bool) -> Element {
         .iter()
         .filter(|s| s.category != "bundled")
         .count();
-    let count_enabled = skills_list.iter().filter(|s| s.enabled).count();
+    // ENABLED count reads confirmed_states (server-confirmed per Pitfall 6),
+    // not the frozen skills_list snapshot — G-41.1-4 fix. Falls back to the
+    // skill's own server-sourced `enabled` for any name not yet seeded.
+    // Extracted to a plain usize before rsx! per signal-borrow discipline.
+    let count_enabled = {
+        let confirmed = confirmed_states.read();
+        skills_list
+            .iter()
+            .filter(|s| *confirmed.get(&s.name).unwrap_or(&s.enabled))
+            .count()
+    };
 
     // Header sub-copy uses optimistic count (tracks live flips);
-    // the ENABLED tab label uses server-sourced count_enabled (Pitfall 6).
+    // the ENABLED tab label uses confirmed-state count_enabled (Pitfall 6).
     let enabled_count_live = toggle_states.read().values().filter(|&&v| v).count();
     // borrow ends at ; — safe before rsx!
 
@@ -89,10 +118,16 @@ pub fn ScreenSkills(is_active: bool) -> Element {
     let filtered_skills = use_memo(move || {
         let tab = active_tab();
         let query = search_query();
+        // Read confirmed_states inside the memo so it subscribes — recomputes
+        // whenever a toggle is server-confirmed (G-41.1-4 fix). Deliberately
+        // NOT toggle_states (optimistic) — ENABLED stays scoped to
+        // confirmed state per Pitfall 6.
+        let confirmed = confirmed_states.read();
         skills_for_memo
             .iter()
             .filter(|s| {
-                tab_predicate(&s.category, s.enabled, tab)
+                let is_enabled = *confirmed.get(&s.name).unwrap_or(&s.enabled);
+                tab_predicate(&s.category, is_enabled, tab)
                     && search_matches(&s.name, &s.description, &query)
             })
             .cloned()
@@ -116,8 +151,9 @@ pub fn ScreenSkills(is_active: bool) -> Element {
     };
     // All borrows (states, errors, filtered_skills read guards) dropped here.
 
-    // Optimistic toggle closure — captures toggle_states and toggle_errors by move.
-    // Called from SkillCard's on_toggle EventHandler with the skill name.
+    // Optimistic toggle closure — captures toggle_states, confirmed_states,
+    // and toggle_errors by move. Called from SkillCard's on_toggle
+    // EventHandler with the skill name.
     let mut on_toggle = move |name: String| {
         // Capture current state (Copy bool — borrow ends at ;)
         let current = *toggle_states.read().get(&name).unwrap_or(&false);
@@ -128,7 +164,13 @@ pub fn ScreenSkills(is_active: bool) -> Element {
         // Spawn async server call — onclick cannot be async in Dioxus 0.7
         spawn(async move {
             match crate::server::api::toggle_skill(name.clone()).await {
-                Ok(_) => {} // optimistic state is already correct
+                Ok(_) => {
+                    // Server confirmed — advance confirmed_states so the
+                    // ENABLED tab count/filter update live (G-41.1-4 fix).
+                    // Do NOT call skills_resource.restart() — hook-order-
+                    // crash trap (see module header / providers.rs).
+                    confirmed_states.write().insert(name.clone(), !current);
+                }
                 Err(_) => {
                     // Revert optimistic flip and surface inline error
                     toggle_states.write().insert(name.clone(), current);
@@ -234,6 +276,20 @@ fn SkillCard(
     error_msg: Option<String>, // None = no error; Some = revert error text
     on_toggle: EventHandler<()>, // fires on .tgl click; parent owns the spawn
 ) -> Element {
+    // Phase 41.1 Plan 06 (D-07): the Run affordance consumes the SAME chat send
+    // handler + active-screen signal provided at the HermesApp root, so one
+    // click navigates to chat and submits /<skill> through the EXISTING WS
+    // chat-input path (no new #[server] execution fn — RESEARCH Pitfall 6).
+    let mut active_screen = use_context::<Signal<crate::state::Screen>>();
+    let send = use_context::<crate::components::hermes_app::screens::chat::ChatSendHandler>();
+    // Inline start-failure flag (mirrors the toggle_errors convention). A
+    // client-side navigate+submit cannot report an async failure, so this is
+    // raised only on the one detectable precondition — an empty skill name.
+    let mut run_error = use_signal(|| false);
+    // Cloned for the onclick closure (moved in); `skill` stays available for
+    // the render tree below.
+    let run_name = skill.name.clone();
+
     rsx! {
         div {
             class: "card",
@@ -247,6 +303,27 @@ fn SkillCard(
                     div { class: "card-title", "{skill.name}" }
                     div { class: "card-meta", "{skill.category}" }
                 }
+                // Phase 41.1 Plan 06 (D-07): one-click Run — LEFT of the toggle.
+                // Reuses the existing .btn--ghost.btn--sm class (no new button
+                // style). A disabled skill renders the button at 50% opacity +
+                // pointer-events:none (the exact "UPDATES · 0" tab pattern) —
+                // running a disabled skill is unsupported this phase.
+                button {
+                    class: "btn btn--ghost btn--sm",
+                    r#type: "button",
+                    "aria-label": "Run skill {skill.name}",
+                    style: if !enabled { "opacity:0.5; pointer-events:none;" },
+                    disabled: !enabled,
+                    onclick: move |_| {
+                        if run_name.is_empty() {
+                            run_error.set(true);
+                        } else {
+                            active_screen.set(crate::state::Screen::Chat);
+                            send.0.call((format!("/{run_name}"), Vec::new()));
+                        }
+                    },
+                    "▶ Run"
+                }
                 div {
                     class: if enabled { "tgl on" } else { "tgl" },
                     role: "switch",
@@ -259,6 +336,14 @@ fn SkillCard(
                 div {
                     style: "color:var(--danger);font-size:var(--fs-12);",
                     "{err}"
+                }
+            }
+            // Phase 41.1 Plan 06 (D-07): inline start-failure copy (UI-SPEC §B /
+            // Copywriting Contract), matching the toggle_errors --danger convention.
+            if *run_error.read() {
+                div {
+                    style: "color:var(--danger);font-size:var(--fs-12);",
+                    "Could not start skill — try typing /{skill.name} in chat."
                 }
             }
         }

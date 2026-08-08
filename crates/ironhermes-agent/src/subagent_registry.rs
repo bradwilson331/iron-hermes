@@ -223,11 +223,13 @@ impl SubagentRegistry {
 /// Newtype required by Rust's orphan rule (foreign trait on foreign type).
 ///
 /// All methods are SYNC by the trait definition, but the underlying lock is
-/// `tokio::sync::RwLock`. We use `tokio::task::block_in_place` +
-/// `Handle::current().block_on` to bridge — the same pattern used by
-/// `ironhermes-core/src/commands/handlers.rs` for `/models refresh`. Safe on
-/// the tokio multi-thread runtime; locks uncontended in practice
-/// (single-session registry).
+/// `tokio::sync::RwLock`. We bridge through
+/// [`ironhermes_core::async_bridge::block_on_sync`], which is safe on every
+/// runtime context including the per-connection `LocalSet` the Dioxus web
+/// server polls its websocket handlers on. The former `block_in_place` +
+/// `Handle::current().block_on` bridge panicked there — see the Phase 41.3 UAT
+/// regression test at `tests/localset_sync_bridge.rs`. Locks are uncontended in
+/// practice (single-session registry).
 ///
 /// Phase 32.3 Plan 03 (D-08 / W3): the handle also owns an
 /// `Arc<ShrikeService>` so the trait overrides for `kill`/`interrupt`/
@@ -321,25 +323,22 @@ fn flatten_tree(
 
 impl ironhermes_core::commands::context::SubagentListSnapshot for SubagentRegistryHandle {
     fn active_count(&self) -> usize {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { self.inner.read().await.active_count() })
+        ironhermes_core::async_bridge::block_on_sync(async {
+            self.inner.read().await.active_count()
         })
     }
 
     fn list_summary(&self) -> Vec<(String, String, std::time::Duration)> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let guard = self.inner.read().await;
-                guard
-                    .list()
-                    .into_iter()
-                    .map(|info| {
-                        let uptime = info.started_at.elapsed();
-                        (info.id, info.task_summary, uptime)
-                    })
-                    .collect()
-            })
+        ironhermes_core::async_bridge::block_on_sync(async {
+            let guard = self.inner.read().await;
+            guard
+                .list()
+                .into_iter()
+                .map(|info| {
+                    let uptime = info.started_at.elapsed();
+                    (info.id, info.task_summary, uptime)
+                })
+                .collect()
         })
     }
 
@@ -355,9 +354,8 @@ impl ironhermes_core::commands::context::SubagentListSnapshot for SubagentRegist
     }
 
     fn transcript_path(&self, id: &str) -> Option<PathBuf> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { self.inner.read().await.transcript_path(id) })
+        ironhermes_core::async_bridge::block_on_sync(async {
+            self.inner.read().await.transcript_path(id)
         })
     }
 
@@ -365,20 +363,18 @@ impl ironhermes_core::commands::context::SubagentListSnapshot for SubagentRegist
     /// depth-tagged flat list derived from the real parent–child tree.
     ///
     /// Uses `build_tree()` + `flatten_tree()` so depths and `parent_id` values
-    /// reflect actual spawn relationships. Uses the same `block_in_place` +
-    /// `block_on` async-to-sync bridge as `list_summary()`.
+    /// reflect actual spawn relationships. Uses the same async-to-sync bridge
+    /// as `list_summary()`.
     fn tree_summary(&self) -> Vec<ironhermes_core::commands::context::SubagentTreeEntry> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let guard = self.inner.read().await;
-                let tree = guard.build_tree();
-                let mut out = Vec::new();
-                // Phase 32.3 Plan 02 (D-06): pass the registry's stale_warned
-                // dedup set so the once-per-child warn gate fires here. Wrap
-                // in Mutex (already is) gives interior mutability through &self.
-                flatten_tree(&tree, 0, &mut out, &guard.stale_warned);
-                out
-            })
+        ironhermes_core::async_bridge::block_on_sync(async {
+            let guard = self.inner.read().await;
+            let tree = guard.build_tree();
+            let mut out = Vec::new();
+            // Phase 32.3 Plan 02 (D-06): pass the registry's stale_warned
+            // dedup set so the once-per-child warn gate fires here. Wrap
+            // in Mutex (already is) gives interior mutability through &self.
+            flatten_tree(&tree, 0, &mut out, &guard.stale_warned);
+            out
         })
     }
 
@@ -550,8 +546,9 @@ mod tests {
         register_into_arc(&reg, child_killed_info).await;
 
         let handle = SubagentRegistryHandle::new(reg);
-        // tree_summary uses block_in_place; must be called inside a blocking-capable runtime context.
-        // tokio::task::spawn_blocking bridges us into that context.
+        // tree_summary is sync and bridges internally via block_on_sync, which is
+        // safe on any runtime context. The spawn_blocking hop is retained because
+        // this test is already written around it; it is no longer required.
         let entries = tokio::task::spawn_blocking(move || {
             use ironhermes_core::commands::context::SubagentListSnapshot;
             handle.tree_summary()

@@ -1,7 +1,16 @@
 //! Phase 25.2 D-03: URL classification + backend selection.
 //!
-//! All functions are pure (no network, no env I/O except `select_backend` which reads env vars).
-//! Classification runs BEFORE any HTTP request per D-03.
+//! All functions are pure (no network, no env I/O). Classification runs BEFORE
+//! any HTTP request per D-03.
+//!
+//! Phase 41.3 D-17: the env-order `select_backend()` selector that used to live
+//! here was dead code (zero callers — the live selection ladder was always the
+//! inline `if std::env::var(...)` chain hand-written inside
+//! `web_extract.rs::fetch_web_with_chain`, not this helper). It has been
+//! removed; `fetch_web_with_chain` now walks the config-ordered
+//! `tools.web_extract.chain` directly. The `Backend` enum below is kept as a
+//! plain name/enum pairing (used by its own tests) but is no longer part of
+//! any dispatch path.
 
 /// Classification of a URL into one of three dispatch branches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -14,8 +23,9 @@ pub enum UrlClass {
     Web,
 }
 
-/// Backend selected for the default web branch, based on env-var presence.
-/// Order is fixed: Firecrawl > Exa > Tavily > Local.
+/// Named backend for the default web branch. Selection is no longer made by
+/// this type (see the module doc-comment) — kept as a plain name/enum pairing
+/// exercised by `backend_name_strings` below.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     Firecrawl,
@@ -67,20 +77,6 @@ pub fn classify_url(url: &str) -> UrlClass {
     }
 
     UrlClass::Web
-}
-
-/// D-04 backend chain selector. Reads env vars at call time (cheap; matches `web_read.rs:550`
-/// pattern). Returns `Backend::Local` when no provider env var is set.
-pub fn select_backend() -> Backend {
-    if std::env::var("FIRECRAWL_API_KEY").is_ok() {
-        Backend::Firecrawl
-    } else if std::env::var("EXA_API_KEY").is_ok() {
-        Backend::Exa
-    } else if std::env::var("TAVILY_API_KEY").is_ok() {
-        Backend::Tavily
-    } else {
-        Backend::Local
-    }
 }
 
 /// D-03 mid-fetch reroute predicate. Called by Plan 09's local backend after the GET response
@@ -179,7 +175,4 @@ mod tests {
         assert_eq!(Backend::Tavily.name(), "tavily");
         assert_eq!(Backend::Local.name(), "local");
     }
-
-    // select_backend tests are env-var sensitive — defer to integration tests in Plan 14
-    // which use env_lock + EnvGuard. Unit-testing it here would race with other tests.
 }

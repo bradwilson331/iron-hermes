@@ -67,7 +67,18 @@ pub async fn cmd_run(
 
     // Resolve model and build provider resolver
     let model_name = model.unwrap_or_else(|| config.model.default.clone());
-    let resolver = ProviderResolver::build(&config).context("Failed to build provider resolver")?;
+    let mut resolver =
+        ProviderResolver::build(&config).context("Failed to build provider resolver")?;
+
+    // Phase 46.8 NF-2 close-out: apply the vault fallback (final provider-key
+    // source) before the resolver builds per-worker clients below. Same guarded
+    // block as `build_client` (main.rs): D-10 no-op when vault.enabled is false
+    // (default); D-07 loud hard error on a sealed/broken enabled vault; shared
+    // `resolve_vault_config` fills the data_dir sentinel (G-46.8-1).
+    if config.vault.enabled {
+        let store = ironhermes_vault::open_store(&ironhermes_core::resolve_vault_config(&config))?;
+        resolver.apply_vault_fallback(&*store).await?;
+    }
 
     // Read all entries from input JSONL
     let input_file = tokio::fs::File::open(&input)

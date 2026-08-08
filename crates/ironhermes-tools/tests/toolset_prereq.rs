@@ -5,6 +5,16 @@
 /// Also verifies that setting the env var makes the tool appear.
 ///
 /// Uses env_lock + --test-threads=1 for race-free env mutation (Phase 21.6 D Rust 2024).
+///
+/// REWRITTEN under Phase 41.3 Plan 07 (D-09): this test originally used
+/// `WebSearchTool` as its example gated tool, back when `web_search` hard-required
+/// `FIRECRAWL_API_KEY`. Plan 07 made `web_search` a multi-provider chain that is
+/// available even with zero provider keys (DDG terminates it) — `web_search` can
+/// no longer demonstrate single-required-prereq gating. `HexapodTcpTool` is the
+/// replacement vehicle: a trivially-constructible unit struct with a single
+/// `required: true` `env_var` prerequisite (`HEXAPOD_IP`), preserving this test's
+/// original intent (the registry's `get_definitions()` filtering mechanism, not
+/// any one tool's wiring) unchanged.
 use std::sync::OnceLock;
 
 fn env_lock() -> &'static std::sync::Mutex<()> {
@@ -17,14 +27,14 @@ async fn tool_excluded_when_prereq_missing() {
     let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     // SAFETY: env_lock + --test-threads=1 ensure single mutator (Phase 21.6 D Rust 2024).
     unsafe {
-        std::env::remove_var("FIRECRAWL_API_KEY");
+        std::env::remove_var("HEXAPOD_IP");
     }
 
     let mut registry = ironhermes_tools::ToolRegistry::new();
-    registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool));
+    registry.register(Box::new(ironhermes_tools::hexapod_tcp::HexapodTcpTool));
     let mut cfg = ironhermes_core::config::ToolsConfig::default();
     cfg.toolsets.insert(
-        "web".to_string(),
+        "robotics".to_string(),
         ironhermes_core::config::ToolsetEntry { enabled: true },
     );
     registry.set_toolset_config(Some(cfg.clone()));
@@ -35,13 +45,13 @@ async fn tool_excluded_when_prereq_missing() {
         .map(|s| s.function.name.clone())
         .collect();
     assert!(
-        !names.iter().any(|n| n == "web_search"),
-        "web_search MUST be filtered out without FIRECRAWL_API_KEY — got: {:?}",
+        !names.iter().any(|n| n == "hexapod_tcp"),
+        "hexapod_tcp MUST be filtered out without HEXAPOD_IP — got: {:?}",
         names
     );
 
     unsafe {
-        std::env::set_var("FIRECRAWL_API_KEY", "test_value");
+        std::env::set_var("HEXAPOD_IP", "127.0.0.1");
     }
     let names: Vec<String> = registry
         .get_definitions(None)
@@ -49,12 +59,12 @@ async fn tool_excluded_when_prereq_missing() {
         .map(|s| s.function.name.clone())
         .collect();
     assert!(
-        names.iter().any(|n| n == "web_search"),
-        "web_search MUST be present with FIRECRAWL_API_KEY set — got: {:?}",
+        names.iter().any(|n| n == "hexapod_tcp"),
+        "hexapod_tcp MUST be present with HEXAPOD_IP set — got: {:?}",
         names
     );
 
     unsafe {
-        std::env::remove_var("FIRECRAWL_API_KEY");
+        std::env::remove_var("HEXAPOD_IP");
     }
 }

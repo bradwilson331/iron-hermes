@@ -8,7 +8,6 @@
 //! in-crate and cannot be reused from an integration test — so we
 //! define tiny purpose-built fakes here.
 
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use ironhermes_core::commands::context::{
@@ -101,11 +100,7 @@ impl ProcessRegistrySnapshotHandle for FakeProc {
 // =============================================================================
 
 fn base_ctx() -> CommandContext {
-    CommandContext::new(
-        Platform::Local,
-        "test-session".to_string(),
-        Arc::new(AtomicBool::new(false)),
-    )
+    CommandContext::new(Platform::Local, "test-session".to_string())
 }
 
 fn find_cmd(name: &str) -> CommandDef {

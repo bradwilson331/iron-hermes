@@ -59,16 +59,16 @@ They coexist: a kanban worker may call `delegate_task` internally during its run
 - **Task** — a row with title, optional body, one assignee (a profile name), status (`triage` | `todo` | `ready` | `running` | `blocked` | `done` | `archived`), optional tenant namespace, optional idempotency key (dedup for retried automation).
 - **Link** — `task_links` row recording a parent → child dependency. The dispatcher promotes `todo` → `ready` when all parents are `done`.
 - **Comment** — the inter-agent protocol. Agents and humans append comments; when a worker is (re-)spawned it reads the full comment thread as part of its context.
-- **Workspace** — the directory a worker operates in. Three kinds:
-  - **`scratch`** (default) — fresh tmp dir under `~/.hermes/kanban/workspaces/<id>/` (or `~/.hermes/kanban/boards/<slug>/workspaces/<id>/` on non-default boards). **Deleted when the task completes** — scratch is ephemeral by design, so the dir is wiped the moment the worker (or `hermes kanban complete <id>`) marks the task done. If you want to keep the worker's output, use `worktree:` or `dir:<path>` instead. The first time a scratch workspace is created on an install, the dispatcher logs a warning and emits a `tip_scratch_workspace` event on the task (visible via `hermes kanban show <id>`).
+- **Workspace** — the directory a worker operates in. Resolution order is an explicit per-task workspace, then `kanban.default_workdir`, then a task-specific scratch directory. The dispatcher validates and canonicalizes the selected absolute path, starts the worker with that path as its current directory, and injects the same value as `IRONHERMES_KANBAN_WORKSPACE`. Users do not need to set this runtime variable manually. Three kinds:
+  - **`scratch`** (default when no task workspace or `kanban.default_workdir` is configured) — fresh tmp dir under `~/.hermes/kanban/workspaces/<id>/` (or `~/.hermes/kanban/boards/<slug>/workspaces/<id>/` on non-default boards). **Deleted when the task completes** — scratch is ephemeral by design, so the dir is wiped the moment the worker (or `hermes kanban complete <id>`) marks the task done. If you want to keep the worker's output, use `worktree:` or `dir:<path>` instead. The first time a scratch workspace is created on an install, the dispatcher logs a warning and emits a `tip_scratch_workspace` event on the task (visible via `hermes kanban show <id>`).
   - **`dir:<path>`** — an existing shared directory (Obsidian vault, mail ops dir, per-account folder). Must be an absolute path. Relative paths like `dir:../tenants/foo/` are rejected at dispatch because they'd resolve against whatever CWD the dispatcher happens to be in, which is ambiguous and a confused-deputy escape vector. The path is otherwise trusted — it's your box, your filesystem, the worker runs with your uid. This is the trusted-local-user threat model; kanban is single-host by design. Preserved on completion.
   - **`worktree`** — a git worktree under `.worktrees/<id>/` for coding tasks. Use `worktree:<path>` to pin the exact target path. Worker-side `git worktree add` creates it, using `--branch` when provided. Preserved on completion.
-- **Dispatcher** — a long-lived loop that, every N seconds (default 60): reclaims stale claims, reclaims crashed workers (PID gone but TTL not yet expired), promotes ready tasks, atomically claims, spawns assigned profiles. **Runs inside the gateway by default** (`kanban.dispatch_in_gateway: true`). One dispatcher sweeps all boards per tick; workers are spawned with `HERMES_KANBAN_BOARD` pinned so they can't see other boards. After `kanban.failure_limit` consecutive spawn failures on the same task (default: 2) the dispatcher auto-blocks it with the last error as the reason — prevents thrashing on tasks whose profile doesn't exist, workspace can't mount, etc.
+- **Dispatcher** — a long-lived loop that, every N seconds (default 60): reclaims stale claims, reclaims crashed workers (PID gone but TTL not yet expired), promotes ready tasks, atomically claims, spawns assigned profiles. **Runs inside the gateway by default** (`kanban.dispatch_in_gateway: true`). One dispatcher sweeps all boards per tick; workers are spawned with `IRONHERMES_KANBAN_BOARD` pinned so they can't see other boards. After `kanban.failure_limit` consecutive spawn failures on the same task (default: 2) the dispatcher auto-blocks it with the last error as the reason — prevents thrashing on tasks whose profile doesn't exist, workspace can't mount, etc.
 - **Tenant** — optional string namespace within a board. One specialist fleet can serve multiple businesses (`--tenant business-a`) with data isolation by workspace path and memory key prefix. Tenants are a soft filter; boards are the hard isolation boundary.
 
 ## Boards (multi-project)
 
-> **Shipped in Phase 36.3.7.9.** Multi-board CLI (`boards list/create/switch/show/rename/rm`) and the `--board <slug>` flag shipped in Phase 36.3.7.9. Per D-01 the default board stays at `~/.ironhermes/kanban.db` (no migration); named boards live at `~/.ironhermes/kanban/boards/<slug>/kanban.db`. Per D-02 the 4-tier resolution order is `--board` flag > `HERMES_KANBAN_BOARD` env > `~/.ironhermes/kanban/current` file > `default`.
+> **Shipped in Phase 36.3.7.9.** Multi-board CLI (`boards list/create/switch/show/rename/rm`) and the `--board <slug>` flag shipped in Phase 36.3.7.9. Per D-01 the default board stays at `~/.ironhermes/kanban.db` (no migration); named boards live at `~/.ironhermes/kanban/boards/<slug>/kanban.db`. Per D-02 the 4-tier resolution order is `--board` flag > `IRONHERMES_KANBAN_BOARD` env (legacy `HERMES_KANBAN_BOARD` also accepted) > `~/.ironhermes/kanban/current` file > `default`.
 
 Boards let you separate unrelated streams of work — one per project, repo, or domain — into isolated queues. A new install has exactly one board called `default` (DB at `~/.ironhermes/kanban.db` for back-compat). Users who only want one stream of work never need to know about boards; the feature is opt-in.
 
@@ -76,7 +76,7 @@ Per-board isolation is absolute:
 
 - Separate SQLite DB per board (`~/.ironhermes/kanban/boards/<slug>/kanban.db`).
 - Separate `workspaces/` and `logs/` directories.
-- Workers spawned for a task see only their board's tasks — the dispatcher sets `HERMES_KANBAN_BOARD` in the child env and every `kanban_*` tool the worker has access to reads it.
+- Workers spawned for a task see only their board's tasks — the dispatcher sets `IRONHERMES_KANBAN_BOARD` (and legacy `HERMES_KANBAN_BOARD`) in the child env and every `kanban_*` tool the worker has access to reads it.
 - Linking tasks across boards is not allowed (keeps the schema simple; if you really need cross-project refs, use free-text mentions and look them up by id manually).
 
 ### Managing boards from the CLI
@@ -114,7 +114,7 @@ hermes kanban boards rm atm10-server --delete
 Board resolution order (highest precedence first):
 
 1. Explicit `--board <slug>` on the CLI call.
-2. `HERMES_KANBAN_BOARD` env var (set by the dispatcher when spawning a worker, so workers can't see other boards).
+2. `IRONHERMES_KANBAN_BOARD` env var (set by the dispatcher when spawning a worker, so workers can't see other boards; legacy `HERMES_KANBAN_BOARD` also accepted).
 3. `~/.ironhermes/kanban/current` — the slug persisted by `hermes kanban boards switch`.
 4. `default`.
 
@@ -152,7 +152,7 @@ hermes kanban list
 hermes kanban stats
 ```
 
-When the dispatcher picks up `t_abcd` and spawns the researcher profile, the very first thing that worker's model does is call `kanban_show()` to read its task. It doesn't run `hermes kanban show t_abcd`.
+When the dispatcher picks up `t_abcd` and spawns the researcher profile, the very first thing that worker's model does is call `kanban_show()` to read its task (using `$IRONHERMES_KANBAN_TASK`). It doesn't run `hermes kanban show t_abcd`.
 
 ### Gateway-embedded dispatcher (default)
 
@@ -165,7 +165,7 @@ kanban:
   dispatch_interval_seconds: 60    # default
 ```
 
-Override the config flag at runtime via `HERMES_KANBAN_DISPATCH_IN_GATEWAY=0` for debugging. Standard gateway supervision applies: run `hermes gateway start` directly, or wire the gateway up as a systemd user unit (see the gateway docs). Without a running gateway, ready tasks stay where they are until one comes up — `hermes kanban create` warns about this at creation time.
+Override the config flag at runtime via `IRONHERMES_KANBAN_DISPATCH_IN_GATEWAY=0` (legacy `HERMES_KANBAN_DISPATCH_IN_GATEWAY=0` also accepted) for debugging. Standard gateway supervision applies: run `hermes gateway start` directly, or wire the gateway up as a systemd user unit (see the gateway docs). Without a running gateway, ready tasks stay where they are until one comes up — `hermes kanban create` warns about this at creation time.
 
 Running `hermes kanban daemon` as a separate process is **deprecated**; use the gateway. If you truly cannot run the gateway (headless host policy forbids long-lived services, etc.) a `--force` escape hatch keeps the old standalone daemon alive for one release cycle, but running both a gateway-embedded dispatcher AND a standalone daemon against the same `kanban.db` causes claim races and is not supported.
 
@@ -193,7 +193,7 @@ hermes kanban block    t_abc "need input" --ids t_def t_hij
 
 ## How workers interact with the board
 
-Workers do not shell out to `hermes kanban`. When the dispatcher spawns a worker it sets `HERMES_KANBAN_TASK=t_abcd` in the child's env, and that env var flips on a dedicated kanban toolset in the model's schema. The same toolset is also available to orchestrator profiles that enable `kanban` in their toolsets config. These tools read and mutate the board directly via the Python `kanban_db` layer, same as the CLI does. A running worker calls these like any other tool; it never sees or needs the `hermes kanban` CLI.
+Workers do not shell out to `hermes kanban`. When the dispatcher spawns a worker it sets `IRONHERMES_KANBAN_TASK=t_abcd` (and legacy `HERMES_KANBAN_TASK`) in the child's env, and that env var flips on a dedicated kanban toolset in the model's schema. The same toolset is also available to orchestrator profiles that enable `kanban` in their toolsets config. These tools read and mutate the board directly via the Python `kanban_db` layer, same as the CLI does. A running worker calls these like any other tool; it never sees or needs the `hermes kanban` CLI.
 
 | Tool | Purpose | Required params |
 |---|---|---|
@@ -201,19 +201,19 @@ Workers do not shell out to `hermes kanban`. When the dispatcher spawns a worker
 | `kanban_list` | List task summaries with filters for assignee, status, tenant, archived visibility, and limit. Intended for orchestrators discovering board work. | — |
 | `kanban_complete` | Finish with summary + metadata structured handoff. | at least one of `summary` / `result` |
 | `kanban_block` | Escalate for human input with a reason. | `reason` |
-| `kanban_heartbeat` | Signal liveness during long operations. Appends a `heartbeat` event row; the dispatcher reads these to compute `heartbeat_age_seconds` for staleness reclaim. | optional `task_id` (defaults to `$HERMES_KANBAN_TASK`), optional `note` | Shipped in Phase 36.3.7.6. |
+| `kanban_heartbeat` | Signal liveness during long operations. Appends a `heartbeat` event row; the dispatcher reads these to compute `heartbeat_age_seconds` for staleness reclaim. | optional `task_id` (defaults to `$IRONHERMES_KANBAN_TASK`), optional `note` | Shipped in Phase 36.3.7.6. |
 | `kanban_comment` | Append a durable note to the task thread. | `task_id`, `body` |
 | `kanban_create` | (Orchestrators) fan out into child tasks with an assignee, optional parents, skills, etc. | `title`, `assignee` |
 | `kanban_link` | (Orchestrators) add a `parent_id` → `child_id` dependency edge after the fact. Rejects cycles (descendant-walk via `WITH RECURSIVE` CTE) and cross-tenant links. | `parent_id`, `child_id` | Shipped in Phase 36.3.7.6. |
-| `kanban_unblock` | (Orchestrators) move a blocked task back to ready. Fails closed if the task is not currently in `blocked` status (prevents accidentally reviving `done`/`running` tasks via the LLM-tool surface). | `task_id` (defaults to `$HERMES_KANBAN_TASK`) | Shipped in Phase 36.3.7.6. |
+| `kanban_unblock` | (Orchestrators) move a blocked task back to ready. Fails closed if the task is not currently in `blocked` status (prevents accidentally reviving `done`/`running` tasks via the LLM-tool surface). | `task_id` (defaults to `$IRONHERMES_KANBAN_TASK`) | Shipped in Phase 36.3.7.6. |
 | `kanban_swarm` | (Orchestrators) create N parallel worker cards + optional verifier + optional synthesizer + blackboard root, in one atomic transaction. Implements the multi-agent patterns documented at §740 (P1 fan-out, fan-out+verify, full 4-tier §664 example, P3 quorum). | `goal`, `workers` | Shipped in Phase 36.3.7.7. |
-| `kanban_mention` | (Orchestrators) parse `@<handle>` mentions in a task body and fan out one child task per resolved handle in a single atomic transaction. Skips fenced code, inline code, and HTML comments. Supports `skip`, `pending`, and `error` fallback policies for unknown handles. | — (uses `$HERMES_KANBAN_TASK`) | Shipped in Phase 36.3.7.8. |
+| `kanban_mention` | (Orchestrators) parse `@<handle>` mentions in a task body and fan out one child task per resolved handle in a single atomic transaction. Skips fenced code, inline code, and HTML comments. Supports `skip`, `pending`, and `error` fallback policies for unknown handles. | — (uses `$IRONHERMES_KANBAN_TASK`) | Shipped in Phase 36.3.7.8. |
 
 A typical worker turn looks like:
 
 ```python
 # Model's tool calls, in order:
-kanban_show()                                     # no args — uses HERMES_KANBAN_TASK
+kanban_show()                                     # no args — uses IRONHERMES_KANBAN_TASK
 # (model reads the returned worker_context, does the work via terminal/file tools)
 kanban_heartbeat(note="halfway through — 4 of 8 files transformed")
 # (more work)
@@ -254,7 +254,7 @@ Three reasons:
 2. **No shell-quoting fragility.** Passing `--metadata '{"files": [...]}'` through `shlex` + `argparse` is a latent footgun. Structured tool args skip it entirely.
 3. **Better errors.** Tool results are structured JSON the model can reason about, not stderr strings it has to parse.
 
-**Zero schema footprint on normal sessions.** A regular `hermes chat` session has zero `kanban_*` tools in its schema unless the active profile explicitly enables the `kanban` toolset for orchestrator work. Dispatcher-spawned task workers get task-scoped tools because `HERMES_KANBAN_TASK` is set; orchestrator profiles get the broader routing surface through config. No tool bloat for users who never touch kanban.
+**Zero schema footprint on normal sessions.** A regular `hermes chat` session has zero `kanban_*` tools in its schema unless the active profile explicitly enables the `kanban` toolset for orchestrator work. Dispatcher-spawned task workers get task-scoped tools because `IRONHERMES_KANBAN_TASK` is set; orchestrator profiles get the broader routing surface through config. No tool bloat for users who never touch kanban.
 
 The `kanban-worker` and `kanban-orchestrator` skills teach the model which tool to call when and in what order.
 
@@ -289,7 +289,7 @@ Keep secrets, raw logs, tokens, OAuth material, and unrelated transcripts out of
 Any profile that should be able to work kanban tasks must load the `kanban-worker` skill. It teaches the worker the full lifecycle **in tool calls, not CLI commands**:
 
 - On spawn, call `kanban_show()` to read title + body + parent handoffs + prior attempts + full comment thread.
-- `cd $HERMES_KANBAN_WORKSPACE` (via the terminal tool) and do the work there.
+- Work from the process's current directory: the dispatcher starts the worker in the canonical workspace and also exposes that path as `IRONHERMES_KANBAN_WORKSPACE`. Prefer relative paths or `.` rather than embedding a literal `$IRONHERMES_KANBAN_WORKSPACE` in non-shell file-tool arguments.
 - Call `kanban_heartbeat(note="...")` every few minutes during long operations. If your work may run longer than 1 hour, call `kanban_heartbeat` at least once an hour — the dispatcher reclaims tasks that have been running past `kanban.dispatch_stale_timeout_seconds` (default 4 h) with no heartbeat in the last hour, on the assumption the worker crashed without cleanup. A reclaim is benign (the task goes back to `ready` for re-dispatch without a failure-counter tick) but you lose your current run's progress.
 - Complete with `kanban_complete(summary="...", metadata={...})`, or `kanban_block(reason="...")` if stuck.
 
@@ -307,7 +307,21 @@ If the bundled copy is missing, restore it for that profile:
 hermes -p <your-worker-profile> skills reset kanban-worker --restore
 ```
 
-The dispatcher also auto-passes `--skills kanban-worker` when spawning every worker, so the worker always has the pattern library available even if a profile's default skills config doesn't include it.
+The dispatcher identifies task workers with `IRONHERMES_KANBAN_TASK`; worker startup uses that signal to inject Kanban guidance and register the task-scoped `kanban_*` tools. No `--skills` argument is required on the spawned command.
+
+### Troubleshooting worker startup
+
+The assignee profile directory and the worker executable are separate concerns. A directory such as `~/.ironhermes/profiles/dev/` supplies the worker's profile-scoped `config.yaml` and `.env`; it does not make the `ironhermes` executable discoverable.
+
+The dispatcher resolves the executable from `IRONHERMES_WORKER_BIN`, falling back to `ironhermes` on the dispatcher's `PATH`. Development builds commonly need this in the dispatcher's `~/.ironhermes/.env`:
+
+```dotenv
+IRONHERMES_WORKER_BIN=/absolute/path/to/ironhermes/target/debug/ironhermes
+```
+
+Restart the gateway after changing `.env`. A `spawn_failed` event ending in `No such file or directory (os error 2)` together with empty worker stdout/stderr logs usually means the dispatcher created the log files but could not execute the worker binary. By contrast, `workspace path unresolved or missing` identifies workspace validation, and an HTTP provider error in the stderr tail means the worker started successfully but its LLM call failed.
+
+Workers run with a scrubbed inherited environment. After the `--profile` pivot, each worker loads API keys from the assignee profile's `.env` (for example, `~/.ironhermes/profiles/dev/.env`). Put provider secrets required by that profile there; do not rely on arbitrary secrets being inherited from the gateway process.
 
 ### Pinning extra skills to a specific task
 
@@ -533,8 +547,8 @@ appends two env-var pairs downstream of the `SAFE_SYSTEM_VARS` scrub:
 
 | Env var | Value | Meaning |
 |---|---|---|
-| `HERMES_KANBAN_GOAL_MODE` | `"1"` | Tells the worker shell to wrap `AgentLoop::run` in a budget-bounded loop. Absent → byte-identical pre-Phase-36.3.7.12 worker dispatch. |
-| `HERMES_KANBAN_GOAL_MAX_TURNS` | `"<N>"` | Per-card turn budget. Defensive coercion: `0` → `20` at the env-build site. |
+| `IRONHERMES_KANBAN_GOAL_MODE` | `"1"` | Tells the worker shell to wrap `AgentLoop::run` in a budget-bounded loop. Absent → byte-identical pre-Phase-36.3.7.12 worker dispatch. (Legacy `HERMES_KANBAN_GOAL_MODE` also accepted.) |
+| `IRONHERMES_KANBAN_GOAL_MAX_TURNS` | `"<N>"` | Per-card turn budget. Defensive coercion: `0` → `20` at the env-build site. (Legacy `HERMES_KANBAN_GOAL_MAX_TURNS` also accepted.) |
 
 #### Judge model config — three-tier cascade
 
@@ -769,14 +783,16 @@ All commands are also available as a slash command in the interactive CLI and in
 |---|---|---|
 | `kanban.max_in_progress` | unset (unlimited) | Caps the number of simultaneously `running` tasks. When the board already has N running, the dispatcher skips spawning more — useful for slow workers (local LLMs, resource-constrained hosts) so they finish what they have before more pile up and time out. Invalid or below-1 values log a warning and behave as unlimited. |
 | `kanban.auto_promote_children` | `true` | After `decompose_triage_task()` produces children with no parent-blocker dependencies, they're automatically promoted to `ready` so the dispatcher can pick them up. Set to `false` to require manual review — children stay in `todo` until you promote them. |
-| `kanban.default_workdir` | unset | Board-level default working directory applied to new tasks when neither `--workspace` nor the task itself overrides it. Per-task `workspace:` still wins. |
+| `kanban.default_workdir` | unset | Absolute board-level fallback directory used at dispatch when a task has no explicit workspace. External directories must already exist; managed scratch-root paths are created as needed. Per-task `workspace:` wins; when both are absent, the dispatcher creates the task-specific scratch workspace. The selected canonical path becomes the worker CWD and `IRONHERMES_KANBAN_WORKSPACE`. |
 
 ```yaml
 kanban:
   max_in_progress: 2
   auto_promote_children: false
-  default_workdir: ~/work/active-project
+  default_workdir: /Users/me/work/active-project
 ```
+
+`default_workdir` must be absolute. External directories must already exist; a path under the managed Kanban scratch root is created as needed. `~`, environment-variable references, and literal values such as `$IRONHERMES_KANBAN_WORKSPACE` are not expanded. The gateway dispatcher, one-shot `hermes kanban dispatch`, and deprecated standalone daemon all load this setting from `config.yaml`.
 
 ### Scheduled task starts (`scheduled_at`)
 
@@ -904,7 +920,7 @@ hermes kanban create "monthly report" \
     --workspace dir:~/tenants/business-a/data/
 ```
 
-Workers receive `$HERMES_TENANT` and namespace their memory writes by prefix. The board, the dispatcher, and the profile definitions are all shared; only the data is scoped.
+Workers receive `$IRONHERMES_TENANT` (legacy `$HERMES_TENANT` also accepted) and namespace their memory writes by prefix. The board, the dispatcher, and the profile definitions are all shared; only the data is scoped.
 
 ## Gateway notifications
 

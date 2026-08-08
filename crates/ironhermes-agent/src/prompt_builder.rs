@@ -115,6 +115,10 @@ pub struct PromptBuilder {
     /// Snapshot of active tools used by the D-01/D-03 catalog-render filter (Phase 19 Plan 02).
     /// Captured at session-freeze time. Phase 27.1.1-gap-02: populated from merged toolset config.
     active_tools: HashSet<String>,
+    /// Snapshot of live-connected MCP server names used by the requires_mcp_servers
+    /// catalog-render filter (D-08, Phase 46 Plan 04). Captured at session-freeze
+    /// time from `runtime.mcp_manager().connected_server_names()`.
+    connected_mcp_servers: HashSet<String>,
     /// GAP-4 / D-08: when false, load_memory skips the USER.md block.
     /// Mirrors config.memory.user_profile_enabled. Default: true.
     user_profile_enabled: bool,
@@ -124,6 +128,9 @@ pub struct PromptBuilder {
     /// `config.memory.skill_creation_guidance`; production callers set it
     /// at session freeze via `set_skill_creation_guidance`.
     skill_creation_guidance: bool,
+    /// Phase 38.1 (D-04/D-05): IANA timezone name for the Timestamp slot.
+    /// `None` → host local timezone (chrono::Local). Not cache-breaking (D-07).
+    timezone: Option<String>,
 }
 
 /// Phase 36.2 (D-CACHE-04): assert layers 1-8 (the cached prefix) are free of
@@ -187,10 +194,12 @@ impl PromptBuilder {
             skill_overlays: Vec::new(),
             active_toolsets: HashSet::new(),
             active_tools: HashSet::new(),
+            connected_mcp_servers: HashSet::new(),
             user_profile_enabled: true,
             // Phase 33 LEARN-04: default-on to match `MemoryConfig::default()`.
             // Production callers re-assert via set_skill_creation_guidance.
             skill_creation_guidance: true,
+            timezone: None,
         }
     }
 
@@ -207,6 +216,37 @@ impl PromptBuilder {
     /// Phase 27.1.1-gap-02: populated from merged toolset config enabled set.
     pub fn set_active_tools(&mut self, tools: HashSet<String>) {
         self.active_tools = tools;
+    }
+
+    /// Set the live connected-MCP-server snapshot for the requires_mcp_servers
+    /// catalog-render filter (D-08, Phase 46 Plan 04). Called at session-freeze
+    /// time so slot 4 (Skills) reflects the live MCP-connection state.
+    /// Production callers populate this from
+    /// `runtime.mcp_manager().map(|m| m.connected_server_names()).unwrap_or_default()`.
+    pub fn set_connected_mcp_servers(&mut self, servers: HashSet<String>) {
+        self.connected_mcp_servers = servers;
+    }
+
+    /// D-09b (Phase 46 Plan 05): `active_toolsets` is populated from
+    /// `config.tools.enabled_toolset_names()`, which never contains `"mcp"` — MCP
+    /// tools are dynamically discovered at runtime and have no config entry, so
+    /// `is_toolset_enabled("mcp")` (and any catalog filter keyed on `active_toolsets`)
+    /// fails closed for them, mirroring the `ToolRegistry::get_definitions()` /
+    /// `scope_to()` gap fixed for D-09a (registry.rs `MCP_TOOLSET` exemption).
+    ///
+    /// Returns `self.active_toolsets` widened to include the `MCP_TOOLSET` sentinel
+    /// whenever at least one MCP server is connected, so any catalog entry declaring
+    /// `requires_toolsets: ["mcp"]` is not silently hidden just because no toolset
+    /// config entry exists for `"mcp"`. When no MCP server is connected, the set is
+    /// returned unchanged (MCP-gated entries stay hidden, matching D-08).
+    fn effective_active_toolsets(&self) -> std::borrow::Cow<'_, HashSet<String>> {
+        if self.connected_mcp_servers.is_empty() {
+            std::borrow::Cow::Borrowed(&self.active_toolsets)
+        } else {
+            let mut widened = self.active_toolsets.clone();
+            widened.insert(ironhermes_tools::registry::MCP_TOOLSET.to_string());
+            std::borrow::Cow::Owned(widened)
+        }
     }
 
     /// Skip all context files (SOUL.md, project context, AGENTS.md, memory, skills).
@@ -271,6 +311,14 @@ impl PromptBuilder {
     /// config flag through at session freeze time.
     pub fn set_skill_creation_guidance(&mut self, enabled: bool) {
         self.skill_creation_guidance = enabled;
+    }
+
+    /// Phase 38.1 (D-04/D-05): set the IANA timezone name for the Timestamp slot.
+    /// `None` → host local timezone (chrono::Local). Called at session-freeze from
+    /// `config.agent.timezone`. The timezone only affects the ephemeral Timestamp slot (7)
+    /// and is never cache-breaking (D-07).
+    pub fn set_timezone(&mut self, tz: Option<String>) {
+        self.timezone = tz;
     }
 
     /// Set the skill registry for catalog injection into the system prompt.
@@ -600,8 +648,14 @@ impl PromptBuilder {
         let skill_content = if let Some(ref registry) = self.skill_registry {
             if !registry.list().is_empty() {
                 // D-01/D-03 catalog-render filter — honors requires_* and fallback_for_* (Phase 19 Plan 02).
-                let catalog =
-                    registry.filtered_catalog_text(&self.active_toolsets, &self.active_tools);
+                // D-08 (Phase 46 Plan 04): also honors requires_mcp_servers via connected_mcp_servers.
+                // D-09b (Phase 46 Plan 05): active_toolsets is widened with MCP_TOOLSET when a
+                // server is connected, so requires_toolsets: ["mcp"] entries aren't hidden.
+                let catalog = registry.filtered_catalog_text(
+                    &self.effective_active_toolsets(),
+                    &self.active_tools,
+                    &self.connected_mcp_servers,
+                );
                 if catalog.trim().is_empty() {
                     None
                 } else {
@@ -645,7 +699,14 @@ impl PromptBuilder {
             && !registry.list().is_empty()
         {
             // D-01/D-03 catalog-render filter — honors requires_* and fallback_for_* (Phase 19 Plan 02).
-            let catalog = registry.filtered_catalog_text(&self.active_toolsets, &self.active_tools);
+            // D-08 (Phase 46 Plan 04): also honors requires_mcp_servers via connected_mcp_servers.
+            // D-09b (Phase 46 Plan 05): active_toolsets is widened with MCP_TOOLSET when a
+            // server is connected, so requires_toolsets: ["mcp"] entries aren't hidden.
+            let catalog = registry.filtered_catalog_text(
+                &self.effective_active_toolsets(),
+                &self.active_tools,
+                &self.connected_mcp_servers,
+            );
             if !catalog.trim().is_empty() {
                 let content = format!(
                     "## Available Skills\n\n{}\n\nUse the skills tool to view or activate a skill before using it.",
@@ -750,27 +811,25 @@ impl PromptBuilder {
         out
     }
 
-    /// Build Timestamp slot content (slot 6). Regenerated per turn. Per D-12.
+    /// Build Timestamp slot content (slot 7). Regenerated per turn. Per D-12.
+    /// This is the ONLY call site of `chrono::Utc::now()` for this slot — all
+    /// formatting is delegated to the pure `render_timestamp_block` helper so
+    /// rendering is deterministically testable via an injected instant (Phase 38.1).
     fn build_timestamp_block(&self) -> String {
-        let now = chrono::Utc::now();
-        let mut parts = vec![format!(
-            "Current time: {}",
-            now.format("%Y-%m-%d %H:%M:%S UTC")
-        )];
-        parts.push(format!("Turn: {}", self.turn_number));
-        if let Some(ref session_id) = self.session_id {
-            parts.push(format!("Session: {}", session_id));
-        }
-        if let Some(ref overlay_name) = self.active_overlay {
-            parts.push(format!("Active personality: {}", overlay_name));
-        }
-        parts.join("\n")
+        render_timestamp_block(
+            chrono::Utc::now(),
+            self.timezone.as_deref(),
+            self.turn_number,
+            self.session_id.as_deref(),
+            self.active_overlay.as_deref(),
+        )
     }
 
     fn platform_hint(&self) -> String {
         match self.platform.as_str() {
             "cli" => "You are running in an interactive CLI terminal. The user can see your responses in real-time. Use markdown formatting for readability.".to_string(),
-            "telegram" => "You are running as a Telegram bot. Keep responses concise. Use Telegram-compatible markdown (MarkdownV2). Avoid very long messages. To send a file or media attachment, emit a literal tag on its own line in your reply, in the form: <MEDIA: /absolute/path/to/file.ext> or <MEDIA: https://host.example/path/file.ext>. The gateway extracts the tag and sends it as a native Telegram attachment; supported extensions include .png .jpg .jpeg .webp .gif (photo), .ogg .opus (voice note), .mp3 .m4a .flac .wav (audio), .mp4 .mov .webm (video), and anything else as a document. Place the tag inside a fenced code block to show the literal text instead of sending an attachment.".to_string(),
+            "telegram" => "You are running as a Telegram bot. Keep responses concise. Use Telegram-compatible markdown (MarkdownV2). Avoid very long messages. To send a file or media attachment, emit a literal tag on its own line in your reply, in the form: <MEDIA: /absolute/path/to/file.ext> or <MEDIA: https://host.example/path/file.ext>. The gateway extracts the tag and sends it as a native Telegram attachment; supported extensions include .png .jpg .jpeg .webp .gif (photo), .ogg .opus (voice note), .mp3 .m4a .flac .wav (audio), .mp4 .mov .webm (video), and anything else as a document. Images and videos you generate with a tool are delivered to the user automatically — you do not need to re-emit their path, and you must NOT wrap a generated-media <MEDIA:> tag in a fenced code block. Place a tag inside a fenced code block only when you deliberately want to show its literal text instead of sending an attachment.".to_string(),
+            "web" => "You are running in the iron_hermes_ui web chat. Use markdown for readability. When you generate an image or video, the server delivers it to the user and renders it inline automatically as soon as the tool finishes — you do NOT need to print the file path or emit a <MEDIA:> tag yourself; just briefly say what you created. IMPORTANT: never wrap a <MEDIA: /path> tag in backticks or a fenced code block — a fenced tag is shown to the user as raw text instead of rendering the image.".to_string(),
             "discord" => "You are running as a Discord bot. Use Discord markdown formatting. Keep messages under 2000 characters when possible.".to_string(),
             "slack" => "You are running as a Slack bot. Use Slack mrkdwn formatting. Use threads for long conversations.".to_string(),
             _ => String::new(),
@@ -784,9 +843,124 @@ impl PromptBuilder {
     }
 }
 
+/// Pure helper: render the Timestamp slot from an injected UTC instant.
+///
+/// No wall-clock reads inside this function — `chrono::Utc::now()` is the
+/// exclusive caller's responsibility (in `build_timestamp_block`). This
+/// separation makes rendering deterministically testable via fixed instants
+/// (Phase 38.1 / D-08).
+///
+/// ## Timezone resolution (D-05 / D-06)
+/// - `tz` = `Some(valid IANA name)` → parse via `chrono_tz::Tz`; compute local dt.
+/// - `tz` = `Some(invalid name)` → fall back to `chrono::Local`; emit
+///   `tracing::warn!(timezone = %name, ...)` as a **structured field**
+///   (never concatenated into the message string — D-06 / T-38.1-02). The
+///   bogus name is **not** reflected in the rendered output (D-06).
+/// - `tz` = `None` → `chrono::Local`; display label `"local"` (D-05).
+///
+/// ## Output shape (D-08)
+/// ```text
+/// Today is <Weekday>, <YYYY-MM-DD> (local — <tz_name>).
+/// Current time: <HH:MM:SS TZ_ABBR> (UTC±HH:MM) | <HH:MM:SS> UTC
+/// Turn: N
+/// [Session: <id>]           ← only when session_id is Some
+/// [Active personality: <text>]  ← only when active_overlay is Some
+/// ```
+pub(crate) fn render_timestamp_block(
+    now_utc: chrono::DateTime<chrono::Utc>,
+    tz: Option<&str>,
+    turn_number: usize,
+    session_id: Option<&str>,
+    active_overlay: Option<&str>,
+) -> String {
+    // Resolve timezone → (weekday, date, local_time, tz_abbr, utc_offset, tz_display).
+    // All branches produce the same six-tuple type; only the data source differs.
+    let (weekday, date, local_time, tz_abbr, utc_offset, tz_display) = if let Some(name) = tz {
+        match name.parse::<chrono_tz::Tz>() {
+            Ok(parsed_tz) => {
+                let local = now_utc.with_timezone(&parsed_tz);
+                (
+                    local.format("%A").to_string(),
+                    local.format("%Y-%m-%d").to_string(),
+                    local.format("%H:%M:%S").to_string(),
+                    local.format("%Z").to_string(),
+                    local.format("%:z").to_string(),
+                    name.to_string(),
+                )
+            }
+            Err(_) => {
+                // name is passed as a structured tracing field — NOT concatenated
+                // into the message string — so a newline-bearing value cannot
+                // forge log lines (D-06 / T-38.1-02).
+                tracing::warn!(
+                    timezone = %name,
+                    "Unknown IANA timezone; falling back to host local"
+                );
+                let local = now_utc.with_timezone(&chrono::Local);
+                (
+                    local.format("%A").to_string(),
+                    local.format("%Y-%m-%d").to_string(),
+                    local.format("%H:%M:%S").to_string(),
+                    local.format("%Z").to_string(),
+                    local.format("%:z").to_string(),
+                    "local".to_string(),
+                )
+            }
+        }
+    } else {
+        let local = now_utc.with_timezone(&chrono::Local);
+        (
+            local.format("%A").to_string(),
+            local.format("%Y-%m-%d").to_string(),
+            local.format("%H:%M:%S").to_string(),
+            local.format("%Z").to_string(),
+            local.format("%:z").to_string(),
+            "local".to_string(),
+        )
+    };
+
+    let utc_time = now_utc.format("%H:%M:%S");
+
+    // Line 1: weekday + ISO date + tz label (D-03 / D-08).
+    // Line 2: local time with abbreviation and offset, UTC reference (D-01 / D-08).
+    let mut parts = vec![
+        format!("Today is {weekday}, {date} (local \u{2014} {tz_display})."),
+        format!("Current time: {local_time} {tz_abbr} (UTC{utc_offset}) | {utc_time} UTC"),
+        format!("Turn: {turn_number}"),
+    ];
+
+    if let Some(sid) = session_id {
+        parts.push(format!("Session: {sid}"));
+    }
+    if let Some(overlay) = active_overlay {
+        parts.push(format!("Active personality: {overlay}"));
+    }
+
+    parts.join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// DLV-03 web: the web platform hint MUST teach the `<MEDIA:>` convention so
+    /// the LLM emits the tag the server-side MediaTagExtractor needs to render an
+    /// image inline. Telegram already does; web previously fell through to the
+    /// empty `_` arm, so image_gen results cached but never reached the web chat.
+    #[test]
+    fn web_platform_hint_teaches_media_convention() {
+        let web = PromptBuilder::new("test-model", "web").platform_hint();
+        assert!(
+            web.contains("<MEDIA:"),
+            "web platform hint must teach the <MEDIA:> tag convention, got: {web}"
+        );
+        // Regression guard: Telegram keeps its convention too.
+        let tg = PromptBuilder::new("test-model", "telegram").platform_hint();
+        assert!(
+            tg.contains("<MEDIA:"),
+            "telegram hint must still teach <MEDIA:>"
+        );
+    }
     use std::fs;
     use std::sync::Mutex;
 
@@ -1244,7 +1418,7 @@ mod tests {
 
         // CWD has .hermes.md (project context)
         fs::write(cwd_dir.path().join(".hermes.md"), "project hermes context").unwrap();
-        // HERMES_HOME has AGENTS.md (separate, D-09)
+        // IRONHERMES_HOME has AGENTS.md (separate, D-09)
         fs::write(
             home_dir.path().join("AGENTS.md"),
             "hermes home agents content",
@@ -1268,7 +1442,7 @@ mod tests {
         );
         assert!(
             output.contains("hermes home agents content"),
-            "HERMES_HOME/AGENTS.md must also be loaded: {output}"
+            "IRONHERMES_HOME/AGENTS.md must also be loaded: {output}"
         );
     }
 
@@ -1714,6 +1888,98 @@ mod tests {
     }
 
     // ====================================================================
+    // D-09b (Phase 46 Plan 05): MCP_TOOLSET catalog-inclusion regression
+    // ====================================================================
+
+    /// Regression (D-09b): a catalog entry declaring `requires_toolsets: ["mcp"]`
+    /// must appear in the rendered system-prompt catalog when a live MCP server is
+    /// connected, even though `active_toolsets` (sourced from
+    /// `enabled_toolset_names()`) never contains `"mcp"` — no config entry exists
+    /// for the dynamic MCP toolset. Before the `effective_active_toolsets()` fix,
+    /// this entry would be silently hidden (fail-closed), mirroring the D-09a
+    /// `scope_to()` / `get_definitions()` gap for the API tool schemas.
+    #[test]
+    fn test_mcp_toolset_entry_included_when_server_connected() {
+        use ironhermes_core::SkillRegistry;
+
+        let dir = make_temp_dir();
+
+        // Entry requiring the "mcp" toolset sentinel directly.
+        let mcp_dir = dir.path().join("mcp-catalog-entry");
+        fs::create_dir_all(&mcp_dir).unwrap();
+        fs::write(
+            mcp_dir.join("SKILL.md"),
+            "---\nname: mcp-catalog-entry\ndescription: Uses a connected MCP server\nmetadata:\n  hermes:\n    requires_toolsets:\n      - mcp\n---\nBody.\n",
+        )
+        .unwrap();
+
+        // Control entry requiring an unrelated, never-active toolset — must stay hidden.
+        let unrelated_dir = dir.path().join("unrelated-entry");
+        fs::create_dir_all(&unrelated_dir).unwrap();
+        fs::write(
+            unrelated_dir.join("SKILL.md"),
+            "---\nname: unrelated-entry\ndescription: Requires an unlisted toolset\nmetadata:\n  hermes:\n    requires_toolsets:\n      - definitely_not_a_real_toolset\n---\nBody.\n",
+        )
+        .unwrap();
+
+        let registry = Arc::new(SkillRegistry::load_with_paths(&[dir.path().to_path_buf()]));
+        assert_eq!(registry.list().len(), 2, "both entries should load");
+
+        let mut builder = PromptBuilder::new("test-model", "cli");
+        builder.set_skill_registry(registry);
+        // active_toolsets never lists "mcp" — mirrors production (no config entry exists).
+        builder.set_active_toolsets(HashSet::new());
+        builder.set_active_tools(HashSet::new());
+        // A Cloudflare MCP server is connected.
+        let mut connected = HashSet::new();
+        connected.insert("cloudflare_bindings".to_string());
+        builder.set_connected_mcp_servers(connected);
+
+        let output = builder.build();
+
+        assert!(
+            output.contains("mcp-catalog-entry"),
+            "requires_toolsets: [mcp] entry must appear when an MCP server is connected (D-09b); got: {output}"
+        );
+        assert!(
+            !output.contains("unrelated-entry"),
+            "entry with an unlisted, non-MCP toolset must still be hidden; got: {output}"
+        );
+    }
+
+    /// Regression (D-09b): with no MCP server connected, a `requires_toolsets: ["mcp"]`
+    /// entry must remain hidden — the exemption only applies once a server is live
+    /// (D-08 gating semantics are preserved).
+    #[test]
+    fn test_mcp_toolset_entry_hidden_when_no_server_connected() {
+        use ironhermes_core::SkillRegistry;
+
+        let dir = make_temp_dir();
+        let mcp_dir = dir.path().join("mcp-catalog-entry");
+        fs::create_dir_all(&mcp_dir).unwrap();
+        fs::write(
+            mcp_dir.join("SKILL.md"),
+            "---\nname: mcp-catalog-entry\ndescription: Uses a connected MCP server\nmetadata:\n  hermes:\n    requires_toolsets:\n      - mcp\n---\nBody.\n",
+        )
+        .unwrap();
+
+        let registry = Arc::new(SkillRegistry::load_with_paths(&[dir.path().to_path_buf()]));
+
+        let mut builder = PromptBuilder::new("test-model", "cli");
+        builder.set_skill_registry(registry);
+        builder.set_active_toolsets(HashSet::new());
+        builder.set_active_tools(HashSet::new());
+        // No MCP servers connected (default empty set).
+
+        let output = builder.build();
+
+        assert!(
+            !output.contains("mcp-catalog-entry"),
+            "requires_toolsets: [mcp] entry must stay hidden with no MCP server connected; got: {output}"
+        );
+    }
+
+    // ====================================================================
     // Phase 25.3 D-W-2: with_workspace_root tests (Pitfall 2 cache stability)
     // ====================================================================
 
@@ -1890,5 +2156,138 @@ mod tests {
         );
         cached_layers_must_be_stable("");
         cached_layers_must_be_stable("Model: claude-opus-4-7\nProvider: anthropic");
+    }
+
+    // =========================================================================
+    // Phase 38.1 Plan 02: render_timestamp_block deterministic unit tests
+    // Covers D-01 (local+UTC), D-02 (local day), D-03 (weekday prominent),
+    // D-06 (invalid tz no-panic/no-reflection), D-08 (target shape), D-09 (cache safe).
+    // All instants are fixed at call time — no wall-clock reads in the helper.
+    // =========================================================================
+
+    /// Helper: parse a fixed RFC 3339 string into a UTC DateTime.
+    fn utc(s: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(s)
+            .expect("test instant must be valid RFC 3339")
+            .with_timezone(&chrono::Utc)
+    }
+
+    /// D-03 / D-08: weekday name is prominent (first line), local date is correct,
+    /// IANA name appears in output, UTC reference is present (D-01).
+    ///
+    /// Anchor: 2021-01-01T12:00:00Z in America/Los_Angeles (PST = UTC-8)
+    ///   → local time 04:00:00 PST on Friday 2021-01-01.
+    #[test]
+    fn test_timestamp_weekday_render_local_primary() {
+        let output = render_timestamp_block(
+            utc("2021-01-01T12:00:00Z"),
+            Some("America/Los_Angeles"),
+            3,
+            None,
+            None,
+        );
+        assert!(
+            output.starts_with("Today is Friday, 2021-01-01"),
+            "first line must lead with weekday + local date (D-03/D-08): {output}"
+        );
+        assert!(
+            output.contains("America/Los_Angeles"),
+            "IANA timezone name must appear in output (D-08): {output}"
+        );
+        assert!(
+            output.contains(" UTC"),
+            "UTC reference time must appear on Current time line (D-01): {output}"
+        );
+        assert!(
+            output.contains("Turn: 3"),
+            "Turn line must be present: {output}"
+        );
+    }
+
+    /// D-02: prompt reasons in LOCAL time. When the UTC instant is on day N+1 but
+    /// the local timezone is still on day N, the rendered date must be day N.
+    ///
+    /// Anchor: 2021-01-01T07:00:00Z in America/Los_Angeles (PST = UTC-8)
+    ///   → local time 23:00:00 PST on Thursday 2020-12-31.
+    #[test]
+    fn test_timestamp_local_day_differs_from_utc_day() {
+        let output = render_timestamp_block(
+            utc("2021-01-01T07:00:00Z"),
+            Some("America/Los_Angeles"),
+            1,
+            None,
+            None,
+        );
+        assert!(
+            output.starts_with("Today is Thursday, 2020-12-31"),
+            "local day (Dec 31) must precede UTC day (Jan 1) when crossing midnight (D-02): {output}"
+        );
+    }
+
+    /// D-06 / T-38.1-01 / T-38.1-02: unparseable IANA name must not panic, must
+    /// fall back to host local, and must NOT reflect the bogus string in the output.
+    #[test]
+    fn test_timestamp_invalid_tz_falls_back_no_panic_no_reflection() {
+        let output = render_timestamp_block(
+            utc("2021-01-01T12:00:00Z"),
+            Some("Not/AZone"),
+            1,
+            None,
+            None,
+        );
+        // Must not panic (function completed and returned).
+        assert!(
+            output.contains("Today is "),
+            "must still render a valid Today line on fallback (D-06): {output}"
+        );
+        assert!(
+            output.contains("Turn: 1"),
+            "Turn line must be present on fallback: {output}"
+        );
+        // D-06 no-reflection: the bogus name must NOT appear anywhere in the output.
+        assert!(
+            !output.contains("Not/AZone"),
+            "bogus TZ name must NOT be reflected in output (D-06 / T-38.1-02): {output}"
+        );
+        // Fallback label must appear so the user sees the tz is host-local.
+        assert!(
+            output.contains("local"),
+            "fallback label 'local' must appear in output (D-06): {output}"
+        );
+    }
+
+    /// Existing Session / Active personality lines are preserved across renders
+    /// and absent when their values are None.
+    #[test]
+    fn test_timestamp_session_and_overlay_lines_preserved() {
+        let now = utc("2021-01-01T12:00:00Z");
+
+        // With both session id and overlay — both lines must appear.
+        let with_both = render_timestamp_block(
+            now,
+            Some("America/Los_Angeles"),
+            2,
+            Some("sess-xyz"),
+            Some("muse"),
+        );
+        assert!(
+            with_both.contains("Session: sess-xyz"),
+            "Session line must appear when id is Some: {with_both}"
+        );
+        assert!(
+            with_both.contains("Active personality: muse"),
+            "Active personality line must appear when overlay is Some: {with_both}"
+        );
+
+        // With neither — both lines must be absent.
+        let without_both = render_timestamp_block(now, Some("America/Los_Angeles"), 2, None, None);
+        assert!(
+            !without_both.contains("Session:"),
+            "Session line must be absent when id is None: {without_both}"
+        );
+        assert!(
+            !without_both.contains("Active personality:"),
+            "Active personality line must be absent when overlay is None: {without_both}"
+        );
     }
 }

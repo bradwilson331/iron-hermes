@@ -169,6 +169,70 @@ async fn test_tts_tool_creates_audio_cache_dir() {
     unsafe { std::env::remove_var("IRONHERMES_HOME") };
 }
 
+// Regression (debug: web-tts-zero-byte-audio): a provider that "succeeds" but
+// writes a 0-byte file must NOT be reported as success — execute() must bail so
+// the empty/corrupt audio never reaches the web client.
+#[tokio::test]
+async fn test_tts_tool_rejects_zero_byte_output() {
+    use async_trait::async_trait;
+    use ironhermes_core::Config;
+    use ironhermes_core::tts::{TtsProvider, TtsRegistry};
+    use ironhermes_tools::registry::Tool;
+    use ironhermes_tools::tts_tool::TextToSpeechTool;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    // EmptyProvider: mimics Edge TTS returning Ok with empty audio_bytes —
+    // writes a 0-byte file and reports success.
+    struct EmptyProvider;
+
+    #[async_trait]
+    impl TtsProvider for EmptyProvider {
+        fn name(&self) -> &str {
+            "edge"
+        }
+        fn is_available(&self) -> bool {
+            true
+        }
+        async fn synthesize(
+            &self,
+            _text: &str,
+            output_path: &std::path::Path,
+        ) -> anyhow::Result<PathBuf> {
+            std::fs::write(output_path, b"")?;
+            Ok(output_path.to_path_buf())
+        }
+    }
+
+    let _lock = env_lock().lock().await;
+    let tmpdir = TempDir::new().expect("create tempdir");
+
+    // SAFETY: env_lock() serializes IRONHERMES_HOME mutations across tests.
+    unsafe { std::env::set_var("IRONHERMES_HOME", tmpdir.path()) };
+
+    let mut registry = TtsRegistry::new();
+    registry.register(Arc::new(EmptyProvider));
+
+    let config = Arc::new(Config::default());
+    let tool = TextToSpeechTool::new_with_registry(config, registry);
+
+    let result: anyhow::Result<String> = tool.execute(serde_json::json!({"text": "x"})).await;
+
+    unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+    assert!(
+        result.is_err(),
+        "execute() must reject a 0-byte audio file, got Ok: {:?}",
+        result
+    );
+    let msg = result.unwrap_err().to_string();
+    assert!(
+        msg.contains("empty audio file"),
+        "error must explain the empty-file rejection, got: {msg}"
+    );
+}
+
 // T-output-path BLOCKING test: LLM-supplied path traversal must be rejected.
 #[tokio::test]
 async fn test_output_path_traversal_blocked() {

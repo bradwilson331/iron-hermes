@@ -8,7 +8,9 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use chrono::Utc;
-use ironhermes_core::{ChatMessage, Role, get_hermes_home};
+use ironhermes_core::{
+    ChatMessage, Role, get_hermes_home, session_attachments_dir, session_workspace_dir,
+};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -43,7 +45,7 @@ pub type Result<T, E = StateError> = std::result::Result<T, E>;
 // Schema version
 // ---------------------------------------------------------------------------
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 11;
 
 const SCHEMA_SQL: &str = "
 PRAGMA journal_mode=WAL;
@@ -108,6 +110,37 @@ CREATE TABLE IF NOT EXISTS messages (
     token_count     INTEGER,
     finish_reason   TEXT
 );
+
+-- Phase 36.17.9 (gateway session persistence): durable SessionKey -> session_id
+-- routing for messaging platforms (Telegram/Discord/Slack), plus per-session
+-- voice mode. Lets the gateway RESUME an ongoing conversation after a restart
+-- instead of minting a fresh session (reverses the old D-02 stateless default).
+-- `session_key` is `SessionKey::to_string_key()` (e.g. `Telegram:12345:678`).
+-- `voice_mode` is one of `off` | `on` | `tts`.
+CREATE TABLE IF NOT EXISTS gateway_routes (
+    session_key  TEXT PRIMARY KEY,
+    session_id   TEXT NOT NULL,
+    voice_mode   TEXT NOT NULL DEFAULT 'off',
+    updated_at   REAL NOT NULL
+);
+
+-- Phase 46.7 (D-10/D-11/D-21): chat attachment metadata for web-chat uploads
+-- (code/images/etc). `stored_rel_path` is RELATIVE to
+-- `session_attachments_dir(session_id)` (opaque-id subdir + validated leaf) so
+-- the row never hard-codes an absolute home path (D-21 redirect-safety). No
+-- content-hash dedupe column (D-29) and no age/size reaper (D-28) — v1 scope
+-- is intentionally minimal; attachment lifetime is tied to session lifetime.
+CREATE TABLE IF NOT EXISTS chat_attachments (
+    id               TEXT PRIMARY KEY,
+    session_id       TEXT NOT NULL,
+    message_id       TEXT,
+    filename         TEXT NOT NULL,
+    content_type     TEXT,
+    size_bytes       INTEGER NOT NULL,
+    stored_rel_path  TEXT NOT NULL,
+    created_at       INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_chat_attachments_session ON chat_attachments(session_id);
 
 CREATE INDEX IF NOT EXISTS idx_sessions_source  ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent  ON sessions(parent_session_id);
@@ -275,6 +308,39 @@ pub struct StoredMessage {
     pub timestamp: f64,
     pub token_count: Option<i64>,
     pub finish_reason: Option<String>,
+}
+
+/// A durable gateway routing record (Phase 36.17.9).
+///
+/// Maps a `SessionKey::to_string_key()` to the active `session_id` for a
+/// messaging-platform conversation, plus that conversation's persisted voice
+/// mode. Read on gateway startup so an inbound message resumes its prior
+/// session instead of starting fresh.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RouteRecord {
+    /// Active session UUID this key currently routes to.
+    pub session_id: String,
+    /// Persisted voice mode for this conversation: `off` | `on` | `tts`.
+    pub voice_mode: String,
+}
+
+/// A single `chat_attachments` row (Phase 46.7 D-10/D-11): metadata for one
+/// file uploaded into a web-chat session (code/images/etc).
+///
+/// `stored_rel_path` is relative to `ironhermes_core::session_attachments_dir(session_id)`
+/// — never an absolute path — so the row survives an `IRONHERMES_HOME` redirect
+/// (D-21). `message_id` is `None` until the attachment is associated with a
+/// specific turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatAttachmentRow {
+    pub id: String,
+    pub session_id: String,
+    pub message_id: Option<String>,
+    pub filename: String,
+    pub content_type: Option<String>,
+    pub size_bytes: i64,
+    pub stored_rel_path: String,
+    pub created_at: i64,
 }
 
 /// A result from FTS5 full-text search.
@@ -524,6 +590,46 @@ impl StateStore {
             self.conn
                 .execute("UPDATE schema_version SET version = 9", [])?;
         }
+        if current < 10 {
+            // v10 (Phase 36.17.9): gateway_routes table for durable
+            // SessionKey -> session_id routing + per-session voice mode.
+            // CREATE TABLE IF NOT EXISTS is re-run-safe (v9 precedent).
+            self.conn.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS gateway_routes (
+                    session_key  TEXT PRIMARY KEY,
+                    session_id   TEXT NOT NULL,
+                    voice_mode   TEXT NOT NULL DEFAULT 'off',
+                    updated_at   REAL NOT NULL
+                );
+                ",
+            )?;
+            self.conn
+                .execute("UPDATE schema_version SET version = 10", [])?;
+        }
+        if current < 11 {
+            // v11 (Phase 46.7 D-10/D-11): chat_attachments table for web-chat
+            // upload metadata. CREATE TABLE / INDEX IF NOT EXISTS are re-run-safe
+            // (v9/v10 precedent) and independently gated — never assumes the
+            // immediately-prior version ran.
+            self.conn.execute_batch(
+                "
+                CREATE TABLE IF NOT EXISTS chat_attachments (
+                    id               TEXT PRIMARY KEY,
+                    session_id       TEXT NOT NULL,
+                    message_id       TEXT,
+                    filename         TEXT NOT NULL,
+                    content_type     TEXT,
+                    size_bytes       INTEGER NOT NULL,
+                    stored_rel_path  TEXT NOT NULL,
+                    created_at       INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_chat_attachments_session ON chat_attachments(session_id);
+                ",
+            )?;
+            self.conn
+                .execute("UPDATE schema_version SET version = 11", [])?;
+        }
         Ok(())
     }
 
@@ -674,6 +780,209 @@ impl StateStore {
         let rows = stmt.query_map(params![session_id], message_from_row)?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
+    }
+
+    /// Retrieve a session's messages already converted to [`ChatMessage`],
+    /// ready to rehydrate an in-memory conversation (Phase 36.17.9 resume).
+    ///
+    /// Rows with an unrecognized role are skipped (defensive — keeps the
+    /// assistant↔tool pairing intact rather than injecting a bogus turn).
+    pub fn get_chat_messages(&self, session_id: &str) -> Result<Vec<ChatMessage>> {
+        Ok(self
+            .get_messages(session_id)?
+            .iter()
+            .filter_map(chat_message_from_stored)
+            .collect())
+    }
+
+    // -----------------------------------------------------------------------
+    // Gateway routing (Phase 36.17.9 — durable SessionKey -> session_id)
+    // -----------------------------------------------------------------------
+
+    /// Insert or refresh the routing record for `session_key`, pointing it at
+    /// `session_id`. Preserves any existing `voice_mode` (only the session id +
+    /// timestamp change on conflict). Called write-through whenever the gateway
+    /// creates or resumes a session.
+    pub fn upsert_route(&mut self, session_key: &str, session_id: &str) -> Result<()> {
+        let now = unix_now();
+        self.conn.execute(
+            "INSERT INTO gateway_routes (session_key, session_id, voice_mode, updated_at) \
+             VALUES (?1, ?2, 'off', ?3) \
+             ON CONFLICT(session_key) DO UPDATE SET \
+                 session_id = excluded.session_id, \
+                 updated_at = excluded.updated_at",
+            params![session_key, session_id, now],
+        )?;
+        Ok(())
+    }
+
+    /// Look up the durable routing record for `session_key`, if any.
+    pub fn get_route(&self, session_key: &str) -> Result<Option<RouteRecord>> {
+        self.conn
+            .query_row(
+                "SELECT session_id, voice_mode FROM gateway_routes WHERE session_key = ?1",
+                params![session_key],
+                |r| {
+                    Ok(RouteRecord {
+                        session_id: r.get(0)?,
+                        voice_mode: r.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// Persist the voice mode (`off` | `on` | `tts`) for `session_key`.
+    /// Preserves the existing `session_id` on conflict; if no route row exists
+    /// yet (voice toggled before the first turn persisted one) a placeholder
+    /// row is created with an empty `session_id`, which the next `upsert_route`
+    /// fills in.
+    pub fn set_route_voice_mode(&mut self, session_key: &str, voice_mode: &str) -> Result<()> {
+        let now = unix_now();
+        self.conn.execute(
+            "INSERT INTO gateway_routes (session_key, session_id, voice_mode, updated_at) \
+             VALUES (?1, '', ?2, ?3) \
+             ON CONFLICT(session_key) DO UPDATE SET \
+                 voice_mode = excluded.voice_mode, \
+                 updated_at = excluded.updated_at",
+            params![session_key, voice_mode, now],
+        )?;
+        Ok(())
+    }
+
+    /// Phase 47.5 (D-04): remove a chat's durable route so a reset session
+    /// cannot be resumed; the next message mints a fresh session and
+    /// re-points the route via upsert_route.
+    pub fn delete_route(&mut self, session_key: &str) -> Result<()> {
+        let rows = self.conn.execute(
+            "DELETE FROM gateway_routes WHERE session_key = ?1",
+            params![session_key],
+        )?;
+        if rows == 0 {
+            warn!("delete_route: no route found for session_key={session_key}");
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Chat attachments (Phase 46.7 D-10/D-11/D-21 — web-chat upload metadata)
+    // -----------------------------------------------------------------------
+
+    /// Record metadata for one uploaded chat attachment (D-10/D-11). Does NOT
+    /// write bytes to disk — callers (upload transport) write the file under
+    /// `ironhermes_core::session_attachments_dir(session_id)` first, then pass
+    /// the resulting `stored_rel_path` (relative to that dir) here.
+    ///
+    /// No content-hash dedupe (D-29): every call inserts a fresh row keyed by
+    /// a newly generated opaque id, even if identical bytes were uploaded
+    /// before.
+    pub fn add_chat_attachment(
+        &mut self,
+        session_id: &str,
+        message_id: Option<&str>,
+        filename: &str,
+        content_type: Option<&str>,
+        size_bytes: i64,
+        stored_rel_path: &str,
+    ) -> Result<ChatAttachmentRow> {
+        let id = new_attachment_id();
+        let created_at = Utc::now().timestamp();
+        self.conn.execute(
+            "INSERT INTO chat_attachments \
+             (id, session_id, message_id, filename, content_type, size_bytes, stored_rel_path, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id,
+                session_id,
+                message_id,
+                filename,
+                content_type,
+                size_bytes,
+                stored_rel_path,
+                created_at,
+            ],
+        )?;
+        Ok(ChatAttachmentRow {
+            id,
+            session_id: session_id.to_string(),
+            message_id: message_id.map(String::from),
+            filename: filename.to_string(),
+            content_type: content_type.map(String::from),
+            size_bytes,
+            stored_rel_path: stored_rel_path.to_string(),
+            created_at,
+        })
+    }
+
+    /// List all attachment metadata for a session, oldest first (D-10/D-11 retrieval).
+    pub fn list_chat_attachments(&self, session_id: &str) -> Result<Vec<ChatAttachmentRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, message_id, filename, content_type, size_bytes, \
+             stored_rel_path, created_at \
+             FROM chat_attachments WHERE session_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![session_id], chat_attachment_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// List attachment metadata linked to a single message (D-10).
+    pub fn list_chat_attachments_for_message(
+        &self,
+        message_id: &str,
+    ) -> Result<Vec<ChatAttachmentRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, session_id, message_id, filename, content_type, size_bytes, \
+             stored_rel_path, created_at \
+             FROM chat_attachments WHERE message_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![message_id], chat_attachment_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Delete all `chat_attachments` rows for a session AND best-effort remove
+    /// its on-disk attachments + workspace directories (D-28: attachment
+    /// lifetime is tied to session lifetime — no separate age/size reaper).
+    /// A session with no attachment rows is a DB-side no-op but still attempts
+    /// the (already-absent) dir removal, which is harmless.
+    ///
+    /// `std::fs::remove_dir_all` errors are swallowed when the directory does
+    /// not exist (`ErrorKind::NotFound`); any other IO error is surfaced.
+    /// Returns the count of deleted `chat_attachments` rows.
+    pub fn delete_chat_attachments_for_session(&mut self, session_id: &str) -> Result<usize> {
+        // SEC-02: this is a `remove_dir_all` primitive keyed by a session id.
+        // It has no non-test callers yet, which is exactly why the guard goes in
+        // now — the first caller must not be able to reintroduce CR-01 with a
+        // deletion blast radius. `session_*_dir` are pure joins, so an
+        // unvalidated id (`../../..`) would recursively delete outside the
+        // sessions root.
+        if ironhermes_core::safe_session_id(session_id).is_none() {
+            return Err(anyhow::anyhow!("invalid session id: {session_id:?}").into());
+        }
+
+        let deleted = self.conn.execute(
+            "DELETE FROM chat_attachments WHERE session_id = ?1",
+            params![session_id],
+        )?;
+
+        for dir in [
+            session_attachments_dir(session_id),
+            session_workspace_dir(session_id),
+        ] {
+            if let Err(e) = std::fs::remove_dir_all(&dir)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                return Err(
+                    anyhow::anyhow!("remove_dir_all({}) failed: {e}", dir.display()).into(),
+                );
+            }
+        }
+
+        Ok(deleted)
     }
 
     /// List sessions, optionally filtered by source, most recent first.
@@ -1336,6 +1645,14 @@ fn unix_now() -> f64 {
     Utc::now().timestamp_millis() as f64 / 1000.0
 }
 
+/// Generate an opaque `catt_` + 16 hex-char attachment id (Phase 46.7).
+/// Mirrors `ironhermes-kanban::Store::new_id`'s v4-UUID-simple-truncated
+/// convention.
+fn new_attachment_id() -> String {
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    format!("catt_{}", &id[..16])
+}
+
 fn role_str(role: &Role) -> &'static str {
     match role {
         Role::System => "system",
@@ -1343,6 +1660,19 @@ fn role_str(role: &Role) -> &'static str {
         Role::Assistant => "assistant",
         Role::Tool => "tool",
     }
+}
+
+fn chat_attachment_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChatAttachmentRow> {
+    Ok(ChatAttachmentRow {
+        id: r.get(0)?,
+        session_id: r.get(1)?,
+        message_id: r.get(2)?,
+        filename: r.get(3)?,
+        content_type: r.get(4)?,
+        size_bytes: r.get(5)?,
+        stored_rel_path: r.get(6)?,
+        created_at: r.get(7)?,
+    })
 }
 
 fn session_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
@@ -1380,6 +1710,35 @@ fn message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<StoredMessage> {
         timestamp: r.get(7)?,
         token_count: r.get(8)?,
         finish_reason: r.get(9)?,
+    })
+}
+
+/// Convert a persisted [`StoredMessage`] back into a [`ChatMessage`] for
+/// session rehydration (Phase 36.17.9). Returns `None` for an unrecognized
+/// role so a corrupt row is skipped rather than breaking assistant↔tool
+/// pairing on resume. `tool_calls` JSON that fails to parse is dropped (the
+/// text content is still preserved). Canonical converter — surfaces shared by
+/// the gateway resume path and the web UI session view.
+pub fn chat_message_from_stored(row: &StoredMessage) -> Option<ChatMessage> {
+    use ironhermes_core::types::MessageContent;
+    let role = match row.role.as_str() {
+        "system" => Role::System,
+        "user" => Role::User,
+        "assistant" => Role::Assistant,
+        "tool" => Role::Tool,
+        _ => return None,
+    };
+    let tool_calls = row
+        .tool_calls
+        .as_ref()
+        .and_then(|json| serde_json::from_str(json).ok());
+    Some(ChatMessage {
+        role,
+        content: row.content.clone().map(MessageContent::Text),
+        tool_calls,
+        tool_call_id: row.tool_call_id.clone(),
+        name: row.tool_name.clone(),
+        is_recall_context: false,
     })
 }
 
@@ -1572,15 +1931,16 @@ mod schema_migration_v8_tests {
     use rusqlite::Connection;
     use tempfile::tempdir;
 
-    #[test]
-    fn schema_version_constant_is_9() {
-        // Phase 25.3 D-W-1 originally bumped to 8 (workspace_root).
-        // Phase 36.2 D-USAGE-02 bumps to 9 (cache tokens + usage_events table).
-        assert_eq!(
-            SCHEMA_VERSION, 9,
-            "Phase 36.2 D-USAGE-02: SCHEMA_VERSION must be bumped to 9"
-        );
-    }
+    // NOTE: the SCHEMA_VERSION pin previously lived here as
+    // `schema_version_constant_is_10`. Removed (Phase 46.7) because
+    // `assert_eq!(SCHEMA_VERSION, N)` against the CURRENT compile-time
+    // constant becomes `clippy::assertions_on_constants` once it's rewritten
+    // as a plain bool comparison, and duplicating the exact-value pin across
+    // two modules just churns on every future bump. The single source of
+    // truth for the current SCHEMA_VERSION is now
+    // `chat_attachment_tests::schema_version_constant_is_11` (history: v8
+    // workspace_root -> v9 cache tokens + usage_events -> v10 gateway_routes
+    // -> v11 chat_attachments).
 
     #[test]
     fn fresh_install_has_workspace_root_column() {
@@ -1674,6 +2034,165 @@ mod schema_migration_v8_tests {
         assert_eq!(
             exists, 1,
             "usage_events table must exist after v9 migration"
+        );
+        // Phase 36.17.9 invariant: gateway_routes table created during v10 migration.
+        let routes_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='gateway_routes'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            routes_exists, 1,
+            "gateway_routes table must exist after v10 migration"
+        );
+    }
+
+    #[test]
+    fn gateway_route_upsert_get_and_voice_mode_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = StateStore::new(&path).unwrap();
+        let key = "Telegram:12345:678";
+
+        // Missing key → None.
+        assert_eq!(store.get_route(key).unwrap(), None);
+
+        // Upsert points the key at a session; voice_mode defaults to "off".
+        store.upsert_route(key, "sess-aaa").unwrap();
+        let r = store.get_route(key).unwrap().expect("route present");
+        assert_eq!(r.session_id, "sess-aaa");
+        assert_eq!(r.voice_mode, "off");
+
+        // Setting voice mode preserves the session_id.
+        store.set_route_voice_mode(key, "tts").unwrap();
+        let r = store.get_route(key).unwrap().unwrap();
+        assert_eq!(
+            r.session_id, "sess-aaa",
+            "voice update must keep session_id"
+        );
+        assert_eq!(r.voice_mode, "tts");
+
+        // Re-pointing the route to a new session preserves the voice mode.
+        store.upsert_route(key, "sess-bbb").unwrap();
+        let r = store.get_route(key).unwrap().unwrap();
+        assert_eq!(r.session_id, "sess-bbb", "upsert must update session_id");
+        assert_eq!(r.voice_mode, "tts", "upsert must preserve voice_mode");
+    }
+
+    #[test]
+    fn set_voice_mode_before_route_then_upsert_fills_session_id() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = StateStore::new(&path).unwrap();
+        let key = "Discord:room-9";
+
+        // Voice toggled before any session persisted → placeholder row.
+        store.set_route_voice_mode(key, "on").unwrap();
+        let r = store.get_route(key).unwrap().unwrap();
+        assert_eq!(r.session_id, "", "no session yet → empty placeholder");
+        assert_eq!(r.voice_mode, "on");
+
+        // First turn persists the session id, keeping the chosen voice mode.
+        store.upsert_route(key, "sess-ccc").unwrap();
+        let r = store.get_route(key).unwrap().unwrap();
+        assert_eq!(r.session_id, "sess-ccc");
+        assert_eq!(r.voice_mode, "on");
+    }
+
+    #[test]
+    fn gateway_route_delete_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = StateStore::new(&path).unwrap();
+        let key = "Telegram:99999:111";
+
+        store.upsert_route(key, "sess-zzz").unwrap();
+        assert!(
+            store.get_route(key).unwrap().is_some(),
+            "route present before delete"
+        );
+
+        store.delete_route(key).unwrap();
+        assert_eq!(
+            store.get_route(key).unwrap(),
+            None,
+            "route must resolve to None after delete"
+        );
+    }
+
+    #[test]
+    fn gateway_route_delete_missing_key_is_noop() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = StateStore::new(&path).unwrap();
+
+        // Deleting a key that was never written must not error.
+        store.delete_route("never-written-key").unwrap();
+        assert_eq!(store.get_route("never-written-key").unwrap(), None);
+    }
+
+    #[test]
+    fn get_chat_messages_rehydrates_with_tool_pairing() {
+        use ironhermes_core::types::{MessageContent, ToolCall};
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = StateStore::new(&path).unwrap();
+        store
+            .create_session("sess-1", "telegram", Some("m"), None, None, None)
+            .unwrap();
+
+        // user → assistant(tool_call) → tool(result) — the pairing-sensitive trio.
+        let user = ChatMessage {
+            role: Role::User,
+            content: Some(MessageContent::Text("hi".into())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            is_recall_context: false,
+        };
+        let assistant = ChatMessage {
+            role: Role::Assistant,
+            content: None,
+            tool_calls: Some(vec![ToolCall {
+                id: "call_1".into(),
+                call_type: "function".into(),
+                function: ironhermes_core::types::FunctionCall {
+                    name: "ping".into(),
+                    arguments: "{}".into(),
+                },
+            }]),
+            tool_call_id: None,
+            name: None,
+            is_recall_context: false,
+        };
+        let tool = ChatMessage {
+            role: Role::Tool,
+            content: Some(MessageContent::Text("pong".into())),
+            tool_calls: None,
+            tool_call_id: Some("call_1".into()),
+            name: Some("ping".into()),
+            is_recall_context: false,
+        };
+        store.add_message("sess-1", &user).unwrap();
+        store.add_message("sess-1", &assistant).unwrap();
+        store.add_message("sess-1", &tool).unwrap();
+
+        let msgs = store.get_chat_messages("sess-1").unwrap();
+        assert_eq!(msgs.len(), 3, "all three turns rehydrate in order");
+        assert_eq!(msgs[0].role, Role::User);
+        assert_eq!(msgs[1].role, Role::Assistant);
+        assert_eq!(
+            msgs[1].tool_calls.as_ref().map(|t| t[0].id.clone()),
+            Some("call_1".to_string()),
+            "assistant tool_call id survives rehydration"
+        );
+        assert_eq!(msgs[2].role, Role::Tool);
+        assert_eq!(
+            msgs[2].tool_call_id.as_deref(),
+            Some("call_1"),
+            "tool result keeps its tool_call_id (pairing intact)"
         );
     }
 
@@ -1883,5 +2402,291 @@ mod schema_migration_v8_tests {
         let stats = store.backfill_usage_costs(identity, false, true).unwrap();
         assert_eq!(stats.orphan_rows, 0);
         assert_eq!(stats.orphans_deleted, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 46.7 Plan 01 Task 2: Schema migration v11 — chat_attachments (D-10/D-11)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod chat_attachment_tests {
+    use super::*;
+    use rusqlite::Connection;
+    use std::sync::Mutex;
+    use tempfile::tempdir;
+
+    /// Tests that manipulate IRONHERMES_HOME must hold this lock to avoid
+    /// env var races (Rust tests run in parallel). Mirrors the
+    /// `ironhermes-agent::prompt_builder` ENV_MUTEX convention.
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn schema_version_constant_is_11() {
+        assert_eq!(
+            SCHEMA_VERSION, 11,
+            "Phase 46.7: SCHEMA_VERSION must be bumped to 11 (chat_attachments)"
+        );
+    }
+
+    #[test]
+    fn v10_db_migrates_to_v11_and_creates_chat_attachments() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        // Stamp a v10-shaped fixture: schema_version=10, no chat_attachments table.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (version INTEGER NOT NULL); \
+                 INSERT INTO schema_version (version) VALUES (10); \
+                 CREATE TABLE sessions ( \
+                   id TEXT PRIMARY KEY, source TEXT NOT NULL, user_id TEXT, model TEXT, \
+                   system_prompt TEXT, parent_session_id TEXT, started_at REAL NOT NULL, \
+                   ended_at REAL, end_reason TEXT, message_count INTEGER DEFAULT 0, \
+                   tool_call_count INTEGER DEFAULT 0, input_tokens INTEGER DEFAULT 0, \
+                   output_tokens INTEGER DEFAULT 0, title TEXT, workspace_root TEXT, \
+                   cache_read_tokens INTEGER DEFAULT 0, cache_creation_tokens INTEGER DEFAULT 0, \
+                   cost_usd_micros INTEGER DEFAULT 0 \
+                 ); \
+                 CREATE TABLE gateway_routes ( \
+                   session_key TEXT PRIMARY KEY, session_id TEXT NOT NULL, \
+                   voice_mode TEXT NOT NULL DEFAULT 'off', updated_at REAL NOT NULL \
+                 );",
+            )
+            .unwrap();
+        }
+
+        let _store = StateStore::new(&path).expect("upgrade open from v10 fixture");
+        let conn = Connection::open(&path).unwrap();
+        let v: i64 = conn
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(v, 11, "schema_version must be 11 after v10->v11 migration");
+
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chat_attachments'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            exists, 1,
+            "chat_attachments table must exist after v11 migration"
+        );
+    }
+
+    #[test]
+    fn v8_db_skips_intermediate_versions_and_still_creates_chat_attachments() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        // Stamp a v8-shaped fixture (skips v9/v10 entirely) — each migration
+        // block must be independently gated, never assume the immediately
+        // prior version ran.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE schema_version (version INTEGER NOT NULL); \
+                 INSERT INTO schema_version (version) VALUES (8); \
+                 CREATE TABLE sessions ( \
+                   id TEXT PRIMARY KEY, source TEXT NOT NULL, user_id TEXT, model TEXT, \
+                   system_prompt TEXT, parent_session_id TEXT, started_at REAL NOT NULL, \
+                   ended_at REAL, end_reason TEXT, message_count INTEGER DEFAULT 0, \
+                   tool_call_count INTEGER DEFAULT 0, input_tokens INTEGER DEFAULT 0, \
+                   output_tokens INTEGER DEFAULT 0, title TEXT, workspace_root TEXT \
+                 );",
+            )
+            .unwrap();
+        }
+
+        let _store = StateStore::new(&path).expect("upgrade open from v8 fixture");
+        let conn = Connection::open(&path).unwrap();
+        let v: i64 = conn
+            .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION, "must land on current SCHEMA_VERSION");
+
+        let exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chat_attachments'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            exists, 1,
+            "chat_attachments must exist even skipping v9/v10 fixtures (each block independently gated)"
+        );
+    }
+
+    #[test]
+    fn add_and_list_chat_attachments_round_trips_fields() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = StateStore::new(&path).unwrap();
+        store
+            .create_session("sess-att-1", "web", None, None, None, None)
+            .unwrap();
+
+        let row = store
+            .add_chat_attachment(
+                "sess-att-1",
+                None,
+                "photo.png",
+                Some("image/png"),
+                1234,
+                "att_abc/photo.png",
+            )
+            .unwrap();
+        assert_eq!(row.session_id, "sess-att-1");
+        assert_eq!(row.filename, "photo.png");
+
+        let listed = store.list_chat_attachments("sess-att-1").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].filename, "photo.png");
+        assert_eq!(listed[0].content_type.as_deref(), Some("image/png"));
+        assert_eq!(listed[0].size_bytes, 1234);
+        assert_eq!(listed[0].stored_rel_path, "att_abc/photo.png");
+    }
+
+    #[test]
+    fn list_chat_attachments_for_message_filters_by_message_id() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let mut store = StateStore::new(&path).unwrap();
+        store
+            .create_session("sess-att-2", "web", None, None, None, None)
+            .unwrap();
+
+        store
+            .add_chat_attachment(
+                "sess-att-2",
+                Some("msg-1"),
+                "a.txt",
+                Some("text/plain"),
+                10,
+                "att_a/a.txt",
+            )
+            .unwrap();
+        store
+            .add_chat_attachment(
+                "sess-att-2",
+                Some("msg-2"),
+                "b.txt",
+                Some("text/plain"),
+                20,
+                "att_b/b.txt",
+            )
+            .unwrap();
+        store
+            .add_chat_attachment(
+                "sess-att-2",
+                None,
+                "c.txt",
+                Some("text/plain"),
+                30,
+                "att_c/c.txt",
+            )
+            .unwrap();
+
+        let for_msg1 = store.list_chat_attachments_for_message("msg-1").unwrap();
+        assert_eq!(for_msg1.len(), 1);
+        assert_eq!(for_msg1[0].filename, "a.txt");
+
+        let for_msg2 = store.list_chat_attachments_for_message("msg-2").unwrap();
+        assert_eq!(for_msg2.len(), 1);
+        assert_eq!(for_msg2[0].filename, "b.txt");
+    }
+
+    /// SEC-02 regression: this fn `remove_dir_all`s two session-keyed dirs.
+    /// An unvalidated traversal id would recursively delete OUTSIDE the sessions
+    /// root. It has no non-test callers yet — the guard exists so the first one
+    /// cannot reintroduce CR-01 with a deletion blast radius.
+    #[test]
+    fn delete_chat_attachments_rejects_a_traversal_session_id() {
+        let dir = tempfile::tempdir().unwrap();
+        // No IRONHERMES_HOME redirect needed (and so no ENV_MUTEX): rejection
+        // must happen BEFORE any path is resolved or any fs call is made. If
+        // this test ever needs the env, the guard has regressed.
+        let mut store = StateStore::new(dir.path().join("state.db")).unwrap();
+
+        let canary = dir.path().join("canary.txt");
+        std::fs::write(&canary, b"must survive").unwrap();
+
+        for evil in ["../../../tmp/evil", "..", "a/b", "a\\b", "~root", ""] {
+            let err = store.delete_chat_attachments_for_session(evil);
+            assert!(
+                err.is_err(),
+                "traversal session id {evil:?} must be rejected before any remove_dir_all"
+            );
+        }
+        assert!(
+            canary.exists(),
+            "nothing outside the sessions root may be deleted"
+        );
+    }
+
+    #[test]
+    fn delete_chat_attachments_for_session_removes_rows_and_dirs_and_is_noop_when_empty() {
+        let _lock = ENV_MUTEX.lock().unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        // SAFETY: env var mutation is guarded by ENV_MUTEX above so no other
+        // test observes a torn IRONHERMES_HOME value concurrently.
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", dir.path());
+        }
+        let mut store = StateStore::new(&path).unwrap();
+        store
+            .create_session("sess-att-3", "web", None, None, None, None)
+            .unwrap();
+
+        store
+            .add_chat_attachment(
+                "sess-att-3",
+                None,
+                "photo.png",
+                Some("image/png"),
+                100,
+                "att_x/photo.png",
+            )
+            .unwrap();
+
+        // Create the on-disk dirs the way a real upload path would.
+        let att_dir = session_attachments_dir("sess-att-3");
+        let ws_dir = session_workspace_dir("sess-att-3");
+        std::fs::create_dir_all(&att_dir).unwrap();
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::write(att_dir.join("marker.txt"), b"x").unwrap();
+        assert!(att_dir.exists());
+        assert!(ws_dir.exists());
+
+        let deleted = store
+            .delete_chat_attachments_for_session("sess-att-3")
+            .unwrap();
+        assert_eq!(deleted, 1);
+        assert!(
+            store
+                .list_chat_attachments("sess-att-3")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(!att_dir.exists(), "attachments dir must be removed");
+        assert!(!ws_dir.exists(), "workspace dir must be removed");
+
+        // No-op for a session with no attachments/dirs — must not error.
+        let deleted_again = store
+            .delete_chat_attachments_for_session("sess-att-3")
+            .unwrap();
+        assert_eq!(deleted_again, 0);
+
+        // SAFETY: still holding ENV_MUTEX from above.
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
     }
 }

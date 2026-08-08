@@ -8,9 +8,11 @@
 
 pub mod edge;
 pub mod elevenlabs;
+pub mod openai;
 
 pub use edge::EdgeProvider;
 pub use elevenlabs::ElevenLabsProvider;
+pub use openai::OpenAiTtsProvider;
 use std::sync::OnceLock;
 
 // D-04: Cache the ffmpeg probe result once per process. The probe is sync,
@@ -60,6 +62,9 @@ pub fn build_tts_registry(
     )));
     registry.register(Arc::new(crate::tts::elevenlabs::ElevenLabsProvider::new(
         config.elevenlabs.clone(),
+    )));
+    registry.register(Arc::new(crate::tts::openai::OpenAiTtsProvider::new(
+        config.openai.clone(),
     )));
     registry
 }

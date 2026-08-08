@@ -19,11 +19,21 @@ memory-sqlite = ["ironhermes-agent/memory-sqlite"]
 memory-duckdb = ["ironhermes-agent/memory-duckdb"]
 memory-grafeo = ["ironhermes-agent/memory-grafeo"]
 test-support = ["ironhermes-agent/test-support"]
+# Phase 46.8 Plan 05 (D-10): thread the rusty-vault backend into the CLI's
+# `vault init`/`unlock` handlers (vault_cmd.rs). Off by default — same
+# zero-behavioral-change posture as `ironhermes-vault`'s own feature.
+rusty-vault = ["ironhermes-vault/rusty-vault"]
+# Phase 47.6 Plan 04 (D-06/D-07): thread the Buzz (Nostr) platform adapter's
+# identity module into the CLI's `buzz` noun (buzz_cmd.rs). Off by default —
+# same zero-behavioral-change posture as `ironhermes-gateway`'s own feature.
+buzz = ["ironhermes-gateway/buzz", "dep:nostr-sdk"]
 
 [dependencies]
 ironhermes-core = { path = "../ironhermes-core" }
 ironhermes-agent = { path = "../ironhermes-agent" }
 ironhermes-tools = { path = "../ironhermes-tools" }
+# Phase 46.8 Plan 05: `vault_cmd.rs` calls `open_store`/`RustyVaultStore` directly.
+ironhermes-vault = { path = "../ironhermes-vault" }
 # Plan 21.7-06 (D-29): ProcessRegistry constructor at the three main.rs call sites
 ironhermes-exec = { path = "../ironhermes-exec" }
 ironhermes-state = { path = "../ironhermes-state" }
@@ -75,9 +85,36 @@ rustls = "0.23"
 reqwest = { workspace = true }
 rusqlite = { workspace = true }
 tempfile = "3"
+open = { workspace = true }
+# Phase 46.1 D-02: parse the issuer host for the new-issuer audit/confirm message
+url = { workspace = true }
+# Phase 46.5 D-08: base64-encode kanban worker image attachments into data: URIs
+# for the worker's first LLM turn. Already a pinned workspace dependency
+# (used by ironhermes-gateway/ironhermes-tools) — no new crate introduced.
+base64 = { workspace = true }
+# Phase 46.8 Plan 05 (D-03): masked secret-value prompt for `vault set`/`unlock`.
+# Already resolved in Cargo.lock as a transitive `rusty_vault` dependency — pin
+# matches RESEARCH exactly so no lockfile drift.
+rpassword = "7.5.4"
+# Phase 46.8 Plan 05 (D-08): `SecretStore::put_secret` takes a `secrecy::SecretString`
+# — same pin as `ironhermes-vault`/`ironhermes-core` so the type unifies across crates.
+secrecy = { version = "0.10.3", features = ["serde"] }
+# Phase 47.3 Plan 03 (D-08): `web set-password` hashes the operator password with
+# argon2id. Pin "0.5" deliberately — the unscoped latest resolves to a 0.6.0-rc
+# pre-release (same pin as `iron_hermes_ui`'s Cargo.toml, which verifies the hash
+# this CLI produces).
+argon2 = "0.5"
+# Phase 47.6 Plan 04 (D-06/D-07): `ironhermes buzz keygen/import/pubkey` —
+# same "0.45.0" version line ironhermes-gateway's Cargo.toml pinned for Plan
+# 01, so Cargo resolves one shared `nostr-sdk` instance across both crates.
+nostr-sdk = { version = "0.45.0", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Phase 46.5.1: build oversized test-image fixtures for the kanban worker
+# image-turn tests. Runtime downscaling moved to the shared
+# ironhermes_gateway::multimodal::fit_image_for_vision (46.5.1 follow-up).
+image = { version = "0.25", default-features = false, features = ["png"] }
 async-trait = { workspace = true }
 wiremock = { workspace = true }
 hex = { workspace = true }

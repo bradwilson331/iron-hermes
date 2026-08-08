@@ -260,6 +260,37 @@
     box-shadow: var(--w-shadow-float);
     max-width: 480px;
     line-height: 1.4;
+    display: flex;
+    align-items: flex-start;
+    gap: var(--sp-4);
+}
+
+/* GAP-10 (47.4-16 Task 1): while a drawer is open, the toast moves to the
+   opposite corner instead of pinning over the drawer's SAVE row. Anchored
+   to the viewport's left edge, not offset by the drawer's width — Task 2
+   makes the drawer resizable, so a width-derived offset would go stale the
+   moment the operator drags it. */
+.kn-toast[data-drawer-open="true"] {
+    right: auto;
+    left: var(--sp-4);
+}
+
+.kn-toast-dismiss {
+    background: transparent;
+    border: none;
+    color: var(--fg-strong);
+    font-family: var(--font-mono);
+    font-size: var(--fs-13);
+    line-height: 1;
+    padding: 0 0 0 var(--sp-2);
+    cursor: pointer;
+    flex: 0 0 auto;
+}
+
+.kn-toast-dismiss:hover,
+.kn-toast-dismiss:focus {
+    color: var(--danger);
+    outline: none;
 }
 
 /* ============================================================================
@@ -278,7 +309,13 @@
     bottom: 0;
     width: 480px;
     min-width: 320px;
-    max-width: min(480px, calc(100vw - 80px));
+    /* GAP-10 (47.4-16 Task 2): resizable — ceiling raised from the old
+       480px cap to one viewport-width-minus-80px, drag floor stays at
+       min-width above. Native grabber sits at the bottom-right corner,
+       the same corner Task 1 just cleared of the toast; both changes are
+       required together for the affordance to be reachable at all. */
+    max-width: calc(100vw - 80px);
+    resize: horizontal;
     /* BUG-2 fix (quick-260602-ds9): opaque tinted dark fill so the
        `--w-bg-2` board behind no longer bleeds through. `--w-bg-3` is
        opaque (it's a token resolving to a flat dark color) and
@@ -411,12 +448,18 @@
 
 /* ----- Drawer action buttons (StatusActionRow / TriageActionRow) ------ */
 
+/* Phase 47.4 Plan 14 (GAP-6): typography contract adopted verbatim from
+ * the site `.btn` family (site.css:165-186) so drawer action buttons read
+ * as the same terminal-theme button as the toolbar. */
 .kn-action-btn {
     background: var(--w-bg-3);
     border: 1px solid var(--w-border-hi);
     color: var(--fg);
     font-family: var(--font-mono);
-    font-size: var(--fs-13);
+    font-size: var(--fs-11);
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
     padding: var(--sp-1) var(--sp-2);
     cursor: pointer;
     border-radius: 0;
@@ -714,12 +757,18 @@
     border-top: 1px solid color-mix(in srgb, var(--accent-primary) 30%, transparent);
 }
 
+/* Phase 47.4 Plan 14 (GAP-6): typography contract adopted verbatim from
+ * the site `.btn` family (site.css:165-186) so modal buttons read as the
+ * same terminal-theme button as the toolbar. */
 .kn-modal-btn {
     background: var(--w-bg-3);
     border: 1px solid var(--w-border-hi);
     color: var(--fg);
     font-family: var(--font-mono);
-    font-size: var(--fs-13);
+    font-size: var(--fs-11);
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
     padding: var(--sp-2) var(--sp-4);
     cursor: pointer;
     border-radius: 0;
@@ -749,6 +798,236 @@
 .kn-modal-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
+}
+
+/* ============================================================================
+ * Phase 46.4 Plan 06 (D-03/D-04/D-10) — Card attachments + output-path
+ * ============================================================================
+ *
+ * All declarations use existing CSS variables only — NO new hex literals
+ * (D-04 enforcement, per this file's original header mandate).
+ */
+
+/* ----- Attachments strip (UI-SPEC "Card file attachments" PRIMARY) ----- */
+
+.kn-attach-strip {
+    margin-top: var(--sp-2);
+    padding: var(--sp-2);
+    border: 1px dashed var(--w-border);
+    border-radius: var(--w-radius-block);
+    font-family: var(--font-mono);
+    transition: border-color 120ms ease, background 120ms ease;
+}
+
+/* Active file-drop-target highlight (UI-SPEC Drop-target visual states):
+   solid accent outline + soft tinted wash, replacing the idle dashed
+   border. Only set while `dragged_task_id` is None (card.rs enforces the
+   collision-avoidance rule client-side before toggling this attribute). */
+.kn-attach-strip[data-drop-active="true"] {
+    border-style: solid;
+    border-color: var(--accent-primary);
+    background: color-mix(in srgb, var(--accent-primary) 8%, transparent);
+}
+
+/* UI-SPEC: suppress the card's own hover glow while a file-drag is active
+   over the attachments strip specifically, to avoid two competing glows. */
+.kn-card:has(.kn-attach-strip[data-drop-active="true"]):hover {
+    box-shadow: none;
+    border-color: var(--accent-primary);
+}
+
+.kn-attach-idle {
+    display: block;
+    color: var(--fg-dim);
+    font-size: var(--fs-11);
+    text-align: center;
+    cursor: pointer;
+    padding: var(--sp-1) 0;
+}
+
+.kn-attach-idle:hover,
+.kn-attach-idle:focus {
+    color: var(--accent-primary);
+    outline: none;
+}
+
+.kn-attach-chips {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--sp-1);
+}
+
+.kn-attach-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-1);
+    background: var(--w-bg-3);
+    border: 1px solid var(--w-border);
+    border-radius: var(--w-radius-pill);
+    color: var(--fg-dim);
+    font-size: var(--fs-11);
+    line-height: 1.4;
+    padding: 1px 6px;
+}
+
+/* Uploading state — reuses the same --warn "in flight" semantic as the
+   existing kn-pending-pulse optimistic-update accent (D-06/UI-SPEC
+   precedent in card.rs). */
+.kn-attach-chip--uploading {
+    border-color: var(--warn);
+    color: var(--warn);
+}
+
+.kn-attach-chip--error {
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
+.kn-attach-retry,
+.kn-attach-remove {
+    background: transparent;
+    border: none;
+    color: inherit;
+    font-family: var(--font-mono);
+    font-size: var(--fs-11);
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+    /* Icon-only touch-target exception (UI-SPEC Spacing Scale carve-out):
+       expanded hit box via padding, not on the 8-pt scale. */
+    min-width: 20px;
+    min-height: 20px;
+}
+
+.kn-attach-retry:hover,
+.kn-attach-remove:hover,
+.kn-attach-retry:focus,
+.kn-attach-remove:focus {
+    color: var(--accent-primary);
+    outline: none;
+}
+
+.kn-attach-add {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: transparent;
+    border: 1px solid var(--w-border);
+    border-radius: var(--w-radius-pill);
+    color: var(--accent-primary);
+    font-size: var(--fs-11);
+    cursor: pointer;
+    min-width: 20px;
+    min-height: 20px;
+    padding: 1px 6px;
+}
+
+.kn-attach-add:hover,
+.kn-attach-add:focus {
+    border-color: var(--accent-primary);
+    color: var(--accent-primary-hi);
+    outline: none;
+}
+
+/* Hidden native file input — triggered via the paired label[for=...]
+   (kn-attach-idle / kn-attach-add). Visually-hidden-but-focusable recipe,
+   mirrors .kn-live-region's off-screen technique above. */
+.kn-card-input-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(1px, 1px, 1px, 1px);
+    white-space: nowrap;
+}
+
+/* ----- Output-path row (UI-SPEC "Output-path display" SECONDARY) ------- */
+
+.kn-card-output-path {
+    margin-top: var(--sp-2);
+    padding: var(--sp-2);
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2);
+    background: var(--w-bg-3);
+    border-radius: var(--w-radius-block);
+    font-family: var(--font-mono);
+}
+
+.kn-card-output-path-text {
+    color: var(--fg-dim);
+    font-size: var(--fs-11);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.kn-card-output-copy {
+    background: transparent;
+    border: 1px solid var(--w-border);
+    color: var(--fg-dim);
+    font-family: var(--font-mono);
+    font-size: var(--fs-11);
+    cursor: pointer;
+    border-radius: var(--w-radius-pill);
+    min-width: 20px;
+    min-height: 20px;
+    padding: 1px 6px;
+    flex: 0 0 auto;
+    transition: border-color 120ms ease, color 120ms ease;
+}
+
+.kn-card-output-copy:hover,
+.kn-card-output-copy:focus {
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+    outline: none;
+}
+
+/* Brief ✓ success flip (UI-SPEC ~1200ms window — timed in Rust via
+   platform::timer::sleep, not a CSS animation duration). */
+.kn-card-output-copy[data-copied="true"] {
+    border-color: var(--success);
+    color: var(--success);
+}
+
+/* ----- Work-path input scaffolding (forward-compat, D-06 future plan) --
+ * Net-new classes per this plan's Task 2 action bullet. Not yet wired to
+ * any component here — the work-path row (UI-SPEC "Work-path reference
+ * input", D-06) is out of this plan's scope (requirements: D-03/D-04/D-10
+ * only). Mirrors the .kn-modal-input / .kn-modal-hint precedent at card
+ * scale so a future D-06 plan can consume these directly.
+ */
+
+.kn-card-input {
+    background: var(--w-bg-3);
+    border: 1px solid var(--w-border-hi);
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: var(--fs-13);
+    padding: var(--sp-2);
+    border-radius: 0;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.kn-card-input:focus {
+    border-color: var(--accent-primary);
+    outline: none;
+}
+
+.kn-card-hint {
+    font-size: var(--fs-10);
+    color: var(--fg-dim);
+    line-height: 1.4;
+}
+
+.kn-card-hint--danger {
+    color: var(--danger);
 }
 
 /* ----- Reduced motion (UI-SPEC §6.6) ----------------------------------- */
@@ -782,4 +1061,369 @@
     .kn-drawer-close {
         transition: none;
     }
+    .kn-attach-strip,
+    .kn-card-output-copy {
+        transition: none;
+    }
+}
+
+/* ============================================================================
+ * Phase 47.4 Plan 01 Task 2 (D-05 / D-08 / D-11) — Kanban profile management
+ *
+ * Board PROFILE switcher, health dot, and the complete forward-compat class
+ * set the phase's later plans (05/07/08/09) attach to: wizard shell, key
+ * table, board profile-lens. Every declaration below uses an existing
+ * var(--...) token or a --sp-* 4pt-grid value — no new hex literals, no new
+ * border-radius other than 0 / --w-radius-pill, and no drop-shadow effect
+ * (design-export SKILL.md hard rule 4).
+ * ============================================================================
+ */
+
+/* ----- PROFILE trigger (board toolbar, wired by Task 1) ---------------- */
+
+.kn-profile-switcher-wrap {
+    position: relative;
+    display: inline-flex;
+}
+
+.kn-profile-trigger {
+    background: transparent;
+    border: 1px solid var(--w-border);
+    color: var(--fg-dim);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 6px 12px;
+    letter-spacing: 0.14em;
+    cursor: pointer;
+    border-radius: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-1);
+    transition: border-color 120ms ease;
+}
+
+.kn-profile-trigger:hover,
+.kn-profile-trigger:focus {
+    border-color: var(--accent-primary);
+    outline: none;
+}
+
+.kn-profile-trigger-label {
+    color: var(--fg-dim);
+}
+
+.kn-profile-trigger-name {
+    color: var(--warn);
+}
+
+.kn-profile-trigger-caret {
+    color: var(--fg-dim);
+}
+
+/* ----- PROFILE dropdown menu (Task 1/2, E1 backstops) ------------------ */
+
+.kn-profile-menu {
+    position: absolute;
+    top: calc(100% + var(--sp-1));
+    left: 0;
+    /* E1/long-text: reuses .kn-drawer's existing min-width value — do not
+       invent a new width. */
+    width: 320px;
+    /* E1/overflow: scrolls internally instead of growing past viewport. */
+    max-height: min(60vh, 420px);
+    overflow-y: auto;
+    background: color-mix(in srgb, var(--accent-primary) 6%, var(--w-bg-3));
+    border: 1px solid var(--w-border-hi);
+    border-radius: 0;
+    /* No drop shadow — design-export SKILL.md hard rule 4. */
+    z-index: 210;
+    font-family: var(--font-mono);
+    padding: var(--sp-2) 0;
+}
+
+.kn-profile-menu-header {
+    font-size: var(--fs-11);
+    font-weight: 700;
+    color: var(--fg-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: var(--sp-2) var(--sp-4);
+}
+
+/* Reuses .kn-drawer-loading's declared style (color/size) via the class
+   list on the element itself — this class only supplies layout padding. */
+.kn-profile-menu-loading {
+    padding: var(--sp-2) var(--sp-4);
+}
+
+.kn-profile-menu-item {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: var(--sp-4);
+    cursor: pointer;
+    border: none;
+    background: transparent;
+    width: 100%;
+    text-align: left;
+    box-sizing: border-box;
+    font-family: var(--font-mono);
+}
+
+.kn-profile-menu-item:hover,
+.kn-profile-menu-item:focus {
+    background: var(--w-bg-3);
+    outline: none;
+}
+
+/* ALL PROFILES lens-clear row — no dot, dim text (resolved discretion,
+   D-05: the canvas has no lens-clear affordance). The nested-selector
+   override is required: .kn-profile-menu-item-name sets its own explicit
+   color, which otherwise wins over the parent's inherited dim tone. */
+.kn-profile-menu-item--all {
+    color: var(--fg-dim);
+}
+
+.kn-profile-menu-item--all .kn-profile-menu-item-name {
+    color: var(--fg-dim);
+}
+
+.kn-profile-menu-item-body {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* E1/long-text: name + meta line both truncate rather than overflow the
+   320px .kn-profile-menu width. */
+.kn-profile-menu-item-name {
+    font-size: var(--fs-13);
+    color: var(--fg);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.kn-profile-menu-item-meta {
+    font-size: var(--fs-11);
+    font-weight: 400;
+    color: var(--fg-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.kn-profile-edit-chip {
+    flex: 0 0 auto;
+    background: transparent;
+    border: 1px solid var(--accent-primary);
+    color: var(--accent-primary);
+    font-family: var(--font-mono);
+    font-size: var(--fs-11);
+    padding: 2px 8px;
+    cursor: pointer;
+    border-radius: 0;
+}
+
+.kn-profile-edit-chip:hover,
+.kn-profile-edit-chip:focus {
+    background: color-mix(in srgb, var(--accent-primary) 15%, var(--w-bg-3));
+    outline: none;
+}
+
+.kn-profile-menu-footer {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: transparent;
+    border: none;
+    border-top: 1px solid var(--w-border);
+    color: var(--fg-dim);
+    font-family: var(--font-mono);
+    font-size: var(--fs-11);
+    padding: var(--sp-2) var(--sp-4);
+    cursor: pointer;
+    margin-top: var(--sp-2);
+}
+
+.kn-profile-menu-footer:hover,
+.kn-profile-menu-footer:focus {
+    color: var(--accent-primary);
+    outline: none;
+}
+
+/* ----- Health dot (D-11) ------------------------------------------------- */
+
+.kn-health-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    flex: 0 0 auto;
+    border-radius: var(--w-radius-pill);
+    background: var(--fg-dim);
+}
+
+.kn-health-dot--ok {
+    background: var(--success);
+}
+
+.kn-health-dot--gap {
+    background: var(--warn);
+}
+
+/* ----- Forward-compat scaffolding (Plan 05/07/08/09 consumers) ---------
+ * Net-new classes per this plan's Task 2 action bullet. Not yet wired to
+ * any component in THIS plan (mirrors the .kn-card-input precedent above)
+ * — the wizard, key table, and board-lens components land in later plans.
+ */
+
+.kn-wizard {
+    width: 640px;
+    max-width: calc(100vw - 64px);
+    max-height: calc(100vh - 64px);
+    background: color-mix(in srgb, var(--accent-primary) 6%, var(--w-bg-3));
+    border: 1px solid var(--accent-primary);
+    border-radius: var(--w-radius-block);
+    display: flex;
+    flex-direction: column;
+    font-family: var(--font-mono);
+    overflow-y: auto;
+}
+
+.kn-wizard-steps {
+    display: flex;
+    flex-direction: row;
+    gap: var(--sp-1);
+}
+
+.kn-modal-seg--done {
+    color: var(--fg-dim);
+    border-color: var(--w-border);
+}
+
+.kn-wizard-footer {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2);
+    padding: var(--sp-4) var(--sp-6);
+    border-top: 1px solid var(--w-border);
+}
+
+.kn-wizard-preview {
+    flex: 1 1 auto;
+    min-width: 0;
+    color: var(--fg-dim);
+    font-size: var(--fs-11);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.kn-key-table {
+    display: flex;
+    flex-direction: column;
+    max-height: 280px;
+    overflow-y: auto;
+}
+
+.kn-key-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--sp-4);
+    padding: var(--sp-2) 0;
+    border-bottom: 1px solid var(--w-border);
+}
+
+.kn-key-status--inherited {
+    color: var(--success);
+    font-size: var(--fs-11);
+}
+
+.kn-key-status--missing {
+    color: var(--warn);
+    font-size: var(--fs-11);
+}
+
+.kn-key-input {
+    background: var(--w-bg-3);
+    border: 1px solid var(--w-border-hi);
+    color: var(--fg);
+    font-family: var(--font-mono);
+    font-size: var(--fs-13);
+    padding: var(--sp-2);
+    border-radius: 0;
+}
+
+.kn-key-input:focus {
+    border-color: var(--accent-primary);
+    outline: none;
+}
+
+/* Phase 47.4 Plan 15 (GAP-9): per-row OVERRIDE/SET toggle — declared drift,
+ * not in the UI-SPEC's "New classes required" table (see 47.4-15-SUMMARY.md). */
+.kn-key-edit-toggle {
+    background: transparent;
+    border: 1px solid var(--w-border);
+    color: var(--fg-dim);
+    font-family: var(--font-mono);
+    font-size: var(--fs-11);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding: 2px 8px;
+    border-radius: 0;
+    cursor: pointer;
+    flex: 0 0 auto;
+}
+
+.kn-key-edit-toggle:hover:not(:disabled),
+.kn-key-edit-toggle:focus:not(:disabled) {
+    border-color: var(--accent-primary);
+    color: var(--accent-primary);
+    outline: none;
+}
+
+.kn-key-edit-toggle:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* Phase 47.4 Plan 15 (GAP-9, Task 2): the `+ ADD KEY` form — sits OUTSIDE
+ * `.kn-key-table`'s 280px inner scroll region (source fact 9), inside the
+ * KEYS `.kn-drawer-section`. Declared drift, not in the UI-SPEC's "New
+ * classes required" table (see 47.4-15-SUMMARY.md). */
+.kn-key-add-row {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    padding-top: var(--sp-2);
+}
+
+.kn-key-add-actions {
+    display: flex;
+    flex-direction: row;
+    gap: var(--sp-2);
+}
+
+.kn-lens-indicator {
+    font-size: var(--fs-11);
+    color: var(--fg-dim);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 220px;
+}
+
+.kn-card[data-lens-dimmed="true"] {
+    opacity: 0.45;
+}
+
+.kn-assignee-unmatched {
+    font-style: italic;
+    color: var(--fg-dim);
 }

@@ -24,6 +24,7 @@ pub mod board;
 pub mod cas;
 pub mod config;
 pub mod dispatcher;
+pub mod env_compat;
 pub mod error;
 pub mod events;
 pub mod kanban_guidance;
@@ -51,7 +52,7 @@ pub use cas::{
     DEFAULT_CLAIM_TTL_SECONDS, assert_claim_lock, assert_run_id, atomic_claim, build_claim_lock,
     release_claim, worker_write_gated,
 };
-pub use config::KanbanConfig;
+pub use config::{DefaultNotifyTarget, KanbanConfig, subscribe_default_notify};
 pub use decomposer::{
     ChildSpec, DecomposeFn, DecomposeOutput, DecomposeRequest, DecomposedIds,
     decompose_triage_task, specify_triage_task,
@@ -60,6 +61,7 @@ pub use dispatcher::{
     DispatcherContext, StrandedReport, StrandedSeverity, diagnose_stranded, run_dispatch_loop,
     run_dispatch_tick, run_dispatch_tick_for_board,
 };
+pub use env_compat::{kanban_env, tenant_env};
 pub use error::{KanbanError, Result};
 pub use events::{
     GOAL_SUBKIND_BUDGET_EXHAUSTED, GOAL_SUBKIND_JUDGE_ERROR, GOAL_SUBKIND_JUDGE_VERDICT,
@@ -74,7 +76,8 @@ pub use notifier_config::{
     NotifierToml, SubscribeBoardsConfig, load_notifier_toml, resolve_subscribe_boards,
 };
 pub use paths::{
-    kanban_db_path, kanban_log_stderr, kanban_log_stdout, kanban_logs_dir, kanban_skills_dir,
+    kanban_db_path, kanban_log_stderr, kanban_log_stderr_for, kanban_log_stdout,
+    kanban_log_stdout_for, kanban_logs_dir, kanban_logs_dir_for_profile, kanban_skills_dir,
     kanban_workspace_for, kanban_workspaces_root, validate_dir_workspace,
 };
 pub use pid::is_pid_alive;
@@ -97,7 +100,7 @@ pub use worker_spawn::{
 };
 
 /// Canonical KANBAN_GUIDANCE system-prompt block injected into worker
-/// prompts when `HERMES_KANBAN_TASK` is set at process start (D-26).
+/// prompts when `IRONHERMES_KANBAN_TASK` is set at process start (D-26).
 ///
 /// Sourced from upstream `agent/prompt_builder.py` and
 /// `kanban-worker-skill-upstream.md` preamble (Plan 05).
@@ -107,7 +110,8 @@ pub use kanban_guidance::KANBAN_GUIDANCE;
 /// Process-wide mutex serialising all env-mutating unit tests in this binary.
 ///
 /// Every `#[test]` that calls `std::env::set_var` / `remove_var` for
-/// `HERMES_KANBAN_TASK`, `HERMES_KANBAN_BOARD`, or `IRONHERMES_HOME` MUST
+/// `IRONHERMES_KANBAN_TASK`, `IRONHERMES_KANBAN_BOARD`, `HERMES_KANBAN_TASK`,
+/// `HERMES_KANBAN_BOARD`, or `IRONHERMES_HOME` MUST
 /// acquire this lock first:
 ///
 /// ```ignore

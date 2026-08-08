@@ -6,7 +6,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
-use crate::config::SkillsConfig;
+use crate::config::{DefconLevel, SkillsConfig};
 use crate::constants::get_hermes_home;
 
 // =============================================================================
@@ -103,6 +103,12 @@ pub struct SkillConfigField {
 #[serde(default)]
 pub struct HermesMetadata {
     pub requires_toolsets: Vec<String>,
+    /// D-08 (Phase 46 Plan 04): skill is hidden unless ALL listed MCP servers
+    /// are in the live connected-server set (ALL-of semantics, mirrors
+    /// `requires_toolsets`). Populated from `metadata.hermes.requires_mcp_servers`.
+    /// The connected-server set arrives as plain data via `filtered_catalog_text` /
+    /// `skill_passes_filter` — this crate does not import ironhermes-mcp.
+    pub requires_mcp_servers: Vec<String>,
     pub requires_tools: Vec<String>,
     pub fallback_for_toolsets: Vec<String>,
     pub fallback_for_tools: Vec<String>,
@@ -535,9 +541,56 @@ fn extract_raw_name_from_yaml(content: &str) -> Option<String> {
 /// pre-21.8.1-05 inline body.
 fn try_register_skill_from_dir(
     subdir: &std::path::Path,
+    skills_root: &std::path::Path,
+    defcon_level: DefconLevel,
     seen_names: &mut HashSet<String>,
     skills: &mut Vec<SkillRecord>,
 ) {
+    // CR-01 (DEFCON-gated symlink bypass guard): canonicalize the candidate
+    // directory and verify it still lives under the declared search root.
+    // A symlink inside the skills directory could otherwise point outside the
+    // root and receive a trust tier based on its apparent (unrealised) location.
+    //
+    // DEFCON 1–2: hard-reject (skill is not loaded).
+    // DEFCON 3–5: warn-but-load (backward-compatible default).
+    match (subdir.canonicalize(), skills_root.canonicalize()) {
+        (Ok(real_subdir), Ok(real_root)) => {
+            if !real_subdir.starts_with(&real_root) {
+                if defcon_level.at_least_as_strict_as(2) {
+                    warn!(
+                        path = %subdir.display(),
+                        canonical = %real_subdir.display(),
+                        root = %real_root.display(),
+                        defcon = %defcon_level,
+                        "SkillRegistry CR-01: hard-rejecting skill — path escapes skills root (symlink bypass)"
+                    );
+                    return;
+                } else {
+                    warn!(
+                        path = %subdir.display(),
+                        canonical = %real_subdir.display(),
+                        root = %real_root.display(),
+                        defcon = %defcon_level,
+                        "SkillRegistry CR-01: skill path escapes skills root (possible symlink) — warn-but-load at {defcon_level}"
+                    );
+                }
+            }
+        }
+        (Err(e), _) => {
+            // canonicalize failed — path may be a broken symlink; treat as
+            // warn-but-load so a missing symlink target doesn't silently drop
+            // a legitimate skill on most DEFCON levels.
+            warn!(
+                path = %subdir.display(),
+                err = %e,
+                "SkillRegistry CR-01: could not canonicalize skill path — loading anyway"
+            );
+        }
+        (_, Err(_)) => {
+            // Root doesn't canonicalize (unusual). Proceed without CR-01 check.
+        }
+    }
+
     let skill_md_path = subdir.join("SKILL.md");
 
     let content = match std::fs::read_to_string(&skill_md_path) {
@@ -698,7 +751,7 @@ impl SkillRegistry {
         }
 
         let search_paths = build_skill_search_paths(cwd, config);
-        let mut registry = Self::load_with_paths(&search_paths);
+        let mut registry = Self::load_with_paths_defcon(&search_paths, config.defcon_level);
 
         // D-08: recompute trust labels on every load from config.hub.trusted_repos.
         // The primary skills root is get_hermes_home()/skills (where Hub installs
@@ -769,6 +822,16 @@ impl SkillRegistry {
 
     /// Load from explicit search paths (useful for testing).
     pub fn load_with_paths(search_paths: &[PathBuf]) -> Self {
+        Self::load_with_paths_defcon(search_paths, DefconLevel::default())
+    }
+
+    /// Like [`load_with_paths`] but with an explicit DEFCON level for CR-01
+    /// symlink-bypass enforcement.  Called by [`load_with_config`] which has
+    /// access to the user's `SkillsConfig.defcon_level`.
+    pub(crate) fn load_with_paths_defcon(
+        search_paths: &[PathBuf],
+        defcon_level: DefconLevel,
+    ) -> Self {
         let mut seen_names: HashSet<String> = HashSet::new();
         let mut skills: Vec<SkillRecord> = Vec::new();
 
@@ -805,7 +868,13 @@ impl SkillRegistry {
 
                 // Level 1 try: <root>/<dir>/SKILL.md (legacy / one-level)
                 if subdir.join("SKILL.md").exists() {
-                    try_register_skill_from_dir(&subdir, &mut seen_names, &mut skills);
+                    try_register_skill_from_dir(
+                        &subdir,
+                        search_path,
+                        defcon_level,
+                        &mut seen_names,
+                        &mut skills,
+                    );
                 }
 
                 // Level 2 try: <root>/<dir>/<sub>/SKILL.md (Phase 21.8 installer layout)
@@ -840,7 +909,13 @@ impl SkillRegistry {
                         continue;
                     }
                     if inner_subdir.join("SKILL.md").exists() {
-                        try_register_skill_from_dir(&inner_subdir, &mut seen_names, &mut skills);
+                        try_register_skill_from_dir(
+                            &inner_subdir,
+                            search_path,
+                            defcon_level,
+                            &mut seen_names,
+                            &mut skills,
+                        );
                     }
                     // No `else { recurse }`: if there's no SKILL.md at level 2, this entry
                     // is just clutter inside a category dir (notes/, README.md/, etc.).
@@ -867,6 +942,8 @@ impl SkillRegistry {
     /// - `requires_tools`: skill hidden unless ALL listed tools are in `active_tools`
     /// - `fallback_for_toolsets`: skill hidden when ANY listed toolset is in `active_toolsets`
     /// - `fallback_for_tools`: skill hidden when ANY listed tool is in `active_tools`
+    /// - `requires_mcp_servers`: skill hidden unless ALL listed MCP servers are in
+    ///   `connected_mcp_servers` (D-08, Phase 46 Plan 04)
     ///
     /// Skills without hermes metadata are always shown.
     ///
@@ -876,10 +953,13 @@ impl SkillRegistry {
         &self,
         active_toolsets: &std::collections::HashSet<String>,
         active_tools: &std::collections::HashSet<String>,
+        connected_mcp_servers: &std::collections::HashSet<String>,
     ) -> String {
         self.skills
             .iter()
-            .filter(|s| skill_passes_filter(s, active_toolsets, active_tools))
+            .filter(|s| {
+                skill_passes_filter(s, active_toolsets, active_tools, connected_mcp_servers)
+            })
             .map(|s| format!("- {}: {}", s.name, s.description))
             .collect::<Vec<_>>()
             .join("\n")
@@ -983,12 +1063,16 @@ impl SkillRegistry {
 /// - `requires_tools` nonempty → all must be active
 /// - Any `fallback_for_toolsets` entry active → hide
 /// - Any `fallback_for_tools` entry active → hide
+/// - `requires_mcp_servers` nonempty → all must be in `connected_mcp_servers` (D-08)
 ///
 /// D-06: pure function — no env/filesystem access. Takes immutable HashSet refs.
+/// D-08: `connected_mcp_servers` arrives as plain data — this function (and this
+/// crate) does not import ironhermes-mcp, avoiding a crate cycle.
 fn skill_passes_filter(
     record: &SkillRecord,
     active_toolsets: &std::collections::HashSet<String>,
     active_tools: &std::collections::HashSet<String>,
+    connected_mcp_servers: &std::collections::HashSet<String>,
 ) -> bool {
     let meta = match &record.hermes_metadata {
         Some(m) => m,
@@ -1021,6 +1105,14 @@ fn skill_passes_filter(
         .fallback_for_tools
         .iter()
         .any(|t| active_tools.contains(t.as_str()))
+    {
+        return false;
+    }
+    if !meta.requires_mcp_servers.is_empty()
+        && !meta
+            .requires_mcp_servers
+            .iter()
+            .all(|s| connected_mcp_servers.contains(s.as_str()))
     {
         return false;
     }
@@ -2290,7 +2382,8 @@ Body content.
         // active_toolsets=["fs"]: alpha hidden (requires "web"), beta shown
         let active_toolsets: HashSet<String> = ["fs".to_string()].into_iter().collect();
         let active_tools: HashSet<String> = HashSet::new();
-        let catalog = registry.filtered_catalog_text(&active_toolsets, &active_tools);
+        let catalog =
+            registry.filtered_catalog_text(&active_toolsets, &active_tools, &HashSet::new());
         assert!(
             catalog.contains("beta"),
             "beta (no metadata) must appear: {catalog}"
@@ -2303,7 +2396,8 @@ Body content.
         // active_toolsets=["web","fs"]: both shown
         let active_toolsets2: HashSet<String> =
             ["web".to_string(), "fs".to_string()].into_iter().collect();
-        let catalog2 = registry.filtered_catalog_text(&active_toolsets2, &active_tools);
+        let catalog2 =
+            registry.filtered_catalog_text(&active_toolsets2, &active_tools, &HashSet::new());
         assert!(
             catalog2.contains("alpha"),
             "alpha must appear when web is active: {catalog2}"
@@ -2311,6 +2405,77 @@ Body content.
         assert!(
             catalog2.contains("beta"),
             "beta must always appear: {catalog2}"
+        );
+    }
+
+    #[test]
+    fn test_filter_requires_mcp_servers() {
+        // D-08 (Phase 46 Plan 04): a skill requiring one MCP server is hidden
+        // unless connected_mcp_servers contains it; ALL-of semantics for two.
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        make_skill_with_hermes(
+            &skills_dir,
+            "cf-skill",
+            "Cloudflare skill",
+            "    requires_mcp_servers:\n      - cloudflare_bindings",
+        );
+        make_skill_with_hermes(
+            &skills_dir,
+            "dual-mcp-skill",
+            "Dual MCP skill",
+            "    requires_mcp_servers:\n      - cloudflare_bindings\n      - other_server",
+        );
+
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        assert_eq!(registry.list().len(), 2);
+
+        let active_toolsets: HashSet<String> = HashSet::new();
+        let active_tools: HashSet<String> = HashSet::new();
+
+        // Empty connected set → both hidden.
+        let empty_connected: HashSet<String> = HashSet::new();
+        let catalog =
+            registry.filtered_catalog_text(&active_toolsets, &active_tools, &empty_connected);
+        assert!(
+            !catalog.contains("cf-skill"),
+            "cf-skill must be hidden when no MCP servers connected: {catalog}"
+        );
+        assert!(
+            !catalog.contains("dual-mcp-skill"),
+            "dual-mcp-skill must be hidden when no MCP servers connected: {catalog}"
+        );
+
+        // Only cloudflare_bindings connected → cf-skill shown, dual-mcp-skill still hidden (ALL-of).
+        let one_connected: HashSet<String> =
+            ["cloudflare_bindings".to_string()].into_iter().collect();
+        let catalog2 =
+            registry.filtered_catalog_text(&active_toolsets, &active_tools, &one_connected);
+        assert!(
+            catalog2.contains("cf-skill"),
+            "cf-skill must appear when cloudflare_bindings is connected: {catalog2}"
+        );
+        assert!(
+            !catalog2.contains("dual-mcp-skill"),
+            "dual-mcp-skill must stay hidden with only 1/2 required servers connected: {catalog2}"
+        );
+
+        // Both servers connected → both shown (ALL-of satisfied).
+        let both_connected: HashSet<String> = [
+            "cloudflare_bindings".to_string(),
+            "other_server".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let catalog3 =
+            registry.filtered_catalog_text(&active_toolsets, &active_tools, &both_connected);
+        assert!(
+            catalog3.contains("cf-skill"),
+            "cf-skill must still appear: {catalog3}"
+        );
+        assert!(
+            catalog3.contains("dual-mcp-skill"),
+            "dual-mcp-skill must appear when both required servers are connected: {catalog3}"
         );
     }
 
@@ -2332,7 +2497,8 @@ Body content.
         // Only fetch_url active → gamma hidden (not ALL required tools present)
         let active_toolsets: HashSet<String> = HashSet::new();
         let partial_tools: HashSet<String> = ["fetch_url".to_string()].into_iter().collect();
-        let catalog = registry.filtered_catalog_text(&active_toolsets, &partial_tools);
+        let catalog =
+            registry.filtered_catalog_text(&active_toolsets, &partial_tools, &HashSet::new());
         assert!(
             !catalog.contains("gamma"),
             "gamma must be hidden when only 1/2 required tools active: {catalog}"
@@ -2342,7 +2508,8 @@ Body content.
         let full_tools: HashSet<String> = ["fetch_url".to_string(), "parse_html".to_string()]
             .into_iter()
             .collect();
-        let catalog2 = registry.filtered_catalog_text(&active_toolsets, &full_tools);
+        let catalog2 =
+            registry.filtered_catalog_text(&active_toolsets, &full_tools, &HashSet::new());
         assert!(
             catalog2.contains("gamma"),
             "gamma must appear when all required tools active: {catalog2}"
@@ -2367,7 +2534,8 @@ Body content.
         // playwright active → fallback-web hidden
         let with_playwright: HashSet<String> = ["playwright".to_string()].into_iter().collect();
         let active_tools: HashSet<String> = HashSet::new();
-        let catalog = registry.filtered_catalog_text(&with_playwright, &active_tools);
+        let catalog =
+            registry.filtered_catalog_text(&with_playwright, &active_tools, &HashSet::new());
         assert!(
             !catalog.contains("fallback-web"),
             "fallback-web must be hidden when playwright is active: {catalog}"
@@ -2375,7 +2543,8 @@ Body content.
 
         // playwright NOT active → fallback-web shown
         let no_playwright: HashSet<String> = HashSet::new();
-        let catalog2 = registry.filtered_catalog_text(&no_playwright, &active_tools);
+        let catalog2 =
+            registry.filtered_catalog_text(&no_playwright, &active_tools, &HashSet::new());
         assert!(
             catalog2.contains("fallback-web"),
             "fallback-web must appear when playwright is not active: {catalog2}"
@@ -2399,7 +2568,7 @@ Body content.
         // playwright_nav active → hidden
         let active_toolsets: HashSet<String> = HashSet::new();
         let with_nav: HashSet<String> = ["playwright_nav".to_string()].into_iter().collect();
-        let catalog = registry.filtered_catalog_text(&active_toolsets, &with_nav);
+        let catalog = registry.filtered_catalog_text(&active_toolsets, &with_nav, &HashSet::new());
         assert!(
             !catalog.contains("fallback-tool"),
             "fallback-tool must be hidden when playwright_nav is active: {catalog}"
@@ -2407,7 +2576,7 @@ Body content.
 
         // playwright_nav NOT active → shown
         let no_nav: HashSet<String> = HashSet::new();
-        let catalog2 = registry.filtered_catalog_text(&active_toolsets, &no_nav);
+        let catalog2 = registry.filtered_catalog_text(&active_toolsets, &no_nav, &HashSet::new());
         assert!(
             catalog2.contains("fallback-tool"),
             "fallback-tool must appear when playwright_nav is not active: {catalog2}"
@@ -2433,7 +2602,8 @@ Body content.
         // Even with completely empty active sets, no-metadata skill always appears
         let empty_toolsets: HashSet<String> = HashSet::new();
         let empty_tools: HashSet<String> = HashSet::new();
-        let catalog = registry.filtered_catalog_text(&empty_toolsets, &empty_tools);
+        let catalog =
+            registry.filtered_catalog_text(&empty_toolsets, &empty_tools, &HashSet::new());
         assert!(
             catalog.contains("bare"),
             "skill with no hermes_metadata must always appear: {catalog}"
@@ -2443,7 +2613,7 @@ Body content.
         let some_toolsets: HashSet<String> =
             ["web".to_string(), "fs".to_string()].into_iter().collect();
         let some_tools: HashSet<String> = ["fetch_url".to_string()].into_iter().collect();
-        let catalog2 = registry.filtered_catalog_text(&some_toolsets, &some_tools);
+        let catalog2 = registry.filtered_catalog_text(&some_toolsets, &some_tools, &HashSet::new());
         assert!(
             catalog2.contains("bare"),
             "skill with no hermes_metadata must appear regardless of active sets: {catalog2}"
@@ -2472,7 +2642,8 @@ Body content.
 
         let active_toolsets: HashSet<String> = HashSet::new();
         let active_tools: HashSet<String> = HashSet::new();
-        let _catalog = registry.filtered_catalog_text(&active_toolsets, &active_tools);
+        let _catalog =
+            registry.filtered_catalog_text(&active_toolsets, &active_tools, &HashSet::new());
 
         assert!(
             std::env::var_os(sentinel).is_none(),
@@ -3374,5 +3545,151 @@ mod skills_filter {
         // D-05: category is intentionally excluded from search scope
         // A query matching only the hypothetical category must NOT match
         assert!(!search_matches("Foo", "Bar", "bundled"));
+    }
+    // ==========================================================================
+    // CR-01: DefconLevel + symlink-bypass guard tests
+    // ==========================================================================
+
+    #[test]
+    fn defcon_level_default_is_five() {
+        use crate::config::DefconLevel;
+        assert_eq!(DefconLevel::default().level(), 5);
+    }
+
+    #[test]
+    fn defcon_level_at_least_as_strict_as() {
+        use crate::config::DefconLevel;
+        let defcon2 = DefconLevel::try_from(2).unwrap();
+        let defcon5 = DefconLevel::try_from(5).unwrap();
+        // DEFCON 2 is stricter than threshold 2 (equal counts)
+        assert!(defcon2.at_least_as_strict_as(2));
+        // DEFCON 2 is stricter than threshold 3 (lower number = stricter)
+        assert!(defcon2.at_least_as_strict_as(3));
+        // DEFCON 5 is NOT stricter than threshold 2
+        assert!(!defcon5.at_least_as_strict_as(2));
+    }
+
+    #[test]
+    fn defcon_level_rejects_out_of_range() {
+        use crate::config::DefconLevel;
+        assert!(DefconLevel::try_from(0).is_err());
+        assert!(DefconLevel::try_from(6).is_err());
+        assert!(DefconLevel::try_from(255).is_err());
+    }
+
+    #[test]
+    fn defcon_level_accepts_valid_range() {
+        use crate::config::DefconLevel;
+        for n in 1u8..=5 {
+            let d = DefconLevel::try_from(n).unwrap();
+            assert_eq!(d.level(), n);
+        }
+    }
+
+    #[test]
+    fn cr01_legitimate_skill_loads_at_defcon1() {
+        // A real skill file under the search root must load even at DEFCON 1.
+        use crate::config::DefconLevel;
+        use std::io::Write;
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join("my-skill");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let mut f = std::fs::File::create(skill_dir.join("SKILL.md")).unwrap();
+        write!(
+            f,
+            "---
+name: my-skill
+description: test skill
+---
+Body.
+"
+        )
+        .unwrap();
+
+        let strict = DefconLevel::try_from(1).unwrap();
+        let registry = SkillRegistry::load_with_paths_defcon(&[dir.path().to_path_buf()], strict);
+        assert!(
+            registry.find("my-skill").is_some(),
+            "legitimate skill must load even at DEFCON 1"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cr01_symlink_escape_hard_rejected_at_defcon1() {
+        // A symlink inside the skills root that points outside is rejected at DEFCON 1.
+        use crate::config::DefconLevel;
+        use std::io::Write;
+
+        // Build the "outside" skill directory (real content lives here).
+        let outside = tempfile::tempdir().unwrap();
+        let outside_skill_dir = outside.path().join("evil-skill");
+        std::fs::create_dir_all(&outside_skill_dir).unwrap();
+        let mut f = std::fs::File::create(outside_skill_dir.join("SKILL.md")).unwrap();
+        write!(
+            f,
+            "---
+name: evil-skill
+description: should be blocked
+---
+Body.
+"
+        )
+        .unwrap();
+
+        // Build the skills root and create a symlink pointing outside.
+        let skills_root = tempfile::tempdir().unwrap();
+        let symlink_path = skills_root.path().join("evil-skill");
+        std::os::unix::fs::symlink(&outside_skill_dir, &symlink_path).unwrap();
+
+        let strict = DefconLevel::try_from(1).unwrap();
+        let registry =
+            SkillRegistry::load_with_paths_defcon(&[skills_root.path().to_path_buf()], strict);
+        assert!(
+            registry.find("evil-skill").is_none(),
+            "symlink-escaped skill must be hard-rejected at DEFCON 1"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cr01_symlink_escape_warn_but_load_at_defcon5() {
+        // Same symlink escape, but at DEFCON 5 (default) it warns-but-loads.
+        use crate::config::DefconLevel;
+        use std::io::Write;
+
+        let outside = tempfile::tempdir().unwrap();
+        let outside_skill_dir = outside.path().join("ok-skill");
+        std::fs::create_dir_all(&outside_skill_dir).unwrap();
+        let mut f = std::fs::File::create(outside_skill_dir.join("SKILL.md")).unwrap();
+        write!(
+            f,
+            "---
+name: ok-skill
+description: permissive load
+---
+Body.
+"
+        )
+        .unwrap();
+
+        let skills_root = tempfile::tempdir().unwrap();
+        let symlink_path = skills_root.path().join("ok-skill");
+        std::os::unix::fs::symlink(&outside_skill_dir, &symlink_path).unwrap();
+
+        let permissive = DefconLevel::try_from(5).unwrap();
+        let registry =
+            SkillRegistry::load_with_paths_defcon(&[skills_root.path().to_path_buf()], permissive);
+        assert!(
+            registry.find("ok-skill").is_some(),
+            "symlink-escaped skill must warn-but-load at DEFCON 5"
+        );
+    }
+
+    #[test]
+    fn skills_config_default_defcon_is_five() {
+        use crate::config::SkillsConfig;
+        let cfg = SkillsConfig::default();
+        assert_eq!(cfg.defcon_level.level(), 5);
     }
 }

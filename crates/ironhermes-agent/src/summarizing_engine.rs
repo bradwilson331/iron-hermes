@@ -329,6 +329,18 @@ impl ContextEngine for SummarizingEngine {
         // LLM after `?` propagates an error.
         let snapshot = messages.clone();
 
+        // Phase 47.5 (D-05): the protected front is conversation SCAFFOLDING
+        // (the leading system-message run) only — cap the configured value
+        // against `system_prefix_len` BEFORE the tool-pair auto-shrink below
+        // ever sees it, so the first user/assistant pair is never pinned
+        // here either. This mirrors the role-aware floor `ContextCompressor`
+        // now applies internally (Task 2); without this hand-off,
+        // `effective_first_n`/`prune_start` below would stay derived from
+        // the raw `self.protect_first_n` and messages 1..protect_first_n
+        // would remain pinned in this engine even after the compressor fix.
+        let front_cap = crate::context_compressor::ContextCompressor::system_prefix_len(messages)
+            .min(self.protect_first_n);
+
         // Phase 18 Plan 11 fix: when an asst(tool_use) message is pinned by
         // `protect_first_n` but ≥1 of its tool_results lies OUTSIDE the
         // front-protected region, shrink the effective protect_first_n to
@@ -342,15 +354,21 @@ impl ContextEngine for SummarizingEngine {
         //
         // Safety-over-recovery: effective value is MONOTONIC downward —
         // never grows above configured. Operator intent is an upper bound.
+        // The shrink is monotonic downward from `front_cap` itself (rather
+        // than from `self.protect_first_n`): since no tool pair's assistant
+        // can ever sit inside a system-only prefix, this can only shrink
+        // further, never re-grow past the role-aware cap, so the system
+        // prompt can never be shrunk away.
         let detected_pairs_early = tool_pair::detect_tool_pairs(messages);
         let effective_first_n = tool_pair::compute_effective_protect_first_n(
             messages,
-            self.protect_first_n,
+            front_cap,
             &detected_pairs_early,
         );
-        if effective_first_n != self.protect_first_n {
+        if effective_first_n != front_cap {
             tracing::info!(
                 configured_protect_first_n = self.protect_first_n,
+                front_cap,
                 effective_protect_first_n = effective_first_n,
                 reason = "tool_pair_front_boundary_autoshrink",
                 "summarizing_engine: effective_protect_first_n shrunk"
@@ -399,8 +417,12 @@ impl ContextEngine for SummarizingEngine {
                 .map(|s| s.trim_start_matches('\n').to_string())
         });
 
-        // Determine prune range [protect_first_n .. protect_start], excluding
-        // the pinned history segment (D-19).
+        // Determine prune range [effective_first_n .. protect_start], excluding
+        // the pinned history segment (D-19). Phase 47.5 (D-05): effective_first_n
+        // is now derived from front_cap (system-run length capped by the
+        // configured value) rather than the raw configured count, so this
+        // range's start is conversation-scaffolding-aware, not a literal
+        // message-count pin.
         if protect_start <= effective_first_n {
             tracing::info!(
                 protect_start,
@@ -423,11 +445,18 @@ impl ContextEngine for SummarizingEngine {
         //       prune_end BACK to `assistant_idx` so both sides stay live.
         //
         //   (b) FRONT-STRADDLE: assistant is BEFORE prune_start (inside the
-        //       front-protected `protect_first_n` region), and one or more
-        //       tool_results are inside prune range. We must push prune_start
-        //       FORWARD past `max(tool_result_idx) + 1` so the whole pair
-        //       stays in the front-protected region — otherwise we'd prune
-        //       tool_results whose assistant cannot be removed, orphaning them.
+        //       front-protected region — Phase 47.5: the leading
+        //       system-message run, capped by `protect_first_n`), and one or
+        //       more tool_results are inside prune range. We must push
+        //       prune_start FORWARD past `max(tool_result_idx) + 1` so the
+        //       whole pair stays in the front-protected region — otherwise
+        //       we'd prune tool_results whose assistant cannot be removed,
+        //       orphaning them. Since no tool-calling assistant message is
+        //       ever `Role::System`, this direction is now structurally rare
+        //       (an assistant message can only be "before prune_start" when
+        //       the leading system run is long enough to extend past it) but
+        //       the guard stays in place for defensive correctness at any
+        //       configured cap.
         //
         // Post-fix invariant: `prune_start` only increases, `prune_end` only
         // decreases. This is why we compute adjustments then apply the
@@ -741,9 +770,16 @@ mod tests {
 
     #[tokio::test]
     async fn history_segment_pin() {
+        // Phase 47.5 (D-05): the pin index is now the leading system-message
+        // run's length (capped by protect_first_n), not a literal message
+        // count. Prepend a single leading system message so the fixture
+        // demonstrates the fix directly: the summary lands right after the
+        // REAL system prompt (index 1), not after 3 messages that used to
+        // include conversation content by raw index.
         let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary body".into())]);
         let engine = SummarizingEngine::new(1000, 0.5, mock);
-        let mut msgs = build_large(30);
+        let mut msgs = vec![ChatMessage::system("You are Hermes.")];
+        msgs.extend(build_large(30));
         let _ = engine
             .compress(&mut msgs, make_stats())
             .await
@@ -763,7 +799,64 @@ mod tests {
             .collect();
 
         assert_eq!(hits.len(), 1, "exactly one pinned history segment");
-        assert_eq!(hits[0], 3, "pinned at protect_first_n index");
+        assert_eq!(
+            hits[0], 1,
+            "pinned at the system-run length (1 leading system message), not the raw protect_first_n count (3)"
+        );
+    }
+
+    /// Review finding 7: `summarizing_engine.rs`'s summary-insertion pin
+    /// index (`effective_first_n.min(new_messages.len())`) moves from ~3 to
+    /// the system-run length under the Phase 47.5 role-aware front. Assert
+    /// the RELATION (not a hard-coded index) so this stays true regardless
+    /// of how long the leading system run is: the `[CONTEXT HISTORY]` block
+    /// always lands strictly AFTER the original system prompt and strictly
+    /// BEFORE the first surviving conversation message.
+    #[tokio::test]
+    async fn summary_never_precedes_system_prompt() {
+        let (mock, _) = MockSummarizer::new(vec![Ok("Mock summary body".into())]);
+        let engine = SummarizingEngine::new(1000, 0.5, mock);
+        let mut msgs = vec![ChatMessage::system("ORIGINAL system prompt")];
+        msgs.extend(build_large(30));
+        msgs.push(ChatMessage::user("current question marker"));
+
+        let _ = engine
+            .compress(&mut msgs, make_stats())
+            .await
+            .expect("compress ok");
+
+        // (a) The original system prompt is still at index 0, unchanged.
+        assert_eq!(
+            msgs[0].role,
+            Role::System,
+            "system prompt must survive at index 0"
+        );
+        assert_eq!(
+            msgs[0].content_text(),
+            Some("ORIGINAL system prompt"),
+            "system prompt content must be unchanged at index 0"
+        );
+
+        // (b) The pinned [CONTEXT HISTORY] block's index is strictly greater
+        // than 0 (after the system prompt) and strictly less than the index
+        // of the first surviving conversation message.
+        let pin_idx = msgs
+            .iter()
+            .position(|m| m.name.as_deref() == Some(HISTORY_NAME))
+            .expect("pinned history segment must exist");
+        assert!(
+            pin_idx > 0,
+            "summary must not precede the system prompt, got index {pin_idx}"
+        );
+
+        let first_conversation_idx = msgs
+            .iter()
+            .position(|m| m.role != Role::System)
+            .expect("at least one surviving conversation message");
+        assert!(
+            pin_idx < first_conversation_idx,
+            "summary (idx {pin_idx}) must precede the first surviving conversation message (idx {first_conversation_idx})"
+        );
     }
 
     #[tokio::test]
@@ -1522,17 +1615,29 @@ mod tests {
     async fn compress_noop_when_only_pair_fills_entire_prunable_range() {
         // Edge case: the only prunable content IS a pair. After the atomicity
         // guard pulls prune_end back to before the assistant, prune_end ==
-        // prune_start (protect_first_n=3 == assistant_idx=3) → collapsed range
+        // prune_start (front_cap=3 == assistant_idx=3) → collapsed range
         // no-op. compress returns Ok(default()) without error.
+        //
+        // Phase 47.5 (D-05): under the role-aware front, `protect_first_n=3`
+        // only pins the leading system-message RUN, capped at 3 — a raw
+        // [system, user, assistant] shape no longer front-pins anything past
+        // index 1 (system_prefix_len=1), so "u" and "a" become ordinary
+        // prunable content and this fixture stops reproducing the collapse.
+        // Use THREE leading system messages instead so system_prefix_len==3
+        // matches the configured cap exactly, keeping every downstream index
+        // (assistant at 3, tool_result at 4, literal `3` boundary calls)
+        // unchanged and preserving the test's original atomicity-collapse
+        // intent.
         let (mock, _) = MockSummarizer::new(vec![Ok("Should not be called".into())]);
         let ctx_len = 500;
         let protect_last = 100;
         let engine = SummarizingEngine::new(ctx_len, 0.001, mock).with_protect(3, protect_last);
-        // Minimal list: system, user, asst, [pair at index 3-4], tail filler.
+        // Minimal list: 3 leading system messages (front_cap==3), [pair at
+        // index 3-4], tail filler.
         let mut msgs = vec![
-            ChatMessage::system("sys"),
-            ChatMessage::user("u"),
-            ChatMessage::assistant("a"),
+            ChatMessage::system("sys0"),
+            ChatMessage::system("sys1"),
+            ChatMessage::system("sys2"),
             ChatMessage::assistant_tool_calls(vec![ToolCall {
                 id: "only".into(),
                 call_type: "function".into(),

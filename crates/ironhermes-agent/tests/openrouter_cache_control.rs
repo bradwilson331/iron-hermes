@@ -2,9 +2,10 @@
 //! `cache_control` attachment on the `AnyClient::ChatCompletions` arm.
 //!
 //! Validates the provider+model gating predicate `is_openrouter_claude` and the
-//! request-body builder that attaches `cache_control` markers using the same
-//! `{ type: "ephemeral", ttl: "5m" | "1h" }` envelope as native Anthropic
-//! (Assumption A1 — verified against OpenRouter docs 2026-05-25).
+//! request-body builder that attaches `cache_control` markers. The OpenRouter
+//! envelope is the plain `{ type: "ephemeral" }` form — WITHOUT `ttl` — because
+//! OpenRouter routes Claude across upstreams (incl. Amazon Bedrock) that reject
+//! the `ttl` field. The native Anthropic-direct path keeps `ttl` (Plan 05).
 //!
 //! Three matrix slots verified:
 //!   (a) openrouter + claude        → markers attached
@@ -103,9 +104,9 @@ fn is_openrouter_claude_false_for_unrelated_models_on_openrouter() {
 // =============================================================================
 
 #[test]
-fn openrouter_claude_request_attaches_four_cache_control_markers_with_one_hour_ttl() {
+fn openrouter_claude_request_attaches_four_cache_control_markers_without_ttl() {
     let messages = synthetic_conversation(4); // system + 4 non-system → 5 total
-    let cfg = PromptCachingConfig::default(); // enabled=true, ttl=OneHour
+    let cfg = PromptCachingConfig::default(); // enabled=true, ttl=OneHour (ignored on this path)
     let request = build_openrouter_chat_request_for_test(
         "openrouter",
         "anthropic/claude-opus-4-7",
@@ -118,12 +119,20 @@ fn openrouter_claude_request_attaches_four_cache_control_markers_with_one_hour_t
         marker_count, 4,
         "system_and_3 strategy must attach exactly 4 cache_control markers (1 system + 3 messages); got {marker_count}.\nJSON: {json}"
     );
+    // The OpenRouter envelope omits `ttl` (Amazon Bedrock — one of OpenRouter's
+    // upstreams — rejects it). Even with ttl=OneHour configured, the wire form is
+    // the plain ephemeral envelope, and NO `ttl` token may appear anywhere.
     let envelope_count = json
-        .matches("\"cache_control\":{\"type\":\"ephemeral\",\"ttl\":\"1h\"}")
+        .matches("\"cache_control\":{\"type\":\"ephemeral\"}")
         .count();
     assert_eq!(
         envelope_count, 4,
-        "all 4 markers must use the Anthropic-identical envelope {{ type: ephemeral, ttl: 1h }}; got {envelope_count}.\nJSON: {json}"
+        "all 4 markers must use the Bedrock-safe envelope {{ type: ephemeral }} (no ttl); got {envelope_count}.\nJSON: {json}"
+    );
+    assert_eq!(
+        json.matches("\"ttl\"").count(),
+        0,
+        "the OpenRouter cache_control envelope must NOT serialize a ttl field.\nJSON: {json}"
     );
 }
 
@@ -193,30 +202,36 @@ fn openrouter_claude_request_with_caching_disabled_attaches_zero_markers() {
 }
 
 // =============================================================================
-// Test 9: 5m TTL — markers carry "5m" ttl string
+// Test 9: ttl config never leaks into the OpenRouter envelope (Bedrock-safe)
 // =============================================================================
 
 #[test]
-fn openrouter_claude_request_with_five_minute_ttl_serializes_correctly() {
-    let messages = synthetic_conversation(4);
-    let cfg = PromptCachingConfig {
-        ttl: CacheTtl::FiveMinutes,
-        enabled: true,
-    };
-    let request = build_openrouter_chat_request_for_test(
-        "openrouter",
-        "anthropic/claude-opus-4-7",
-        &messages,
-        &cfg,
-    );
-    let json = serialize_openrouter_request_for_test(&request).expect("serialize");
-    let envelope_count = json
-        .matches("\"cache_control\":{\"type\":\"ephemeral\",\"ttl\":\"5m\"}")
-        .count();
-    assert_eq!(
-        envelope_count, 4,
-        "all 4 markers must carry ttl=5m when config selects FiveMinutes.\nJSON: {json}"
-    );
+fn openrouter_claude_request_omits_ttl_regardless_of_config() {
+    // Even when the operator selects an explicit ttl, the OpenRouter path must
+    // NOT serialize it — Amazon Bedrock (an OpenRouter upstream for Claude)
+    // rejects `cache_control.ephemeral.ttl`. Markers still attach; ttl is dropped.
+    for ttl in [CacheTtl::FiveMinutes, CacheTtl::OneHour] {
+        let messages = synthetic_conversation(4);
+        let cfg = PromptCachingConfig { ttl, enabled: true };
+        let request = build_openrouter_chat_request_for_test(
+            "openrouter",
+            "anthropic/claude-opus-4-7",
+            &messages,
+            &cfg,
+        );
+        let json = serialize_openrouter_request_for_test(&request).expect("serialize");
+        assert_eq!(
+            json.matches("\"cache_control\":{\"type\":\"ephemeral\"}")
+                .count(),
+            4,
+            "all 4 markers must be the plain ephemeral envelope regardless of configured ttl.\nJSON: {json}"
+        );
+        assert_eq!(
+            json.matches("\"ttl\"").count(),
+            0,
+            "no ttl field may be serialized on the OpenRouter path.\nJSON: {json}"
+        );
+    }
 }
 
 // =============================================================================

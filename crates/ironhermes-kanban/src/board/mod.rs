@@ -28,7 +28,7 @@ pub struct BoardContext {
 pub enum BoardSource {
     /// Explicit `--board <slug>` CLI flag (tier 1).
     Flag,
-    /// `HERMES_KANBAN_BOARD` environment variable (tier 2).
+    /// `IRONHERMES_KANBAN_BOARD` environment variable (tier 2).
     Env,
     /// `~/.ironhermes/kanban/current` file (tier 3).
     File,

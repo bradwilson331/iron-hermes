@@ -74,6 +74,29 @@ fn job_to_json(job: &ironhermes_cron::CronJob) -> Value {
 }
 
 // ---------------------------------------------------------------------------
+// Validation
+// ---------------------------------------------------------------------------
+
+/// A tool (e.g. `web_search`) is enabled via toolsets, not loaded as skill
+/// content. Listing one in `skills[]` resolves to nothing at tick time and
+/// used to inject a misleading "skill was skipped" banner into the job prompt.
+/// Returns an error message (for the JSON response) when any skill name is
+/// actually a built-in tool, else `None`.
+fn reject_tool_names_in_skills(skills: &[String]) -> Option<String> {
+    let offenders = crate::tool_names_among(skills);
+    if offenders.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} {} a tool, not a skill — tools are already available to cron jobs via toolsets. \
+         Remove {} from 'skills'.",
+        offenders.join(", "),
+        if offenders.len() == 1 { "is" } else { "are" },
+        if offenders.len() == 1 { "it" } else { "them" },
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Action handlers
 // ---------------------------------------------------------------------------
 
@@ -152,6 +175,11 @@ fn handle_create(store: &mut JobStore, args: &Value) -> Value {
                 .collect()
         })
         .unwrap_or_default();
+
+    // A1: a tool name is not a skill — reject before persisting.
+    if let Some(msg) = reject_tool_names_in_skills(&skills) {
+        return json!({"status": "error", "message": msg});
+    }
 
     match store.add_job(
         name,
@@ -236,6 +264,13 @@ fn handle_update(store: &mut JobStore, args: &Value) -> Value {
             .filter_map(|v| v.as_str().map(|s| s.to_string()))
             .collect()
     });
+
+    // A1: a tool name is not a skill — reject before persisting.
+    if let Some(ref s) = skills
+        && let Some(msg) = reject_tool_names_in_skills(s)
+    {
+        return json!({"status": "error", "message": msg});
+    }
 
     let updates = JobUpdate {
         name: args
@@ -386,7 +421,7 @@ impl Tool for CronjobTool {
                     "skills": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "List of skill names to load when the job runs."
+                        "description": "List of SKILL names to load when the job runs. These are skills (SKILL.md bundles), NOT tools — do not pass tool names like 'web_search' here (tools such as web search are already available via toolsets; listing one as a skill is rejected)."
                     }
                 },
                 "required": ["action"]
@@ -482,6 +517,31 @@ mod tests {
         let v = parse_response(&result);
         assert_eq!(v["status"], "created");
         assert_eq!(v["job"]["skills"], json!(["focus"]));
+    }
+
+    #[tokio::test]
+    async fn test_create_rejects_tool_name_in_skills() {
+        let (tool, _dir) = make_tool();
+        let result = tool
+            .execute(json!({
+                "action": "create",
+                "name": "bad-skill-job",
+                "schedule": "every 2h",
+                "prompt": "do stuff",
+                "skills": ["web_search"]
+            }))
+            .await
+            .unwrap();
+        let v = parse_response(&result);
+        assert_eq!(v["status"], "error");
+        assert!(
+            v["message"].as_str().unwrap().contains("web_search"),
+            "error must name the offending tool, got: {}",
+            v["message"]
+        );
+        // And nothing was persisted.
+        let list = parse_response(&tool.execute(json!({"action": "list"})).await.unwrap());
+        assert_eq!(list["count"], 0);
     }
 
     #[tokio::test]
@@ -629,6 +689,28 @@ mod tests {
         let v = parse_response(&result);
         assert_eq!(v["status"], "updated");
         assert_eq!(v["job"]["skills"], json!(["writing"]));
+    }
+
+    #[tokio::test]
+    async fn test_update_rejects_tool_name_in_skills() {
+        let (tool, _dir) = make_tool();
+        let created = parse_response(
+            &tool
+                .execute(
+                    json!({"action": "create", "name": "j", "schedule": "every 1h", "prompt": "p"}),
+                )
+                .await
+                .unwrap(),
+        );
+        let job_id = created["job"]["id"].as_str().unwrap().to_string();
+
+        let result = tool
+            .execute(json!({"action": "update", "job_id": job_id, "skills": ["web_search"]}))
+            .await
+            .unwrap();
+        let v = parse_response(&result);
+        assert_eq!(v["status"], "error");
+        assert!(v["message"].as_str().unwrap().contains("web_search"));
     }
 
     #[tokio::test]

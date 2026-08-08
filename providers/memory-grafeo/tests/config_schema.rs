@@ -33,7 +33,7 @@ fn grafeo_provider_config_schema_shape() {
     assert!(graph_dir.env_var.is_none());
     assert_eq!(
         graph_dir.default,
-        Some(serde_json::json!("$HERMES_HOME/grafeo")),
+        Some(serde_json::json!("$IRONHERMES_HOME/grafeo")),
     );
 }
 

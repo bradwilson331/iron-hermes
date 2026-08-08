@@ -34,7 +34,7 @@ fn env_lock() -> &'static std::sync::Mutex<()> {
 #[test]
 fn cli_parses_pricing_list_subcommand() {
     // Behavior 1: `hermes pricing list` is a recognized subcommand and runs cleanly
-    // against an empty $HERMES_HOME (no cache file).
+    // against an empty $IRONHERMES_HOME (no cache file).
     let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
     let tmp = TempDir::new().unwrap();
     Command::cargo_bin("ironhermes")

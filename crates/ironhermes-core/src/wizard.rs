@@ -130,7 +130,7 @@ pub fn apply_memory_provider_answer(
     Ok(())
 }
 
-/// Resolve a HERMES_HOME path answer. Empty input returns the default.
+/// Resolve a IRONHERMES_HOME path answer. Empty input returns the default.
 /// Path normalization (~ expansion, abs-path) is the caller's job.
 pub fn apply_hermes_home_answer(raw_input: &str, default: &str) -> String {
     let trimmed = raw_input.trim();

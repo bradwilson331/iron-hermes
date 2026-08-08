@@ -17,6 +17,7 @@
 use std::path::PathBuf;
 use tempfile::TempDir;
 
+use ironhermes_kanban::schema::SCHEMA_VERSION;
 use ironhermes_kanban::store::KanbanStore;
 use rusqlite::Connection;
 
@@ -53,7 +54,7 @@ fn open_store(dir: &TempDir) -> KanbanStore {
 }
 
 /// Fresh DB path: DDL block at schema.rs must include the three goal-mode columns,
-/// schema_version row lands at 3 (current SCHEMA_VERSION after Phase 36.3.7.13 v3 bump).
+/// schema_version row lands at the current SCHEMA_VERSION (4 as of Phase 46.4).
 #[test]
 fn fresh_db_has_v2_columns() {
     let dir = tempfile::tempdir().unwrap();
@@ -96,17 +97,17 @@ fn fresh_db_has_v2_columns() {
         "goal_turns_used DEFAULT must be 0"
     );
 
-    // schema_version row is at 2.
+    // schema_version row lands at the current SCHEMA_VERSION.
     let version: i64 = store
         .conn
         .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
             r.get(0)
         })
         .expect("read schema_version");
-    // Phase 36.3.7.13: schema is now at v3; fresh DBs land at 3.
+    // Phase 46.4: schema is now at v4; fresh DBs land at SCHEMA_VERSION.
     assert_eq!(
-        version, 3,
-        "fresh DB must land at schema_version 3 (current SCHEMA_VERSION)"
+        version, SCHEMA_VERSION,
+        "fresh DB must land at current SCHEMA_VERSION"
     );
 }
 
@@ -185,6 +186,12 @@ fn v1_db_upgrades_to_v2() {
         "v1 → v3 full migration must add goal_toolset column; actual columns: {:?}",
         names
     );
+    // Phase 46.4: v3→v4 ladder also runs, adding output_path.
+    assert!(
+        names.contains(&"output_path"),
+        "v1 → v4 full migration must add output_path column; actual columns: {:?}",
+        names
+    );
 
     let version: i64 = store
         .conn
@@ -192,10 +199,10 @@ fn v1_db_upgrades_to_v2() {
             r.get(0)
         })
         .expect("read schema_version after migration");
-    // Phase 36.3.7.13: both v1→v2 and v2→v3 ladders run; final version is 3.
+    // Phase 46.4: v1→v2→v3→v4 ladders all run; final version is SCHEMA_VERSION.
     assert_eq!(
-        version, 3,
-        "schema_version row must be bumped to 3 after full migration (v1→v2→v3)"
+        version, SCHEMA_VERSION,
+        "schema_version row must be bumped to current SCHEMA_VERSION after full migration"
     );
 }
 
@@ -223,10 +230,14 @@ fn migration_is_idempotent() {
             r.get(0)
         })
         .expect("read schema_version on second open");
-    // Phase 36.3.7.13: schema is now at v3.
-    assert_eq!(version, 3, "schema_version must remain 3 on re-open");
+    // Phase 46.4: schema is now at v4.
+    assert_eq!(
+        version, SCHEMA_VERSION,
+        "schema_version must remain at current SCHEMA_VERSION on re-open"
+    );
 
-    // All goal-mode columns (v2) and goal_toolset (v3) are still present after the second open.
+    // All goal-mode columns (v2), goal_toolset (v3), and output_path (v4) are
+    // still present after the second open.
     let cols = read_tasks_columns(&store.conn);
     let names: Vec<&str> = cols.iter().map(|c| c.name.as_str()).collect();
     for col in &[
@@ -234,6 +245,7 @@ fn migration_is_idempotent() {
         "goal_max_turns",
         "goal_turns_used",
         "goal_toolset",
+        "output_path",
     ] {
         assert!(
             names.contains(col),

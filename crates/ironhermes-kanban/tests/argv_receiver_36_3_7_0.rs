@@ -46,6 +46,8 @@ fn fake_task(id: &str, assignee: &str) -> Task {
         goal_turns_used: 0,
         // Phase 36.3.7.13 D-B1: no toolset preset by default.
         goal_toolset: None,
+        // Phase 46.4 D-10: no output_path set by default.
+        output_path: None,
     }
 }
 
@@ -157,11 +159,11 @@ fn ironhermes_binary_accepts_constructed_argv() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: build_kanban_worker_env emits HERMES_KANBAN_TASK_SKILLS correctly
+// Test 3: build_kanban_worker_env emits IRONHERMES_KANBAN_TASK_SKILLS + legacy twin correctly
 // ---------------------------------------------------------------------------
 
 /// INV-36.3.7.0-03a: When `task.skills` is `Some` containing a non-empty
-/// JSON array, `build_kanban_worker_env` must emit `HERMES_KANBAN_TASK_SKILLS`
+/// JSON array, `build_kanban_worker_env` must emit `IRONHERMES_KANBAN_TASK_SKILLS` (and legacy twin)
 /// with the original JSON string verbatim.
 #[test]
 fn build_kanban_worker_env_emits_skills_env_when_task_has_extras() {

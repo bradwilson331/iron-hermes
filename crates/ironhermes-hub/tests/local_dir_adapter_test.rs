@@ -19,7 +19,7 @@ use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ────────────────────────────────────────────────────────────────────────────
-// Env guard — HERMES_HOME and any other process-global env vars mutated by
+// Env guard — IRONHERMES_HOME and any other process-global env vars mutated by
 // these tests must be serialized to avoid races under `cargo test --jobs N`.
 // Pattern: skills_sh_blob_adapter.rs:33-71.
 // ────────────────────────────────────────────────────────────────────────────
@@ -126,7 +126,7 @@ fn write_skill_dir(dir: &Path, files: &[(&str, &[u8])]) -> std::io::Result<()> {
 const VALID_SKILL_MD: &[u8] =
     b"---\nname: my-skill\nversion: 0.1.0\ncategory: test\n---\n\n# My Skill\nDoes things.\n";
 
-/// Build a hermes_home tempdir, set HERMES_HOME, create skills_root, return both.
+/// Build a hermes_home tempdir, set IRONHERMES_HOME, create skills_root, return both.
 fn make_hermes_home() -> (tempfile::TempDir, std::path::PathBuf) {
     let hermes_home = tempfile::tempdir().unwrap();
     let skills_root = hermes_home.path().join("skills");
@@ -159,7 +159,10 @@ async fn local_dir_tilde_expansion() {
     let canonical = std::fs::canonicalize(&skill_src).unwrap();
     let canonical_str = canonical.to_string_lossy().into_owned();
 
-    let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
+    let _env = EnvGuard::new(&[(
+        "IRONHERMES_HOME",
+        Some(hermes_home.path().to_str().unwrap()),
+    )]);
     let scanner = AlwaysCleanScanner;
     let src = LocalDirSource;
 
@@ -202,7 +205,10 @@ async fn local_dir_relative_path() {
     let canonical = std::fs::canonicalize(&skill_src).unwrap();
     let canonical_str = canonical.to_string_lossy().into_owned();
 
-    let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
+    let _env = EnvGuard::new(&[(
+        "IRONHERMES_HOME",
+        Some(hermes_home.path().to_str().unwrap()),
+    )]);
     let scanner = AlwaysCleanScanner;
 
     let outcome = ironhermes_hub::install(
@@ -228,7 +234,10 @@ async fn local_dir_relative_path() {
 #[tokio::test]
 async fn local_dir_missing_path_hard_fails() {
     let (hermes_home, skills_root) = make_hermes_home();
-    let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
+    let _env = EnvGuard::new(&[(
+        "IRONHERMES_HOME",
+        Some(hermes_home.path().to_str().unwrap()),
+    )]);
 
     let err = ironhermes_hub::install(
         &LocalDirSource,
@@ -272,7 +281,10 @@ async fn local_dir_copies_all_subfiles() {
     let canonical = std::fs::canonicalize(source_tmp.path()).unwrap();
     let canonical_str = canonical.to_string_lossy().into_owned();
 
-    let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
+    let _env = EnvGuard::new(&[(
+        "IRONHERMES_HOME",
+        Some(hermes_home.path().to_str().unwrap()),
+    )]);
 
     let outcome = ironhermes_hub::install(
         &LocalDirSource,
@@ -316,7 +328,10 @@ async fn local_dir_scan_hit_warns_but_loads() {
     let canonical = std::fs::canonicalize(source_tmp.path()).unwrap();
     let canonical_str = canonical.to_string_lossy().into_owned();
 
-    let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
+    let _env = EnvGuard::new(&[(
+        "IRONHERMES_HOME",
+        Some(hermes_home.path().to_str().unwrap()),
+    )]);
 
     // AlwaysBlockedScanner returns "[BLOCKED: reason]" verdict for every file
     let scanner = AlwaysBlockedScanner::new("test-threat-pattern");
@@ -366,7 +381,10 @@ async fn local_dir_audit_skipped() {
     let canonical_str = canonical.to_string_lossy().into_owned();
 
     let _env = EnvGuard::new(&[
-        ("HERMES_HOME", Some(hermes_home.path().to_str().unwrap())),
+        (
+            "IRONHERMES_HOME",
+            Some(hermes_home.path().to_str().unwrap()),
+        ),
         ("SKILLS_AUDIT_URL", Some(&audit_url)),
     ]);
 
@@ -414,7 +432,10 @@ async fn local_dir_lock_entry_identifier_is_canonical() {
     let canonical = std::fs::canonicalize(source_tmp.path()).unwrap();
     let canonical_str = canonical.to_string_lossy().into_owned();
 
-    let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
+    let _env = EnvGuard::new(&[(
+        "IRONHERMES_HOME",
+        Some(hermes_home.path().to_str().unwrap()),
+    )]);
 
     let _outcome = ironhermes_hub::install(
         &LocalDirSource,
@@ -448,7 +469,10 @@ async fn local_dir_snapshot_hash_is_empty() {
     write_skill_dir(source_tmp.path(), &[("SKILL.md", VALID_SKILL_MD)]).unwrap();
 
     let canonical = std::fs::canonicalize(source_tmp.path()).unwrap();
-    let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
+    let _env = EnvGuard::new(&[(
+        "IRONHERMES_HOME",
+        Some(hermes_home.path().to_str().unwrap()),
+    )]);
 
     let _outcome = ironhermes_hub::install(
         &LocalDirSource,
@@ -488,7 +512,10 @@ async fn local_dir_computed_hash_matches_folder() {
     write_skill_dir(source_tmp.path(), files).unwrap();
 
     let canonical = std::fs::canonicalize(source_tmp.path()).unwrap();
-    let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
+    let _env = EnvGuard::new(&[(
+        "IRONHERMES_HOME",
+        Some(hermes_home.path().to_str().unwrap()),
+    )]);
 
     let outcome = ironhermes_hub::install(
         &LocalDirSource,
@@ -544,7 +571,10 @@ async fn local_dir_update_recopies_all_files() {
     let canonical = std::fs::canonicalize(source_tmp.path()).unwrap();
     let canonical_str = canonical.to_string_lossy().into_owned();
 
-    let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
+    let _env = EnvGuard::new(&[(
+        "IRONHERMES_HOME",
+        Some(hermes_home.path().to_str().unwrap()),
+    )]);
 
     let outcome = ironhermes_hub::install(
         &LocalDirSource,
@@ -630,7 +660,10 @@ async fn local_dir_update_missing_source_hard_fails() {
     let canonical = std::fs::canonicalize(source_tmp.path()).unwrap();
     let canonical_str = canonical.to_string_lossy().into_owned();
 
-    let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
+    let _env = EnvGuard::new(&[(
+        "IRONHERMES_HOME",
+        Some(hermes_home.path().to_str().unwrap()),
+    )]);
 
     // Install first
     ironhermes_hub::install(
@@ -684,7 +717,10 @@ async fn local_dir_symlink_skipped_in_walk() {
     std::os::unix::fs::symlink("/etc/passwd", source_tmp.path().join("outside_link")).unwrap();
 
     let canonical = std::fs::canonicalize(source_tmp.path()).unwrap();
-    let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
+    let _env = EnvGuard::new(&[(
+        "IRONHERMES_HOME",
+        Some(hermes_home.path().to_str().unwrap()),
+    )]);
 
     // Install must succeed (symlink skipped, not an error)
     let outcome = ironhermes_hub::install(
@@ -732,7 +768,10 @@ async fn local_dir_file_not_dir_hard_fails() {
     std::fs::write(&file_path, VALID_SKILL_MD).unwrap();
     let canonical = std::fs::canonicalize(&file_path).unwrap();
 
-    let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
+    let _env = EnvGuard::new(&[(
+        "IRONHERMES_HOME",
+        Some(hermes_home.path().to_str().unwrap()),
+    )]);
 
     let err = ironhermes_hub::install(
         &LocalDirSource,
@@ -772,7 +811,10 @@ async fn local_dir_no_skill_md_hard_fails() {
     std::fs::write(source_tmp.path().join("README.md"), b"# Not a skill\n").unwrap();
     let canonical = std::fs::canonicalize(source_tmp.path()).unwrap();
 
-    let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
+    let _env = EnvGuard::new(&[(
+        "IRONHERMES_HOME",
+        Some(hermes_home.path().to_str().unwrap()),
+    )]);
 
     let err = ironhermes_hub::install(
         &LocalDirSource,
@@ -818,7 +860,10 @@ async fn local_dir_js_frontmatter_rejected() {
     .unwrap();
     let canonical = std::fs::canonicalize(source_tmp.path()).unwrap();
 
-    let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
+    let _env = EnvGuard::new(&[(
+        "IRONHERMES_HOME",
+        Some(hermes_home.path().to_str().unwrap()),
+    )]);
 
     let err = ironhermes_hub::install(
         &LocalDirSource,
@@ -860,7 +905,10 @@ async fn local_dir_traversal_via_symlink_skipped() {
     std::os::unix::fs::symlink("/etc", source_tmp.path().join("evil")).unwrap();
 
     let canonical = std::fs::canonicalize(source_tmp.path()).unwrap();
-    let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
+    let _env = EnvGuard::new(&[(
+        "IRONHERMES_HOME",
+        Some(hermes_home.path().to_str().unwrap()),
+    )]);
 
     // Install must succeed — symlink is skipped, not an error
     let outcome = ironhermes_hub::install(
@@ -922,7 +970,10 @@ async fn local_dir_perms_denied() {
     std::fs::set_permissions(source_tmp.path(), std::fs::Permissions::from_mode(0o000)).unwrap();
 
     let canonical = std::fs::canonicalize(source_tmp.path()).unwrap();
-    let _env = EnvGuard::new(&[("HERMES_HOME", Some(hermes_home.path().to_str().unwrap()))]);
+    let _env = EnvGuard::new(&[(
+        "IRONHERMES_HOME",
+        Some(hermes_home.path().to_str().unwrap()),
+    )]);
 
     let err = ironhermes_hub::install(
         &LocalDirSource,

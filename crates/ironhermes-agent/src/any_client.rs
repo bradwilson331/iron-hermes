@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use crate::agent_loop::AgentLoop;
 use crate::anthropic_client::AnthropicClient;
 use crate::client::{LlmClient, StreamEvent};
+use crate::codex_client::CodexClient;
 
 // =============================================================================
 // AnyClient enum dispatch (D-07, D-08, D-10)
@@ -20,13 +21,15 @@ use crate::client::{LlmClient, StreamEvent};
 
 /// Universal client that dispatches to the correct backend based on ApiMode.
 ///
-/// AnyClient is the type used by AgentLoop — it wraps either an OpenAI-compatible
-/// LlmClient (ChatCompletions mode) or the native AnthropicClient (AnthropicMessages mode).
-/// CodexResponses is not yet implemented; constructing it returns an error.
+/// AnyClient is the type used by AgentLoop — it wraps an OpenAI-compatible
+/// LlmClient (ChatCompletions mode), the native AnthropicClient (AnthropicMessages
+/// mode), or CodexClient (CodexResponses mode — the OpenAI Responses API, used by
+/// `providers.merge`).
 #[derive(Clone)]
 pub enum AnyClient {
     ChatCompletions(LlmClient),
     AnthropicMessages(AnthropicClient),
+    CodexResponses(CodexClient),
 }
 
 impl std::fmt::Debug for AnyClient {
@@ -34,6 +37,8 @@ impl std::fmt::Debug for AnyClient {
         match self {
             Self::ChatCompletions(_) => write!(f, "AnyClient::ChatCompletions(LlmClient)"),
             Self::AnthropicMessages(c) => write!(f, "AnyClient::AnthropicMessages({:?})", c),
+            // CodexClient's own Debug redacts api_key (Pitfall 9).
+            Self::CodexResponses(c) => write!(f, "AnyClient::CodexResponses({:?})", c),
         }
     }
 }
@@ -43,7 +48,7 @@ impl AnyClient {
     ///
     /// - `ApiMode::ChatCompletions` → wraps LlmClient
     /// - `ApiMode::AnthropicMessages` → wraps AnthropicClient
-    /// - `ApiMode::CodexResponses` → returns error (not yet implemented)
+    /// - `ApiMode::CodexResponses` → wraps CodexClient
     pub fn from_endpoint(endpoint: &ResolvedEndpoint) -> Result<Self> {
         match endpoint.api_mode {
             ApiMode::ChatCompletions => Ok(AnyClient::ChatCompletions(LlmClient::new(
@@ -56,9 +61,11 @@ impl AnyClient {
                 endpoint.api_key.as_deref().unwrap_or(""),
                 &endpoint.default_model,
             ))),
-            ApiMode::CodexResponses => Err(anyhow!(
-                "Codex Responses API mode is not yet implemented. Use chat_completions or anthropic_messages."
-            )),
+            ApiMode::CodexResponses => Ok(AnyClient::CodexResponses(CodexClient::new(
+                &endpoint.base_url,
+                endpoint.api_key.as_deref().unwrap_or(""),
+                &endpoint.default_model,
+            ))),
         }
     }
 
@@ -75,9 +82,11 @@ impl AnyClient {
                 endpoint.api_key.as_deref().unwrap_or(""),
                 model,
             ))),
-            ApiMode::CodexResponses => Err(anyhow!(
-                "Codex Responses API mode is not yet implemented. Use chat_completions or anthropic_messages."
-            )),
+            ApiMode::CodexResponses => Ok(AnyClient::CodexResponses(CodexClient::new(
+                &endpoint.base_url,
+                endpoint.api_key.as_deref().unwrap_or(""),
+                model,
+            ))),
         }
     }
 
@@ -100,6 +109,10 @@ impl AnyClient {
                 c.chat_completion(messages, tools, model, max_tokens, temperature, extra)
                     .await
             }
+            Self::CodexResponses(c) => {
+                c.chat_completion(messages, tools, model, max_tokens, temperature, extra)
+                    .await
+            }
         }
     }
 
@@ -108,6 +121,7 @@ impl AnyClient {
         match self {
             Self::ChatCompletions(c) => c.model(),
             Self::AnthropicMessages(c) => c.model(),
+            Self::CodexResponses(c) => c.model(),
         }
     }
 
@@ -148,6 +162,10 @@ impl AnyClient {
                 c.chat_completion_stream(messages, tools, model, max_tokens, temperature, extra)
                     .await
             }
+            Self::CodexResponses(c) => {
+                c.chat_completion_stream(messages, tools, model, max_tokens, temperature, extra)
+                    .await
+            }
         }
     }
 }
@@ -170,6 +188,19 @@ pub fn build_client(resolver: &ProviderResolver, provider: &str, model: &str) ->
 pub fn build_main_client(resolver: &ProviderResolver) -> Result<AnyClient> {
     let endpoint = resolver.resolve_for_main();
     AnyClient::from_endpoint(endpoint)
+}
+
+/// Build an AnyClient for the main configured provider, overriding the request
+/// model with `model` (e.g. a per-cron-job `model` override).
+///
+/// The main provider's endpoint (base_url, api_key, api_mode) is kept; only the
+/// model string is swapped. This is correct when `model` is served by the main
+/// provider (e.g. an `anthropic/claude-*` slug on an OpenRouter endpoint). A
+/// model that lives on a *different* provider is not routed here — that would
+/// require per-call provider resolution (see `build_client`).
+pub fn build_main_client_with_model(resolver: &ProviderResolver, model: &str) -> Result<AnyClient> {
+    let endpoint = resolver.resolve_for_main();
+    AnyClient::from_endpoint_with_model(endpoint, model)
 }
 
 /// Build an AnyClient for an auxiliary role (vision, compression, etc).
@@ -196,7 +227,10 @@ pub fn wire_fallback_if_configured(mut agent: AgentLoop, resolver: &ProviderReso
         if let Some(fb_endpoint) = resolver.resolve(fb_name) {
             match build_client(resolver, fb_name, &fb_endpoint.default_model) {
                 Ok(fb_client) => {
-                    agent = agent.with_fallback(fb_client);
+                    // Cause E fix: pass the fallback's canonical provider name via
+                    // with_fallback_named so AgentLoop can update self.provider_name
+                    // on failover and usage_events rows carry the correct label.
+                    agent = agent.with_fallback_named(fb_client, fb_name.clone());
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -395,10 +429,14 @@ impl ironhermes_core::SummarizationClientHandle for AnyClientSummarizationHandle
 // cut-line semantics so the Anthropic-side PARITY from Plan 05 is intact.
 //
 // Assumption A1 (verified against OpenRouter docs 2026-05-25 §"Anthropic
-// Claude" §"TTL Options"): OpenRouter accepts the SAME `cache_control`
-// envelope as native Anthropic: `{ "type": "ephemeral" }` or
-// `{ "type": "ephemeral", "ttl": "1h" }`. Source:
+// Claude" §"TTL Options"): OpenRouter accepts the `cache_control` envelope
+// `{ "type": "ephemeral" }` or `{ "type": "ephemeral", "ttl": "1h" }`. Source:
 //   https://openrouter.ai/docs/guides/best-practices/prompt-caching.mdx
+// CAVEAT (post-ship): the `ttl` variant is NOT honored by all of OpenRouter's
+// Claude upstreams — Amazon Bedrock rejects it (`cache_control.ephemeral.ttl:
+// Extra inputs are not permitted`), failing the request. Since routing is
+// opaque per-request, this path emits only the plain `{ "type": "ephemeral" }`
+// form. See `OpenRouterCacheControl`.
 
 /// Phase 36.2 Plan 11: provider+model gating predicate for OpenRouter Claude
 /// routing on the ChatCompletions arm.
@@ -418,23 +456,31 @@ pub fn is_openrouter_claude(provider: &str, model: &str) -> bool {
 
 /// Phase 36.2 Plan 11: OpenRouter Claude `cache_control` envelope.
 ///
-/// Serializes as `{"type":"ephemeral","ttl":"5m"|"1h"}` — identical to native
-/// Anthropic per Assumption A1. Attached to OpenAI-compat content blocks
-/// (NOT messages themselves) to mark cache breakpoints. Per the
-/// `system_and_3` strategy, exactly 4 markers max per request: 1 system + last
-/// 3 non-system messages.
+/// Serializes as `{"type":"ephemeral"}` — deliberately WITHOUT a `ttl` field.
+///
+/// Rationale (post-ship fix): OpenRouter load-balances `anthropic/claude-*`
+/// across multiple upstreams (Anthropic direct, Google Vertex, **Amazon
+/// Bedrock**). Anthropic/Vertex accept the extended-cache `ttl` field, but
+/// Bedrock rejects it outright — `cache_control.ephemeral.ttl: Extra inputs are
+/// not permitted` — which fails the request (surfaced as a 400/500 depending on
+/// streaming). Because OpenRouter's routing is opaque per-request, the only
+/// safe envelope is the plain `{"type":"ephemeral"}` form (default 5-minute
+/// cache), which every upstream accepts. The native Anthropic-direct path
+/// (`anthropic_client`) is unaffected and still honors `prompt_caching.ttl`.
+///
+/// Attached to OpenAI-compat content blocks (NOT messages themselves) to mark
+/// cache breakpoints. Per the `system_and_3` strategy, exactly 4 markers max per
+/// request: 1 system + last 3 non-system messages.
 #[derive(Debug, Clone, Serialize)]
 pub struct OpenRouterCacheControl {
     #[serde(rename = "type")]
     ty: String,
-    ttl: String,
 }
 
 impl OpenRouterCacheControl {
-    fn ephemeral(ttl: &'static str) -> Self {
+    fn ephemeral() -> Self {
         Self {
             ty: "ephemeral".to_string(),
-            ttl: ttl.to_string(),
         }
     }
 }
@@ -559,8 +605,9 @@ pub fn build_openrouter_chat_request_full(
     let attach = prompt_caching.enabled && is_openrouter_claude(provider, model);
 
     if attach {
-        let ttl = prompt_caching.ttl.as_anthropic_ttl();
-        attach_cache_control_to_chat_completions(&mut adapted, ttl);
+        // No ttl is threaded here: the OpenRouter envelope intentionally omits it
+        // for cross-upstream (Bedrock) compatibility. See OpenRouterCacheControl.
+        attach_cache_control_to_chat_completions(&mut adapted);
     }
 
     OpenRouterChatRequest {
@@ -630,14 +677,14 @@ fn adapt_chat_message_to_openrouter(msg: &ChatMessage) -> OpenRouterMessage {
 ///
 /// Mirrors `anthropic_client::attach_cache_control_markers` semantics but
 /// operates on the OpenAI-compat content-block shape.
-fn attach_cache_control_to_chat_completions(messages: &mut [OpenRouterMessage], ttl: &'static str) {
+fn attach_cache_control_to_chat_completions(messages: &mut [OpenRouterMessage]) {
     // Mark the LAST system message's last content block.
     if let Some(last_system) = messages.iter_mut().rev().find(|m| m.role == "system")
         && let Some(last_block) = last_system.content.last_mut()
     {
         match last_block {
             OpenRouterContentBlock::Text { cache_control, .. } => {
-                *cache_control = Some(OpenRouterCacheControl::ephemeral(ttl));
+                *cache_control = Some(OpenRouterCacheControl::ephemeral());
             }
         }
     }
@@ -655,7 +702,7 @@ fn attach_cache_control_to_chat_completions(messages: &mut [OpenRouterMessage], 
         if let Some(last_block) = messages[idx].content.last_mut() {
             match last_block {
                 OpenRouterContentBlock::Text { cache_control, .. } => {
-                    *cache_control = Some(OpenRouterCacheControl::ephemeral(ttl));
+                    *cache_control = Some(OpenRouterCacheControl::ephemeral());
                 }
             }
         }
@@ -714,6 +761,7 @@ mod tests {
             fallback_providers: vec![],
             model_metadata: None,
             config_context_length: None,
+            models: vec![],
         }
     }
 
@@ -731,6 +779,33 @@ mod tests {
         let endpoint = make_endpoint(ApiMode::AnthropicMessages);
         let client = AnyClient::from_endpoint(&endpoint).unwrap();
         assert!(matches!(client, AnyClient::AnthropicMessages(_)));
+    }
+
+    // Option 1: build_main_client_with_model must put the override model on the
+    // client (previously the per-cron-job model was computed but never reached
+    // the client, so every job ran on the provider default).
+    #[test]
+    fn build_main_client_with_model_overrides_request_model() {
+        use ironhermes_core::provider::ProviderResolver;
+        let config = Config::default();
+        let resolver =
+            ProviderResolver::build(&config).expect("resolver builds from default config");
+
+        let default_model = resolver.resolve_for_main().default_model.clone();
+        let override_model = "anthropic/claude-haiku-4.5";
+        assert_ne!(
+            default_model, override_model,
+            "test precondition: override must differ from the provider default"
+        );
+
+        // Default builder uses the provider default...
+        let base = build_main_client(&resolver).expect("default client builds");
+        assert_eq!(base.model(), default_model);
+
+        // ...the with_model builder swaps in the override, same endpoint.
+        let overridden = build_main_client_with_model(&resolver, override_model)
+            .expect("override client builds");
+        assert_eq!(overridden.model(), override_model);
     }
 
     // Test: AnyClient::from_endpoint with ApiMode::ChatCompletions creates ChatCompletions variant
@@ -751,17 +826,18 @@ mod tests {
         assert!(matches!(result.unwrap(), AnyClient::AnthropicMessages(_)));
     }
 
-    // Test: AnyClient::from_endpoint with ApiMode::CodexResponses returns error
+    // Test: AnyClient::from_endpoint with ApiMode::CodexResponses succeeds and
+    // constructs the CodexResponses variant (D-01: flipped from the pre-Phase-46.2
+    // "not yet implemented" error now that CodexClient is a real backend).
     #[test]
-    fn test_from_endpoint_codex_responses_errors() {
+    fn test_from_endpoint_codex_responses_succeeds() {
         let endpoint = make_endpoint(ApiMode::CodexResponses);
         let result = AnyClient::from_endpoint(&endpoint);
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
         assert!(
-            err_msg.contains("not yet implemented"),
-            "Error should contain 'not yet implemented': {err_msg}"
+            result.is_ok(),
+            "CodexResponses must construct successfully: {result:?}"
         );
+        assert!(matches!(result.unwrap(), AnyClient::CodexResponses(_)));
     }
 
     // Test: ProviderResolver::build_client returns AnyClient for valid provider

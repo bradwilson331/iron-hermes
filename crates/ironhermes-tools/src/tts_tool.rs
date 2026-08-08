@@ -155,6 +155,27 @@ impl Tool for TextToSpeechTool {
         // Step e: synthesize
         let written_path = provider.synthesize(text, &output_path).await?;
 
+        // Defense in depth (debug: web-tts-zero-byte-audio): a provider must
+        // never report success with an empty audio file. A 0-byte mp3 reaches
+        // the web client as silent/corrupt audio. Reject it here so the caller
+        // sees a real error regardless of which provider was used.
+        match tokio::fs::metadata(&written_path).await {
+            Ok(meta) if meta.len() == 0 => {
+                anyhow::bail!(
+                    "TTS provider '{}' wrote an empty audio file: {}",
+                    self.config.tts.provider,
+                    written_path.display()
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                anyhow::bail!(
+                    "TTS output file not readable after synthesis ({}): {e}",
+                    written_path.display()
+                );
+            }
+        }
+
         // Step f: D-06 — return path string only (no base64, no side-channel)
         Ok(written_path.to_string_lossy().to_string())
     }

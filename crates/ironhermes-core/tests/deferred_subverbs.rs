@@ -13,7 +13,6 @@
 //! against copy changes as long as the routing behavior is preserved.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use ironhermes_core::commands::context::{CommandContext, KanbanStoreReader};
 use ironhermes_core::commands::handlers::dispatch;
@@ -47,12 +46,7 @@ impl KanbanStoreReader for FakeStore {
 
 fn make_ctx() -> CommandContext {
     let store: Arc<dyn KanbanStoreReader> = Arc::new(FakeStore);
-    CommandContext::new(
-        Platform::Local,
-        "test-session".to_string(),
-        Arc::new(AtomicBool::new(false)),
-    )
-    .with_kanban_store(store)
+    CommandContext::new(Platform::Local, "test-session".to_string()).with_kanban_store(store)
 }
 
 fn find_kanban_cmd() -> CommandDef {

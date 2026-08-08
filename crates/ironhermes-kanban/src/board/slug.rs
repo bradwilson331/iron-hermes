@@ -2,7 +2,7 @@
 //!
 //! `validate_board_slug` is the single entry point for all untrusted slug
 //! input: CLI argv (`--board <slug>`, `boards create <slug>`), the
-//! `HERMES_KANBAN_BOARD` env var (via the resolver), and the
+//! `IRONHERMES_KANBAN_BOARD` env var (via the resolver), and the
 //! `~/.ironhermes/kanban/current` file.
 //!
 //! # Security ordering

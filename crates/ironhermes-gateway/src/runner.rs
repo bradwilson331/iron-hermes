@@ -6,7 +6,8 @@ use ironhermes_agent::engine_factory::build_context_engine;
 use ironhermes_agent::pressure_warning::PressureTracker;
 use ironhermes_agent::subagent_registry::SubagentRegistry;
 use ironhermes_core::commands::context::ToolsetSessionHandle;
-use ironhermes_core::{Config, ProviderResolver, SkillRecord, SkillRegistry};
+use ironhermes_core::commands::{CommandDef, CommandRouter, registry::build_registry};
+use ironhermes_core::{Config, Platform, ProviderResolver, SkillRecord, SkillRegistry};
 use ironhermes_cron::JobStore;
 use ironhermes_exec::process_registry::ProcessRegistry;
 use ironhermes_mcp::McpManager;
@@ -27,7 +28,7 @@ use crate::session_queue::{QueueError, SessionQueue};
 use crate::telegram::{TelegramAdapter, TgBotCommand, tg_message_to_event};
 use crate::user_queue::{DispatchOutcome, UserQueueManager};
 use ironhermes_core::MessageEvent;
-use ironhermes_cron::TgSendApi;
+use ironhermes_cron::{DeliveryRegistry, DeliverySend, TgSendApi};
 
 /// Runs the Telegram gateway: long polling, per-user dispatch, JoinSet supervision,
 /// Semaphore concurrency control, and CancellationToken-based graceful shutdown.
@@ -101,6 +102,12 @@ pub struct GatewayRunner {
     /// `SessionQueue` type is intentionally not exported in lib.rs — adapters
     /// reach it only via the thin public API methods on this struct.
     session_queue: Arc<SessionQueue>,
+    /// Phase 39.1 (R39.1-01 / R39.1-03 / R39.1-04): process-wide TurnRegistry
+    /// and two-level ConcurrencyLayer. Both always-initialized so the worker loop
+    /// and all surfaces share the same instance. The global ceiling Semaphore
+    /// inside ConcurrencyLayer is process-wide (R39.1-04).
+    turn_registry: Arc<ironhermes_core::concurrency::TurnRegistry>,
+    concurrency: Arc<ironhermes_core::concurrency::ConcurrencyLayer>,
     /// Phase 36.17.1 D-03 (Plan 04): drain-mode flag — set true BEFORE
     /// `cancel.cancel()` during shutdown so late-arriving messages stay in
     /// the queue and reach the next agent turn (in-process only). The flag
@@ -113,7 +120,62 @@ pub struct GatewayRunner {
     /// to see `cancel` not-yet-fired AND the queue continues to accept the
     /// push (D-03 preserve-AND-accept).
     is_draining: Arc<AtomicBool>,
+    /// Phase 36.3.8 Plan 03 — in-memory registry of suspended `ClarifyTool`
+    /// awaiters keyed by `clarify_id`. The dispatch loop resolves a pending
+    /// awaiter when an inline-keyboard `callback_query` arrives (D-05). Shared
+    /// with `ClarifyTool` instances (Plan 04) via Arc clone at per-turn
+    /// registration time — same Arc-shared-state pattern as `skill_overlays`
+    /// in handler.rs.
+    clarify_registry: Arc<ironhermes_tools::PendingClarifyRegistry>,
     cancel: CancellationToken,
+}
+
+/// Build the Telegram bot-command menu (D-17 `setMyCommands` payload) from
+/// the command router's full catalog, filtered to Telegram-available
+/// commands (G-41.1-5). Replaces the previous hardcoded 4-command
+/// start/new/clear/help subset — every command whose `platform_filter`
+/// allows `Platform::Telegram` is now registered.
+///
+/// Skills (resolved via `SkillRegistry`, not `CommandRouter`) are
+/// architecturally distinct from slash commands and are intentionally NOT
+/// included here — extending the bot menu to skills is out of scope.
+fn telegram_bot_commands() -> Vec<TgBotCommand> {
+    let command_router = CommandRouter::new(build_registry());
+    commands_for_platform(&command_router.commands, &Platform::Telegram)
+}
+
+/// Filter `commands` to those available on `platform` and map each to the
+/// wire-format `TgBotCommand` (`CommandDef.name` -> `command`,
+/// `CommandDef.description` -> `description`). Split out from
+/// [`telegram_bot_commands`] so the filter+mapping logic is unit-testable
+/// against a small synthetic command set, independent of the full
+/// `build_registry()` catalog.
+///
+/// Telegram rejects the ENTIRE `setMyCommands` batch with
+/// `400: BOT_COMMAND_INVALID` if any single name violates its
+/// `[a-z0-9_]{1,32}` rule, so names are sanitized here:
+/// - subcommand entries with spaces (e.g. "provider list") are dropped —
+///   the parent command is already in the menu and covers them
+/// - hyphens map to underscores (e.g. "reload-mcp" -> "reload_mcp"); the
+///   registry carries underscore aliases so the tapped menu item resolves
+/// - anything still outside the allowed charset/length is dropped
+fn commands_for_platform(commands: &[CommandDef], platform: &Platform) -> Vec<TgBotCommand> {
+    commands
+        .iter()
+        .filter(|c| c.is_available_on(platform))
+        .filter(|c| !c.name.contains(' '))
+        .map(|c| TgBotCommand {
+            command: c.name.replace('-', "_"),
+            description: c.description.to_string(),
+        })
+        .filter(|c| {
+            !c.command.is_empty()
+                && c.command.len() <= 32
+                && c.command
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        })
+        .collect()
 }
 
 impl GatewayRunner {
@@ -128,10 +190,17 @@ impl GatewayRunner {
             ironhermes_state::StateStore::open_default()
                 .expect("failed to open state.db for gateway"),
         ));
+        // Phase 36.17.9: honor `gateway.persist_sessions` (default true) so an
+        // ongoing platform conversation resumes its prior session across restarts.
+        let mut session_store = SessionStore::new(Arc::clone(&state_store));
+        session_store.set_persist_sessions(config.gateway.persist_sessions);
+        // Phase 39.1 (R39.1-03 / R39.1-04): extract concurrency caps before config is moved.
+        let session_turn_cap = config.concurrency.session_turn_cap;
+        let global_turn_ceiling = config.concurrency.global_turn_ceiling;
         Self {
             config,
             resolver,
-            session_store: Arc::new(RwLock::new(SessionStore::new(Arc::clone(&state_store)))),
+            session_store: Arc::new(RwLock::new(session_store)),
             state_store,
             tool_registry,
             memory_manager: None,
@@ -152,10 +221,20 @@ impl GatewayRunner {
             // No `set_session_queue` method — the queue is owned by the runner from
             // construction; `build_gateway_handler` clones the Arc into the handler.
             session_queue: Arc::new(SessionQueue::new()),
+            // Phase 39.1: process-wide TurnRegistry + ConcurrencyLayer (always-init).
+            turn_registry: Arc::new(ironhermes_core::concurrency::TurnRegistry::new()),
+            concurrency: Arc::new(ironhermes_core::concurrency::ConcurrencyLayer::new(
+                session_turn_cap,
+                global_turn_ceiling,
+            )),
             // Phase 36.17.1 Plan 04 (D-03): drain-mode flag starts false.
             // `drain_for_restart()` flips it to true BEFORE cancelling the
             // cancel token — preserve-AND-accept semantics live there.
             is_draining: Arc::new(AtomicBool::new(false)),
+            // Phase 36.3.8 Plan 03: always-initialized clarify awaiter registry.
+            // Plan 04 clones this Arc into per-turn ClarifyTool registration so
+            // the dispatch loop and the tool share the same pending-awaiter map.
+            clarify_registry: Arc::new(ironhermes_tools::PendingClarifyRegistry::new()),
             cancel: CancellationToken::new(),
         }
     }
@@ -456,6 +535,7 @@ impl GatewayRunner {
             let no_attachments = crate::multimodal::ProcessedAttachments {
                 text_prefix: None,
                 image_data_uri: None,
+                image_cache_path: None,
             };
             if let Err(e) = handler
                 .run_agent(&next_event, adapter.clone(), cancel.clone(), no_attachments)
@@ -524,6 +604,14 @@ impl GatewayRunner {
             handler.set_subagent_registry(reg.clone());
         }
 
+        // Phase 41.3 Plan 04 (D-11/D-12): thread the existing McpManager handle
+        // (already held for GAP-8 shutdown wiring) into the handler so its
+        // slash-dispatch CommandContext can wire mcp_reloader — previously the
+        // gateway had no MCP handle on CommandContext at all.
+        if let Some(ref mgr) = self.mcp_manager {
+            handler.set_mcp_manager(mgr.clone());
+        }
+
         // Phase 25.1 D-17: thread the shared browser session Arc so every
         // per-request AgentLoop calls with_browser_session (T-25.1-04 drop semantics).
         if let Some(ref sess) = self.browser_session {
@@ -548,6 +636,10 @@ impl GatewayRunner {
         // None and `handle_with_multimodal` falls back to the Phase 36 reject
         // path. With it, the busy-branch enqueues and cap-hit fires D-13 UX.
         handler.set_session_queue(self.session_queue.clone());
+        // Phase 39.1 (R39.1-01 / R39.1-03 / R39.1-04): wire shared TurnRegistry
+        // and ConcurrencyLayer so run_agent acquires permits + registers turns.
+        handler.set_turn_registry(self.turn_registry.clone());
+        handler.set_concurrency(self.concurrency.clone());
         // Phase 25.3-15 CR-02 close-out: trajectory writers are no longer
         // process-wide; per-session writers are owned (and lazily opened) by
         // `SessionStore` keyed by the canonical SQLite session UUID. The
@@ -604,7 +696,7 @@ impl GatewayRunner {
     pub async fn start(self: Arc<Self>) -> Result<()> {
         // --- 0. Acquire PID lock (Phase 24 D-09/D-12) ---
         // Refuses startup if another live gateway is already running under
-        // the same HERMES_HOME (profile-scoped after Phase 24's --profile
+        // the same IRONHERMES_HOME (profile-scoped after Phase 24's --profile
         // pivot in main.rs). Stale PID files (crashed gateways) are
         // auto-cleaned by acquire_pid_lock; the live-conflict path returns
         // an error containing "Stop it first" which the CLI dispatch maps
@@ -618,7 +710,96 @@ impl GatewayRunner {
         let _pid_guard = crate::pid::acquire_pid_lock(&home)
             .context("Gateway startup refused: PID lock conflict")?;
 
-        // --- 1. Resolve Telegram token ---
+        // Phase 47.6 Plan 03 (P0-1): the boot gate is now the single source
+        // of truth for which platforms are usable. This replaces the
+        // previous unconditional `resolve_token(...).context(...)?` hard
+        // Telegram requirement — the gateway still refuses to boot with
+        // zero usable platforms, but the error now names every platform it
+        // tried and why (see `boot_gate.rs`).
+        let platform_gate = crate::boot_gate::resolve_enabled_platforms(&self.config)
+            .map_err(|e| anyhow::anyhow!("Gateway startup refused: {e}"))?;
+
+        // Phase 47.6 Plan 01: bound here, in `start()`'s OWN scope — NOT
+        // inside the section 7d block below and NOT inside the spawned
+        // adapter task — so later plans can read it from outer scope. Four
+        // consumers need this exact handle: plan 03's "primary adapter"
+        // fallback for `UserQueueManager`/`ApprovalCoordinator` when
+        // Telegram is absent, plan 06's per-platform approval coordinator,
+        // plan 07's cron delivery registry, and plan 07's notifier snapshot.
+        #[cfg(feature = "buzz")]
+        let mut buzz_adapter: Option<std::sync::Arc<crate::buzz::BuzzAdapter>> = None;
+
+        // Phase 47.6 Plan 03 (ORDERING TRAP — see this task's own note in
+        // PLAN.md): CONSTRUCT the Buzz adapter here, before the
+        // primary-adapter binding below. Construction is cheap and does no
+        // network I/O — connecting happens inside the spawned loop at
+        // section 7d, unchanged from Plan 01. `user_queue` /
+        // `approval_coordinator` need a primary adapter NOW: `user_queue`
+        // used to be constructed from the Telegram adapter immediately after
+        // adapter creation, well before section 7d ran, so "otherwise the
+        // Buzz adapter" is only expressible if the Buzz adapter already
+        // exists at this point. Reading `buzz_adapter` at the UQM site while
+        // it is still `None` would give a Buzz-only gateway no UQM and no
+        // approval coordinator — a silent failure (boots, connects, then
+        // cannot queue or approve anything).
+        #[cfg(feature = "buzz")]
+        {
+            match &platform_gate.buzz {
+                crate::boot_gate::PlatformResolution::Usable(buzz_creds) => {
+                    let buzz_config_for_construction = self
+                        .config
+                        .gateway
+                        .platforms
+                        .get("buzz")
+                        .cloned()
+                        .unwrap_or_default();
+                    if let Some(relay_url) = buzz_config_for_construction.relay_url.clone() {
+                        let nsec = buzz_creds.get("nsec").cloned().unwrap_or_default();
+                        match nostr_sdk::prelude::Keys::parse(&nsec) {
+                            Ok(keys) => {
+                                buzz_adapter = Some(std::sync::Arc::new(
+                                    crate::buzz::BuzzAdapter::new(keys, relay_url),
+                                ));
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "Buzz identity resolved but the key failed to parse: {e:#}. \
+                                     Skipping Buzz adapter (fail-closed — never boot a keyless Buzz adapter)."
+                                );
+                            }
+                        }
+                    } else {
+                        tracing::debug!("Buzz adapter skipped (no relay_url configured)");
+                    }
+                }
+                crate::boot_gate::PlatformResolution::NotUsable(
+                    crate::boot_gate::PlatformSkipReason::Disabled,
+                ) => {
+                    tracing::debug!("Buzz adapter skipped (not enabled)");
+                }
+                crate::boot_gate::PlatformResolution::NotUsable(
+                    crate::boot_gate::PlatformSkipReason::SectionAbsent,
+                ) => {
+                    tracing::debug!("Buzz adapter skipped (not configured)");
+                }
+                crate::boot_gate::PlatformResolution::NotUsable(reason) => {
+                    tracing::error!(
+                        "Buzz identity not resolved ({reason}) — set BUZZ_NSEC. Skipping Buzz \
+                         adapter (fail-closed — never boot a keyless Buzz adapter)."
+                    );
+                }
+            }
+        }
+
+        // --- 1. Resolve Telegram token (P0-1: now OPTIONAL) ---
+        // Phase 47.6 Plan 03: Telegram is one optional platform among four.
+        // `telegram_adapter` is `Some` only when the boot gate above reported
+        // Telegram usable; every Telegram-specific branch below (get_me,
+        // slash-command registration, the long-poll task, and the entire
+        // step 8/12 dispatch loop) is conditional on that `Option`. With
+        // Telegram configured, every one of those branches takes the `Some`
+        // path and nothing observable changes — existing deployments are
+        // byte-identical.
         let tg_config = self
             .config
             .gateway
@@ -626,102 +807,85 @@ impl GatewayRunner {
             .get("telegram")
             .cloned()
             .unwrap_or_default();
-
-        let token = resolve_token(&tg_config.token)
-            .context("No Telegram bot token configured. Set TELEGRAM_BOT_TOKEN or gateway.platforms.telegram.token in config.yaml")?;
-
-        // --- 2. Create adapter ---
-        let adapter: Arc<TelegramAdapter> = Arc::new(TelegramAdapter::new(&token));
-
-        // --- 3. Verify token via getMe ---
-        let bot_info = adapter
-            .get_me()
-            .await
-            .context("Failed to authenticate with Telegram (check bot token)")?;
-        let bot_username = bot_info.username.clone().unwrap_or_default();
-        info!(
-            bot_id = bot_info.id,
-            bot_name = %bot_info.first_name,
-            bot_username = %bot_username,
-            "Connected to Telegram"
-        );
-
-        // --- 4. Register slash commands (D-17) ---
-        let commands = vec![
-            TgBotCommand {
-                command: "start".into(),
-                description: "Start the bot".into(),
-            },
-            TgBotCommand {
-                command: "new".into(),
-                description: "New conversation".into(),
-            },
-            TgBotCommand {
-                command: "clear".into(),
-                description: "Clear history".into(),
-            },
-            TgBotCommand {
-                command: "help".into(),
-                description: "Show help".into(),
-            },
-        ];
-        if let Err(e) = adapter.set_my_commands(&commands).await {
-            warn!("Failed to register bot commands: {}", e);
-        } else {
-            info!("Bot commands registered");
-        }
-
-        // --- 5. Setup channels and concurrency primitives ---
-        let (msg_tx, msg_rx) = mpsc::channel::<crate::telegram::TgUpdate>(256);
-        let max_concurrent = tg_config.max_concurrent_runs.max(1);
-        let semaphore = Arc::new(Semaphore::new(max_concurrent));
+        // Session cleanup (9b) applies to session storage globally, not just
+        // Telegram — keep this read unconditional so it still uses the
+        // configured value even when Telegram itself is absent.
         let timeout_hours = tg_config.session_timeout_hours;
-        let whitelist = tg_config.whitelist.clone();
-
-        // --- 6. Create handler (with gateway hygiene engine wired) and queue manager ---
-        //
-        // Phase 36.17.2.1 D-01/D-03: order matters — UQM must be constructed BEFORE
-        // the handler is Arc-wrapped so we can call handler.set_user_queue_manager(...)
-        // on the still-mutable owned `mut handler`. This wires the UQM into the
-        // handler's CoreCommandResult::Queued arm (handler.rs) so /queue events
-        // dispatch via UQM::dispatch (which calls notify_one() — user_queue.rs:154)
-        // instead of the direct session_queue.try_push path that has no wake protocol.
-        //
-        // Phase 36.17.2 Plan 01: UQM constructor signature — Arc<SessionQueue> arg
-        // (D-03: UQM holds Arc<SessionQueue>, not capacity).
-        let user_queue = Arc::new(UserQueueManager::new(
-            adapter.clone() as Arc<dyn crate::adapter::PlatformAdapter>,
-            self.session_queue.clone(), // Arc<SessionQueue> already on GatewayRunner per 36.17.1-02
-        ));
-        let mut handler = self.build_gateway_handler();
-        // Phase 36.17.2.1 D-01/D-03: install the same UQM Arc the dispatch loop uses
-        // (user_queue_dispatch downstream is a clone of this same Arc — both
-        // reference identical workers + pending_multimodal + session_queue state).
-        handler.set_user_queue_manager(user_queue.clone());
-        // Phase 36.17.2.2 D-18: install the MediaSender impl (Telegram only).
-        //
-        // Construct as `Arc<TelegramAdapter>` (already done at line 645 above),
-        // then clone-cast SEPARATELY for each trait. Do NOT upcast
-        // `Arc<dyn PlatformAdapter>` -> `Arc<dyn MediaSender>` — that was
-        // unstable on stable Rust at the time of writing (RESEARCH Open Q4 /
-        // Assumption A7). The concrete `Arc<TelegramAdapter>` at `adapter`
-        // is already used independently as `Arc<dyn PlatformAdapter>` at
-        // runner.rs:704 (`adapter.clone() as Arc<dyn crate::adapter::PlatformAdapter>`),
-        // so the second clone-cast to `Arc<dyn MediaSender>` here mirrors
-        // that pattern. Discord / Slack / web start paths do NOT call
-        // `set_media_sender` — `media_sender` stays `None` on those handlers
-        // and the D-19 dispatch loop in `run_agent` warns + drops any
-        // extracted `<MEDIA: ...>` refs (D-18 contract).
-        handler.set_media_sender(adapter.clone() as Arc<dyn crate::adapter::MediaSender>);
-        // Phase 36.17.7 D-01 (Site 1 — Telegram, real dispatcher):
-        // TelegramAdapter doubles as AudioDispatcher for per-turn TTS wiring.
-        // Mirror set_media_sender pattern exactly: clone-cast the concrete
-        // Arc<TelegramAdapter>. Do NOT upcast Arc<dyn PlatformAdapter> — that
-        // was unstable on stable Rust (RESEARCH Assumption A7).
-        handler.set_telegram_audio_dispatcher(
-            adapter.clone() as Arc<dyn ironhermes_tools::AudioDispatcher>
+        let telegram_usable = matches!(
+            platform_gate.telegram,
+            crate::boot_gate::PlatformResolution::Usable(_)
         );
-        let handler = Arc::new(handler);
+
+        // --- 2. Create adapter (conditional — Some only when telegram_usable) ---
+        let telegram_adapter: Option<Arc<TelegramAdapter>> = if telegram_usable {
+            let token = resolve_token(&tg_config.token).context(
+                "No Telegram bot token configured. Set TELEGRAM_BOT_TOKEN or gateway.platforms.telegram.token in config.yaml",
+            )?;
+            Some(Arc::new(TelegramAdapter::new(&token)))
+        } else {
+            None
+        };
+
+        // Primary-adapter selection (Phase 47.6 Plan 03): Telegram when
+        // present, otherwise Buzz when present. `UserQueueManager` and
+        // `ApprovalCoordinator` need SOME adapter; this pure helper is what
+        // makes a Buzz-only gateway able to queue and approve at all.
+        // Discord and Slack are never primaries in this plan's scope.
+        #[cfg(feature = "buzz")]
+        let buzz_as_platform_adapter: Option<Arc<dyn crate::adapter::PlatformAdapter>> =
+            buzz_adapter
+                .clone()
+                .map(|b| b as Arc<dyn crate::adapter::PlatformAdapter>);
+        #[cfg(not(feature = "buzz"))]
+        let buzz_as_platform_adapter: Option<Arc<dyn crate::adapter::PlatformAdapter>> = None;
+        let telegram_as_platform_adapter: Option<Arc<dyn crate::adapter::PlatformAdapter>> =
+            telegram_adapter
+                .clone()
+                .map(|t| t as Arc<dyn crate::adapter::PlatformAdapter>);
+        let primary_adapter =
+            select_primary_adapter(telegram_as_platform_adapter, buzz_as_platform_adapter);
+
+        // --- 6 (moved up, ahead of Telegram-specific steps 3-5/7/8 below):
+        // UserQueueManager + ApprovalCoordinator, bound to the PRIMARY
+        // adapter rather than unconditionally Telegram ---
+        //
+        // Phase 36.17.2.1 D-01/D-03: UQM constructor signature — Arc<SessionQueue> arg
+        // (D-03: UQM holds Arc<SessionQueue>, not capacity).
+        let user_queue: Option<Arc<UserQueueManager>> = primary_adapter.clone().map(|pa| {
+            Arc::new(UserQueueManager::new(
+                pa,
+                self.session_queue.clone(), // Arc<SessionQueue> already on GatewayRunner per 36.17.1-02
+            ))
+        });
+        // Phase 45 BL-01 fix: construct the ApprovalCoordinator so /approve,
+        // /deny, and per-turn GatewayApprovalGate injection are ACTIVE.
+        // `config.approvals.timeout_secs` (default 120, D-04) flows in here.
+        // `ApprovalsStore::load()` restores CLI-set session/always approvals
+        // from disk so D-03 bypass works; the coordinator only READS the
+        // store (D-03 negative).
+        let approvals_store = Arc::new(ironhermes_core::ApprovalsStore::load().await);
+        // Phase 46 D-01/D-02: construct the append-only audit log alongside the
+        // approvals store. Every ApprovalCoordinator resolution (bypass / operator
+        // approved / operator denied / dropped-sender / timeout) appends exactly one
+        // entry to ~/.ironhermes/audit.jsonl before returning to the caller.
+        let audit_log = Arc::new(ironhermes_core::AuditLog::load(self.config.audit.clone()));
+        // Phase 47.6 Plan 06 (P1-2): ONE ApprovalCoordinator per platform, not a
+        // single shared instance bound to whichever adapter happens to be primary.
+        // `ApprovalCoordinator` binds exactly one adapter for its entire lifetime
+        // (see that struct's own doc comment) — "add a Buzz case" is not
+        // expressible on it, so each platform that wants `/approve`/`/deny` gets
+        // its own coordinator instance instead, built by
+        // `build_platform_approval_coordinator` below and installed via
+        // `set_approval_coordinator` on that platform's own handler, at that
+        // platform's own construction site (Telegram in steps 3-6 below, Buzz in
+        // section 7d). `approvals_store`/`audit_log` above are constructed ONCE
+        // and cloned into every coordinator — the store carries the operator's
+        // CLI-set session/always approvals and the audit log is a single
+        // append-only file, both shared truth across every platform, never
+        // per-platform copies. Discord/Slack handlers built further below stay
+        // fail-closed (no coordinator) — that remains their documented, unchanged
+        // behavior; Buzz is no longer in that same boat now that this task gives
+        // it real wiring.
 
         let mut join_set: JoinSet<()> = JoinSet::new();
 
@@ -732,11 +896,123 @@ impl GatewayRunner {
         let worker_join_set: Arc<TokioMutex<JoinSet<()>>> =
             Arc::new(TokioMutex::new(JoinSet::new()));
 
-        // --- 7. Poll loop ---
-        let poll_cancel = self.cancel.clone();
-        let adapter_poll = adapter.clone();
-        let msg_tx_poll = msg_tx.clone();
-        join_set.spawn(async move {
+        // Phase 47.6 Plan 03: `msg_tx`/the dispatch future are only ever
+        // populated inside the `if let Some(ref adapter) = telegram_adapter`
+        // block below — bound here as `Option` so shutdown teardown (which
+        // runs unconditionally) and the step 12 select! can handle either
+        // Telegram-present or Telegram-absent gateways uniformly. The step 8
+        // dispatch loop lives in ITS OWN separate conditional block further
+        // down (after the 7b/7c/7d optional-platform sections, which must
+        // NOT be nested inside a Telegram-only `if`), so everything step 8
+        // needs from steps 3-7 is stashed into these holders too.
+        let mut msg_tx: Option<mpsc::Sender<crate::telegram::TgUpdate>> = None;
+        let mut msg_rx_holder: Option<mpsc::Receiver<crate::telegram::TgUpdate>> = None;
+        let mut telegram_semaphore: Option<Arc<Semaphore>> = None;
+        let mut telegram_whitelist: Option<Vec<String>> = None;
+        let mut telegram_bot_username: Option<String> = None;
+        let mut telegram_handler: Option<Arc<GatewayMessageHandler>> = None;
+        let mut dispatch_future_boxed: Option<
+            std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+        > = None;
+
+        // --- 3-8. Telegram-specific setup + the long-poll/dispatch pipeline.
+        // P0-1: entirely conditional on `telegram_adapter` — these use
+        // inherent `TelegramAdapter` methods that are not on the
+        // `PlatformAdapter` trait object, so they cannot be generalized here
+        // and simply do not run when Telegram is absent. ---
+        if let Some(ref adapter) = telegram_adapter {
+            let adapter = adapter.clone();
+
+            // --- 3. Verify token via getMe ---
+            let bot_info = adapter
+                .get_me()
+                .await
+                .context("Failed to authenticate with Telegram (check bot token)")?;
+            let bot_username = bot_info.username.clone().unwrap_or_default();
+            info!(
+                bot_id = bot_info.id,
+                bot_name = %bot_info.first_name,
+                bot_username = %bot_username,
+                "Connected to Telegram"
+            );
+
+            // --- 4. Register slash commands (D-17) ---
+            // G-41.1-5: generated from the command router's full catalog (filtered
+            // to Telegram-available commands), not a stale hardcoded 4-command
+            // subset. Skills (resolved via SkillRegistry, not CommandRouter) are
+            // intentionally excluded from the bot command menu — out of scope here.
+            let commands = telegram_bot_commands();
+            if let Err(e) = adapter.set_my_commands(&commands).await {
+                warn!("Failed to register bot commands: {}", e);
+            } else {
+                info!("Bot commands registered");
+            }
+
+            // --- 5. Setup channels and concurrency primitives ---
+            let (msg_tx_local, msg_rx) = mpsc::channel::<crate::telegram::TgUpdate>(256);
+            let max_concurrent = tg_config.max_concurrent_runs.max(1);
+            let semaphore = Arc::new(Semaphore::new(max_concurrent));
+            let whitelist = tg_config.whitelist.clone();
+            msg_tx = Some(msg_tx_local.clone());
+
+            // --- 6. Create handler (with gateway hygiene engine wired) ---
+            //
+            // Phase 36.17.2.1 D-01/D-03: order matters — the handler is
+            // Arc-wrapped only after every setter call below, mirroring the
+            // pre-Plan-03 sequencing exactly.
+            let mut handler = self.build_gateway_handler();
+            if let Some(ref uq) = user_queue {
+                handler.set_user_queue_manager(uq.clone());
+            }
+            // Phase 47.6 Plan 06 (P1-2): Telegram's own ApprovalCoordinator,
+            // bound to the Telegram adapter, sharing the one approvals store
+            // and one audit log constructed above.
+            let telegram_approval_coordinator = build_platform_approval_coordinator(
+                self.config.approvals.timeout_secs,
+                adapter.clone() as Arc<dyn crate::adapter::PlatformAdapter>,
+                approvals_store.clone(),
+                audit_log.clone(),
+            );
+            handler.set_approval_coordinator(telegram_approval_coordinator);
+            // Phase 36.17.2.2 D-18: install the MediaSender impl (Telegram only).
+            // Do NOT upcast `Arc<dyn PlatformAdapter>` -> `Arc<dyn MediaSender>` —
+            // that was unstable on stable Rust at the time of writing (RESEARCH
+            // Open Q4 / Assumption A7); clone-cast the concrete `Arc<TelegramAdapter>`
+            // separately for each trait instead.
+            handler.set_media_sender(adapter.clone() as Arc<dyn crate::adapter::MediaSender>);
+            // Phase 36.17.7 D-01 (Site 1 — Telegram, real dispatcher):
+            // TelegramAdapter doubles as AudioDispatcher for per-turn TTS wiring.
+            handler.set_telegram_audio_dispatcher(
+                adapter.clone() as Arc<dyn ironhermes_tools::AudioDispatcher>
+            );
+            // Phase 36.3.8 D-02/D-04/D-05/T-36.3.8-ROUTE (Site 1 — Telegram):
+            // TelegramAdapter also implements MessageDispatcher + ClarifyDispatcher.
+            handler.set_telegram_message_dispatcher(
+                adapter.clone() as Arc<dyn ironhermes_tools::MessageDispatcher>
+            );
+            handler.set_telegram_clarify_dispatcher(
+                adapter.clone() as Arc<dyn ironhermes_tools::ClarifyDispatcher>
+            );
+            // RC-2: clone the runner's clarify_registry Arc into the handler so per-turn
+            // ClarifyTool registration uses the same map as the callback_query loop.
+            handler.set_clarify_registry(self.clarify_registry.clone());
+            let handler = Arc::new(handler);
+
+            // Phase 47.6 Plan 03: stash everything the step 8 dispatch loop
+            // (a separate conditional block further down, positioned AFTER
+            // the 7b/7c/7d optional-platform sections which must stay
+            // unconditional) needs from steps 3-6 above.
+            telegram_bot_username = Some(bot_username.clone());
+            msg_rx_holder = Some(msg_rx);
+            telegram_semaphore = Some(semaphore.clone());
+            telegram_whitelist = Some(whitelist.clone());
+            telegram_handler = Some(handler.clone());
+
+            // --- 7. Poll loop ---
+            let poll_cancel = self.cancel.clone();
+            let adapter_poll = adapter.clone();
+            let msg_tx_poll = msg_tx_local.clone();
+            join_set.spawn(async move {
             let mut offset: Option<i64> = None;
             let mut backoff = BackoffState::default_polling();
 
@@ -792,6 +1068,7 @@ impl GatewayRunner {
                 }
             }
         });
+        } // close: if let Some(ref adapter) = telegram_adapter (steps 3-7)
 
         // --- 7b. Optional Discord adapter (D-10) ---
         // Spawns alongside Telegram in the same JoinSet so CancellationToken-driven
@@ -818,15 +1095,39 @@ impl GatewayRunner {
             // Also wire UQM so the Discord handler uses the same wake-notify path
             // as Telegram (mirrors the Telegram set_user_queue_manager call above).
             let mut handler_discord = self.build_gateway_handler();
-            handler_discord.set_user_queue_manager(user_queue.clone());
+            if let Some(ref uq) = user_queue {
+                handler_discord.set_user_queue_manager(uq.clone());
+            }
             handler_discord.set_telegram_audio_dispatcher(std::sync::Arc::new(
                 ironhermes_tools::NotSupportedAudioDispatcher::new("discord"),
             )
                 as std::sync::Arc<dyn ironhermes_tools::AudioDispatcher>);
             let handler_d = std::sync::Arc::new(handler_discord);
             let cancel_d = self.cancel.clone();
-            let whitelist_d: Vec<u64> =
-                discord_config.whitelist.iter().map(|&v| v as u64).collect();
+            // Phase 47.6 Plan 01 (P0-2/D-05): whitelist is now the canonical
+            // Vec<String> shared across every platform. Discord's own adapter
+            // still needs u64 snowflake IDs, so parse here at the boundary —
+            // an entry that does NOT parse as u64 (e.g. a Buzz hex pubkey
+            // sitting in the same shared list) is a real operator error worth
+            // surfacing, not a silent drop.
+            let (whitelist_d, unparsed_count): (Vec<u64>, usize) = {
+                let mut parsed = Vec::new();
+                let mut unparsed = 0usize;
+                for entry in &discord_config.whitelist {
+                    match entry.parse::<u64>() {
+                        Ok(v) => parsed.push(v),
+                        Err(_) => unparsed += 1,
+                    }
+                }
+                (parsed, unparsed)
+            };
+            if unparsed_count > 0 {
+                tracing::warn!(
+                    unparsed_count,
+                    "Discord whitelist contains {} entries that do not parse as a numeric Discord user ID — dropped",
+                    unparsed_count
+                );
+            }
             // Empty whitelist propagates to adapter, which enforces D-12 deny-all
             // per canonical Telegram semantics (config.rs:731 + runner.rs:601-611).
             tracing::info!(
@@ -872,23 +1173,20 @@ impl GatewayRunner {
             // Also wire UQM so the Slack handler uses the same wake-notify path
             // as Telegram (mirrors the Telegram set_user_queue_manager call above).
             let mut handler_slack = self.build_gateway_handler();
-            handler_slack.set_user_queue_manager(user_queue.clone());
+            if let Some(ref uq) = user_queue {
+                handler_slack.set_user_queue_manager(uq.clone());
+            }
             handler_slack.set_telegram_audio_dispatcher(std::sync::Arc::new(
                 ironhermes_tools::NotSupportedAudioDispatcher::new("slack"),
             )
                 as std::sync::Arc<dyn ironhermes_tools::AudioDispatcher>);
             let handler_s = std::sync::Arc::new(handler_slack);
             let cancel_s = self.cancel.clone();
-            let whitelist_s: Vec<String> = slack_config
-                .whitelist
-                .iter()
-                .map(|v| v.to_string())
-                .collect();
+            // Phase 47.6 Plan 01 (P0-2/D-05): whitelist is now the canonical
+            // Vec<String> shared across every platform — Slack's own
+            // alphanumeric member IDs (e.g. "U012AB3CD") need no conversion.
+            let whitelist_s: Vec<String> = slack_config.whitelist.clone();
             // Empty whitelist propagates to adapter — D-12 deny-all enforced in callback.
-            // Note: Slack-native whitelist uses alphanumeric user IDs (e.g. "U012AB3CD");
-            // operators currently configure i64 values which are converted via to_string().
-            // Migrating to a Vec<String> whitelist in PlatformGatewayConfig is a deferred
-            // config-schema improvement (see SUMMARY.md).
             tracing::info!(whitelist_len = whitelist_s.len(), "Slack adapter spawning");
             join_set.spawn(async move {
                 if let Err(e) = crate::slack::run_slack_adapter(
@@ -907,286 +1205,508 @@ impl GatewayRunner {
             tracing::debug!("Slack adapter skipped (missing app_token or bot_token)");
         }
 
-        // --- 8. Dispatch loop ---
-        let dispatch_cancel = self.cancel.clone();
-        let handler_dispatch = handler.clone();
-        let user_queue_dispatch = user_queue.clone();
-        let adapter_dispatch = adapter.clone() as Arc<dyn crate::adapter::PlatformAdapter>;
-        let adapter_dispatch_mm = adapter.clone(); // typed Arc<TelegramAdapter> for multimodal
-        let semaphore_dispatch = semaphore.clone();
-        let cancel_dispatch = self.cancel.clone();
-        let mut msg_rx = msg_rx;
-        let bot_username_str = bot_username.clone();
-        // Phase 36.17.1 Plan 02 Task 3: clone Arc<GatewayRunner> for the per-chat
-        // worker spawn closure so it can call `runner.drain_pending(...)` after
-        // each handler turn returns. The Arc<Self> threading is what motivates
-        // the `start(self: Arc<Self>)` signature change introduced in this plan.
-        let runner_dispatch: Arc<Self> = self.clone();
-
-        // Plan 03: clone Arc so dispatch_future (async move) can spawn into worker_join_set
-        let worker_join_set_dispatch = worker_join_set.clone();
-
-        // We run dispatch inline (not in JoinSet) so we control msg_rx lifetime
-        let dispatch_future = async move {
-            loop {
-                tokio::select! {
-                    _ = dispatch_cancel.cancelled() => {
-                        info!("Dispatch loop cancelled");
-                        break;
+        // --- 7d. Optional Buzz adapter: CONNECT + SPAWN only (Phase 47.6
+        // Plan 01, P0-3; construction moved up ahead of the primary-adapter
+        // binding by Plan 03 — see the ORDERING TRAP note near the top of
+        // `start()`). Spawns alongside Telegram/Discord/Slack in the same
+        // JoinSet so CancellationToken-driven shutdown handles all platforms
+        // uniformly. This spawn point is load-bearing: Phase 47.4 shipped a
+        // gate wired only into a CLI subcommand that was completely inert —
+        // a Buzz arm that is not spawned from `GatewayRunner::start` does
+        // not exist.
+        #[cfg(feature = "buzz")]
+        if let Some(adapter_buzz) = buzz_adapter.clone() {
+            match adapter_buzz.connect().await {
+                Ok(()) => {
+                    let mut handler_buzz = self.build_gateway_handler();
+                    if let Some(ref uq) = user_queue {
+                        handler_buzz.set_user_queue_manager(uq.clone());
                     }
-                    update = msg_rx.recv() => {
-                        let update = match update {
-                            Some(u) => u,
-                            None => break, // channel closed
-                        };
-
-                        let msg = match &update.message {
-                            Some(m) => m.clone(),
-                            None => continue,
-                        };
-
-                        // Convert to MessageEvent
-                        let event = tg_message_to_event(&msg);
-                        info!(
-                            chat_id = %event.chat_id,
-                            sender_id = %event.sender_id,
-                            content = %event.content,
-                            chat_type = %event.chat_type,
-                            "Received message from dispatch channel"
-                        );
-
-                        // Whitelist check (D-10/D-11/D-12)
-                        if !whitelist.is_empty() {
-                            let sender_id: i64 = event.sender_id.parse().unwrap_or(0);
-                            if !whitelist.contains(&sender_id) {
-                                warn!(sender_id = sender_id, "Sender not in whitelist, ignoring");
-                                continue;
-                            }
-                        } else {
-                            warn!("Whitelist is empty — denying all messages (D-12)");
-                            continue;
+                    handler_buzz.set_telegram_audio_dispatcher(std::sync::Arc::new(
+                        ironhermes_tools::NotSupportedAudioDispatcher::new("buzz"),
+                    )
+                        as std::sync::Arc<dyn ironhermes_tools::AudioDispatcher>);
+                    // Phase 47.6 Plan 06 (P1-2/D-14): Buzz's own
+                    // ApprovalCoordinator, bound to the Buzz adapter, sharing
+                    // the one approvals store and one audit log constructed
+                    // at the top of start(). Installed BEFORE the handler is
+                    // Arc-wrapped and spawned, mirroring the Telegram wiring
+                    // above.
+                    let buzz_approval_coordinator = build_platform_approval_coordinator(
+                        self.config.approvals.timeout_secs,
+                        adapter_buzz.clone() as std::sync::Arc<dyn crate::adapter::PlatformAdapter>,
+                        approvals_store.clone(),
+                        audit_log.clone(),
+                    );
+                    handler_buzz.set_approval_coordinator(buzz_approval_coordinator);
+                    let handler_b: std::sync::Arc<dyn crate::adapter::MessageHandler> =
+                        std::sync::Arc::new(handler_buzz);
+                    let cancel_b = self.cancel.clone();
+                    let adapter_for_spawn = adapter_buzz.clone();
+                    let buzz_config = self
+                        .config
+                        .gateway
+                        .platforms
+                        .get("buzz")
+                        .cloned()
+                        .unwrap_or_default();
+                    let relay_url = buzz_config.relay_url.clone().unwrap_or_default();
+                    tracing::info!(%relay_url, "Buzz adapter spawning");
+                    join_set.spawn(async move {
+                        if let Err(e) = crate::buzz::run_buzz_adapter(
+                            adapter_for_spawn,
+                            buzz_config,
+                            handler_b,
+                            cancel_b,
+                        )
+                        .await
+                        {
+                            tracing::error!("Buzz adapter error: {e:#}");
                         }
+                    });
+                }
+                Err(e) => {
+                    tracing::error!("Buzz adapter failed to connect to relay: {e:#} — skipping");
+                }
+            }
+        }
+        #[cfg(feature = "buzz")]
+        tracing::debug!(
+            buzz_ready = buzz_adapter.is_some(),
+            "Gateway optional-platform sections complete"
+        );
 
-                        // Group @mention check (D-09)
-                        if event.chat_type == "group" || event.chat_type == "supergroup" {
-                            let mention = format!("@{}", bot_username_str);
-                            if !event.content.contains(&mention) {
-                                info!("Group message without @mention, skipping");
-                                continue;
-                            }
+        // --- 8. Dispatch loop (Phase 47.6 Plan 03: conditional on Telegram
+        // being present — everything it needs from steps 3-6 was stashed
+        // into the `telegram_*`/`msg_rx_holder` holders above, since this
+        // block sits after 7b/7c/7d which must stay unconditional). ---
+        if let (
+            Some(adapter),
+            Some(handler),
+            Some(mut msg_rx),
+            Some(semaphore),
+            Some(whitelist),
+            Some(bot_username),
+            Some(user_queue),
+        ) = (
+            telegram_adapter.clone(),
+            telegram_handler.clone(),
+            msg_rx_holder.take(),
+            telegram_semaphore.clone(),
+            telegram_whitelist.clone(),
+            telegram_bot_username.clone(),
+            user_queue.clone(),
+        ) {
+            let dispatch_cancel = self.cancel.clone();
+            let handler_dispatch = handler.clone();
+            let user_queue_dispatch = user_queue.clone();
+            let adapter_dispatch = adapter.clone() as Arc<dyn crate::adapter::PlatformAdapter>;
+            let adapter_dispatch_mm = adapter.clone(); // typed Arc<TelegramAdapter> for multimodal
+            // Phase 36.3.8 Plan 03: typed Arc<TelegramAdapter> for answer_callback_query
+            // (inherent method — not on the PlatformAdapter trait object) and the
+            // clarify awaiter registry both captured into the dispatch async move.
+            let adapter_dispatch_cb = adapter.clone();
+            let clarify_registry_dispatch = self.clarify_registry.clone();
+            let whitelist_cb = whitelist.clone();
+            let semaphore_dispatch = semaphore.clone();
+            let cancel_dispatch = self.cancel.clone();
+            let bot_username_str = bot_username.clone();
+            // Phase 36.17.1 Plan 02 Task 3: clone Arc<GatewayRunner> for the per-chat
+            // worker spawn closure so it can call `runner.drain_pending(...)` after
+            // each handler turn returns. The Arc<Self> threading is what motivates
+            // the `start(self: Arc<Self>)` signature change introduced in this plan.
+            let runner_dispatch: Arc<Self> = self.clone();
+
+            // Plan 03: clone Arc so dispatch_future (async move) can spawn into worker_join_set
+            let worker_join_set_dispatch = worker_join_set.clone();
+
+            // We run dispatch inline (not in JoinSet) so we control msg_rx lifetime
+            let dispatch_future = async move {
+                loop {
+                    tokio::select! {
+                        _ = dispatch_cancel.cancelled() => {
+                            info!("Dispatch loop cancelled");
+                            break;
                         }
+                        update = msg_rx.recv() => {
+                            let update = match update {
+                                Some(u) => u,
+                                None => break, // channel closed
+                            };
 
-                        info!(chat_id = %event.chat_id, "Message passed all filters, dispatching");
-
-                        // Phase 36.17.2 Plan 05 (D-23, D-24, D-27): slash-command fast-path.
-                        // Commands bypass UserQueueManager entirely so they don't serialize behind
-                        // an in-flight free-text turn in the per-chat worker. The same handler entry
-                        // (handle_with_multimodal) is used — only the routing differs.
-                        //
-                        // D-24: strict prefix match, no whitespace trim — matches handler.rs:411 command parser.
-                        // D-26: state-mutation safety covered by SessionQueue mutex + SessionStore RwLock + AtomicBool.
-                        // T-36.17.2-06 mitigation: sem_dispatch permit acquired BEFORE handle call (TG-06 bound preserved).
-                        if event.content.starts_with('/') {
-                            let handler_cmd = handler_dispatch.clone();
-                            let adapter_cmd = adapter_dispatch.clone();
-                            let sem_cmd = semaphore_dispatch.clone();
-                            let cancel_cmd = cancel_dispatch.clone();
-                            let event_cmd = event.clone();
-                            // Detached spawn — commands are short-lived (D-27). Graceful shutdown
-                            // observes cancel_token via cancel.is_cancelled() inside the handler.
-                            tokio::spawn(async move {
-                                let permit = match sem_cmd.acquire().await {
-                                    Ok(p) => p,
-                                    Err(_) => return, // semaphore closed → shutdown in progress
-                                };
-                                // Commands are text-only by contract (D-27) — skip multimodal processing.
-                                let processed = crate::multimodal::ProcessedAttachments {
-                                    text_prefix: None,
-                                    image_data_uri: None,
-                                };
-                                if let Err(e) = handler_cmd
-                                    .handle_with_multimodal(
-                                        &event_cmd,
-                                        adapter_cmd,
-                                        cancel_cmd.child_token(),
-                                        processed,
-                                    )
-                                    .await
+                            // Phase 36.3.8 Plan 03 — callback_query routing (D-05).
+                            // Handle a button tap BEFORE the message branch: an
+                            // inline-keyboard tap arrives as `callback_query`, never
+                            // as `message`, and resolves a suspended clarify awaiter.
+                            if let Some(cq) = &update.callback_query {
+                                // 1. Ack FIRST — Pitfall 3 / T-36.3.8-STUCK. Must
+                                //    happen before any other async work or the
+                                //    Telegram button spins indefinitely.
+                                if let Err(e) =
+                                    adapter_dispatch_cb.answer_callback_query(&cq.id).await
                                 {
-                                    error!(
-                                        chat_id = %event_cmd.chat_id,
-                                        error = %e,
-                                        "Slash-command fast-path handler error (Phase 36.17.2 Plan 05)"
-                                    );
+                                    warn!(error = %e, "answerCallbackQuery failed");
                                 }
-                                drop(permit);
-                            });
-                            continue; // Skip the multimodal + UQM.dispatch path for this event
-                        }
 
-                        // Process multimodal attachments (D-05 through D-08)
-                        let (text_prefix, image_data_uri) = if !event.attachments.is_empty() {
-                            match multimodal::process_attachments(&adapter_dispatch_mm, &msg).await {
-                                Ok(processed) => (processed.text_prefix, processed.image_data_uri),
-                                Err(e) => {
-                                    // Send user-friendly error and skip this message
-                                    let chat_id = event.chat_id.clone();
-                                    let err_msg = format!("Could not process attachment: {}", e);
-                                    let _ = PlatformAdapter::send_message(adapter_dispatch_mm.as_ref(), &chat_id, &err_msg, None).await;
+                                // 2. SECURITY / T-36.3.8-SPOOF: validate the tapper
+                                //    against the same whitelist used for inbound
+                                //    messages. Telegram guarantees the callback
+                                //    originates from the user who tapped; a
+                                //    non-whitelisted sender is acked-and-dropped
+                                //    (the spinner is already cleared) and resolves
+                                //    NO awaiter.
+                                if whitelist_cb.is_empty() {
+                                    warn!(
+                                        "Whitelist is empty — dropping callback_query (D-12 deny-all)"
+                                    );
+                                    continue;
+                                }
+                                if !whitelist_cb.contains(&cq.from.id.to_string()) {
+                                    warn!(
+                                        from_id = cq.from.id,
+                                        "callback_query sender not in whitelist, dropping (T-36.3.8-SPOOF)"
+                                    );
+                                    continue;
+                                }
+
+                                // 3. LABEL RECOVERY (callback_data grammar is LOCKED):
+                                //    callback_data carries only the index
+                                //    (`clarify:<clarify_id>:<index>`). Parse it, then
+                                //    look the human-readable label up from the
+                                //    registry's stored choices by index — the label
+                                //    is never carried in callback_data (64-byte limit).
+                                if let Some(data) = &cq.data
+                                    && let Some((clarify_id, choice_index)) =
+                                        ironhermes_tools::parse_clarify_callback(data)
+                                {
+                                    // 4. take() returns the PendingClarify
+                                    //    (choices + sender) OUTSIDE the lock. None
+                                    //    means already resolved/timed out — the
+                                    //    ack already fired, so just drop through.
+                                    if let Some(entry) =
+                                        clarify_registry_dispatch.take(&clarify_id).await
+                                    {
+                                        // Bounds-check the index against stored
+                                        // choices: a malformed / out-of-range
+                                        // index does NOT resolve the awaiter.
+                                        if choice_index < entry.choices.len() {
+                                            let label = entry.choices[choice_index].clone();
+                                            // sender.send consumes the entry's
+                                            // oneshot sender; an Err means the
+                                            // receiver was already dropped
+                                            // (turn exited) — harmless.
+                                            let _ = entry.sender.send(
+                                                ironhermes_tools::ClarifyAnswer {
+                                                    label,
+                                                    index: choice_index,
+                                                },
+                                            );
+                                        } else {
+                                            warn!(
+                                                clarify_id = %clarify_id,
+                                                choice_index,
+                                                choices_len = entry.choices.len(),
+                                                "clarify callback choice_index out of range, dropping"
+                                            );
+                                        }
+                                    } else {
+                                        debug!(
+                                            clarify_id = %clarify_id,
+                                            "no pending clarify for callback (already resolved/timed out)"
+                                        );
+                                    }
+                                }
+
+                                // 5. Skip the message branch entirely for this update.
+                                continue;
+                            }
+
+                            let msg = match &update.message {
+                                Some(m) => m.clone(),
+                                None => continue,
+                            };
+
+                            // Convert to MessageEvent
+                            let event = tg_message_to_event(&msg);
+                            info!(
+                                chat_id = %event.chat_id,
+                                sender_id = %event.sender_id,
+                                content = %event.content,
+                                chat_type = %event.chat_type,
+                                "Received message from dispatch channel"
+                            );
+
+                            // Whitelist check (D-10/D-11/D-12)
+                            if !whitelist.is_empty() {
+                                if !whitelist.contains(&event.sender_id) {
+                                    warn!(sender_id = %event.sender_id, "Sender not in whitelist, ignoring");
+                                    continue;
+                                }
+                            } else {
+                                warn!("Whitelist is empty — denying all messages (D-12)");
+                                continue;
+                            }
+
+                            // Group @mention check (D-09)
+                            if event.chat_type == "group" || event.chat_type == "supergroup" {
+                                let mention = format!("@{}", bot_username_str);
+                                if !event.content.contains(&mention) {
+                                    info!("Group message without @mention, skipping");
                                     continue;
                                 }
                             }
-                        } else {
-                            (None, None)
-                        };
 
-                        // Phase 36.17.2 Plan 01: capture session key fields BEFORE moving event
-                        // into dispatch (event is consumed by UQM::dispatch; D-14 triple).
-                        let event_platform = event.platform.clone();
-                        let event_chat_id = event.chat_id.clone();
-                        let event_sender_id = event.sender_id.clone();
+                            info!(chat_id = %event.chat_id, "Message passed all filters, dispatching");
 
-                        // Phase 36.17.2 Plan 02: full match on Result<DispatchOutcome, QueueError> (D-15).
-                        // Cap-hit UX (❌ + chat reply) fires inside UQM::dispatch on Err — no
-                        // additional handling needed here for the error path.
-                        let dispatch_result = user_queue_dispatch.dispatch(event, text_prefix, image_data_uri).await;
-
-                        // SessionKey built from fields captured before event was moved into dispatch (D-14).
-                        let session_key_task = SessionKey::new(event_platform, &event_chat_id)
-                            .with_user(&event_sender_id);
-
-                        match dispatch_result {
-                            Ok(DispatchOutcome::Accepted) => {
-                                // Existing worker picked up the message via Notify wake.
-                                // 👀 fires when the worker pops (D-08). Nothing to do here.
-                                debug!(
-                                    chat_id = %event_chat_id,
-                                    "Dispatch: message accepted by existing worker (Phase 36.17.2 D-08)"
-                                );
-                            }
-                            Ok(DispatchOutcome::WorkerSpawned) => {
-                                // New worker needed for this chat. Spawn the full Notify-based
-                                // pop-loop worker (D-04, D-05, D-06, D-08, D-09, D-16).
-                                let handler_task = handler_dispatch.clone();
-                                let adapter_task = adapter_dispatch.clone();
-                                let sem_task = semaphore_dispatch.clone();
-                                let cancel_task = cancel_dispatch.clone();
-                                let queue_task = user_queue_dispatch.clone();
-                                // Capture Arc<SessionQueue> via the session_queue field accessor
-                                // (runner_dispatch stays alive; Arc<SessionQueue> clone is cheap).
-                                let session_queue_task = runner_dispatch.session_queue.clone();
-                                let session_key_for_worker = session_key_task.clone();
-
-                                // D-19 (M4 locked): notify_for is pub async fn; workers map uses
-                                // tokio::sync::Mutex. WorkerSpawned invariant guarantees Some here.
-                                let notify_task: std::sync::Arc<tokio::sync::Notify> = queue_task
-                                    .notify_for(&session_key_for_worker)
-                                    .await
-                                    .expect("notify_for must return Some immediately after WorkerSpawned (Plan 01 invariant)");
-
-                                // Plan 03 (Phase 22.4.2.1): spawn into worker_join_set so
-                                // per-chat workers are tracked and drained on shutdown.
-                                worker_join_set_dispatch.lock().await.spawn(async move {
-                                    // Full Notify-based pop-loop (D-04, D-05, D-06).
-                                    loop {
-                                        // D-06 step 1+2: pop or wait for Notify wake / cancellation.
-                                        let next_event = match session_queue_task.pop(&session_key_for_worker) {
-                                            Some(ev) => ev,
-                                            None => {
-                                                // Queue empty — park until dispatch signals or cancel fires.
-                                                tokio::select! {
-                                                    _ = cancel_task.cancelled() => break,
-                                                    _ = notify_task.notified() => continue, // re-poll the queue
-                                                }
-                                            }
-                                        };
-
-                                        // Cancellation check after pop (cancel may have fired between
-                                        // pop and this point — T-36.17.2-03 acknowledged, window is μs).
-                                        if cancel_task.is_cancelled() { break; }
-
-                                        // Acquire semaphore permit (TG-06 — bounded concurrency).
-                                        let permit = match sem_task.acquire().await {
-                                            Ok(p) => p,
-                                            Err(_) => break, // semaphore closed on shutdown
-                                        };
-
-                                        // D-06 step 3 + D-08: emit 👀 reaction inline before
-                                        // handle_with_multimodal. Inline await means "👀 reaches
-                                        // Telegram before the placeholder █ send" — strict ordering
-                                        // preferred over fire-and-forget (see CONTEXT.md Claude's Discretion).
-                                        // D-09: warn-and-ignore on failure; must not block the turn.
-                                        if let Err(e) = adapter_task
-                                            .add_reaction(&next_event.chat_id, &next_event.message_id, "👀")
-                                            .await
-                                        {
-                                            tracing::warn!(
-                                                chat_id = %next_event.chat_id,
-                                                message_id = %next_event.message_id,
-                                                error = %e,
-                                                "Worker: 👀 reaction emission failed; continuing (Phase 36.17.2 D-09)"
-                                            );
-                                        }
-
-                                        // Reconstruct multimodal payload from UQM sidecar (M1 locked by Plan 01).
-                                        // FIFO lockstep with SessionQueue::pop — one take_multimodal per pop.
-                                        // None means plain-text message with no multimodal payload.
-                                        let (text_prefix, image_data_uri) = queue_task
-                                            .take_multimodal(&session_key_for_worker)
-                                            .await
-                                            .unwrap_or((None, None));
-                                        let processed = crate::multimodal::ProcessedAttachments {
-                                            text_prefix,
-                                            image_data_uri,
-                                        };
-
-                                        let result = handler_task
-                                            .handle_with_multimodal(
-                                                &next_event,
-                                                adapter_task.clone(),
-                                                cancel_task.child_token(),
-                                                processed,
-                                            )
-                                            .await;
-
-                                        if let Err(e) = result {
-                                            error!(
-                                                chat_id = %next_event.chat_id,
-                                                error = %e,
-                                                "Handler error for message (Phase 36.17.2 worker pop-loop)"
-                                            );
-                                        }
-
-                                        // D-07: post-turn drain_pending call removed.
-                                        // The next loop iteration pops the next event from
-                                        // session_queue_task if any arrived during the turn —
-                                        // that is the natural drain.
-
-                                        drop(permit);
-
-                                        // D-05: cancellation check between iterations.
-                                        if cancel_task.is_cancelled() { break; }
+                            // Phase 36.17.2 Plan 05 (D-23, D-24, D-27): slash-command fast-path.
+                            // Commands bypass UserQueueManager entirely so they don't serialize behind
+                            // an in-flight free-text turn in the per-chat worker. The same handler entry
+                            // (handle_with_multimodal) is used — only the routing differs.
+                            //
+                            // D-24: strict prefix match, no whitespace trim — matches handler.rs:411 command parser.
+                            // D-26: state-mutation safety covered by SessionQueue mutex + SessionStore RwLock + AtomicBool.
+                            // T-36.17.2-06 mitigation: sem_dispatch permit acquired BEFORE handle call (TG-06 bound preserved).
+                            if event.content.starts_with('/') {
+                                let handler_cmd = handler_dispatch.clone();
+                                let adapter_cmd = adapter_dispatch.clone();
+                                let sem_cmd = semaphore_dispatch.clone();
+                                let cancel_cmd = cancel_dispatch.clone();
+                                let event_cmd = event.clone();
+                                // Detached spawn — commands are short-lived (D-27). Graceful shutdown
+                                // observes cancel_token via cancel.is_cancelled() inside the handler.
+                                tokio::spawn(async move {
+                                    let permit = match sem_cmd.acquire().await {
+                                        Ok(p) => p,
+                                        Err(_) => return, // semaphore closed → shutdown in progress
+                                    };
+                                    // Commands are text-only by contract (D-27) — skip multimodal processing.
+                                    let processed = crate::multimodal::ProcessedAttachments {
+                                        text_prefix: None,
+                                        image_data_uri: None,
+                                        image_cache_path: None,
+                                    };
+                                    if let Err(e) = handler_cmd
+                                        .handle_with_multimodal(
+                                            &event_cmd,
+                                            adapter_cmd,
+                                            cancel_cmd.child_token(),
+                                            processed,
+                                        )
+                                        .await
+                                    {
+                                        error!(
+                                            chat_id = %event_cmd.chat_id,
+                                            error = %e,
+                                            "Slash-command fast-path handler error (Phase 36.17.2 Plan 05)"
+                                        );
                                     }
-
-                                    // D-16: worker exits — clean up UQM map entry
-                                    // (workers + pending_multimodal both purged by remove).
-                                    queue_task.remove(&session_key_for_worker).await;
+                                    drop(permit);
                                 });
+                                continue; // Skip the multimodal + UQM.dispatch path for this event
                             }
-                            Err(QueueError::CapacityReached { .. }) => {
-                                // Cap-hit UX (❌ + chat reply) already fired inside UQM::dispatch (D-11).
-                                // Dispatch loop's only job here is to log and continue.
-                                // Telegram offset already advanced (Pitfall 6) — no re-delivery risk.
-                                tracing::warn!(
-                                    chat_id = %event_chat_id,
-                                    "Dispatch: queue full, message dropped (Phase 36.17.2 D-11)"
-                                );
+
+                            // Process multimodal attachments (D-05 through D-08)
+                            // image_cache_path threads the inbound photo's cache PATH to the worker
+                            // so the model can drive video_animate (image-to-video) — fix 36.3.3.
+                            let (text_prefix, image_data_uri, image_cache_path) = if !event.attachments.is_empty() {
+                                match multimodal::process_attachments(&adapter_dispatch_mm, &msg).await {
+                                    Ok(processed) => (
+                                        processed.text_prefix,
+                                        processed.image_data_uri,
+                                        processed.image_cache_path,
+                                    ),
+                                    Err(e) => {
+                                        // Send user-friendly error and skip this message
+                                        let chat_id = event.chat_id.clone();
+                                        let err_msg = format!("Could not process attachment: {}", e);
+                                        let _ = PlatformAdapter::send_message(adapter_dispatch_mm.as_ref(), &chat_id, &err_msg, None).await;
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                (None, None, None)
+                            };
+
+                            // Phase 36.17.2 Plan 01: capture session key fields BEFORE moving event
+                            // into dispatch (event is consumed by UQM::dispatch; D-14 triple).
+                            let event_platform = event.platform.clone();
+                            let event_chat_id = event.chat_id.clone();
+                            let event_sender_id = event.sender_id.clone();
+
+                            // Phase 36.17.2 Plan 02: full match on Result<DispatchOutcome, QueueError> (D-15).
+                            // Cap-hit UX (❌ + chat reply) fires inside UQM::dispatch on Err — no
+                            // additional handling needed here for the error path.
+                            let dispatch_result = user_queue_dispatch.dispatch(event, text_prefix, image_data_uri, image_cache_path).await;
+
+                            // SessionKey built from fields captured before event was moved into dispatch (D-14).
+                            let session_key_task = SessionKey::new(event_platform, &event_chat_id)
+                                .with_user(&event_sender_id);
+
+                            match dispatch_result {
+                                Ok(DispatchOutcome::Accepted) => {
+                                    // Existing worker picked up the message via Notify wake.
+                                    // 👀 fires when the worker pops (D-08). Nothing to do here.
+                                    debug!(
+                                        chat_id = %event_chat_id,
+                                        "Dispatch: message accepted by existing worker (Phase 36.17.2 D-08)"
+                                    );
+                                }
+                                Ok(DispatchOutcome::WorkerSpawned) => {
+                                    // New worker needed for this chat. Spawn the full Notify-based
+                                    // pop-loop worker (D-04, D-05, D-06, D-08, D-09, D-16).
+                                    let handler_task = handler_dispatch.clone();
+                                    let adapter_task = adapter_dispatch.clone();
+                                    let sem_task = semaphore_dispatch.clone();
+                                    let cancel_task = cancel_dispatch.clone();
+                                    let queue_task = user_queue_dispatch.clone();
+                                    // Capture Arc<SessionQueue> via the session_queue field accessor
+                                    // (runner_dispatch stays alive; Arc<SessionQueue> clone is cheap).
+                                    let session_queue_task = runner_dispatch.session_queue.clone();
+                                    // Phase 39.1 (R39.1-01 / R39.1-03): capture ConcurrencyLayer for
+                                    // per-turn semaphore check. On cap-hit, push_front back to FIFO
+                                    // and re-park — over-cap messages stay queued (D-03).
+                                    let concurrency_task = runner_dispatch.concurrency.clone();
+                                    let session_key_for_worker = session_key_task.clone();
+
+                                    // D-19 (M4 locked): notify_for is pub async fn; workers map uses
+                                    // tokio::sync::Mutex. WorkerSpawned invariant guarantees Some here.
+                                    let notify_task: std::sync::Arc<tokio::sync::Notify> = queue_task
+                                        .notify_for(&session_key_for_worker)
+                                        .await
+                                        .expect("notify_for must return Some immediately after WorkerSpawned (Plan 01 invariant)");
+
+                                    // Plan 03 (Phase 22.4.2.1): spawn into worker_join_set so
+                                    // per-chat workers are tracked and drained on shutdown.
+                                    worker_join_set_dispatch.lock().await.spawn(async move {
+                                        // Full Notify-based pop-loop (D-04, D-05, D-06).
+                                        loop {
+                                            // D-06 step 1+2: pop or wait for Notify wake / cancellation.
+                                            let next_event = match session_queue_task.pop(&session_key_for_worker) {
+                                                Some(ev) => ev,
+                                                None => {
+                                                    // Queue empty — park until dispatch signals or cancel fires.
+                                                    tokio::select! {
+                                                        _ = cancel_task.cancelled() => break,
+                                                        _ = notify_task.notified() => continue, // re-poll the queue
+                                                    }
+                                                }
+                                            };
+
+                                            // Cancellation check after pop (cancel may have fired between
+                                            // pop and this point — T-36.17.2-03 acknowledged, window is μs).
+                                            if cancel_task.is_cancelled() { break; }
+
+                                            // Phase 39.1 (R39.1-01 / R39.1-03 / D-03): try per-session
+                                            // + global semaphore before running the turn. If cap is hit,
+                                            // push the event back to the front of the FIFO (preserves
+                                            // ordering) and re-park on Notify — the next completed turn
+                                            // will wake us via the TurnGuard drop / Notify signal.
+                                            let _turn_permits = match concurrency_task.try_acquire() {
+                                                Some(permits) => permits,
+                                                None => {
+                                                    // Over-cap: return event to front of queue and wait.
+                                                    tracing::debug!(
+                                                        chat_id = %next_event.chat_id,
+                                                        "Worker: concurrency cap hit — re-queuing event (Phase 39.1 R39.1-03)"
+                                                    );
+                                                    session_queue_task.push_front(
+                                                        &session_key_for_worker,
+                                                        next_event,
+                                                    );
+                                                    // Re-park: wait for next Notify wake (a turn completing
+                                                    // will wake us so we can retry try_acquire).
+                                                    tokio::select! {
+                                                        _ = cancel_task.cancelled() => break,
+                                                        _ = notify_task.notified() => continue,
+                                                    }
+                                                }
+                                            };
+
+                                            // Acquire semaphore permit (TG-06 — bounded concurrency).
+                                            let permit = match sem_task.acquire().await {
+                                                Ok(p) => p,
+                                                Err(_) => break, // semaphore closed on shutdown
+                                            };
+
+                                            // D-06 step 3 + D-08: emit 👀 reaction inline before
+                                            // handle_with_multimodal. Inline await means "👀 reaches
+                                            // Telegram before the placeholder █ send" — strict ordering
+                                            // preferred over fire-and-forget (see CONTEXT.md Claude's Discretion).
+                                            // D-09: warn-and-ignore on failure; must not block the turn.
+                                            if let Err(e) = adapter_task
+                                                .add_reaction(&next_event.chat_id, &next_event.message_id, "👀")
+                                                .await
+                                            {
+                                                tracing::warn!(
+                                                    chat_id = %next_event.chat_id,
+                                                    message_id = %next_event.message_id,
+                                                    error = %e,
+                                                    "Worker: 👀 reaction emission failed; continuing (Phase 36.17.2 D-09)"
+                                                );
+                                            }
+
+                                            // Reconstruct multimodal payload from UQM sidecar (M1 locked by Plan 01).
+                                            // FIFO lockstep with SessionQueue::pop — one take_multimodal per pop.
+                                            // None means plain-text message with no multimodal payload.
+                                            let (text_prefix, image_data_uri, image_cache_path) = queue_task
+                                                .take_multimodal(&session_key_for_worker)
+                                                .await
+                                                .unwrap_or((None, None, None));
+                                            let processed = crate::multimodal::ProcessedAttachments {
+                                                text_prefix,
+                                                image_data_uri,
+                                                image_cache_path,
+                                            };
+
+                                            let result = handler_task
+                                                .handle_with_multimodal(
+                                                    &next_event,
+                                                    adapter_task.clone(),
+                                                    cancel_task.child_token(),
+                                                    processed,
+                                                )
+                                                .await;
+
+                                            if let Err(e) = result {
+                                                error!(
+                                                    chat_id = %next_event.chat_id,
+                                                    error = %e,
+                                                    "Handler error for message (Phase 36.17.2 worker pop-loop)"
+                                                );
+                                            }
+
+                                            // D-07: post-turn drain_pending call removed.
+                                            // The next loop iteration pops the next event from
+                                            // session_queue_task if any arrived during the turn —
+                                            // that is the natural drain.
+
+                                            drop(permit);
+
+                                            // D-05: cancellation check between iterations.
+                                            if cancel_task.is_cancelled() { break; }
+                                        }
+
+                                        // D-16: worker exits — clean up UQM map entry
+                                        // (workers + pending_multimodal both purged by remove).
+                                        queue_task.remove(&session_key_for_worker).await;
+                                    });
+                                }
+                                Err(QueueError::CapacityReached { .. }) => {
+                                    // Cap-hit UX (❌ + chat reply) already fired inside UQM::dispatch (D-11).
+                                    // Dispatch loop's only job here is to log and continue.
+                                    // Telegram offset already advanced (Pitfall 6) — no re-delivery risk.
+                                    tracing::warn!(
+                                        chat_id = %event_chat_id,
+                                        "Dispatch: queue full, message dropped (Phase 36.17.2 D-11)"
+                                    );
+                                }
                             }
                         }
                     }
                 }
-            }
-        };
+            };
+            dispatch_future_boxed = Some(Box::pin(dispatch_future));
+        } // close: if let (Some(adapter), Some(handler), ...) = (...) (step 8, Telegram-only)
 
         // --- 9a. WAL checkpoint timer (every 5 minutes, PASSIVE mode, non-blocking) ---
         let wal_cancel = self.cancel.clone();
@@ -1236,8 +1756,17 @@ impl GatewayRunner {
             let tool_registry_tick = self.tool_registry.clone();
             let memory_manager_tick = self.memory_manager.clone();
             let config_tick = self.config.clone();
-            // Phase 22.4.2.1 Plan 02: thread TG adapter for delivery dispatch
-            let adapter_tick = adapter.clone();
+            // Phase 22.4.2.1 Plan 02: thread TG adapter for delivery dispatch.
+            // Phase 47.6 Plan 03 (P0-1): Telegram is now optional — `adapter_tick`
+            // is `None` when Telegram is absent, so cron delivery/audio dispatch
+            // via Telegram is simply unavailable rather than panicking.
+            let adapter_tick = telegram_adapter.clone();
+            // Phase 47.6 Plan 07: same clone-cast pattern for the Buzz adapter,
+            // captured so the tick task's own DeliveryRegistry can register a
+            // "buzz" sender when the platform is present. `buzz_adapter` is
+            // bound at the top of `start()` (see the ORDERING TRAP note there).
+            #[cfg(feature = "buzz")]
+            let buzz_adapter_tick = buzz_adapter.clone();
 
             join_set.spawn(async move {
                 // UAT gap 2 / test 13: first-tick-after-boot burst guard.
@@ -1258,6 +1787,21 @@ impl GatewayRunner {
                     }
                 }
 
+                // Phase 47.6 Plan 07: platform-keyed text-delivery registry —
+                // "telegram" when the adapter is present, "buzz" likewise.
+                // This is the wiring that makes `deliver=buzz` real: the cron
+                // tick loop is hosted here, and a registry entry never built
+                // from THIS site is inert (Phase 47.4 lesson, re-applied).
+                let mut delivery_registry_tick = DeliveryRegistry::new();
+                if let Some(ref tg) = adapter_tick {
+                    delivery_registry_tick
+                        .insert("telegram", tg.clone() as Arc<dyn DeliverySend>);
+                }
+                #[cfg(feature = "buzz")]
+                if let Some(ref buzz) = buzz_adapter_tick {
+                    delivery_registry_tick.insert("buzz", buzz.clone() as Arc<dyn DeliverySend>);
+                }
+
                 // Construct CronRunnerContext from the gateway's shared Arcs
                 // and delegate to ironhermes_cron_runner::run_tick_loop.
                 // Plan 32.1-07: execute_cron_job + dispatch_delivery moved to
@@ -1270,7 +1814,12 @@ impl GatewayRunner {
                     hook_registry: hook_registry_tick,
                     config: config_tick,
                     mcp_manager: None, // gateway's McpManager is not yet threaded into the tick task
-                    tg_client: Some(adapter_tick.clone() as Arc<dyn TgSendApi>),
+                    tg_client: adapter_tick.clone().map(|a| a as Arc<dyn TgSendApi>),
+                    // RC-2: same clone-cast pattern as set_telegram_audio_dispatcher (runner.rs:725-727)
+                    audio_dispatcher: adapter_tick
+                        .clone()
+                        .map(|a| a as Arc<dyn ironhermes_tools::AudioDispatcher>),
+                    delivery_registry: delivery_registry_tick,
                 });
                 ironhermes_cron_runner::run_tick_loop(cron_ctx, tick_cancel).await;
             });
@@ -1297,7 +1846,7 @@ impl GatewayRunner {
                 }
             }
         };
-        let dispatch_in_gw_env = std::env::var("HERMES_KANBAN_DISPATCH_IN_GATEWAY")
+        let dispatch_in_gw_env = ironhermes_kanban::kanban_env("DISPATCH_IN_GATEWAY")
             .map(|v| v != "0")
             .unwrap_or(true);
 
@@ -1317,7 +1866,7 @@ impl GatewayRunner {
         // -----------------------------------------------------------------------
         // Phase 36.3.7.13 D-A1: env-bridged open closes F-01 on the gateway
         // background dispatcher loop. Workers spawned from here read
-        // HERMES_KANBAN_DB to resolve the same DB path.
+        // IRONHERMES_KANBAN_DB to resolve the same DB path.
         match ironhermes_kanban::KanbanStore::open_from_env() {
             Ok(store) => {
                 let kanban_store_arc = std::sync::Arc::new(tokio::sync::Mutex::new(store));
@@ -1336,7 +1885,9 @@ impl GatewayRunner {
                     });
                     info!("Kanban dispatch task started ({}s interval)", interval_secs);
                 } else if !dispatch_in_gw_env {
-                    info!("Kanban dispatcher disabled via HERMES_KANBAN_DISPATCH_IN_GATEWAY=0");
+                    info!(
+                        "Kanban dispatcher disabled via IRONHERMES_KANBAN_DISPATCH_IN_GATEWAY=0 (legacy HERMES_KANBAN_DISPATCH_IN_GATEWAY also accepted)"
+                    );
                 } else {
                     // dispatch_in_gateway = false in config
                     debug!("Kanban dispatcher disabled via config (dispatch_in_gateway = false)");
@@ -1357,12 +1908,46 @@ impl GatewayRunner {
                 // The send_fn is the kanban->gateway boundary closure — keeps the
                 // ironhermes-kanban crate free of any compile-time dep on
                 // ironhermes-gateway. See Plan 02 SUMMARY crate-isolation audit.
+                //
+                // Phase 47.6 Plan 07: the gate is fed REALITY (the adapter
+                // snapshot's own platform names), not `collect_enabled_platform_names`'
+                // config-key INTENT — a platform configured but fail-closed at boot
+                // (Buzz with an unresolvable nsec is the live case: Plan 01 makes
+                // that fail closed and skip the spawn) must not pass the gate, start
+                // the notifier loop, and then fail every send with "not enabled in
+                // gateway". Intent is still consulted, ONLY to warn when it disagrees
+                // with reality, so the operator learns why their subscription is inert.
                 // -----------------------------------------------------------------------
-                let enabled_platforms: Vec<String> =
-                    collect_enabled_platform_names(&self.config, &adapter);
+                #[cfg(feature = "buzz")]
+                let buzz_for_snapshot: Option<std::sync::Arc<dyn crate::adapter::PlatformAdapter>> =
+                    buzz_adapter
+                        .clone()
+                        .map(|b| b as std::sync::Arc<dyn crate::adapter::PlatformAdapter>);
+                #[cfg(not(feature = "buzz"))]
+                let buzz_for_snapshot: Option<std::sync::Arc<dyn crate::adapter::PlatformAdapter>> =
+                    None;
+                let adapter_snapshot: Vec<(
+                    String,
+                    std::sync::Arc<dyn crate::adapter::PlatformAdapter>,
+                )> = build_adapter_snapshot(&telegram_adapter, &buzz_for_snapshot);
+                let enabled_platforms_from_snapshot: Vec<String> =
+                    adapter_snapshot.iter().map(|(name, _)| name.clone()).collect();
+
+                let intended_platforms =
+                    collect_enabled_platform_names(&self.config, &telegram_adapter);
+                for platform in diagnose_notifier_platform_mismatch(
+                    &intended_platforms,
+                    &enabled_platforms_from_snapshot,
+                ) {
+                    warn!(
+                        platform = %platform,
+                        "kanban notifications configured for this platform, but no live adapter is present in the gateway (see boot log above for why) — notifier gate treats it as absent"
+                    );
+                }
+
                 let gate = crate::notifier_gating::compute_notifier_gate(
                     kanban_config.notification_sources.as_deref(),
-                    &enabled_platforms,
+                    &enabled_platforms_from_snapshot,
                 );
                 match gate {
                     crate::notifier_gating::NotifierGate::DisabledNoSources => {
@@ -1376,14 +1961,9 @@ impl GatewayRunner {
                         );
                     }
                     crate::notifier_gating::NotifierGate::Enabled { sources } => {
-                        // Build the send_fn closure: take an owned snapshot of the
-                        // gateway's adapter handles at spawn time. The notifier
-                        // loop's lifetime can outlive `start()`'s stack frame, so
-                        // capturing references would not work — Arcs only.
-                        let adapter_snapshot: Vec<(
-                            String,
-                            std::sync::Arc<dyn crate::adapter::PlatformAdapter>,
-                        )> = build_adapter_snapshot(&adapter);
+                        // send_fn closure: the owned adapter snapshot built above
+                        // (Arcs, not references — the notifier loop's lifetime can
+                        // outlive `start()`'s stack frame).
                         let send_fn = build_notifier_send_fn(adapter_snapshot);
                         let poll_seconds = kanban_config.notifier_poll_seconds;
                         let notifier_ctx =
@@ -1419,15 +1999,32 @@ impl GatewayRunner {
 
         // --- 12. Run dispatch loop concurrently with shutdown signal ---
         // dispatch_future processes messages; ctrl+c or cancel token stops everything.
-        tokio::select! {
-            _ = dispatch_future => {
-                info!("Dispatch loop exited");
+        // Phase 47.6 Plan 03 (P0-1): `dispatch_future_boxed` is `None` when
+        // Telegram is absent — the ctrl_c/cancel arms are byte-identical
+        // either way; only the dispatch-future arm is skipped.
+        match dispatch_future_boxed {
+            Some(dispatch_future) => {
+                tokio::select! {
+                    _ = dispatch_future => {
+                        info!("Dispatch loop exited");
+                    }
+                    _ = tokio::signal::ctrl_c() => {
+                        info!("Ctrl+C received, initiating graceful shutdown");
+                    }
+                    _ = self.cancel.cancelled() => {
+                        info!("Cancellation token fired, shutting down");
+                    }
+                }
             }
-            _ = tokio::signal::ctrl_c() => {
-                info!("Ctrl+C received, initiating graceful shutdown");
-            }
-            _ = self.cancel.cancelled() => {
-                info!("Cancellation token fired, shutting down");
+            None => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {
+                        info!("Ctrl+C received, initiating graceful shutdown");
+                    }
+                    _ = self.cancel.cancelled() => {
+                        info!("Cancellation token fired, shutting down");
+                    }
+                }
             }
         }
 
@@ -1620,73 +2217,158 @@ fn resolve_token_with_env(token: &Option<String>, env_var: &str) -> Option<Strin
     std::env::var(env_var).ok()
 }
 
+/// Select the "primary adapter" used to construct `UserQueueManager`
+/// (Phase 47.6 Plan 03, P0-1): Telegram when present, otherwise Buzz when
+/// present. Discord and Slack are never primaries in this plan's scope —
+/// they share the primary's `UserQueueManager` (when one exists) but do not
+/// fall back into the primary role themselves.
+///
+/// Phase 47.6 Plan 06 (P1-2): `ApprovalCoordinator` no longer reads this
+/// helper's result — each platform now builds its own coordinator bound
+/// directly to its own adapter via `build_platform_approval_coordinator`,
+/// so a Buzz-only gateway's approvals are no longer contingent on which
+/// adapter this function happens to pick.
+///
+/// Pure and trivially unit-testable without booting a gateway — this is the
+/// helper the plan's own acceptance criteria pin directly.
+fn select_primary_adapter(
+    telegram: Option<Arc<dyn crate::adapter::PlatformAdapter>>,
+    buzz: Option<Arc<dyn crate::adapter::PlatformAdapter>>,
+) -> Option<Arc<dyn crate::adapter::PlatformAdapter>> {
+    telegram.or(buzz)
+}
+
+/// Construct one `ApprovalCoordinator` bound to `adapter` (Phase 47.6 Plan 06,
+/// P1-2). A thin wrapper over `ApprovalCoordinator::new` so every platform
+/// builds its coordinator identically, and so the `approvals_store`/`audit_log`
+/// Arcs passed to every platform's coordinator are provably clones of the SAME
+/// two objects — the store carries the operator's CLI-set session/always
+/// approvals and the audit log is a single append-only file, both meant to be
+/// shared truth across every platform, never per-platform copies.
+fn build_platform_approval_coordinator(
+    timeout_secs: u64,
+    adapter: Arc<dyn crate::adapter::PlatformAdapter>,
+    approvals_store: Arc<ironhermes_core::ApprovalsStore>,
+    audit_log: Arc<ironhermes_core::AuditLog>,
+) -> Arc<crate::approval::ApprovalCoordinator> {
+    Arc::new(crate::approval::ApprovalCoordinator::new(
+        timeout_secs,
+        adapter,
+        approvals_store,
+        audit_log,
+    ))
+}
+
 // -------------------------------------------------------------------------
 // Phase 36.3.7.5 BUG-36.3.7.5-04: notifier-spawn support helpers.
 //
 // `collect_enabled_platform_names` reads the gateway's `Config` + the live
-// Telegram adapter Arc to compute the set of enabled-platform names used by
-// the spawn-gating check (`compute_notifier_gate`).
+// Telegram adapter Arc to compute the set of OPERATOR-INTENDED platform names
+// (Phase 47.6 Plan 07: no longer fed to the gate directly — see below).
 //
 // `build_adapter_snapshot` produces an owned `Vec<(String, Arc<dyn PlatformAdapter>)>`
 // for the `SendFn` closure — captured by value so the closure can outlive
-// `start()`'s stack frame. Currently includes ONLY the Telegram adapter
-// (Discord/Slack adapters are constructed inside their own spawned tasks and
-// are not retained as runner-scope Arcs in this iteration; subscriptions
-// naming those platforms will hit the "platform not enabled in gateway" arm
-// of the send_fn closure and the notifier will log + drop per locked policy).
+// `start()`'s stack frame. Includes Telegram AND Buzz, whichever adapters are
+// actually present (Discord/Slack adapters are constructed inside their own
+// spawned tasks and are not retained as runner-scope Arcs in this iteration;
+// subscriptions naming those platforms will hit the "platform not enabled in
+// gateway" arm of the send_fn closure and the notifier will log + drop per
+// locked policy).
 //
 // `build_notifier_send_fn` constructs the `ironhermes_kanban::SendFn`
 // trait-object closure: case-insensitive string match on `platform`, route
 // to the matching `PlatformAdapter::send_message`, or return `Err` so the
 // notifier's log-and-drop policy applies.
+//
+// Phase 47.6 Plan 07 gate/snapshot fix: the spawn gate (`compute_notifier_gate`)
+// is now fed the platform names taken from `build_adapter_snapshot`'s
+// REALITY (adapters that actually exist), not from `collect_enabled_platform_names`'s
+// config-key INTENT. A platform configured but fail-closed at boot (Buzz with
+// an unresolvable nsec is the live case — Plan 01 makes that fail closed and
+// skip the spawn) no longer passes the gate, starts the notifier loop, and
+// then fails every send with "not enabled in gateway". `diagnose_notifier_platform_mismatch`
+// is the pure-function seam that finds the intent/reality gap so the caller
+// can `warn!` naming the platform BEFORE gating on reality.
 // -------------------------------------------------------------------------
 
-/// Enumerate the gateway's enabled platform names from the parsed `Config`.
+/// Enumerate the gateway's OPERATOR-INTENDED platform names from the parsed
+/// `Config` — i.e. what the operator configured, independent of whether an
+/// adapter for it actually exists at runtime.
 ///
-/// "Enabled" = the platform appears in `config.gateway.platforms`. The Telegram
-/// adapter is ALWAYS enabled (constructed at `start()` entry); Discord/Slack
-/// are enabled iff their config sections AND token environments resolve at
-/// startup. Conservative semantics: include any platform key present in the
-/// platforms map so the gate check sees the operator's intent.
+/// "Intended" = the platform appears in `config.gateway.platforms`, EXCEPT
+/// Telegram, which is now optional (Phase 47.6 Plan 03, P0-1): the
+/// `telegram` name is appended only when `telegram_adapter` is `Some` —
+/// i.e., the boot gate reported Telegram usable and `start()` actually
+/// constructed it. Discord/Slack are intended iff their config sections
+/// exist (unchanged conservative semantics: presence of the key is enough
+/// to see operator intent, independent of whether their own tokens resolved).
+///
+/// Phase 47.6 Plan 07: this list is NO LONGER fed directly to
+/// `compute_notifier_gate` — the gate now follows REALITY (the adapter
+/// snapshot). This function's role is now solely to detect intent/reality
+/// mismatches via `diagnose_notifier_platform_mismatch`, so the operator gets
+/// a `warn!` naming a configured-but-absent platform instead of the notifier
+/// silently starting and failing every send.
 fn collect_enabled_platform_names(
     config: &ironhermes_core::Config,
-    _telegram_adapter: &std::sync::Arc<crate::telegram::TelegramAdapter>,
+    telegram_adapter: &Option<std::sync::Arc<crate::telegram::TelegramAdapter>>,
 ) -> Vec<String> {
-    // Start from the configured platforms map. Telegram is the canonical
-    // entry — if the operator wrote `platforms.telegram`, the platform is
-    // enabled by the time we reach this point (start() would have failed
-    // earlier if the token were unresolvable). Discord/Slack are enabled
-    // when their config sections exist.
     let mut names: Vec<String> = config
         .gateway
         .platforms
         .keys()
+        .filter(|k| !k.eq_ignore_ascii_case("telegram"))
         .map(|k| k.to_string())
         .collect();
-    // Always include "telegram" — start() unconditionally builds the
-    // TelegramAdapter, so it is the always-on adapter even if the config
-    // platforms map is missing the explicit `telegram:` key (the
-    // tg_config default-clone above tolerates absence).
-    if !names.iter().any(|n| n.eq_ignore_ascii_case("telegram")) {
+    if telegram_adapter.is_some() {
         names.push("telegram".to_string());
     }
     names
 }
 
+/// Find operator-INTENDED platforms (from [`collect_enabled_platform_names`])
+/// that are absent from the adapter-snapshot REALITY (from
+/// [`build_adapter_snapshot`]) — case-insensitively. The caller `warn!`s one
+/// line per returned platform BEFORE gating on reality, so a configured but
+/// fail-closed platform (Buzz with an unresolvable nsec, the live case) tells
+/// the operator why their subscription is inert instead of silently starting
+/// the notifier loop and failing every send.
+fn diagnose_notifier_platform_mismatch(intended: &[String], actual: &[String]) -> Vec<String> {
+    intended
+        .iter()
+        .filter(|i| !actual.iter().any(|a| a.eq_ignore_ascii_case(i)))
+        .cloned()
+        .collect()
+}
+
 /// Build an owned snapshot of platform-name → `Arc<dyn PlatformAdapter>` pairs
-/// for the `SendFn` closure. Currently only the Telegram adapter is reachable
-/// as a runner-scope Arc; Discord/Slack adapters live inside their own tokio
-/// tasks (constructed after socket connect). Subscriptions that name a
-/// platform NOT in this snapshot will receive `Err("platform X not enabled
-/// in gateway")` from the closure and the notifier will log+drop the message
-/// per locked policy D-log-and-drop-on-fail.
+/// for the `SendFn` closure. Telegram AND Buzz are both reachable as
+/// runner-scope Arcs (Phase 47.6 Plan 07 adds Buzz); Discord/Slack adapters
+/// live inside their own tokio tasks (constructed after socket connect).
+/// Subscriptions that name a platform NOT in this snapshot will receive
+/// `Err("platform X not enabled in gateway")` from the closure and the
+/// notifier will log+drop the message per locked policy D-log-and-drop-on-fail.
+///
+/// Phase 47.6 Plan 03 (P0-1): `telegram_adapter` is `Option` — Phase 47.6
+/// Plan 07 adds an equally-optional `buzz_adapter`. Either or both being
+/// `None` shrinks the snapshot; the "not enabled in gateway" drop behavior is
+/// unchanged for any platform not present.
 fn build_adapter_snapshot(
-    telegram_adapter: &std::sync::Arc<crate::telegram::TelegramAdapter>,
+    telegram_adapter: &Option<std::sync::Arc<crate::telegram::TelegramAdapter>>,
+    buzz_adapter: &Option<std::sync::Arc<dyn crate::adapter::PlatformAdapter>>,
 ) -> Vec<(String, std::sync::Arc<dyn crate::adapter::PlatformAdapter>)> {
-    vec![(
-        "telegram".to_string(),
-        telegram_adapter.clone() as std::sync::Arc<dyn crate::adapter::PlatformAdapter>,
-    )]
+    let mut snapshot: Vec<(String, std::sync::Arc<dyn crate::adapter::PlatformAdapter>)> =
+        Vec::new();
+    if let Some(adapter) = telegram_adapter {
+        snapshot.push((
+            "telegram".to_string(),
+            adapter.clone() as std::sync::Arc<dyn crate::adapter::PlatformAdapter>,
+        ));
+    }
+    if let Some(adapter) = buzz_adapter {
+        snapshot.push(("buzz".to_string(), adapter.clone()));
+    }
+    snapshot
 }
 
 /// Construct the `ironhermes_kanban::SendFn` trait-object closure.
@@ -1731,6 +2413,501 @@ fn build_notifier_send_fn(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -------------------------------------------------------------------------
+    // Phase 47.6 Plan 03 (P0-1): primary-adapter selection + optional-Telegram
+    // helper pure-function tests — pinned WITHOUT booting a gateway.
+    // -------------------------------------------------------------------------
+
+    fn fake_telegram_adapter() -> Arc<TelegramAdapter> {
+        Arc::new(TelegramAdapter::new("fake-token-for-tests"))
+    }
+
+    #[test]
+    fn select_primary_adapter_prefers_telegram_when_both_present() {
+        let telegram: Arc<dyn crate::adapter::PlatformAdapter> = fake_telegram_adapter();
+        let buzz: Arc<dyn crate::adapter::PlatformAdapter> = fake_telegram_adapter();
+        let selected = select_primary_adapter(Some(telegram.clone()), Some(buzz));
+        assert!(selected.is_some());
+        // Same underlying pointer as `telegram` (Telegram wins when both present).
+        assert!(Arc::ptr_eq(&selected.unwrap(), &telegram));
+    }
+
+    #[test]
+    fn select_primary_adapter_falls_back_to_buzz_when_telegram_absent() {
+        let buzz: Arc<dyn crate::adapter::PlatformAdapter> = fake_telegram_adapter();
+        let selected = select_primary_adapter(None, Some(buzz.clone()));
+        assert!(selected.is_some());
+        assert!(Arc::ptr_eq(&selected.unwrap(), &buzz));
+    }
+
+    #[test]
+    fn select_primary_adapter_none_when_neither_present() {
+        let selected = select_primary_adapter(None, None);
+        assert!(selected.is_none());
+    }
+
+    #[test]
+    fn collect_enabled_platform_names_includes_telegram_only_when_adapter_present() {
+        let config = ironhermes_core::Config::default();
+        let with_telegram = collect_enabled_platform_names(&config, &Some(fake_telegram_adapter()));
+        assert!(with_telegram.iter().any(|n| n == "telegram"));
+
+        let without_telegram = collect_enabled_platform_names(&config, &None);
+        assert!(!without_telegram.iter().any(|n| n == "telegram"));
+    }
+
+    #[test]
+    fn build_adapter_snapshot_empty_when_telegram_absent() {
+        let snapshot = build_adapter_snapshot(&None, &None);
+        assert!(snapshot.is_empty());
+    }
+
+    #[test]
+    fn build_adapter_snapshot_contains_telegram_when_present() {
+        let snapshot = build_adapter_snapshot(&Some(fake_telegram_adapter()), &None);
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].0, "telegram");
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 47.6 Plan 07: Buzz in the notifier snapshot + the round-trip
+    // invariant test.
+    // -------------------------------------------------------------------------
+
+    /// Minimal recording `PlatformAdapter` — enough surface to exercise
+    /// `build_notifier_send_fn`'s routing without a real Telegram/Buzz
+    /// transport. `platform_tag` lets each fixture instance answer a distinct
+    /// `Platform` so tests can tell which adapter actually received a call.
+    struct RecordingAdapter {
+        platform_tag: Platform,
+        calls: std::sync::Mutex<Vec<(String, String, Option<String>)>>,
+    }
+
+    impl RecordingAdapter {
+        fn new(platform_tag: Platform) -> Self {
+            Self {
+                platform_tag,
+                calls: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn recorded_calls(&self) -> Vec<(String, String, Option<String>)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::adapter::PlatformAdapter for RecordingAdapter {
+        fn platform(&self) -> Platform {
+            self.platform_tag.clone()
+        }
+
+        async fn send_message(
+            &self,
+            chat_id: &str,
+            content: &str,
+            thread_id: Option<&str>,
+        ) -> Result<ironhermes_core::MessageResponse> {
+            self.calls.lock().unwrap().push((
+                chat_id.to_string(),
+                content.to_string(),
+                thread_id.map(|s| s.to_string()),
+            ));
+            Ok(ironhermes_core::MessageResponse {
+                message_id: "fake-id".to_string(),
+                chat_id: chat_id.to_string(),
+                platform: self.platform_tag.clone(),
+            })
+        }
+
+        async fn send_message_markdown_v2(
+            &self,
+            chat_id: &str,
+            content: &str,
+            thread_id: Option<&str>,
+        ) -> Result<ironhermes_core::MessageResponse> {
+            self.send_message(chat_id, content, thread_id).await
+        }
+
+        async fn edit_message(&self, _chat_id: &str, _message_id: &str, _content: &str) -> Result<()> {
+            Ok(())
+        }
+
+        async fn edit_message_markdown_v2(
+            &self,
+            _chat_id: &str,
+            _message_id: &str,
+            _content: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn delete_message(&self, _chat_id: &str, _message_id: &str) -> Result<()> {
+            Ok(())
+        }
+
+        fn is_running(&self) -> bool {
+            true
+        }
+    }
+
+    fn recording_adapter(platform_tag: Platform) -> Arc<RecordingAdapter> {
+        Arc::new(RecordingAdapter::new(platform_tag))
+    }
+
+    #[test]
+    fn snapshot_includes_buzz_when_present() {
+        let buzz = recording_adapter(Platform::Buzz);
+        let buzz_dyn: Arc<dyn crate::adapter::PlatformAdapter> = buzz.clone();
+        let snapshot = build_adapter_snapshot(&None, &Some(buzz_dyn));
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].0, "buzz");
+    }
+
+    #[test]
+    fn snapshot_omits_buzz_when_absent() {
+        let snapshot = build_adapter_snapshot(&Some(fake_telegram_adapter()), &None);
+        assert!(snapshot.iter().all(|(name, _)| name != "buzz"));
+    }
+
+    #[test]
+    fn snapshot_includes_both_when_both_present() {
+        let buzz = recording_adapter(Platform::Buzz);
+        let buzz_dyn: Arc<dyn crate::adapter::PlatformAdapter> = buzz.clone();
+        let snapshot = build_adapter_snapshot(&Some(fake_telegram_adapter()), &Some(buzz_dyn));
+        assert_eq!(snapshot.len(), 2);
+        assert!(snapshot.iter().any(|(name, _)| name == "telegram"));
+        assert!(snapshot.iter().any(|(name, _)| name == "buzz"));
+    }
+
+    #[test]
+    fn snapshot_is_empty_when_no_adapter_is_present() {
+        // The Buzz-only-and-not-yet-connected case: neither adapter Arc is
+        // present, e.g. because Buzz failed to connect and Telegram is
+        // absent. Must yield an empty vec, never panic.
+        let snapshot = build_adapter_snapshot(&None, &None);
+        assert!(snapshot.is_empty());
+    }
+
+    #[tokio::test]
+    async fn notifier_send_fn_routes_to_buzz() {
+        let telegram = recording_adapter(Platform::Telegram);
+        let buzz = recording_adapter(Platform::Buzz);
+        let telegram_dyn: Arc<dyn crate::adapter::PlatformAdapter> = telegram.clone();
+        let buzz_dyn: Arc<dyn crate::adapter::PlatformAdapter> = buzz.clone();
+        let snapshot = vec![
+            ("telegram".to_string(), telegram_dyn),
+            ("buzz".to_string(), buzz_dyn),
+        ];
+        let send_fn = build_notifier_send_fn(snapshot);
+
+        send_fn("buzz", "chat1", None, "hello")
+            .await
+            .expect("buzz send must succeed");
+
+        assert_eq!(buzz.recorded_calls().len(), 1);
+        assert_eq!(buzz.recorded_calls()[0].0, "chat1");
+        assert!(
+            telegram.recorded_calls().is_empty(),
+            "telegram must not receive the buzz-addressed send"
+        );
+    }
+
+    #[tokio::test]
+    async fn notifier_send_fn_routes_case_insensitively() {
+        let buzz = recording_adapter(Platform::Buzz);
+        let buzz_dyn: Arc<dyn crate::adapter::PlatformAdapter> = buzz.clone();
+        let snapshot = vec![("buzz".to_string(), buzz_dyn)];
+        let send_fn = build_notifier_send_fn(snapshot);
+
+        send_fn("BUZZ", "chat1", None, "hello")
+            .await
+            .expect("uppercase platform token must still route");
+
+        assert_eq!(buzz.recorded_calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn notifier_send_fn_errors_for_an_unlisted_platform() {
+        let snapshot: Vec<(String, Arc<dyn crate::adapter::PlatformAdapter>)> = vec![];
+        let send_fn = build_notifier_send_fn(snapshot);
+
+        let err = send_fn("discord", "chat1", None, "hello")
+            .await
+            .expect_err("unlisted platform must error");
+        assert!(
+            err.to_string().contains("discord"),
+            "error must name the platform: {err}"
+        );
+    }
+
+    /// The assumption-delta invariant test: build a snapshot with every
+    /// supported platform present, then — iterating the snapshot ITSELF,
+    /// never a hardcoded platform list — assert `build_notifier_send_fn`
+    /// routes a message to that entry's adapter. Goes red the moment a
+    /// future change makes the snapshot's contents and the send closure's
+    /// routing disagree, or reintroduces a single-adapter assumption.
+    #[tokio::test]
+    async fn every_snapshot_entry_round_trips_a_notifier_send() {
+        let telegram = recording_adapter(Platform::Telegram);
+        let buzz = recording_adapter(Platform::Buzz);
+        let telegram_dyn: Arc<dyn crate::adapter::PlatformAdapter> = telegram.clone();
+        let buzz_dyn: Arc<dyn crate::adapter::PlatformAdapter> = buzz.clone();
+        let snapshot = vec![
+            ("telegram".to_string(), telegram_dyn),
+            ("buzz".to_string(), buzz_dyn),
+        ];
+        let platform_names: Vec<String> = snapshot.iter().map(|(name, _)| name.clone()).collect();
+        let send_fn = build_notifier_send_fn(snapshot);
+
+        for platform in &platform_names {
+            send_fn(platform, "round-trip-chat", None, "round-trip message")
+                .await
+                .unwrap_or_else(|e| panic!("send to {platform} must succeed: {e}"));
+        }
+
+        assert_eq!(telegram.recorded_calls().len(), 1);
+        assert_eq!(buzz.recorded_calls().len(), 1);
+    }
+
+    #[test]
+    fn notifier_gate_enables_for_a_buzz_only_gateway() {
+        let sources = vec!["buzz".to_string()];
+        let enabled = vec!["buzz".to_string()];
+        let gate = crate::notifier_gating::compute_notifier_gate(Some(&sources), &enabled);
+        assert!(matches!(
+            gate,
+            crate::notifier_gating::NotifierGate::Enabled { .. }
+        ));
+    }
+
+    #[test]
+    fn notifier_gate_declines_when_a_configured_platform_did_not_spawn() {
+        // The unresolvable-nsec case: buzz is in config.gateway.platforms
+        // (operator intent) and in notification_sources, but no Buzz adapter
+        // ended up in the snapshot (reality). Gating on the snapshot's
+        // platform names — not collect_enabled_platform_names' config keys —
+        // must NOT enable the notifier loop.
+        let sources = vec!["buzz".to_string()];
+        let enabled_from_snapshot: Vec<String> = vec![]; // buzz absent from the snapshot
+        let gate = crate::notifier_gating::compute_notifier_gate(Some(&sources), &enabled_from_snapshot);
+        assert!(!matches!(
+            gate,
+            crate::notifier_gating::NotifierGate::Enabled { .. }
+        ));
+    }
+
+    #[test]
+    fn notifier_gate_warns_when_intent_and_reality_disagree() {
+        // Operator configured (and subscribed) buzz, but no buzz adapter
+        // spawned — diagnose_notifier_platform_mismatch is the pure-function
+        // seam the caller uses to warn! naming the absent platform.
+        let intended = vec!["buzz".to_string()];
+        let actual_from_snapshot: Vec<String> = vec![]; // buzz absent from the snapshot
+        let mismatched = diagnose_notifier_platform_mismatch(&intended, &actual_from_snapshot);
+        assert_eq!(mismatched, vec!["buzz".to_string()]);
+    }
+
+    #[test]
+    fn diagnose_notifier_platform_mismatch_is_empty_when_intent_matches_reality() {
+        let intended = vec!["telegram".to_string(), "buzz".to_string()];
+        let actual = vec!["TELEGRAM".to_string(), "Buzz".to_string()];
+        assert!(diagnose_notifier_platform_mismatch(&intended, &actual).is_empty());
+    }
+
+    /// Integration-style test (Task 2's own acceptance criterion): a
+    /// Buzz-only config's boot gate reports Buzz usable and Telegram not
+    /// usable, WITHOUT booting a gateway (`GatewayRunner::start` owns a PID
+    /// lock and never returns, so it cannot be exercised directly in a
+    /// test) — `resolve_enabled_platforms_with` and `build_adapter_snapshot`
+    /// are the two seams that make this testable.
+    #[test]
+    fn buzz_only_gate_result_is_usable_and_snapshot_stays_telegram_only() {
+        let config: ironhermes_core::Config = serde_yaml::from_str(
+            r#"
+gateway:
+  platforms:
+    buzz:
+      enabled: true
+      relay_url: "wss://relay.example"
+"#,
+        )
+        .expect("valid config fixture");
+        let gate = crate::boot_gate::resolve_enabled_platforms_with(
+            &config,
+            |_name: &str| None,
+            || Ok("nsec1testfixturekeymaterial".to_string()),
+        )
+        .expect("buzz alone must be usable");
+        assert!(gate.buzz.is_usable());
+        assert!(!gate.telegram.is_usable());
+        // This test only exercises the boot gate, not full adapter
+        // construction — no adapter Arcs exist here, so the snapshot is
+        // empty regardless of Buzz's gate result (Phase 47.6 Plan 07: a real
+        // `start()` run WOULD populate a "buzz" entry once the adapter is
+        // actually constructed and connected; see snapshot_includes_buzz_when_present).
+        assert!(build_adapter_snapshot(&None, &None).is_empty());
+    }
+
+    // -------------------------------------------------------------------------
+    // G-41.1-5: Telegram command-menu generation (commands_for_platform)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn telegram_command_menu_includes_available_and_excludes_unavailable() {
+        use ironhermes_core::commands::{CommandCategory, PlatformFilter};
+
+        let commands = vec![
+            CommandDef::new("help", "Show help", CommandCategory::Info)
+                .platform(PlatformFilter::All),
+            CommandDef::new("skills", "List skills", CommandCategory::ToolsAndSkills)
+                .platform(PlatformFilter::Universal),
+            CommandDef::new("agents", "Manage agents", CommandCategory::Configuration)
+                .platform(PlatformFilter::CliOnly),
+            CommandDef::new("usage", "Show usage", CommandCategory::Info)
+                .platform(PlatformFilter::CliAndAcp),
+        ];
+
+        let tg_commands = commands_for_platform(&commands, &Platform::Telegram);
+        let names: Vec<&str> = tg_commands.iter().map(|c| c.command.as_str()).collect();
+
+        assert!(
+            names.contains(&"help"),
+            "PlatformFilter::All must be included"
+        );
+        assert!(
+            names.contains(&"skills"),
+            "PlatformFilter::Universal must be included"
+        );
+        assert!(
+            !names.contains(&"agents"),
+            "PlatformFilter::CliOnly must be excluded"
+        );
+        assert!(
+            !names.contains(&"usage"),
+            "PlatformFilter::CliAndAcp must be excluded on Telegram"
+        );
+        assert_eq!(
+            tg_commands.len(),
+            2,
+            "only the two Telegram-available commands should be produced"
+        );
+
+        // name/description mapping is exact, not just presence.
+        let help = tg_commands.iter().find(|c| c.command == "help").unwrap();
+        assert_eq!(help.description, "Show help");
+    }
+
+    /// Regression test for G-41.1-5: the bot menu must be generated from the
+    /// real command router catalog, not the stale hardcoded 4-command vec.
+    /// "start", "new", and "help" are all Telegram-available in the real
+    /// registry (GatewayOnly / Universal / All respectively) so they must
+    /// survive the filter, and the full catalog is far larger than 4.
+    #[test]
+    fn telegram_command_menu_generated_from_full_router_catalog() {
+        let commands = telegram_bot_commands();
+        let names: Vec<&str> = commands.iter().map(|c| c.command.as_str()).collect();
+
+        assert!(names.contains(&"start"));
+        assert!(names.contains(&"new"));
+        assert!(names.contains(&"help"));
+        assert!(
+            commands.len() > 4,
+            "expected the full router catalog, got only {} commands",
+            commands.len()
+        );
+
+        // Scope assertion: individual skills (172 of them, resolved via
+        // SkillRegistry, not CommandRouter) must never inflate the menu —
+        // only the single "skills" slash command itself may appear.
+        assert!(
+            names.iter().filter(|n| **n == "skills").count() <= 1,
+            "skills must appear at most once as the slash command, never per-skill"
+        );
+    }
+
+    /// Regression test for the startup `400: BOT_COMMAND_INVALID` warning:
+    /// Telegram rejects the whole `setMyCommands` batch if ANY name falls
+    /// outside `[a-z0-9_]{1,32}`, so every generated name must comply.
+    #[test]
+    fn telegram_command_menu_names_are_all_telegram_valid() {
+        for cmd in telegram_bot_commands() {
+            assert!(
+                !cmd.command.is_empty()
+                    && cmd.command.len() <= 32
+                    && cmd
+                        .command
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
+                "command name {:?} violates Telegram's [a-z0-9_]{{1,32}} rule",
+                cmd.command
+            );
+        }
+    }
+
+    /// Subcommand entries with spaces (e.g. "provider list") are dropped in
+    /// favor of the already-present parent; hyphenated names are mapped to
+    /// their underscore form rather than dropped.
+    #[test]
+    fn telegram_command_menu_sanitizes_invalid_names() {
+        use ironhermes_core::commands::{CommandCategory, PlatformFilter};
+
+        let commands = vec![
+            CommandDef::new(
+                "provider",
+                "Manage providers",
+                CommandCategory::Configuration,
+            )
+            .platform(PlatformFilter::Universal),
+            CommandDef::new(
+                "provider list",
+                "List providers",
+                CommandCategory::Configuration,
+            )
+            .platform(PlatformFilter::Universal),
+            CommandDef::new(
+                "reload-mcp",
+                "Reload MCP servers",
+                CommandCategory::ToolsAndSkills,
+            )
+            .platform(PlatformFilter::Universal),
+        ];
+
+        let names: Vec<String> = commands_for_platform(&commands, &Platform::Telegram)
+            .into_iter()
+            .map(|c| c.command)
+            .collect();
+
+        assert_eq!(
+            names,
+            vec!["provider", "reload_mcp"],
+            "space-named subcommands dropped, hyphens mapped to underscores"
+        );
+    }
+
+    /// The underscore forms the menu emits for hyphenated commands must
+    /// resolve in the router (via alias), otherwise tapping the menu item
+    /// would fail.
+    #[test]
+    fn telegram_menu_underscore_forms_resolve_in_router() {
+        use ironhermes_core::commands::{CommandRouter, ResolveResult, registry::build_registry};
+
+        let router = CommandRouter::new(build_registry());
+        for (input, expected) in [
+            ("reload_mcp", "reload-mcp"),
+            ("export_session", "export-session"),
+        ] {
+            let result = router.resolve(input, &Platform::Telegram);
+            assert!(
+                matches!(&result, ResolveResult::Exact(c) if c.name == expected),
+                "expected /{} to resolve to {:?}, got {:?}",
+                input,
+                expected,
+                result
+            );
+        }
+    }
 
     // -------------------------------------------------------------------------
     // Plan 05-05 Task 3: First-tick burst guard regression test
@@ -1899,6 +3076,8 @@ mod tests {
             config: config.clone(),
             mcp_manager: None,
             tg_client: None,
+            audio_dispatcher: None,
+            delivery_registry: DeliveryRegistry::new(),
         };
         let result = ironhermes_cron_runner::run_cron_job(&job, &cron_ctx).await;
         assert!(result.is_ok(), "run_cron_job failed: {:?}", result);
@@ -2455,6 +3634,8 @@ mod tests {
             config: config.clone(),
             mcp_manager: None,
             tg_client: None,
+            audio_dispatcher: None,
+            delivery_registry: DeliveryRegistry::new(),
         };
         let _ = ironhermes_cron_runner::run_cron_job(&job, &cron_ctx).await;
         // Give tokio::spawn listeners 50ms to drain

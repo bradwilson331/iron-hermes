@@ -6,7 +6,7 @@
 //! agent turn, so every append runs under tokio::spawn.
 //!
 //! Path convention (D-05):
-//!   $HERMES_HOME/subagent-transcripts/<session_id>/<subagent_id>.jsonl
+//!   $IRONHERMES_HOME/subagent-transcripts/<session_id>/<subagent_id>.jsonl
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -85,13 +85,13 @@ impl TranscriptLine {
 }
 
 /// Compose the per-session transcripts directory path (D-05).
-/// `$HERMES_HOME/subagent-transcripts/<session_id>`
+/// `$IRONHERMES_HOME/subagent-transcripts/<session_id>`
 pub fn transcripts_dir_for_session(hermes_home: &Path, session_id: &str) -> PathBuf {
     hermes_home.join("subagent-transcripts").join(session_id)
 }
 
 /// Compose the full per-subagent transcript file path (D-05).
-/// `$HERMES_HOME/subagent-transcripts/<session_id>/<subagent_id>.jsonl`
+/// `$IRONHERMES_HOME/subagent-transcripts/<session_id>/<subagent_id>.jsonl`
 pub fn transcript_path_for(hermes_home: &Path, session_id: &str, subagent_id: &str) -> PathBuf {
     transcripts_dir_for_session(hermes_home, session_id).join(format!("{}.jsonl", subagent_id))
 }

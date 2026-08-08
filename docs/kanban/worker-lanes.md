@@ -39,15 +39,17 @@ For Hermes profile lanes, the dispatcher's `_default_spawn` runs `hermes -p <ass
 
 | Variable | Carries |
 |---|---|
-| `HERMES_KANBAN_TASK` | the task id the worker is operating on |
-| `HERMES_KANBAN_DB` | absolute path to the per-board SQLite file |
-| `HERMES_KANBAN_BOARD` | board slug |
-| `HERMES_KANBAN_WORKSPACES_ROOT` | root of the board's workspace tree |
-| `HERMES_KANBAN_WORKSPACE` | absolute path to this task's workspace |
-| `HERMES_KANBAN_RUN_ID` | the current run's id (for the lifecycle gate) |
-| `HERMES_KANBAN_CLAIM_LOCK` | the claim lock string (`<host>:<pid>:<uuid>`) |
+| `IRONHERMES_KANBAN_TASK` | the task id the worker is operating on (legacy `HERMES_KANBAN_TASK` also set during deprecation window) |
+| `IRONHERMES_KANBAN_DB` | absolute path to the per-board SQLite file (legacy `HERMES_KANBAN_DB` also set) |
+| `IRONHERMES_KANBAN_BOARD` | board slug (legacy `HERMES_KANBAN_BOARD` also set) |
+| `IRONHERMES_KANBAN_WORKSPACES_ROOT` | root of the board's workspace tree (legacy `HERMES_KANBAN_WORKSPACES_ROOT` also set) |
+| `IRONHERMES_KANBAN_WORKSPACE` | absolute path to this task's workspace (legacy `HERMES_KANBAN_WORKSPACE` also set) |
+| `IRONHERMES_KANBAN_RUN_ID` | the current run's id (for the lifecycle gate) (legacy `HERMES_KANBAN_RUN_ID` also set) |
+| `IRONHERMES_KANBAN_CLAIM_LOCK` | the claim lock string (`<host>:<pid>:<uuid>`) (legacy `HERMES_KANBAN_CLAIM_LOCK` also set) |
 | `HERMES_PROFILE` | the worker's own profile name (for `kanban_comment` author attribution) |
-| `HERMES_TENANT` | tenant namespace, if the task has one |
+| `IRONHERMES_TENANT` | tenant namespace, if the task has one (legacy `HERMES_TENANT` also set) |
+
+`IRONHERMES_KANBAN_WORKSPACE` always carries a resolved, canonical absolute path — the worker's CWD is set to this same path (`.current_dir(...)` on the spawn `Command`), so file tools never need to expand it as a shell variable. For a `project:<repo>` task, worktree creation is fully dispatcher-managed: the dispatcher shells out `git worktree add` against `kanban_worktree_for(task_id)` (outside the referenced repo) before the worker ever spawns — workers never create or `cd` into a worktree themselves. Any files attached to the task are copied into the resolved workspace at the same spawn point, before the worker starts, regardless of workspace kind.
 
 For non-Hermes lanes (registered via a plugin), the plugin supplies its own `spawn_fn` callable that gets `task`, `workspace`, and `board` and returns an optional pid for crash detection.
 
@@ -89,13 +91,15 @@ The shape every kanban worker takes today: the assignee is a profile name, the d
 
 When you create profiles for your fleet, choose names that match the role you want the orchestrator to route to. The orchestrator (when there is one) discovers your profile names via `hermes profile list` — there's no fixed roster the system assumes (see the `kanban-orchestrator` skill for the orchestrator side of the contract).
 
+**Credentials.** A lane's provider key lives in that profile's own `.env` at `$IRONHERMES_HOME/profiles/<name>/.env` (mode `0600`), and that file is the only channel by which a dispatched worker gets a key — workers are spawned with `.env_clear()` and an allowlist that excludes every `*_API_KEY`. If you hand-edit one, **single-quote the values**: `dotenvy` resolves an unquoted `${VAR}` against the reading process's own environment. `ironhermes doctor` reports a **Profile credential exposure (CR-03 window)** check that flags profiles carrying the result of that substitution; see [CONFIGURATION.md § Kanban Worker Profile Credentials](../CONFIGURATION.md#kanban-worker-profile-credentials-profilesnameenv) for what it detects and why a hit means *rotate*, not *delete*.
+
 ### Orchestrator profile lane
 
 A specialisation of the profile lane: an orchestrator is a Hermes profile whose toolset includes `kanban` but excludes `terminal` / `file` / `code` / `web` for implementation. Its job is decomposing a high-level goal into child tasks via `kanban_create` + `kanban_link` and stepping back. The orchestrator skill encodes the anti-temptation rules.
 
 ### Adding an external CLI worker lane
 
-Wiring a non-Hermes CLI tool (Codex CLI, Claude Code CLI, OpenCode CLI, a local coding-model runner, etc.) as a kanban worker lane is **not yet a paved path**. The dispatcher's spawn function is pluggable (`spawn_fn` is a parameter on `dispatch_once`), and a plugin could register its own `spawn_fn` for a non-Hermes assignee, but the surrounding integration work — wrapping the CLI's exit code into `kanban_complete` / `kanban_block` calls, mapping the CLI's workspace/sandbox conventions onto the dispatcher's `HERMES_KANBAN_WORKSPACE` env, handling auth and per-CLI policy — is still per-integration design work.
+Wiring a non-Hermes CLI tool (Codex CLI, Claude Code CLI, OpenCode CLI, a local coding-model runner, etc.) as a kanban worker lane is **not yet a paved path**. The dispatcher's spawn function is pluggable (`spawn_fn` is a parameter on `dispatch_once`), and a plugin could register its own `spawn_fn` for a non-Hermes assignee, but the surrounding integration work — wrapping the CLI's exit code into `kanban_complete` / `kanban_block` calls, mapping the CLI's workspace/sandbox conventions onto the dispatcher's `IRONHERMES_KANBAN_WORKSPACE` env, handling auth and per-CLI policy — is still per-integration design work.
 
 If you're considering adding a CLI lane, open an issue describing the specific CLI and the workflow you're trying to enable. The contract above is the constraints any such lane must satisfy; the implementation shape (one plugin per CLI vs a generic CLI-runner plugin parameterised by config) is open.
 

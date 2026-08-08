@@ -6,7 +6,7 @@ pub mod context;
 pub mod handlers;
 pub mod provider_display;
 pub mod registry;
-pub mod running_agent;
+pub mod skill_dispatch;
 pub mod toolset_display;
 pub mod typo;
 
@@ -106,6 +106,159 @@ impl CommandDef {
 }
 
 // =============================================================================
+// QuickCommandDef (Phase 42 EXEC-01)
+// =============================================================================
+
+/// Phase 42 EXEC-01: User-defined Quick Command loaded from the `quick_commands:`
+/// config block at runtime.
+///
+/// Unlike `CommandDef` (compile-time built-ins with `&'static str`), this struct
+/// uses owned `String` fields so it can be deserialized from YAML config.
+///
+/// See Anti-Pattern 6 in 42-RESEARCH.md: do NOT add an `exec` field to `CommandDef`.
+/// The exec string lives here, on `QuickCommandDef.command`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct QuickCommandDef {
+    /// Command name — also serves as the approval cache key (D-02).
+    pub name: String,
+    /// The shell command string to execute via `sh -c`.
+    pub command: String,
+    /// Optional human-readable description shown in help output.
+    pub description: Option<String>,
+    /// D-11: bidirectional operator override.
+    ///
+    /// - `Some(true)` → force approval prompt even if denylist misses it.
+    /// - `Some(false)` → skip denylist/approval (operator vouches for fixed string).
+    /// - `None` → auto-detect via denylist.
+    ///
+    /// Env sanitization ALWAYS applies regardless of this flag (D-11).
+    pub dangerous: Option<bool>,
+    /// D-05: per-command least-privilege env opt-in.
+    ///
+    /// Only these named vars are passed through beyond the base SAFE_ENV_KEYS
+    /// + global `terminal_env_allowlist`. Absent names are silently skipped.
+    #[serde(default)]
+    pub pass_env: Option<Vec<String>>,
+}
+
+// =============================================================================
+// ApprovalNeed (Phase 42 D-11)
+// =============================================================================
+
+/// Phase 42 D-11: Approval disposition for a Quick Command dispatch.
+///
+/// Determined by `QuickCommandDef.dangerous` at prepare time:
+/// - `dangerous: Some(false)` → `Skip` — operator vouches; no approval prompt.
+/// - `dangerous: Some(true)` → `Force` — always show approval prompt.
+/// - `dangerous: None`       → `Auto`  — run the dangerous-command guard at dispatch time.
+///
+/// Note: env sanitization (EXEC-03) is ALWAYS applied regardless of this value (D-11).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApprovalNeed {
+    /// Skip the approval prompt (operator vouched via `dangerous: false`).
+    Skip,
+    /// Force an approval prompt (operator flagged via `dangerous: true`).
+    Force,
+    /// Let the dangerous-command guard decide at dispatch time (`dangerous` absent).
+    Auto,
+}
+
+// =============================================================================
+// QuickCommandPlan (Phase 42 EXEC-01)
+// =============================================================================
+
+/// Phase 42 EXEC-01: Resolved dispatch plan for a Quick Command.
+///
+/// Produced by [`prepare_quick_command()`] from a [`QuickCommandDef`]. Contains
+/// everything needed to execute the command without any further LLM call.
+#[derive(Debug, Clone)]
+pub struct QuickCommandPlan {
+    /// The shell command string to pass to `sh -c`.
+    pub command: String,
+    /// Sanitized subprocess environment (build_terminal_safe_env output).
+    /// Callers must call `cmd.env_clear()` then `cmd.envs(&plan.env)`.
+    pub env: HashMap<String, String>,
+    /// Approval disposition derived from `QuickCommandDef.dangerous` (D-11).
+    pub approval_need: ApprovalNeed,
+    /// Approval cache key — the Quick Command name, NOT the command string (D-02).
+    pub cache_key: String,
+}
+
+// =============================================================================
+// QuickCommandRegistry (Phase 42 EXEC-01)
+// =============================================================================
+
+/// Phase 42 EXEC-01: Runtime registry of user-defined Quick Commands.
+///
+/// Loaded at startup from `Config.quick_commands`. Quick Command lookup
+/// precedes built-in `CommandDef` resolution (RESEARCH A4 — user-explicit
+/// commands take precedence over built-ins with the same name).
+pub struct QuickCommandRegistry {
+    commands: HashMap<String, QuickCommandDef>,
+}
+
+impl QuickCommandRegistry {
+    /// Build a registry from the `quick_commands` config map.
+    pub fn from_config(map: &HashMap<String, QuickCommandDef>) -> Self {
+        Self {
+            commands: map.clone(),
+        }
+    }
+
+    /// Resolve a command name to its [`QuickCommandDef`], or `None` if not found.
+    pub fn resolve(&self, name: &str) -> Option<&QuickCommandDef> {
+        self.commands.get(name)
+    }
+
+    /// Returns `true` if the registry contains no Quick Commands.
+    pub fn is_empty(&self) -> bool {
+        self.commands.is_empty()
+    }
+
+    /// Number of registered Quick Commands.
+    pub fn len(&self) -> usize {
+        self.commands.len()
+    }
+}
+
+// =============================================================================
+// prepare_quick_command (Phase 42 EXEC-01)
+// =============================================================================
+
+/// Phase 42 EXEC-01 / D-11: Build a [`QuickCommandPlan`] from a [`QuickCommandDef`].
+///
+/// This function is purely deterministic — no LLM call, no I/O (EXEC-01). It:
+/// 1. Builds the sanitized subprocess env via `build_terminal_safe_env()`, passing
+///    the global allowlist and the def's `pass_env`. This is **unconditional** — env
+///    scrub is NEVER waived regardless of the `dangerous` flag (D-11).
+/// 2. Maps `dangerous` → [`ApprovalNeed`] (D-11).
+/// 3. Sets `cache_key` to the command **name** (not the command string) for D-02
+///    approval keying (Quick Commands key by name; ad-hoc by exact command string).
+pub fn prepare_quick_command(
+    def: &QuickCommandDef,
+    global_allowlist: &[String],
+) -> QuickCommandPlan {
+    // D-11: env scrub is always applied — dangerous flag controls approval only.
+    let pass_env: &[String] = def.pass_env.as_deref().unwrap_or(&[]);
+    let env = crate::env_sanitize::build_terminal_safe_env(global_allowlist, pass_env);
+
+    // D-11: map dangerous flag to ApprovalNeed
+    let approval_need = match def.dangerous {
+        Some(false) => ApprovalNeed::Skip,
+        Some(true) => ApprovalNeed::Force,
+        None => ApprovalNeed::Auto,
+    };
+
+    // D-02: cache key is the command NAME, not the command string
+    QuickCommandPlan {
+        command: def.command.clone(),
+        env,
+        approval_need,
+        cache_key: def.name.clone(),
+    }
+}
+
+// =============================================================================
 // ResolveResult
 // =============================================================================
 
@@ -172,7 +325,17 @@ pub enum CommandResult {
     /// prompt for the next LLM turn (D-07). `name` is the normalized skill name
     /// (kebab-case); `body` is the full SKILL.md body text returned by
     /// `SkillRegistry::read_content`.
-    SkillActivated { name: String, body: String },
+    ///
+    /// Phase 41.1 (D-02): `args` carries the verbatim trailing text of an
+    /// argued invoke (`/<skill> <text>`), or `None` for a bare `/<skill>`.
+    /// Surfaces feed it into `build_skill_invocation` to compute the run-turn
+    /// trigger_text. This plan only threads the field; the one-shot activate+run
+    /// wiring that consumes it lands in the per-surface plans (02–06).
+    SkillActivated {
+        name: String,
+        body: String,
+        args: Option<String>,
+    },
 
     /// Phase 36.17.1 (D-01.c / D-08): `/queue <message>` produced an event that
     /// should be queued for replay after the current agent turn finishes. The
@@ -204,6 +367,32 @@ pub enum CommandResult {
     /// existing session-resume `/resume` command at
     /// `commands::registry::build_registry` (RESEARCH Pitfall 4).
     UnpauseQueue,
+
+    /// Phase 39.1 (R39.1-09 / D-09): `/agents turns [cancel <id>]` returns the
+    /// list of all in-flight turns from the process-wide `TurnRegistry`.
+    ///
+    /// Distinct from the subagent-registry `Output` produced by the existing
+    /// `/agents list|kill|logs` arms — surfaces render `AgentsList` in their
+    /// native idiom (Plans 02/03/04). Each surface maps this to its own display
+    /// format (labeled list, rich UI table, Telegram reply, etc.).
+    AgentsList(Vec<crate::concurrency::TurnSummary>),
+
+    /// Phase 36.6.3 Plan 03 (TUI-INPUT-02, D-06/D-10): bare `/model`
+    /// invocation (no args). TUI surfaces map this to
+    /// `active_overlay = Some(OverlayKind::ModelPicker { step: PickerStep::Provider,
+    /// selected_provider: None })`; non-TUI/gateway surfaces map it to
+    /// `fallback_text` (today's `model_list_text()` output) so nothing
+    /// regresses (mirrors the `Queued`/`PauseQueue` precedent). `/model <name>`
+    /// (with an arg) is UNCHANGED — still `Output`/`Error` via the existing
+    /// validate-then-confirm path.
+    OpenModelPicker { fallback_text: String },
+
+    /// Phase 36.6.3 Plan 03 (TUI-INPUT-02, D-06/D-10): bare `/provider`
+    /// invocation (unconditional — `/provider` never took args). TUI surfaces
+    /// map this to `active_overlay = Some(OverlayKind::ModelPicker { step:
+    /// PickerStep::ProviderOnly, selected_provider: None })`; non-TUI/gateway
+    /// surfaces map it to `fallback_text` (today's `status_text()` output).
+    OpenProviderPicker { fallback_text: String },
 }
 
 // =============================================================================
@@ -464,6 +653,31 @@ mod tests {
     #[test]
     fn platform_filter_universal_api_server_false() {
         assert!(!PlatformFilter::Universal.is_available_on(&Platform::ApiServer));
+    }
+
+    /// Phase 41.1 (D-09): `/skills` must resolve on Web + Telegram (not just
+    /// Local) after widening its PlatformFilter CliOnly → Universal (Pitfall 2).
+    #[test]
+    fn platform_filter_skills_universal_on_web_and_telegram() {
+        let router = real_router();
+        for platform in [Platform::Web, Platform::Telegram, Platform::Local] {
+            match router.resolve("skills", &platform) {
+                ResolveResult::Exact(cmd) => assert_eq!(
+                    cmd.name, "skills",
+                    "/skills must resolve exactly on {platform:?}"
+                ),
+                other => panic!("/skills did not resolve on {platform:?}: {other:?}"),
+            }
+        }
+        // Universal excludes ApiServer (mirrors the kanban precedent).
+        let def = build_registry()
+            .into_iter()
+            .find(|c| c.name == "skills")
+            .expect("skills CommandDef must exist");
+        assert!(def.platform_filter.is_available_on(&Platform::Web));
+        assert!(def.platform_filter.is_available_on(&Platform::Telegram));
+        assert!(def.platform_filter.is_available_on(&Platform::Local));
+        assert!(!def.platform_filter.is_available_on(&Platform::ApiServer));
     }
 
     // ---------------------------------------------------------------------------
@@ -845,12 +1059,14 @@ mod tests {
         let r = CommandResult::SkillActivated {
             name: "ascii-art".to_string(),
             body: "skill body".to_string(),
+            args: None,
         };
         assert_eq!(
             r,
             CommandResult::SkillActivated {
                 name: "ascii-art".to_string(),
                 body: "skill body".to_string(),
+                args: None,
             }
         );
     }

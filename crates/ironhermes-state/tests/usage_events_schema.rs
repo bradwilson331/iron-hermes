@@ -125,12 +125,12 @@ fn b4_migration_idempotent_on_reopen() {
     // First open: fresh DB.
     {
         let store = StateStore::new(&path).unwrap();
-        assert_eq!(schema_version(&store), 9);
+        assert_eq!(schema_version(&store), 11);
     }
     // Re-open: should not error.
     {
         let store = StateStore::new(&path).unwrap();
-        assert_eq!(schema_version(&store), 9);
+        assert_eq!(schema_version(&store), 11);
     }
     // Force schema_version backwards to simulate partial migration, then reopen.
     {
@@ -144,8 +144,8 @@ fn b4_migration_idempotent_on_reopen() {
         let store = StateStore::new(&path).unwrap();
         assert_eq!(
             schema_version(&store),
-            9,
-            "re-running migration v9 should bring version back to 9 without error"
+            11,
+            "re-running migrations v9+v10+v11 should bring version back to 11 without error"
         );
     }
 }

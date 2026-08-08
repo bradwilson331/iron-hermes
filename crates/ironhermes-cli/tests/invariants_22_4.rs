@@ -539,8 +539,10 @@ fn invariant_22_4_28_tool_registry_parity() {
          to prevent tool-registration drift. See 22.4-UAT.md Gap 2 (a) and 27.1.1-gap-01-PLAN.md."
     );
     // rpc_registry still has explicit web search/read registrations (safe-subset by design).
+    // Phase 41.3 Plan 11 (D-19): WebSearchTool became stateful — the literal call
+    // shape gained `::new(tool_credentials.clone())`; match on the stable prefix.
     let rpc_web_search_count = TUI_RATA_EVLOOP
-        .matches("rpc_registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool))")
+        .matches("rpc_registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool::new(")
         .count();
     assert!(
         rpc_web_search_count >= 1,
@@ -1471,11 +1473,20 @@ fn invariant_22_4_53_stop_wired() {
         CORE_HANDLERS.contains("\"stop\" => cmd_stop("),
         "INV-22.4-53 (c): dispatch() must route `\"stop\"` to `cmd_stop(` in core/handlers.rs."
     );
-    // (d) ProcessRegistry threaded in build_command_context
+    // (d) ProcessRegistry threaded in build_command_context.
+    //
+    // Phase 41.3 Plan 04 (D-11/D-12): build_command_context no longer calls
+    // `.with_process_registry(...)` directly — it populates
+    // `CoreContextHandles.process_registry` and the shared `build_core_context`
+    // factory (ironhermes-core) applies the builder internally. Anchored on the
+    // unique ProcessRegistryHandle construction site instead, preserving the
+    // original intent ("build_command_context must actually thread a
+    // ProcessRegistry for /stop").
     assert!(
-        TUI_RATA_COMMANDS.contains("with_process_registry("),
-        "INV-22.4-53 (d): tui_rata/commands.rs build_command_context must call \
-         `with_process_registry(` to thread ProcessRegistry for /stop — Phase 22.4.2 Plan 04."
+        TUI_RATA_COMMANDS.contains("ProcessRegistryHandle::new("),
+        "INV-22.4-53 (d, revised Phase 41.3 Plan 04): tui_rata/commands.rs \
+         build_command_context must construct ProcessRegistryHandle to thread \
+         ProcessRegistry for /stop via CoreContextHandles.process_registry."
     );
 }
 

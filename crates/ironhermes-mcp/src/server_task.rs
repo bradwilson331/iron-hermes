@@ -2,6 +2,8 @@ use crate::config::McpServerConfig;
 use crate::security::sanitize_error;
 use crate::tool::{McpCallRequest, McpTool};
 use crate::transport;
+use crate::www_auth::{OAuthChallengeError, parse_www_authenticate};
+use ironhermes_core::auth::AuthStore;
 use ironhermes_tools::ToolRegistry;
 use ironhermes_tools::registry::Tool;
 use std::sync::Arc;
@@ -15,6 +17,61 @@ pub const MAX_RETRIES: u32 = 5;
 
 /// Maximum backoff interval between reconnection attempts (D-05).
 pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
+
+/// OAuth-specific permanent errors that bypass the exponential-backoff reconnect loop.
+///
+/// When `connect_and_serve` returns one of these variants (wrapped as `anyhow::Error`),
+/// `run_server_task` breaks out of the reconnect loop immediately rather than retrying —
+/// preventing a DoS retry-loop on a mis-configured scope or a permanently revoked token
+/// (T-44-02, B-2).
+#[derive(Debug)]
+pub enum McpOAuthError {
+    /// `error="insufficient_scope"` in WWW-Authenticate: the token's scope is wrong.
+    ///
+    /// **Permanent** — no retry, no token refresh. The operator must re-authorize:
+    /// `hermes mcp connect <server>`.
+    InsufficientScope { server: String },
+    /// `error="invalid_token"` (or bare 401): forced refresh + one reconnect attempt
+    /// both returned 401.
+    ///
+    /// **Permanent** — the token is not recoverable without user re-authorization.
+    InvalidTokenRetryExhausted { server: String },
+}
+
+impl std::fmt::Display for McpOAuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InsufficientScope { server } => write!(
+                f,
+                "MCP server '{server}': OAuth insufficient_scope (permanent — \
+                 run `hermes mcp connect {server}` to re-authorize with correct scopes)"
+            ),
+            Self::InvalidTokenRetryExhausted { server } => write!(
+                f,
+                "MCP server '{server}': OAuth token refresh + 1-retry both returned 401 \
+                 (permanent — run `hermes mcp connect {server}` to re-authorize)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for McpOAuthError {}
+
+/// Returns `true` when an error string indicates an HTTP 401 / Unauthorized response.
+///
+/// Used by `connect_and_serve` to trigger the B-2 WWW-Authenticate parse path.
+/// rmcp 1.8 surfaces 401s as transport errors whose string representations contain
+/// the HTTP status code or reason phrase; exact format is version-specific.
+/// Called only on OAuth servers (`config.oauth_provider.is_some()`).
+fn is_oauth_401(err_str: &str) -> bool {
+    let lower = err_str.to_ascii_lowercase();
+    // Match "401" as a distinct token (avoid matching e.g. port "4011")
+    lower.contains(" 401 ")
+        || lower.contains(" 401\n")
+        || lower.contains("\"401\"")
+        || lower.ends_with(" 401")
+        || lower.contains("unauthorized")
+}
 
 /// Result of a single server task's lifecycle.
 ///
@@ -40,6 +97,7 @@ pub struct ServerTaskResult {
 ///
 /// The returned `ServerTaskResult.failure_reason` is `None` on clean shutdown,
 /// and `Some(sanitized_error)` when retries are exhausted (D-12 data contract).
+#[allow(clippy::too_many_arguments)] // 8 args required: name, config, registry, cancel, connected, child_slot, auth_store, global_issuer_allowlist
 pub async fn run_server_task(
     name: String,
     mut config: McpServerConfig,
@@ -47,6 +105,8 @@ pub async fn run_server_task(
     cancel_token: CancellationToken,
     connected: Arc<AtomicBool>,
     child_slot: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
+    auth_store: Option<Arc<AuthStore>>,
+    global_issuer_allowlist: Vec<String>,
 ) -> ServerTaskResult {
     // D-18: interpolate ${ENV_VAR} placeholders in config fields
     crate::config::interpolate_config(&mut config);
@@ -55,6 +115,10 @@ pub async fn run_server_task(
     let mut failure_reason: Option<String> = None;
     let mut retries = 0u32;
     let mut backoff = Duration::from_secs(1);
+    // B-2: track whether the OAuth 1-retry has been used for this server's lifetime.
+    // Persists across reconnect iterations so the retry is truly bounded to exactly ONE
+    // occurrence regardless of how many times the outer reconnect loop fires.
+    let mut oauth_refreshed = false;
 
     loop {
         match connect_and_serve(
@@ -64,6 +128,9 @@ pub async fn run_server_task(
             &cancel_token,
             &connected,
             &child_slot,
+            &auth_store,
+            &mut oauth_refreshed,
+            &global_issuer_allowlist,
         )
         .await
         {
@@ -74,6 +141,22 @@ pub async fn run_server_task(
             }
             Err(_) if cancel_token.is_cancelled() => break,
             Err(e) => {
+                // B-2: McpOAuthError variants are permanent — bypass the exponential-backoff
+                // reconnect loop entirely. Neither InsufficientScope nor
+                // InvalidTokenRetryExhausted can be recovered by reconnecting; the operator
+                // must re-authorize via `hermes mcp connect <name>` (T-44-02).
+                if e.downcast_ref::<McpOAuthError>().is_some() {
+                    let sanitized = sanitize_error(&e.to_string());
+                    tracing::warn!(
+                        server = %name,
+                        error = %sanitized,
+                        "MCP server OAuth permanent error — not retrying"
+                    );
+                    connected.store(false, Ordering::SeqCst);
+                    failure_reason = Some(sanitized);
+                    break;
+                }
+
                 // GAP-8: a prior attempt may have parked a Child here; clear it before
                 // the next attempt so shutdown_all never sees a stale handle whose
                 // process is already exited. Under the plan-11 Option B fallback this
@@ -136,6 +219,7 @@ pub async fn run_server_task(
 ///
 /// Returns `Ok(registered_names)` on clean cancellation, `Err` on connection failure.
 /// Unregisters tools from the registry before returning in all cases.
+#[allow(clippy::too_many_arguments)] // 9 args required: name, config, registry, cancel, connected, child_slot, auth_store, oauth_refreshed, global_issuer_allowlist
 async fn connect_and_serve(
     name: &str,
     config: &McpServerConfig,
@@ -143,10 +227,46 @@ async fn connect_and_serve(
     cancel_token: &CancellationToken,
     connected: &Arc<AtomicBool>,
     child_slot: &Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
+    auth_store: &Option<Arc<AuthStore>>,
+    oauth_refreshed: &mut bool,
+    global_issuer_allowlist: &[String],
 ) -> anyhow::Result<Vec<String>> {
-    // Connect via appropriate transport
+    // Connect via appropriate transport.
+    // MCPA-02: OAuth branch precedes the plain-HTTP branch — dispatched when both
+    // `url` AND `oauth_provider` are set on the config.
     let (client, child_opt) = if config.command.is_some() {
         transport::connect_stdio(config).await?
+    } else if config.url.is_some() && config.oauth_provider.is_some() {
+        // D-04: headless / auto-start posture — OAuth servers are skipped with a
+        // non-error tracing::warn when no AuthStore is available or no cached token
+        // exists for this namespace. The operator must run `hermes mcp connect <name>`
+        // to complete the interactive PKCE flow first; auto-start never launches a browser.
+        let ns = config.oauth_provider.as_deref().unwrap_or_default();
+        match auth_store {
+            None => {
+                tracing::warn!(
+                    server = %name,
+                    "MCP server requires OAuth but no AuthStore is configured — \
+                     skipping auto-start (run `hermes mcp connect {name}` to authorize)"
+                );
+                return Ok(Vec::new()); // D-04: non-error skip; zero tools registered
+            }
+            Some(store) => {
+                // D-04: only proceed when a token is already cached; never launch a browser
+                // in the headless auto-start path.
+                if store.get_token(ns).await.is_none() {
+                    tracing::warn!(
+                        server = %name,
+                        ns = %ns,
+                        "MCP server requires OAuth but no cached token found — \
+                         skipping auto-start (run `hermes mcp connect {name}` to authorize)"
+                    );
+                    return Ok(Vec::new()); // D-04: non-error skip; zero tools registered
+                }
+                transport::connect_http_oauth(config, store.clone(), global_issuer_allowlist)
+                    .await?
+            }
+        }
     } else if config.url.is_some() {
         transport::connect_http(config).await?
     } else {
@@ -173,7 +293,61 @@ async fn connect_and_serve(
     // discovery succeeded. GAP-7: flip the connected flag HERE — not at spawn time,
     // not at transport-open time. Any earlier error above propagates via `?` and
     // the flag stays `false` — exactly what connected_server_names() needs to read.
-    let mcp_tools = client.list_all_tools().await?;
+    //
+    // B-2: Also the first network roundtrip where the bearer token is validated by
+    // the remote MCP server. A 401 here (stale/revoked token) is handled with the
+    // same WWW-Authenticate parse logic as tool-call 401s below.
+    let mcp_tools = match client.list_all_tools().await {
+        Ok(tools) => tools,
+        Err(e) => {
+            let err_str = e.to_string();
+            // B-2: parse WWW-Authenticate on every 401 from OAuth servers (T-44-02).
+            // rmcp may embed the header value or just the HTTP status code in the
+            // error string; parse_www_authenticate handles both via plain string scan.
+            if config.oauth_provider.is_some() && is_oauth_401(&err_str) {
+                let challenge = parse_www_authenticate(&err_str);
+                match challenge {
+                    OAuthChallengeError::InsufficientScope => {
+                        // Permanent — no retry, no refresh (Pitfall 6 avoidance)
+                        return Err(anyhow::Error::from(McpOAuthError::InsufficientScope {
+                            server: name.to_string(),
+                        }));
+                    }
+                    _ => {
+                        // InvalidToken / None / Other → force refresh + bounded 1-retry
+                        if *oauth_refreshed {
+                            // 1-retry already consumed — permanent fail (B-2 bound)
+                            return Err(anyhow::Error::from(
+                                McpOAuthError::InvalidTokenRetryExhausted {
+                                    server: name.to_string(),
+                                },
+                            ));
+                        }
+                        if let (Some(store), Some(ns)) =
+                            (auth_store, config.oauth_provider.as_deref())
+                        {
+                            tracing::warn!(
+                                server = %name,
+                                ns = %ns,
+                                "OAuth 401 at tool discovery — forcing token refresh; \
+                                 1-retry reconnect pending (B-2)"
+                            );
+                            let _ = store.refresh(ns).await;
+                        }
+                        *oauth_refreshed = true;
+                        // Return error to trigger reconnect via the outer loop.
+                        // On the next connect_and_serve call, connect_http_oauth
+                        // will call get_access_token() which returns the refreshed token.
+                        return Err(anyhow::anyhow!(
+                            "OAuth 401 at discovery — {}",
+                            sanitize_error(&err_str)
+                        ));
+                    }
+                }
+            }
+            return Err(anyhow::anyhow!("{}", sanitize_error(&err_str)));
+        }
+    };
     connected.store(true, Ordering::SeqCst);
     tracing::info!(
         server = %name,
@@ -252,15 +426,74 @@ async fn connect_and_serve(
 
                         let result = tokio::time::timeout(timeout, client.call_tool(params)).await;
 
+                        // B-2: track whether this result requires breaking out of the
+                        // serve loop with an OAuth-specific error. Set before final_result
+                        // so we can notify the caller via response_tx first, then return.
+                        let mut oauth_break_err: Option<anyhow::Error> = None;
+
                         let final_result: anyhow::Result<String> = match result {
                             Err(_elapsed) => Err(anyhow::anyhow!(
                                 "MCP tool call timed out after {}s",
                                 config.timeout
                             )),
-                            Ok(Err(e)) => Err(anyhow::anyhow!(
-                                "{}",
-                                sanitize_error(&e.to_string())
-                            )),
+                            Ok(Err(e)) => {
+                                let err_str = e.to_string();
+                                // B-2: parse WWW-Authenticate on every 401 from OAuth servers,
+                                // BEFORE deciding between retry and permanent fail (T-44-02).
+                                // rmcp 1.8 may embed the WWW-Authenticate header value or just
+                                // the HTTP status code in the error string; parse_www_authenticate
+                                // handles both via plain string scan. Called only on OAuth servers.
+                                if config.oauth_provider.is_some() && is_oauth_401(&err_str) {
+                                    let challenge = parse_www_authenticate(&err_str);
+                                    match challenge {
+                                        OAuthChallengeError::InsufficientScope => {
+                                            // Permanent — no retry, no refresh (Pitfall 6 avoidance).
+                                            // Set break_err so we return after notifying the caller.
+                                            oauth_break_err = Some(anyhow::Error::from(
+                                                McpOAuthError::InsufficientScope {
+                                                    server: name.to_string(),
+                                                },
+                                            ));
+                                        }
+                                        _ => {
+                                            // InvalidToken / None / Other → force refresh + 1-retry
+                                            if *oauth_refreshed {
+                                                // 1-retry already consumed — permanent fail (B-2 bound)
+                                                oauth_break_err = Some(anyhow::Error::from(
+                                                    McpOAuthError::InvalidTokenRetryExhausted {
+                                                        server: name.to_string(),
+                                                    },
+                                                ));
+                                            } else {
+                                                // Force token refresh and mark the 1-retry consumed.
+                                                // The oauth_refreshed flag persists in run_server_task
+                                                // scope so the bound holds across reconnect iterations.
+                                                if let (Some(store), Some(ns)) =
+                                                    (auth_store, config.oauth_provider.as_deref())
+                                                {
+                                                    tracing::warn!(
+                                                        server = %name,
+                                                        ns = %ns,
+                                                        "OAuth 401 during tool call — forcing \
+                                                         token refresh; 1-retry reconnect pending (B-2)"
+                                                    );
+                                                    let _ = store.refresh(ns).await;
+                                                }
+                                                *oauth_refreshed = true;
+                                                // Signal reconnect: return error after notifying caller.
+                                                // The outer reconnect loop will call connect_and_serve
+                                                // again with the refreshed token (Approach A: next
+                                                // connect_http_oauth call uses get_access_token()).
+                                                oauth_break_err = Some(anyhow::anyhow!(
+                                                    "OAuth 401 — {}",
+                                                    sanitize_error(&err_str)
+                                                ));
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(anyhow::anyhow!("{}", sanitize_error(&err_str)))
+                            }
                             Ok(Ok(call_result)) => {
                                 // Extract text content from response
                                 let text = call_result
@@ -288,6 +521,13 @@ async fn connect_and_serve(
                         };
 
                         let _ = req.response_tx.send(final_result);
+
+                        // B-2: after notifying the caller, break with the OAuth error
+                        // so the serve loop exits cleanly and run_server_task can decide
+                        // whether to reconnect (1-retry) or fail permanently.
+                        if let Some(oauth_err) = oauth_break_err {
+                            return Err(oauth_err);
+                        }
                     }
                     None => {
                         // All McpTool senders have been dropped (registry cleared)
@@ -357,5 +597,29 @@ mod tests {
     #[test]
     fn test_max_backoff_constant() {
         assert_eq!(MAX_BACKOFF, Duration::from_secs(60));
+    }
+
+    /// B-2 / T-44-02: static-grep regression — connect_and_serve MUST reference
+    /// `WWW-Authenticate` header parsing on every OAuth 401, and MUST NOT fold
+    /// `insufficient_scope` into the reconnect retry loop (Pitfall 6 avoidance).
+    #[test]
+    fn server_task_parses_www_authenticate_on_oauth_401() {
+        let src = include_str!("server_task.rs");
+        assert!(
+            src.contains("parse_www_authenticate"),
+            "B-2: server_task.rs must call parse_www_authenticate on every 401 \
+             from an OAuth server to distinguish insufficient_scope (permanent) \
+             from invalid_token (1-retry). Do not remove this call."
+        );
+        assert!(
+            src.contains("WWW-Authenticate"),
+            "B-2: server_task.rs must reference 'WWW-Authenticate' — either in a comment \
+             or in the call to parse_www_authenticate, documenting the header source."
+        );
+        assert!(
+            src.contains("InsufficientScope"),
+            "B-2: McpOAuthError::InsufficientScope must be returned on insufficient_scope \
+             challenges so the reconnect loop is bypassed immediately (Pitfall 6 avoidance)."
+        );
     }
 }

@@ -27,7 +27,7 @@ use wiremock::matchers::{method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ────────────────────────────────────────────────────────────────────────────
-// Env guard (HERMES_HOME + SKILLS_DOWNLOAD_URL + SKILLS_AUDIT_URL mutate
+// Env guard (IRONHERMES_HOME + SKILLS_DOWNLOAD_URL + SKILLS_AUDIT_URL mutate
 // process-global state; all tests sharing these vars must serialize).
 // ────────────────────────────────────────────────────────────────────────────
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -184,7 +184,10 @@ async fn install_happy_path() {
 
     let hermes_home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::new(&[
-        ("HERMES_HOME", Some(hermes_home.path().to_str().unwrap())),
+        (
+            "IRONHERMES_HOME",
+            Some(hermes_home.path().to_str().unwrap()),
+        ),
         ("SKILLS_DOWNLOAD_URL", Some(&server.uri())),
         ("SKILLS_AUDIT_URL", Some(&server.uri())),
     ]);
@@ -271,7 +274,10 @@ async fn retry_once_on_5xx() {
 
     let hermes_home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::new(&[
-        ("HERMES_HOME", Some(hermes_home.path().to_str().unwrap())),
+        (
+            "IRONHERMES_HOME",
+            Some(hermes_home.path().to_str().unwrap()),
+        ),
         ("SKILLS_DOWNLOAD_URL", Some(&server.uri())),
     ]);
 
@@ -329,7 +335,10 @@ async fn no_retry_on_404() {
 
     let hermes_home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::new(&[
-        ("HERMES_HOME", Some(hermes_home.path().to_str().unwrap())),
+        (
+            "IRONHERMES_HOME",
+            Some(hermes_home.path().to_str().unwrap()),
+        ),
         ("SKILLS_DOWNLOAD_URL", Some(&server.uri())),
     ]);
 
@@ -402,7 +411,10 @@ async fn path_traversal_blocked() {
 
     let hermes_home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::new(&[
-        ("HERMES_HOME", Some(hermes_home.path().to_str().unwrap())),
+        (
+            "IRONHERMES_HOME",
+            Some(hermes_home.path().to_str().unwrap()),
+        ),
         ("SKILLS_DOWNLOAD_URL", Some(&server.uri())),
     ]);
 
@@ -475,7 +487,10 @@ async fn snapshot_hash_round_trips_opaque() {
 
     let hermes_home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::new(&[
-        ("HERMES_HOME", Some(hermes_home.path().to_str().unwrap())),
+        (
+            "IRONHERMES_HOME",
+            Some(hermes_home.path().to_str().unwrap()),
+        ),
         ("SKILLS_DOWNLOAD_URL", Some(&server.uri())),
     ]);
 
@@ -536,7 +551,10 @@ async fn local_tamper_detection_via_folder_hash() {
 
     let hermes_home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::new(&[
-        ("HERMES_HOME", Some(hermes_home.path().to_str().unwrap())),
+        (
+            "IRONHERMES_HOME",
+            Some(hermes_home.path().to_str().unwrap()),
+        ),
         ("SKILLS_DOWNLOAD_URL", Some(&server.uri())),
     ]);
 
@@ -611,7 +629,10 @@ async fn install_succeeds_when_server_hash_diverges_from_client_hash() {
 
     let hermes_home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::new(&[
-        ("HERMES_HOME", Some(hermes_home.path().to_str().unwrap())),
+        (
+            "IRONHERMES_HOME",
+            Some(hermes_home.path().to_str().unwrap()),
+        ),
         ("SKILLS_DOWNLOAD_URL", Some(&server.uri())),
     ]);
 
@@ -734,7 +755,10 @@ async fn user_agent_advertises_openclaw_ride() {
 
     let hermes_home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::new(&[
-        ("HERMES_HOME", Some(hermes_home.path().to_str().unwrap())),
+        (
+            "IRONHERMES_HOME",
+            Some(hermes_home.path().to_str().unwrap()),
+        ),
         ("SKILLS_DOWNLOAD_URL", Some(&server.uri())),
     ]);
 
@@ -814,7 +838,10 @@ async fn install_bare_name_resolves_via_search() {
 
     let hermes_home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::new(&[
-        ("HERMES_HOME", Some(hermes_home.path().to_str().unwrap())),
+        (
+            "IRONHERMES_HOME",
+            Some(hermes_home.path().to_str().unwrap()),
+        ),
         ("SKILLS_DOWNLOAD_URL", Some(&server.uri())),
     ]);
 
@@ -884,7 +911,10 @@ async fn install_bare_name_prefers_exact_match_over_fuzzy() {
 
     let hermes_home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::new(&[
-        ("HERMES_HOME", Some(hermes_home.path().to_str().unwrap())),
+        (
+            "IRONHERMES_HOME",
+            Some(hermes_home.path().to_str().unwrap()),
+        ),
         ("SKILLS_DOWNLOAD_URL", Some(&server.uri())),
     ]);
 
@@ -929,7 +959,10 @@ async fn install_bare_name_not_found_returns_error() {
 
     let hermes_home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::new(&[
-        ("HERMES_HOME", Some(hermes_home.path().to_str().unwrap())),
+        (
+            "IRONHERMES_HOME",
+            Some(hermes_home.path().to_str().unwrap()),
+        ),
         ("SKILLS_DOWNLOAD_URL", Some(&server.uri())),
     ]);
 
@@ -971,7 +1004,10 @@ async fn install_bare_name_rejects_unsafe_id_from_search() {
 
     let hermes_home = tempfile::tempdir().unwrap();
     let _env = EnvGuard::new(&[
-        ("HERMES_HOME", Some(hermes_home.path().to_str().unwrap())),
+        (
+            "IRONHERMES_HOME",
+            Some(hermes_home.path().to_str().unwrap()),
+        ),
         ("SKILLS_DOWNLOAD_URL", Some(&server.uri())),
     ]);
 

@@ -1,6 +1,6 @@
 //! Phase 24 — Gateway PID file infrastructure (D-09..D-12, D-18).
 //!
-//! Writes `$HERMES_HOME/gateway.pid` atomically via `tempfile::NamedTempFile::persist()`.
+//! Writes `$IRONHERMES_HOME/gateway.pid` atomically via `tempfile::NamedTempFile::persist()`.
 //! Hand-rolled 3-line YAML format (`pid`, `started_at`, `profile`) avoids dragging
 //! `serde_yaml` into the gateway crate just for this file (D-18).
 //!
@@ -15,7 +15,7 @@ use tempfile::NamedTempFile;
 
 const PID_FILENAME: &str = "gateway.pid";
 
-/// 3-line YAML record stored at `$HERMES_HOME/gateway.pid`.
+/// 3-line YAML record stored at `$IRONHERMES_HOME/gateway.pid`.
 /// D-10: pid (u32), started_at (ISO8601 UTC string), profile (slug or "default").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatewayPidRecord {
@@ -132,7 +132,7 @@ pub fn is_pid_alive(_pid: u32) -> PidLiveness {
     );
 }
 
-/// Drop guard that removes `$HERMES_HOME/gateway.pid` on graceful shutdown.
+/// Drop guard that removes `$IRONHERMES_HOME/gateway.pid` on graceful shutdown.
 /// Keep this alive for the duration of the gateway run; drop on exit.
 pub struct PidLockGuard {
     home: PathBuf,

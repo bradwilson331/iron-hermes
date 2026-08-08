@@ -1,7 +1,7 @@
 //! Integration tests for `hermes skills` CLI subcommands.
 //!
 //! All tests call the lib-level handlers directly (no subprocess).
-//! Tests use a temp directory for HERMES_HOME to isolate filesystem state.
+//! Tests use a temp directory for IRONHERMES_HOME to isolate filesystem state.
 
 use std::fs;
 use std::path::PathBuf;
@@ -10,19 +10,19 @@ use std::sync::Mutex;
 // Guard env mutations in tests (env vars are process-global).
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-/// Set HERMES_HOME to a temp dir for the duration of the closure.
+/// Set IRONHERMES_HOME to a temp dir for the duration of the closure.
 fn with_hermes_home<F: FnOnce(PathBuf)>(f: F) {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     unsafe {
-        std::env::set_var("HERMES_HOME", tmp.path());
+        std::env::set_var("IRONHERMES_HOME", tmp.path());
     }
     f(tmp.path().to_path_buf());
     unsafe {
         match prev {
-            Some(v) => std::env::set_var("HERMES_HOME", v),
-            None => std::env::remove_var("HERMES_HOME"),
+            Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+            None => std::env::remove_var("IRONHERMES_HOME"),
         }
     }
 }
@@ -275,10 +275,10 @@ async fn cli_search_json_format_returns_valid_json() {
     let config_path = home.join("config.yaml");
     write_config(&config_path, &[]);
 
-    // Set HERMES_HOME for this test (single-threaded tokio test, no parallelism issue).
-    let prev = std::env::var("HERMES_HOME").ok();
+    // Set IRONHERMES_HOME for this test (single-threaded tokio test, no parallelism issue).
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     unsafe {
-        std::env::set_var("HERMES_HOME", &home);
+        std::env::set_var("IRONHERMES_HOME", &home);
     }
 
     let cfg = ironhermes_cli::skills_cmd::load_config_for_test(&config_path).unwrap();
@@ -294,8 +294,8 @@ async fn cli_search_json_format_returns_valid_json() {
 
     unsafe {
         match prev {
-            Some(v) => std::env::set_var("HERMES_HOME", v),
-            None => std::env::remove_var("HERMES_HOME"),
+            Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+            None => std::env::remove_var("IRONHERMES_HOME"),
         }
     }
 
@@ -439,7 +439,7 @@ fn cmd_list_reads_from_lock() {
         let config_path = home.join("config.yaml");
         write_config(&config_path, &[]);
 
-        // Seed a SkillLock with 2 entries under HERMES_HOME/skills-lock.json.
+        // Seed a SkillLock with 2 entries under IRONHERMES_HOME/skills-lock.json.
         let mut lock = SkillLock::default();
         lock.add_or_replace(SkillLockEntry {
             name: "alpha".to_string(),

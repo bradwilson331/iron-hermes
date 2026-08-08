@@ -256,6 +256,7 @@ pub enum Platform {
     Webhook,
     ApiServer,
     Web, // Phase 25.5: Dioxus web UI sessions
+    Buzz, // Phase 47.6: Nostr-based Buzz platform (P0-3)
 }
 
 impl std::fmt::Display for Platform {
@@ -278,6 +279,7 @@ impl std::fmt::Display for Platform {
             Platform::Webhook => "webhook",
             Platform::ApiServer => "api_server",
             Platform::Web => "web",
+            Platform::Buzz => "buzz",
         };
         write!(f, "{}", s)
     }

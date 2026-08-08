@@ -14,10 +14,13 @@ members = [
     "crates/ironhermes-hub",
     "crates/ironhermes-kanban",
     "crates/ironhermes-mcp",
+    "crates/ironhermes-artifacts",
     "providers/memory-sqlite",
     "providers/memory-grafeo",
     "providers/memory-duckdb",
     "crates/iron_hermes_ui",
+    "crates/ironhermes-blackbox",
+    "crates/ironhermes-vault",
 ]
 # crates/ironagent-tools-api is a stale byte-for-byte duplicate of
 # crates/ironhermes-tools (its test files import the sibling `ironhermes_tools`
@@ -41,14 +44,17 @@ default-members = [
     "crates/ironhermes-hub",
     "crates/ironhermes-kanban",
     "crates/ironhermes-mcp",
+    "crates/ironhermes-artifacts",
     "providers/memory-sqlite",
     "providers/memory-grafeo",
     "providers/memory-duckdb",
+    "crates/ironhermes-blackbox",
+    "crates/ironhermes-vault",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.1"
+version = "0.3.5"
 edition = "2024"
 authors = ["Nous Research"]
 license = "MIT"
@@ -87,8 +93,9 @@ tokio-stream = "0.1"
 futures = "0.3"
 # Time
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = { version = "0.10" }
 # UUID
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 # Regex
 regex = "1"
 # Glob
@@ -110,6 +117,9 @@ base64 = "0.22"
 fs2 = "0.4"
 # URL parsing
 url = "2"
+# Phase 43 — OAuth 2.1 PKCE + device-code flows
+oauth2 = { version = "5", features = ["reqwest"] }
+open = "5"
 # HMAC signing
 hmac = "0.12"
 sha2 = "0.10"

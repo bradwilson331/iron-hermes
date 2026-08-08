@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 
 use crate::skills::SkillRegistry;
 use crate::types::{ChatMessage, Platform};
@@ -54,6 +53,27 @@ pub trait BudgetSnapshot: Send + Sync {
     fn iterations_max(&self) -> usize;
     /// Current pressure label: `"none" | "caution70" | "warning90" | "stop100"`.
     fn pressure_label(&self) -> &'static str;
+}
+
+/// Phase 36.6.3 D-10: Flat DTO for the `/model`/`/provider` picker's step-1
+/// provider list.
+///
+/// Produced by [`crate::provider::ProviderResolver::providers`], one row per
+/// entry in the already-validated `endpoints` map (no new trust boundary or
+/// config parsing — see provider.rs). `models` is the provider's configured
+/// model-override keys unioned with `default_model`, deduped — sparse and
+/// honestly framed as "your configured models," NOT a full catalog.
+///
+/// SECURITY (Security Domain §3): this DTO MUST NOT carry `api_key` or any
+/// other credential/secret field — not even redacted (stricter than
+/// `ResolvedEndpoint`'s redacting `Debug` impl). The field is simply absent.
+#[derive(Debug, Clone)]
+pub struct ProviderPickerRow {
+    pub name: String,
+    pub base_url: String,
+    pub default_model: String,
+    pub is_current: bool,
+    pub models: Vec<String>,
 }
 
 /// D-11 / Phase 32.2 Plan 04: Flat entry for the `/agents` tree view.
@@ -402,7 +422,8 @@ pub trait McpManagerHandle: Send + Sync {
 /// Handle for MemoryManager status inspection (D-04).
 pub trait MemoryManagerHandle: Send + Sync {
     /// Returns a formatted status block showing active memory context.
-    /// Async work is bridged via `block_in_place + block_on` at the call site.
+    /// Async work is bridged via [`crate::async_bridge::block_on_sync`] at the
+    /// call site.
     fn status_text(&self) -> String;
 }
 
@@ -486,12 +507,102 @@ pub trait ProviderResolverHandle: Send + Sync {
     /// Resolve the "fast" role. Returns Some(model_name) if a fast preset is configured,
     /// None if no fast role exists in the config.
     fn fast_role_model(&self) -> Option<String>;
+    /// Phase 36.6.3 D-10: enumerate every configured provider for the
+    /// `/model`/`/provider` picker's step-1 provider list. Forwards to
+    /// [`crate::provider::ProviderResolver::providers`] — sorted by name,
+    /// `is_current` marks the active main provider, and no row carries
+    /// `api_key`/any credential.
+    fn list_providers(&self) -> Vec<ProviderPickerRow>;
+}
+
+/// The canonical [`ProviderResolverHandle`] adapter over a real
+/// [`crate::provider::ProviderResolver`].
+///
+/// Lives here rather than in a surface crate because both the trait and
+/// `ProviderResolver` are defined in `ironhermes-core` — so every surface can
+/// share one implementation with no new dependency and no orphan-rule dance.
+/// It was previously a private struct in `ironhermes-cli`'s TUI module, which
+/// is why `/model`, `/provider` and `/fast` answered
+/// `"Provider resolver not configured."` on every surface except the TUI even
+/// though those surfaces already owned a `ProviderResolver` (Phase 41.3 UAT
+/// finding F-1; Web's has been on `AppState.resolver` all along).
+///
+/// **Known limitation, carried over verbatim:** [`Self::validate_model`]
+/// accepts any non-empty string. There is no provider→model catalog in the
+/// codebase to validate against (the 36.6.3 picker work was planned and never
+/// executed), so `/model <anything>` reports success. Wiring this adapter into
+/// more surfaces spreads that behavior; it does not introduce it.
+pub struct ProviderResolverAdapter(pub std::sync::Arc<crate::provider::ProviderResolver>);
+
+impl ProviderResolverAdapter {
+    pub fn new(resolver: std::sync::Arc<crate::provider::ProviderResolver>) -> Self {
+        Self(resolver)
+    }
+}
+
+impl ProviderResolverHandle for ProviderResolverAdapter {
+    fn main_provider(&self) -> String {
+        self.0.main_provider().to_string()
+    }
+
+    fn main_model(&self) -> String {
+        self.0.resolve_for_main().default_model.clone()
+    }
+
+    /// V8.1: `api_key` is never included — only provider name and model.
+    fn status_text(&self) -> String {
+        let ep = self.0.resolve_for_main();
+        format!(
+            "Provider: {} | Model: {}",
+            self.0.main_provider(),
+            ep.default_model
+        )
+    }
+
+    fn validate_model(&self, model: &str) -> Result<String, String> {
+        // Accepts any non-empty model string — see the type-level note above.
+        if model.trim().is_empty() {
+            Err("Model name cannot be empty.".to_string())
+        } else {
+            Ok(model.trim().to_string())
+        }
+    }
+
+    fn model_list_text(&self) -> String {
+        let registry = self.0.model_registry();
+        let models = registry.all_models();
+        if models.is_empty() {
+            "No models available. Run /reload-mcp to refresh.".to_string()
+        } else {
+            let lines: Vec<String> = models
+                .iter()
+                .take(20)
+                .map(|(id, meta)| format!("  - {} (ctx: {})", id, meta.context_length))
+                .collect();
+            let mut out = format!("Available models:\n{}", lines.join("\n"));
+            if models.len() > 20 {
+                out.push_str("\n  ... (use /models for full list)");
+            }
+            out
+        }
+    }
+
+    fn fast_role_model(&self) -> Option<String> {
+        self.0
+            .resolve_role("fast")
+            .map(|ep| ep.default_model.clone())
+    }
+
+    fn list_providers(&self) -> Vec<ProviderPickerRow> {
+        self.0.providers()
+    }
 }
 
 /// Handle for ContextCompressor operations (D-04).
 pub trait ContextCompressorHandle: Send + Sync {
     /// Trigger compression. Returns a status message.
-    /// Async work is bridged via `block_in_place + block_on` at the call site.
+    /// Async work is bridged via [`crate::async_bridge::block_on_sync`] at the
+    /// call site.
     fn compress_text(&self) -> String;
     /// Status info for `/compress` with no args.
     fn status_text(&self) -> String;
@@ -524,7 +635,6 @@ pub struct CommandContext {
     // Required — always available
     pub platform: Platform,
     pub session_id: String,
-    pub agent_running: Arc<AtomicBool>,
 
     // Optional — platform-dependent or not always wired
     pub skill_registry: Option<Arc<SkillRegistry>>,
@@ -626,15 +736,27 @@ pub struct CommandContext {
     /// — the CLI inspection path uses this as a signal to default to
     /// `TtsRegistrationStatus::Inspection` in the display.
     pub tts_registration_status: Option<TtsRegistrationStatus>,
+
+    /// Phase 39.1 (R39.1-09 / D-08 / D-09): process-wide turn registry shared across
+    /// all surfaces. Defaults to a fresh per-context registry via `Arc::new(Default::default())`
+    /// so existing `CommandContext::new(...)` callers remain unchanged. Surfaces that run
+    /// a shared registry inject it via `with_turn_registry(shared_arc)`.
+    pub turn_registry: Arc<crate::concurrency::TurnRegistry>,
+
+    /// Phase 41.3 (D-12): tracks whether `with_turn_registry` was explicitly called.
+    /// `turn_registry` itself is never absent — `new()` always installs a fresh empty
+    /// registry — so `missing_core_handles()` cannot detect an unwired turn registry
+    /// via `Option::is_none()` the way it does for the other eight core handles. This
+    /// private flag is the signal instead; it carries no meaning outside this file.
+    turn_registry_wired: bool,
 }
 
 impl CommandContext {
     /// Create a minimal context with all optional fields set to None.
-    pub fn new(platform: Platform, session_id: String, agent_running: Arc<AtomicBool>) -> Self {
+    pub fn new(platform: Platform, session_id: String) -> Self {
         Self {
             platform,
             session_id,
-            agent_running,
             skill_registry: None,
             mcp_reloader: None,
             process_registry: None,
@@ -668,6 +790,11 @@ impl CommandContext {
             // Phase 36.17.7 D-06 (Path B / REVISION BLOCKER 2): TTS registration
             // status populated by the per-platform /toolset slash dispatcher.
             tts_registration_status: None,
+            // Phase 39.1 (R39.1-09): default to an empty per-context registry.
+            // Surfaces inject a shared process-wide registry via with_turn_registry().
+            turn_registry: Arc::new(crate::concurrency::TurnRegistry::default()),
+            // Phase 41.3 (D-12): not wired until with_turn_registry() is called.
+            turn_registry_wired: false,
         }
     }
 
@@ -837,19 +964,149 @@ impl CommandContext {
         self.thread_id = thread_id.map(|t| t.into());
         self
     }
+
+    /// Builder: inject a shared process-wide `TurnRegistry` (Phase 39.1 R39.1-09 / D-09).
+    ///
+    /// Surfaces that maintain a singleton registry (e.g. the web UI server, the gateway
+    /// runner) call this at context-build time so all slash commands share one view of
+    /// in-flight turns. Without this, each context gets its own empty registry (safe
+    /// default — `/agents turns` returns an empty list, no panic).
+    pub fn with_turn_registry(mut self, registry: Arc<crate::concurrency::TurnRegistry>) -> Self {
+        self.turn_registry = registry;
+        self.turn_registry_wired = true;
+        self
+    }
+
+    /// D-12: the divergence gate's runtime primitive. Returns the names (from
+    /// `CORE_CONTEXT_HANDLES`, in that order) of any of the nine universal core
+    /// handles that are not wired on this context. A surface proves compliance by
+    /// building its context (ideally through [`build_core_context`]) and asserting
+    /// this is empty — rather than by declaring what it thinks it needs, which is
+    /// exactly the per-surface-manifest shape D-12 rejects.
+    pub fn missing_core_handles(&self) -> Vec<&'static str> {
+        let mut missing = Vec::new();
+        if self.subagent_registry.is_none() {
+            missing.push("subagent_registry");
+        }
+        if self.process_registry.is_none() {
+            missing.push("process_registry");
+        }
+        if self.skill_registry.is_none() {
+            missing.push("skill_registry");
+        }
+        if self.state_store.is_none() {
+            missing.push("state_store");
+        }
+        if self.toolset_session.is_none() {
+            missing.push("toolset_session");
+        }
+        if !self.turn_registry_wired {
+            missing.push("turn_registry");
+        }
+        if self.workspace.is_none() {
+            missing.push("workspace");
+        }
+        if self.mcp_reloader.is_none() {
+            missing.push("mcp_reloader");
+        }
+        if self.trajectory_writer.is_none() {
+            missing.push("trajectory_writer");
+        }
+        missing
+    }
+}
+
+// =============================================================================
+// CoreContextHandles / build_core_context — D-11 shared factory, D-12 gate
+// =============================================================================
+
+/// D-12: the nine core handles every production surface must wire, in the
+/// canonical order used throughout this module (struct fields, missing-handle
+/// reporting, and this const all agree). Adding a tenth handle to this array is
+/// therefore a deliberate, reviewed edit — not something a single surface can
+/// silently drift into or out of.
+pub const CORE_CONTEXT_HANDLES: [&str; 9] = [
+    "subagent_registry",
+    "process_registry",
+    "skill_registry",
+    "state_store",
+    "toolset_session",
+    "turn_registry",
+    "workspace",
+    "mcp_reloader",
+    "trajectory_writer",
+];
+
+/// D-11: input struct for [`build_core_context`]. Every field is `Option` on
+/// purpose — the four production surfaces genuinely differ in which core
+/// handles they own at any given call site (e.g. a slash command fired before
+/// a workspace resolves), and a struct of non-optional handles would force
+/// every surface to fabricate values it does not have. Surface-specific extras
+/// (TUI's `with_history`/`with_agent_loop`/`with_personality_overlay`,
+/// gateway's `with_chat_origin`/`with_user`, CLI's `with_budget` and friends)
+/// stay outside this struct and unconstrained — callers chain them onto the
+/// `CommandContext` returned by `build_core_context` exactly as before.
+#[derive(Default)]
+pub struct CoreContextHandles {
+    pub subagent_registry: Option<Arc<dyn SubagentListSnapshot>>,
+    pub process_registry: Option<Arc<dyn ProcessRegistrySnapshotHandle>>,
+    pub skill_registry: Option<Arc<SkillRegistry>>,
+    pub state_store: Option<Arc<dyn StateStoreHandle>>,
+    pub toolset_session: Option<Arc<dyn ToolsetSessionHandle>>,
+    pub turn_registry: Option<Arc<crate::concurrency::TurnRegistry>>,
+    pub workspace: Option<Arc<crate::workspace::Workspace>>,
+    pub mcp_reloader: Option<Arc<dyn McpReloader>>,
+    pub trajectory_writer: Option<Arc<dyn TrajectoryWriterHandle>>,
+}
+
+/// D-11: the one factory every production `CommandContext` build site calls.
+/// Applies each of the nine core builders for the fields that are `Some`,
+/// then returns a plain `CommandContext` — callers keep chaining their own
+/// surface-specific extras afterward exactly as they did before this factory
+/// existed. This is the single edit point for adding a tenth core handle later;
+/// today it is the D-12 enforcement seam.
+pub fn build_core_context(
+    platform: Platform,
+    session_id: String,
+    handles: CoreContextHandles,
+) -> CommandContext {
+    let mut ctx = CommandContext::new(platform, session_id);
+    if let Some(v) = handles.subagent_registry {
+        ctx = ctx.with_subagent_registry(v);
+    }
+    if let Some(v) = handles.process_registry {
+        ctx = ctx.with_process_registry(v);
+    }
+    if let Some(v) = handles.skill_registry {
+        ctx = ctx.with_skill_registry(v);
+    }
+    if let Some(v) = handles.state_store {
+        ctx = ctx.with_state_store(v);
+    }
+    if let Some(v) = handles.toolset_session {
+        ctx = ctx.with_toolset_session(v);
+    }
+    if let Some(v) = handles.turn_registry {
+        ctx = ctx.with_turn_registry(v);
+    }
+    if let Some(v) = handles.workspace {
+        ctx = ctx.with_workspace(v);
+    }
+    if let Some(v) = handles.mcp_reloader {
+        ctx = ctx.with_mcp_reloader(v);
+    }
+    if let Some(v) = handles.trajectory_writer {
+        ctx = ctx.with_trajectory_writer(v);
+    }
+    ctx
 }
 
 #[cfg(test)]
 mod plan_21_7_07_tests {
     use super::*;
-    use std::sync::atomic::AtomicBool;
 
     fn ctx() -> CommandContext {
-        CommandContext::new(
-            Platform::Local,
-            "sess-1".to_string(),
-            Arc::new(AtomicBool::new(false)),
-        )
+        CommandContext::new(Platform::Local, "sess-1".to_string())
     }
 
     #[test]
@@ -1033,14 +1290,9 @@ mod plan_25_3_tests {
     use super::*;
     use crate::workspace::Workspace;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicBool;
 
     fn make_ctx() -> CommandContext {
-        CommandContext::new(
-            Platform::Local,
-            "sess-25.3".to_string(),
-            Arc::new(AtomicBool::new(false)),
-        )
+        CommandContext::new(Platform::Local, "sess-25.3".to_string())
     }
 
     fn sample_workspace() -> Workspace {

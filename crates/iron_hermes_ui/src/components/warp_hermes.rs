@@ -214,7 +214,7 @@ pub fn WarpHermes() -> Element {
                             };
 
                         match event {
-                            crate::protocol::ChatStreamEvent::Delta { text } => {
+                            crate::protocol::ChatStreamEvent::Delta { text, .. } => {
                                 // Accumulate deltas into a single Block::Ai entry.
                                 let current_streaming_id = streaming_block_id();
                                 if let Some(sid) = current_streaming_id {
@@ -246,7 +246,9 @@ pub fn WarpHermes() -> Element {
                                     });
                                 }
                             }
-                            crate::protocol::ChatStreamEvent::ToolCallStart { name, args } => {
+                            crate::protocol::ChatStreamEvent::ToolCallStart {
+                                name, args, ..
+                            } => {
                                 // Add a Tool block to the block stream.
                                 let id = {
                                     let cur = next_id();
@@ -275,7 +277,9 @@ pub fn WarpHermes() -> Element {
                                     }),
                                 });
                             }
-                            crate::protocol::ChatStreamEvent::ToolCallEnd { name, success } => {
+                            crate::protocol::ChatStreamEvent::ToolCallEnd {
+                                name, success, ..
+                            } => {
                                 // Update the last matching tool call block status.
                                 let new_status = if success {
                                     ToolStatus::Done
@@ -310,7 +314,7 @@ pub fn WarpHermes() -> Element {
                                     }
                                 }
                             }
-                            crate::protocol::ChatStreamEvent::Finished { total_tokens } => {
+                            crate::protocol::ChatStreamEvent::Finished { total_tokens, .. } => {
                                 tokens.set(TokenBudget {
                                     used: total_tokens,
                                     max: 128_000,
@@ -348,7 +352,7 @@ pub fn WarpHermes() -> Element {
                                     }
                                 }
                             }
-                            crate::protocol::ChatStreamEvent::Error { message } => {
+                            crate::protocol::ChatStreamEvent::Error { message, .. } => {
                                 let id = {
                                     let cur = next_id();
                                     next_id.set(cur + 1);
@@ -381,6 +385,40 @@ pub fn WarpHermes() -> Element {
                                 // render inline audio controls — that lives in HermesApp's
                                 // ScreenChat. Silent no-op for exhaustive-match compliance.
                             }
+                            crate::protocol::ChatStreamEvent::ImageOut { .. } => {
+                                // Phase 01-04 (DLV-03 web): legacy WarpHermes shell does not
+                                // render inline images — that lives in HermesApp's ScreenChat.
+                                // Silent no-op for exhaustive-match compliance.
+                            }
+                            crate::protocol::ChatStreamEvent::TurnStarted { .. } => {
+                                // Phase 39.1 Plan 02 (R39.1-08): legacy WarpHermes shell
+                                // does not render per-turn concurrency indicators — that
+                                // lives in HermesApp's ScreenChat. Silent no-op for
+                                // exhaustive-match compliance.
+                            }
+                            crate::protocol::ChatStreamEvent::TurnEnded { .. } => {
+                                // Phase 39.1 Plan 02 (R39.1-08): same as TurnStarted —
+                                // silent no-op for exhaustive-match compliance.
+                            }
+                            crate::protocol::ChatStreamEvent::TurnCancelled { .. } => {
+                                // Phase 39.1 Plan 02 (R39.1-08): same as TurnStarted —
+                                // silent no-op for exhaustive-match compliance.
+                            }
+                            // Phase 36.17.9 voice variants: the legacy WarpHermes shell
+                            // does not render voice status / wake-word / transcript UI —
+                            // that lives in HermesApp. Silent no-op for exhaustive-match
+                            // compliance (pre-existing gap; E0004 fix only — lint-level
+                            // warnings in this deprecated shell are left as-is).
+                            crate::protocol::ChatStreamEvent::VoiceStatus { .. }
+                            | crate::protocol::ChatStreamEvent::WakeWordResult { .. }
+                            | crate::protocol::ChatStreamEvent::UserTranscript { .. } => {}
+                            // Phase 41.1 Plan 03: the run-turn meta chip is a HermesApp-only
+                            // chat treatment; legacy WarpHermes shell ignores it for
+                            // exhaustive-match compliance.
+                            crate::protocol::ChatStreamEvent::RunTurnMeta { .. } => {}
+                            // Phase 40.5 Plan 08: VideoOut is a HermesApp-only feature;
+                            // legacy WarpHermes shell ignores it for exhaustive-match compliance.
+                            crate::protocol::ChatStreamEvent::VideoOut { .. } => {}
                         }
                     }
                     Err(err) => {
@@ -634,6 +672,12 @@ pub fn WarpHermes() -> Element {
             let req = crate::protocol::ChatRequest {
                 session_id: sid,
                 message: text,
+                // Phase 40.5 Plan 08 (D-17): legacy shell does not drive per-identity
+                // voice path — HermesApp is the active root (MEMORY.md).
+                active_identity: None,
+                // Phase 46.7 Plan 04 (D-09): legacy shell has no attach UI (Plan 05
+                // targets HermesApp, the active root); no attachments to send.
+                attachment_ids: Vec::new(),
             };
             let json = serde_json::to_string(&req).unwrap_or_default();
             spawn(async move {
@@ -833,6 +877,12 @@ pub fn WarpHermes() -> Element {
         let req = crate::protocol::ChatRequest {
             session_id: sid,
             message: text,
+            // Phase 40.5 Plan 08 (D-17): legacy shell does not drive per-identity
+            // voice path — HermesApp is the active root (MEMORY.md).
+            active_identity: None,
+            // Phase 46.7 Plan 04 (D-09): legacy shell has no attach UI (Plan 05
+            // targets HermesApp, the active root); no attachments to send.
+            attachment_ids: Vec::new(),
         };
         let json = serde_json::to_string(&req).unwrap_or_default();
         spawn(async move {

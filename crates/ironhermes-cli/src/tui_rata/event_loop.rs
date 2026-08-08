@@ -88,8 +88,12 @@ fn install_tui_logger_subscriber() -> Option<tracing_appender::non_blocking::Wor
     let file_layer_pair = std::fs::create_dir_all(&log_dir).ok().map(|_| {
         let file_appender = tracing_appender::rolling::daily(&log_dir, "tui.log");
         let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+        // NF-1 (46.8-gap, D-15): silence the vendored `rusty_vault` crate's
+        // debug-level secret logging unconditionally — see main.rs's matching
+        // comment for the full rationale. Applied after RUST_LOG is honored.
         let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ironhermes=info"));
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("ironhermes=info"))
+            .add_directive("rusty_vault=off".parse().expect("valid static directive"));
         let layer = tracing_subscriber::fmt::layer()
             .with_writer(non_blocking)
             .with_ansi(false)
@@ -195,7 +199,39 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     ensure_home_dirs(&hermes_home)?;
 
     let config = Config::load().unwrap_or_default();
-    let resolver = ProviderResolver::build(&config)?;
+    let mut resolver = ProviderResolver::build(&config)?;
+
+    // Phase 46.8 NF-2 close-out: apply the vault fallback (final provider-key
+    // source) before the resolver is consumed to build clients below — same
+    // guarded block as `build_client` (main.rs) and the embedded server. D-10
+    // no-op when vault.enabled is false (default); D-07 loud hard error on a
+    // sealed/broken enabled vault; shared `resolve_vault_config` fills the
+    // data_dir sentinel (G-46.8-1). Interactive TUI parity with `run_chat`.
+    if config.vault.enabled {
+        let store = ironhermes_vault::open_store(&ironhermes_core::resolve_vault_config(&config))?;
+        resolver.apply_vault_fallback(&*store).await?;
+    }
+
+    // Phase 41.3 Plan 11 (D-19): resolve the tool-credential snapshot here too —
+    // this is a second production composition root (alongside
+    // build_app_runtime_bundle) whose registry constructs WebSearchTool
+    // directly. Same shape as the vault-fallback block immediately above:
+    // only open the store when the operator enabled the vault, and propagate
+    // a sealed/corrupt vault loudly via `?` rather than a silent keyless
+    // default.
+    let tool_credentials = {
+        let store = if config.vault.enabled {
+            Some(ironhermes_vault::open_store(
+                &ironhermes_core::resolve_vault_config(&config),
+            )?)
+        } else {
+            None
+        };
+        Arc::new(
+            ironhermes_tools::credentials::ToolCredentials::resolve(&config, store.as_deref())
+                .await?,
+        )
+    };
 
     // D-18 item 13: session_id (uuid)
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -250,8 +286,17 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     // Skip the plain TerminalTool; wire the process-registry variant below so
     // background terminal spawns flow through drain_and_kill_session.
     let mut registry = ironhermes_tools::ToolRegistry::new();
+    // Phase 41.3 Plan 11 (D-19): install the resolved snapshot BEFORE
+    // register_defaults_except runs, so web_search reads it instead of the
+    // env-only default.
+    registry.with_credentials(tool_credentials.clone());
     registry.register_defaults_except(&["terminal"]);
-    registry.register_terminal_tool_with_process_registry(process_registry.clone());
+    // Phase 36.3.12 GAP 1 (D-01/D-06/D-07/D-09): pass the operator's full resolved
+    // TerminalConfig (not just the env allowlist) so `terminal.backend: docker`/`ssh`
+    // set in config.yaml actually selects that backend for this composition root
+    // instead of silently no-opping to local.
+    registry
+        .register_terminal_tool_with_process_registry(process_registry.clone(), &config.terminal);
 
     // Runtime-handle tools — registered separately because they need instances
     // that cannot be constructed inside the registry crate itself.
@@ -290,15 +335,34 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         config.delegation.clone(),
         Some(cancel_parent.clone()),
         None, // no progress callback in Phase 22.4 (status-pill integration is follow-up)
+        // Phase 47 Plan 08: the TUI surface is out of this plan's scope (not
+        // one of chat/kanban/delegate's shared-factory call sites) — no
+        // generation wiring here, so a TUI delegate child's "generation"
+        // toolset group (if ever requested) resolves EMPTY, same as
+        // surfaces.delegate=false.
+        None,
     );
 
     // RPC sub-registry (safe subset — no terminal, no execute_code)
     let mut rpc_registry = ironhermes_tools::ToolRegistry::new();
+    // Phase 41.3 Plan 11 (D-19): same resolved snapshot as the main registry
+    // above — this widens no capability (the hand-rolled tool list here is
+    // unchanged); it only gives web_search a credential source.
+    rpc_registry.with_credentials(tool_credentials.clone());
     rpc_registry.register(Box::new(ironhermes_tools::file_tools::ReadFileTool));
     rpc_registry.register(Box::new(ironhermes_tools::file_tools::WriteFileTool));
     rpc_registry.register(Box::new(ironhermes_tools::file_tools::PatchFileTool));
     rpc_registry.register(Box::new(ironhermes_tools::file_tools::SearchFilesTool));
-    rpc_registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool));
+    rpc_registry.register(Box::new(ironhermes_tools::web_search::WebSearchTool::new(
+        tool_credentials.clone(),
+    )));
+    // Phase 41.3 Plan 08 (D-07): web_answer is the same trust class as
+    // web_search in this sandbox (read-only outbound HTTP, no filesystem/
+    // process/hardware access) — mirrors the identical addition in
+    // ironhermes-agent's build_rpc_registry.
+    rpc_registry.register(Box::new(ironhermes_tools::web_answer::WebAnswerTool::new(
+        tool_credentials.clone(),
+    )));
     rpc_registry.register(Box::new(ironhermes_tools::web_read::WebReadTool));
     if let Some(ref mgr) = memory_manager {
         rpc_registry.register_memory_tool(mgr.clone());
@@ -482,11 +546,38 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     );
 
     // D-18 item 14: StatusLineState initial seed
+    //
+    // Phase 46.9 Plan 03 (D-08/D-09): `tokens_limit` is seeded from the SAME
+    // resolver path the web surface reads (`ResolvedEndpoint::context_length`,
+    // D-06 precedence: user config.yaml override > model metadata > default),
+    // not a hardcoded literal. `resolver` is still in scope here (moved into
+    // the runtime bundle further below) and resolves to the active main
+    // provider's model — the same model frozen for `client.model()` above.
+    //
+    // Phase 46.9 Plan 10 (GAP-3/D-07/D-09 TUI parity): `provider` below was
+    // ALREADY seeded from `config.model.provider` — the same single source
+    // the web's `ConfigSummary.provider` reads (api.rs `get_config_summary`,
+    // `config.model.provider.clone()`) — before this plan; the live path
+    // never used the `StatusLineState::default()` `"?"` placeholder. Plan 10
+    // adds a dedicated adjacency regression test in `status_line.rs`
+    // (`provider_renders_adjacent_to_model_pill`) confirming `build_pills`
+    // keeps the provider pill immediately next to the model pill.
     let status_initial = StatusLineState {
         mode: "Chat".to_string(),
         model_short: client.model().to_string(),
         provider: config.model.provider.clone(),
-        hint: "ctrl+c cancel · /help commands".to_string(),
+        // Phase 36.6.2 Plan 04 (D-09): surface Ctrl+T/Ctrl+K/? alongside the
+        // existing hints — pure string edit, no new StatusLineState field.
+        // Phase 36.6.3 Plan 04 (D-08): trailing `/help commands` segment
+        // replaced with the palette (`/ commands`) + `/model` picker
+        // (`/model switch`) mentions, appended LAST so they truncate first
+        // on a narrow terminal (UI-SPEC E4 overflow backstop). DUPLICATED at
+        // status_line.rs's `StatusLineState::default()` — both sites MUST
+        // change together (RESEARCH Pitfall 3): this is the literal the
+        // running TUI actually shows.
+        hint: "ctrl+c cancel · Ctrl+T thinking · Ctrl+K skills · ? help · / commands · /model switch"
+            .to_string(),
+        tokens_limit: resolver.resolve_for_main().context_length(),
         ..Default::default()
     };
 
@@ -552,6 +643,16 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         // Phase 27.1.1-gap-02: populate active_toolsets so the system-prompt skills
         // catalog text reflects the same enabled set as the API tool schemas.
         prompt_builder.set_active_toolsets(merged_tools.enabled_toolset_names());
+        // D-08 (Phase 46 Plan 04): populate connected_mcp_servers so requires_mcp_servers-gated
+        // skills (e.g. the Cloudflare skills) only surface when their MCP server is connected.
+        prompt_builder.set_connected_mcp_servers(
+            agent_runtime
+                .mcp_manager()
+                .map(|m| m.connected_server_names().into_iter().collect())
+                .unwrap_or_default(),
+        );
+        // Phase 38.1 (D-04/D-05): freeze session timezone into PromptBuilder Timestamp slot.
+        prompt_builder.set_timezone(config.agent.timezone.clone());
         prompt_builder.load_memory().await;
         prompt_builder.load_skills();
         Some(prompt_builder.build_system_message())
@@ -577,6 +678,12 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     let queue: Arc<dyn ironhermes_core::queue::MessageQueue<ironhermes_core::session::SessionKey>> =
         Arc::new(ironhermes_gateway::session_queue::SessionQueue::new());
     let queue_paused = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // Phase 36.3.12 Plan 10 (WR-01): load ApprovalsStore ONCE for the process
+    // lifetime — outside spawn_turn's per-turn scope — so a `[s]ession`
+    // approval grant persists across every dispatch of this TUI session
+    // instead of being discarded by a fresh `ApprovalsStore::load()` per turn.
+    let approvals_store = Arc::new(ironhermes_core::ApprovalsStore::load().await);
 
     Ok(AppDeps {
         agent_runtime,
@@ -623,6 +730,8 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         // Phase 21.8.2 Plan 03: SkillsConfig for hot-reload arm + pending overlays buffer.
         skills_config: config.skills.clone(),
         pending_skill_overlays: Vec::new(),
+        // Phase 36.3.12 Plan 10 (WR-01): process-lifetime store — see above.
+        approvals_store,
     })
 }
 
@@ -664,8 +773,59 @@ async fn build_mcp_manager(
         return None;
     }
 
-    // McpManager::new(registry) then start_all(configs) per manager.rs:62,76
-    let manager = ironhermes_mcp::McpManager::new(registry);
+    // 46.1-03 (D-04): build ns -> server-url map for the real rmcp-backed
+    // RefreshFn — only configs that carry both oauth_provider and url can refresh.
+    let ns_to_url: HashMap<String, String> = mcp_configs
+        .values()
+        .filter_map(|cfg| {
+            let ns = cfg.oauth_provider.as_deref()?;
+            let url = cfg.url.as_deref()?;
+            Some((ns.to_string(), url.to_string()))
+        })
+        .collect();
+
+    // 44-05 / 46.1-03: open auth store for OAuth-enabled MCP servers, wired to
+    // the REAL rmcp-backed refresh function (D-04, D-05) — not the stub.
+    // Non-fatal: OAuth servers are skipped with warn when store is unavailable (D-04).
+    let auth_store: Option<Arc<ironhermes_core::auth::AuthStore>> =
+        match ironhermes_mcp::open_auth_store_with_mcp_refresh(
+            ironhermes_core::constants::get_hermes_home().join("auth.json"),
+            ns_to_url,
+        )
+        .await
+        {
+            Ok(store) => Some(store),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "MCP: could not open OAuth token store; OAuth servers will be skipped (D-04)"
+                );
+                None
+            }
+        };
+
+    // Spawn Phase 41 proactive refresh tasks for cached MCP OAuth namespaces
+    // that actually have refresh capability (D-04: a namespace with no
+    // refresh_token is never scheduled into a repeating failing refresh).
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(ref store) = auth_store {
+        for cfg in mcp_configs.values() {
+            if let Some(ns) = cfg.oauth_provider.as_deref()
+                && let Some(tok) = store.get_token(ns).await
+                && tok.refresh_token.is_some()
+            {
+                ironhermes_core::auth::AuthStore::spawn_refresh_task(store.clone(), ns.to_string());
+            }
+        }
+    }
+
+    // McpManager::new(registry).with_auth_store() then start_all(configs) (D-08: new() unchanged)
+    // 46.1 BL-01: wire the config-driven global issuer allowlist here too — the TUI
+    // auto-start must trust the same non-baseline OAuth issuers as the agent runtime,
+    // or D-01 is inert at this surface.
+    let manager = ironhermes_mcp::McpManager::new(registry)
+        .with_auth_store(auth_store)
+        .with_global_issuer_allowlist(config.mcp_oauth.issuer_allowlist.clone());
     manager.start_all(mcp_configs).await;
     Some(Arc::new(manager))
 }
@@ -678,6 +838,33 @@ async fn run_app_inner(terminal: &mut DefaultTerminal, app: &mut App) -> Result<
     use tokio_stream::StreamExt;
 
     let mut events = EventStream::new(); // Pitfall 10 — local to fn, not on App
+
+    // Phase 36.6.2 Plan 03 (TUI-02): wire the approval channel. The sender is
+    // cloned by spawn_turn to build the per-turn TuiApprovalGate; the receiver is
+    // drained by recv_approval_request below (mirrors the pending_rx precedent).
+    if app.approval_tx.is_none() {
+        let (approval_tx, approval_rx) =
+            tokio::sync::mpsc::unbounded_channel::<crate::tui_rata::approval_gate_tui::ApprovalRequest>();
+        app.approval_tx = Some(approval_tx);
+        app.approval_rx = Some(approval_rx);
+    }
+    // Move the receiver into a local so the `select!` approval arm borrows this
+    // local (not a second `&mut app`) alongside `recv_pending`'s app borrow.
+    let mut approval_rx = app.approval_rx.take();
+
+    // Phase 41.1 Plan 10 (G-41.1-1): wire the clarify channel — mirrors the
+    // approval channel above. The sender is cloned by spawn_turn to build the
+    // per-turn TuiClarifyDispatcher; the receiver is drained by
+    // recv_clarify_request below (surfacing the clarify overlay instead of
+    // clarify_tool.rs's raw-println fallback).
+    if app.clarify_tx.is_none() {
+        let (clarify_tx, clarify_rx) = tokio::sync::mpsc::unbounded_channel::<
+            crate::tui_rata::clarify_dispatcher_tui::ClarifyRequest,
+        >();
+        app.clarify_tx = Some(clarify_tx);
+        app.clarify_rx = Some(clarify_rx);
+    }
+    let mut clarify_rx = app.clarify_rx.take();
 
     let mut tick = time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
@@ -704,12 +891,27 @@ async fn run_app_inner(terminal: &mut DefaultTerminal, app: &mut App) -> Result<
                 None => { app.should_quit = true; }
             },
             Some(se) = recv_pending(app) => app.handle_stream_event(se),
+            // Phase 36.6.2 Plan 03 (TUI-02): drain approval requests from spawned
+            // turn tasks and surface/enqueue them (mirrors recv_pending).
+            Some(req) = recv_approval_request(&mut approval_rx) => app.surface_approval_request(req),
+            // Phase 41.1 Plan 10 (G-41.1-1): drain clarify requests from spawned
+            // turn tasks and surface/enqueue them (mirrors the approval arm above).
+            Some(req) = recv_clarify_request(&mut clarify_rx) => app.surface_clarify_request(req),
             _ = &mut ctrl_c => app.handle_ctrl_c_signal(),
-            _ = tick.tick() => app.on_tick(),
+            _ = tick.tick() => {
+                app.on_tick();
+                // Phase 36.17.8 (D-08): drain any transcripts delivered by the
+                // capture task since the last tick and submit them as user turns.
+                app.poll_voice_transcripts();
+            }
         }
 
         app.reconcile_scroll(transcript_area);
-        terminal.draw(|f| ui(f, app))?;
+        terminal.draw(|f| {
+            ui(f, app); // base frame, unchanged
+            crate::tui_rata::overlay::render(f, app); // Clear + centered Block, AFTER ui() (Phase 36.6.2 Plan 01)
+            crate::tui_rata::palette::render(f, app); // NEW (Phase 36.6.3 Plan 01) — self-gates via palette_query, AFTER overlay so a modal always wins
+        })?;
 
         if app.should_quit {
             let _ = app.history_store.save(&app.history_path);
@@ -724,6 +926,36 @@ async fn run_app_inner(terminal: &mut DefaultTerminal, app: &mut App) -> Result<
 async fn recv_pending(app: &mut App) -> Option<StreamEvent> {
     match app.pending_rx.as_mut() {
         Some(rx) => rx.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Await the next `ApprovalRequest` from a spawned turn task, or `pending()` when
+/// no approval channel is wired (defensive — it is always wired at startup).
+/// Mirrors `recv_pending`, but takes the receiver directly (not `&mut App`) so the
+/// `select!` arm shares a single App borrow with `recv_pending` instead of a
+/// conflicting second `&mut App` (Phase 36.6.2 Plan 03, RESEARCH Pattern 3).
+async fn recv_approval_request(
+    rx: &mut Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::tui_rata::approval_gate_tui::ApprovalRequest>,
+    >,
+) -> Option<crate::tui_rata::approval_gate_tui::ApprovalRequest> {
+    match rx.as_mut() {
+        Some(r) => r.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Await the next `ClarifyRequest` from a spawned turn task, or `pending()` when
+/// no clarify channel is wired (defensive — it is always wired at startup).
+/// Mirrors `recv_approval_request` exactly (Phase 41.1 Plan 10, G-41.1-1).
+async fn recv_clarify_request(
+    rx: &mut Option<
+        tokio::sync::mpsc::UnboundedReceiver<crate::tui_rata::clarify_dispatcher_tui::ClarifyRequest>,
+    >,
+) -> Option<crate::tui_rata::clarify_dispatcher_tui::ClarifyRequest> {
+    match rx.as_mut() {
+        Some(r) => r.recv().await,
         None => std::future::pending().await,
     }
 }
@@ -751,6 +983,35 @@ pub(crate) fn compute_transcript_area(size: ratatui::prelude::Size) -> ratatui::
     chunks[0]
 }
 
+/// Build the tui_rata per-turn `MessagingPerTurnWiring` (Phase 41.1 Plan 10,
+/// G-41.1-1). Extracted as a small pure fn — separate from `spawn_turn`'s
+/// large `tokio::spawn` closure — so a test can construct it directly and
+/// assert `clarify_dispatcher.is_some()` without spinning up the whole event
+/// loop. This is the regression fence for the HARD RULE that
+/// `clarify_dispatcher` must never silently revert to `None`: doing so would
+/// route every clarify call back to `clarify_tool.rs`'s raw `println!`
+/// fallback, re-opening G-41.1-1's terminal corruption.
+fn build_messaging_wiring(
+    session_key: ironhermes_core::SessionKey,
+    clarify_tx: Option<
+        tokio::sync::mpsc::UnboundedSender<crate::tui_rata::clarify_dispatcher_tui::ClarifyRequest>,
+    >,
+    clarify_registry: std::sync::Arc<ironhermes_tools::PendingClarifyRegistry>,
+    cancel_token: Option<CancellationToken>,
+) -> ironhermes_agent::MessagingPerTurnWiring {
+    ironhermes_agent::MessagingPerTurnWiring {
+        session_key,
+        message_dispatcher: None,
+        clarify_dispatcher: clarify_tx.map(|tx| {
+            std::sync::Arc::new(crate::tui_rata::clarify_dispatcher_tui::TuiClarifyDispatcher::new(
+                tx,
+            )) as std::sync::Arc<dyn ironhermes_tools::ClarifyDispatcher>
+        }),
+        clarify_registry,
+        cancel_token,
+    }
+}
+
 // ── Per-turn spawn (approach 3: duplicate AgentLoop builder) ──────────────────
 
 /// Spawn an agent turn via `AgentRuntime::run_turn` (Phase 28.1-05).
@@ -766,14 +1027,17 @@ pub(crate) fn compute_transcript_area(size: ratatui::prelude::Size) -> ratatui::
 ///   - Streaming: Delta
 ///   - Tool: ToolCall, ToolProgress, ToolResult
 fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationToken) {
-    use ironhermes_core::commands::running_agent::RunningAgentGuard;
     let runtime = app.agent_runtime.clone();
     let trajectory_writer = app.trajectory_writer.clone(); // Phase 25.3 D-T-3
     let cancel_token = cancel.clone();
-    // Phase 36.1 (GW-05-TUI, D-09, Pitfall 1): clone the Arc in the SYNC body so it can
-    // be moved into the async block. The guard MUST be bound inside tokio::spawn so Drop
-    // fires when the future completes, NOT when spawn_turn returns synchronously.
-    let agent_running = app.agent_running.clone();
+    // Phase 39.1 Plan 04 (R39.1-01 / R39.1-05): acquire semaphore permits and register
+    // the TurnEntry before spawning. RunningAgentGuard (the old AtomicBool RAII guard)
+    // is REMOVED — the TurnRegistry is the new source of truth for in-flight turns.
+    //
+    // Pitfall 1 (from RESEARCH): all Arc clones must be done in the SYNC body so they
+    // can be moved into the async block. Avoid holding std::sync::Mutex across await.
+    let turn_registry = app.turn_registry.clone();
+    let concurrency = app.concurrency.clone();
     // Phase 36.2 Plan 07 fix: thread state_store so the post-LLM-call
     // write site in `agent_loop.rs` records `usage_events` rows and
     // updates session aggregates. Without this, the write is silently
@@ -781,6 +1045,15 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
     // empty, the status-bar cost/tok pills never render.
     let state_store = app.state_store.clone();
     let mut messages_snapshot = app.history.clone();
+
+    // Phase 36.17.8: snapshot voice-reply state for the post-turn TTS decision.
+    // The Arcs read live runtime toggles when the turn finishes; `turn_was_voice`
+    // is fixed at spawn time (this turn's input source). `should_speak` combines
+    // them: `/voice tts` (auto_tts) speaks every reply; `/voice on` (enabled)
+    // speaks only voice-input turns.
+    let voice_auto_tts = app.voice.auto_tts.clone();
+    let voice_enabled = app.voice.enabled.clone();
+    let turn_was_voice = app.last_turn_was_voice;
 
     // Phase 21.8.3.1 D-03 / D-04 / D-06: inject active personality overlay
     // into the per-turn system message clone. Mutates messages_snapshot only;
@@ -795,12 +1068,73 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
     }
     let session_id = app.session_id.clone();
 
+    // Phase 46.7 Plan 06 (D-22): post-turn deliverable capture. `cwd_for_capture`
+    // is the operator's REAL CWD (the TUI never redirects to a session
+    // workspace — `std::env::current_dir()` is stable for the process
+    // lifetime since no `cd` tool call from a spawned turn can change the
+    // TUI's own process CWD). `captured_artifacts` + `session_id_for_capture`
+    // + `text_for_opt_out` are cloned here (sync body) so the spawned async
+    // block can use them without borrowing `app`.
+    let cwd_for_capture = std::env::current_dir().unwrap_or_default();
+    let captured_artifacts = app.captured_artifacts.clone();
+    let session_id_for_capture = session_id.clone();
+    let text_for_opt_out = app.last_submitted_text.clone();
+
+    // Phase 36.3.12 D-08: snapshot the live `/yolo` toggle in the sync body (mirrors
+    // the voice Arcs above) so the spawned async block can read its CURRENT value at
+    // gating time without borrowing `app` across the `tokio::spawn` boundary.
+    let yolo_enabled_for_gating = app.yolo_enabled.clone();
+    // Phase 36.3.12 Plan 10 (WR-01): the process-lifetime store (see AppDeps
+    // doc) — cloning the Arc, not calling `ApprovalsStore::load()`, is what
+    // makes the `[s]ession` tier persist across every spawn_turn dispatch.
+    let approvals_for_gating = app.approvals_store.clone();
+    // Phase 36.6.2 Plan 03 (TUI-02): the approval-channel sender, cloned so the
+    // spawned task can build a channel-based TuiApprovalGate that surfaces the
+    // overlay instead of the blocking CliApprovalGate stdin prompt (RESEARCH
+    // Pitfall 2 — a blocking stdin read conflicts with the raw-mode EventStream).
+    let approval_tx_for_gate = app.approval_tx.clone();
+    // Phase 41.1 Plan 10 (G-41.1-1): the clarify-channel sender + the SHARED
+    // registry, cloned so the spawned task's messaging_wiring routes clarify
+    // through the overlay instead of clarify_tool.rs's raw-println fallback.
+    // MUST be the SAME Arc App owns (not a fresh PendingClarifyRegistry::new())
+    // — App::answer_clarify/cancel_clarify call take()/remove() on this exact
+    // instance, and only reach the awaiter if it's the one the turn inserted into.
+    let clarify_tx_for_dispatcher = app.clarify_tx.clone();
+    let clarify_registry_shared = app.clarify_registry.clone();
+
     tokio::spawn(async move {
-        // Phase 36.1 (GW-05-TUI, D-09, Pitfall 1): RAII guard MUST be bound inside the async
-        // block so Drop fires when the future completes, NOT when spawn_turn returns
-        // synchronously. Binding this outside the tokio::spawn would set the flag true then
-        // immediately clear it before the turn runs, providing zero protection.
-        let _agent_guard = RunningAgentGuard::new(agent_running);
+        // Phase 39.1 Plan 04 (R39.1-01 / R39.1-05 / D-09): acquire semaphore permits and
+        // register a TurnEntry BEFORE spawning agent work (register-before-spawn discipline).
+        // Permits are held for the lifetime of this task (RAII) and dropped on completion.
+        let tui_turn_id = ironhermes_core::concurrency::TurnId::new_v4();
+        let (per_permit, global_permit) = match concurrency.try_acquire() {
+            Some(p) => p,
+            None => {
+                // Cap reached — await a permit (TUI is single-user; waiting is correct).
+                let per = concurrency
+                    .per_session
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("per_session semaphore never closed");
+                let global = concurrency
+                    .global
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .expect("global semaphore never closed");
+                (per, global)
+            }
+        };
+        let entry = ironhermes_core::concurrency::TurnEntry {
+            turn_id: tui_turn_id,
+            session_id: session_id.clone(),
+            surface: ironhermes_core::concurrency::Surface::Cli,
+            started_at: std::time::Instant::now(),
+            cancel: cancel_token.clone(),
+        };
+        turn_registry.register(entry).await;
+
         let _ = tx.send(StreamEvent::Started);
 
         // Build streaming + tool callbacks that forward to the UI event loop.
@@ -855,9 +1189,74 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
             audio_dispatcher: None,
         });
 
+        // Phase 36.6.2 Plan 03 (TUI-02 / RESEARCH Pitfall 2): build the
+        // channel-based TuiApprovalGate for this turn. Terminal/execute_code
+        // approvals MUST route through this gate (which surfaces the overlay),
+        // NOT the blocking CliApprovalGate stdin prompt that hangs under crossterm
+        // raw mode. The gate is passed to BOTH the intercepts (which own the real
+        // terminal/execute_code gating via execute_gated_command) AND the
+        // TurnRequest.approval_gate field (which gates the guardrail
+        // NeedsApproval branch for other tools, e.g. MCP mutations).
+        let yolo_now = yolo_enabled_for_gating.load(std::sync::atomic::Ordering::SeqCst);
+        let tui_gate: Option<std::sync::Arc<dyn ironhermes_core::ApprovalGate>> =
+            approval_tx_for_gate.map(|tx| {
+                std::sync::Arc::new(crate::tui_rata::approval_gate_tui::TuiApprovalGate::new(
+                    tx,
+                    approvals_for_gating.clone(),
+                )) as std::sync::Arc<dyn ironhermes_core::ApprovalGate>
+            });
+
+        let (approval_gate_field, terminal_intercept, execute_code_intercept) = match tui_gate {
+            // Channel wired (production): surface the overlay for every gated call.
+            Some(gate) => (
+                Some(gate.clone()),
+                Some(crate::tui_rata::approval_gate_tui::build_tui_gated_terminal_intercept(
+                    runtime.terminal_tool_arc(),
+                    runtime.config().clone(),
+                    session_id.clone(),
+                    "tui",
+                    session_id.clone(),
+                    yolo_now,
+                    gate.clone(),
+                )),
+                Some(crate::tui_rata::approval_gate_tui::build_tui_gated_execute_code_intercept(
+                    runtime.execute_code_tool_arc(),
+                    runtime.config().clone(),
+                    session_id.clone(),
+                    "tui",
+                    session_id.clone(),
+                    yolo_now,
+                    gate.clone(),
+                )),
+            ),
+            // Defensive fallback (channel not wired — should not happen in the
+            // real event loop): keep the legacy CLI-gated intercepts.
+            None => (
+                None,
+                Some(crate::approval_gate::build_gated_terminal_intercept(
+                    runtime.terminal_tool_arc(),
+                    runtime.config().clone(),
+                    session_id.clone(),
+                    "tui",
+                    session_id.clone(),
+                    yolo_now,
+                    approvals_for_gating.clone(),
+                )),
+                Some(crate::approval_gate::build_gated_execute_code_intercept(
+                    runtime.execute_code_tool_arc(),
+                    runtime.config().clone(),
+                    session_id.clone(),
+                    "tui",
+                    session_id.clone(),
+                    yolo_now,
+                    approvals_for_gating.clone(),
+                )),
+            ),
+        };
+
         let request = ironhermes_agent::TurnRequest {
             messages: messages_snapshot,
-            session_id,
+            session_id: session_id.clone(),
             cancel_token: Some(cancel_token.clone()),
             stream: Some(streaming_cb),
             tool_progress: Some(tool_progress_cb),
@@ -867,9 +1266,64 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
             state_store,
             compression_count: 0,
             tts_wiring,
+            turn_id: None, // Phase 39.2: wired to TUI turn_id in Plan 04 Task 1
+            // Phase 41.1 Plan 10 (G-41.1-1): a real TuiClarifyDispatcher over the
+            // SHARED app.clarify_registry — replaces the old clarify_dispatcher:
+            // None + fresh-per-turn PendingClarifyRegistry::new(), which routed
+            // every clarify call to clarify_tool.rs's raw println! fallback and
+            // corrupted the raw-mode/alt-screen transcript (see
+            // .planning/debug/41.1-tui-interactive-render-corruption.md). The
+            // turn's cancel token is still threaded so /stop reaches a suspended
+            // clarify.
+            messaging_wiring: Some(build_messaging_wiring(
+                session_key.clone(),
+                clarify_tx_for_dispatcher,
+                clarify_registry_shared,
+                Some(cancel_token.clone()),
+            )),
+            // Phase 36.6.2 Plan 03 (TUI-02): channel-based TuiApprovalGate (or the
+            // defensive CLI fallback) — surfaces the approval overlay for the
+            // guardrail NeedsApproval branch. Replaces the old `approval_gate: None`.
+            approval_gate: approval_gate_field,
+            // Phase 36.3.12 D-08/D-10 + 36.6.2 Plan 03: gate the LLM's
+            // terminal/execute_code calls through the same TuiApprovalGate so a real
+            // gated call surfaces the overlay instead of the blocking stdin prompt.
+            terminal_intercept,
+            execute_code_intercept,
         };
 
+        // Phase 46.7 Plan 06 (D-22): captured immediately before the turn runs
+        // so the post-turn mtime gate below only accepts a deliverable
+        // modified during THIS turn's window.
+        let turn_start = std::time::SystemTime::now();
         let result = runtime.run_turn(request).await;
+
+        // Phase 46.7 Plan 06 (D-13/D-15/D-22): deterministic post-turn
+        // deliverable capture, gated on successful completion only (an
+        // errored/cancelled turn didn't necessarily finish writing anything).
+        if result.is_ok() {
+            let opt_out = ironhermes_tools::chat_capture::detect_turn_opt_out(&text_for_opt_out);
+            match capture_turn_scoped_deliverable(
+                &cwd_for_capture,
+                &session_id_for_capture,
+                opt_out,
+                turn_start,
+            ) {
+                Ok(Some(artifact)) => {
+                    if let Ok(mut guard) = captured_artifacts.lock() {
+                        guard.push(artifact);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "TUI post-turn capture failed");
+                }
+            }
+        }
+
+        // Phase 36.17.8: capture the reply text for optional spoken playback
+        // before `result` is consumed by the terminal-event match below.
+        let reply_for_tts = result.as_ref().ok().and_then(|r| r.final_response.clone());
 
         let terminal_event = match result {
             // Phase 36.2 Plan 07/10 fix: forward the per-turn aggregated
@@ -881,7 +1335,79 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
             Err(e) => StreamEvent::Error(e.to_string()),
         };
         let _ = tx.send(terminal_event);
+
+        // Phase 36.17.8: speak the reply when voice TTS is active. Sent AFTER the
+        // Finished event so the transcript renders immediately; playback then runs
+        // in this detached task without blocking the UI event loop. All failures
+        // are swallowed inside `speak_reply` — a missing voice never breaks the turn.
+        use std::sync::atomic::Ordering;
+        if let Some(reply) = reply_for_tts
+            && crate::tui_rata::voice_reply::should_speak(
+                voice_auto_tts.load(Ordering::Relaxed),
+                voice_enabled.load(Ordering::Relaxed),
+                turn_was_voice,
+            )
+        {
+            let spoken = crate::tui_rata::voice_reply::spoken_text(&reply);
+            if !spoken.trim().is_empty() {
+                let config =
+                    std::sync::Arc::new(ironhermes_core::Config::load().unwrap_or_default());
+                let home = ironhermes_core::constants::get_hermes_home();
+                crate::tui_rata::voice_reply::speak_reply(config, &home, &spoken).await;
+            }
+        }
+
+        // Phase 39.1 Plan 04 (R39.1-01 / R39.1-05): deregister turn and drop
+        // permits (RAII). Runs on all exit paths: completion, cancellation, error.
+        turn_registry.deregister(tui_turn_id).await;
+        drop(per_permit);
+        drop(global_permit);
     });
+}
+
+// ── Phase 46.7 Plan 06: TUI post-turn deliverable capture (D-13/D-15/D-22) ──
+
+/// Turn-scoped wrapper around `capture_chat_deliverable` (Plan 03).
+///
+/// `locate_deliverable` (which `capture_chat_deliverable` calls internally)
+/// is a non-recursive, single-directory scan of `scan_root` — for the TUI,
+/// `scan_root` is always the operator's real CWD (D-22; the TUI never
+/// redirects to a session workspace, unlike the web-chat surface). That CWD
+/// is an uncontrolled, potentially long-lived project directory, so a bare
+/// scan would "recapture" a pre-existing `index.html`/`README.md` sitting in
+/// that directory on EVERY turn, not just the turn that actually produced it.
+///
+/// This wrapper closes that gap with an mtime gate: the located deliverable
+/// is only captured when its modification time is `>= turn_start`. RESEARCH
+/// Open Question 2 recommended true per-turn write-event tracking (recording
+/// paths from the write_file/edit tool callbacks) as the more precise
+/// mechanism; that was out of this plan's budget (no existing per-turn
+/// write-path tracking exists in the TUI turn path to hook into without a
+/// wider AgentLoop change). The mtime gate is the documented fallback — it
+/// bounds false positives to "a file with the exact/largest-html candidate
+/// name happened to be modified during this exact turn's wall-clock window"
+/// rather than "any pre-existing deliverable in CWD, ever".
+fn capture_turn_scoped_deliverable(
+    scan_root: &std::path::Path,
+    session_id: &str,
+    turn_opt_out: bool,
+    turn_start: std::time::SystemTime,
+) -> anyhow::Result<Option<ironhermes_tools::chat_capture::CapturedArtifact>> {
+    if turn_opt_out {
+        return Ok(None); // D-15
+    }
+
+    // The mtime gate must filter CANDIDATE SELECTION, not judge an
+    // already-selected candidate: `locate_deliverable` picks by name priority,
+    // so a stale `README.md` sitting in the operator's CWD used to win, fail
+    // the freshness test, and suppress capture of the `*.html` the turn had
+    // just written — every turn, forever (Phase 46.7 UAT test 7).
+    ironhermes_tools::chat_capture::capture_chat_deliverable_since(
+        scan_root,
+        session_id,
+        turn_opt_out,
+        Some(turn_start),
+    )
 }
 
 #[cfg(test)]
@@ -1043,5 +1569,208 @@ mod tests {
             browser_count, 11,
             "Phase 25.1 D-04: exactly 11 browser_* tools must be registered"
         );
+    }
+}
+
+// ── Phase 46.7 Plan 06 tests: tui_turn_capture (D-13/D-15/D-22) ─────────────
+
+#[cfg(test)]
+mod tui_turn_capture {
+    use super::capture_turn_scoped_deliverable;
+    use std::time::{Duration, SystemTime};
+
+    /// Process-wide lock serializing `IRONHERMES_ARTIFACTS_DB` mutation across
+    /// these tests. Mirrors the `toolset_cmd.rs::env_lock` idiom — plain
+    /// `cargo test` runs tests as threads in ONE process (only nextest gives
+    /// process-per-test), so two tests setting this global env var in parallel
+    /// would cross-wire each other's artifact store.
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// Redirects `ArtifactStore::open_default()` to a fresh tempdir DB for this
+    /// test. The returned `MutexGuard` must be held for the test's full
+    /// duration — capture reads the env lazily via `open_default()`, not just
+    /// at setup time.
+    fn redirect_artifacts_db() -> (std::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
+        let guard = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("artifacts.db");
+        unsafe {
+            std::env::set_var("IRONHERMES_ARTIFACTS_DB", &db_path);
+        }
+        (guard, dir)
+    }
+
+    #[test]
+    fn index_html_written_during_the_turn_window_is_captured() {
+        let (_env_guard, _db_dir) = redirect_artifacts_db();
+        let scan_dir = tempfile::tempdir().unwrap();
+        let turn_start = SystemTime::now();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(scan_dir.path().join("index.html"), "<html>hi</html>").unwrap();
+
+        let captured =
+            capture_turn_scoped_deliverable(scan_dir.path(), "tui-s1", false, turn_start).unwrap();
+        assert!(
+            captured.is_some(),
+            "index.html written during the turn window must be captured"
+        );
+        assert_eq!(captured.unwrap().filename, "index.html");
+    }
+
+    #[test]
+    fn preexisting_deliverable_older_than_turn_start_is_not_recaptured() {
+        let (_env_guard, _db_dir) = redirect_artifacts_db();
+        let scan_dir = tempfile::tempdir().unwrap();
+        std::fs::write(scan_dir.path().join("index.html"), "<html>old</html>").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let turn_start = SystemTime::now();
+
+        let captured =
+            capture_turn_scoped_deliverable(scan_dir.path(), "tui-s2", false, turn_start).unwrap();
+        assert!(
+            captured.is_none(),
+            "a pre-existing deliverable older than turn_start must NOT be recaptured every turn"
+        );
+    }
+
+    /// Phase 46.7 UAT test 7 regression: the operator's real CWD (D-22) is an
+    /// uncontrolled project directory that almost always ALREADY contains a
+    /// stale `README.md` (an exact-name CAPTURE_CANDIDATE). `locate_deliverable`
+    /// picks candidates by NAME priority, so it returned that stale README on
+    /// every turn; the mtime gate then judged the README (old) instead of the
+    /// deliverable the agent had just written, and capture returned None forever.
+    /// Freshness must participate in SELECTION, not be applied after it.
+    #[test]
+    fn fresh_html_is_captured_even_when_a_stale_readme_shadows_it() {
+        let (_env_guard, _db_dir) = redirect_artifacts_db();
+        let scan_dir = tempfile::tempdir().unwrap();
+        // A long-lived project README — the exact-name candidate that shadowed
+        // everything else. Written BEFORE the turn starts.
+        std::fs::write(scan_dir.path().join("README.md"), "# project\n").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let turn_start = SystemTime::now();
+        std::thread::sleep(Duration::from_millis(20));
+        // The deliverable the agent actually produced this turn.
+        std::fs::write(
+            scan_dir.path().join("dashboard.html"),
+            "<html>dashboard</html>",
+        )
+        .unwrap();
+
+        let captured =
+            capture_turn_scoped_deliverable(scan_dir.path(), "tui-s5", false, turn_start).unwrap();
+        assert!(
+            captured.is_some(),
+            "a stale README.md in CWD must not shadow the fresh deliverable this turn produced \
+             — this is why the TUI never rendered an artifact chip"
+        );
+        assert_eq!(
+            captured.unwrap().filename,
+            "dashboard.html",
+            "the captured deliverable must be the file written during the turn window"
+        );
+    }
+
+    /// The stale-README case must still not capture anything when the turn
+    /// produced NOTHING — the mtime gate's original purpose (no recapture).
+    #[test]
+    fn stale_readme_alone_is_still_not_captured() {
+        let (_env_guard, _db_dir) = redirect_artifacts_db();
+        let scan_dir = tempfile::tempdir().unwrap();
+        std::fs::write(scan_dir.path().join("README.md"), "# project\n").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let turn_start = SystemTime::now();
+
+        let captured =
+            capture_turn_scoped_deliverable(scan_dir.path(), "tui-s6", false, turn_start).unwrap();
+        assert!(
+            captured.is_none(),
+            "a turn that produced no deliverable must capture nothing"
+        );
+    }
+
+    #[test]
+    fn opt_out_suppresses_even_a_fresh_deliverable() {
+        let (_env_guard, _db_dir) = redirect_artifacts_db();
+        let scan_dir = tempfile::tempdir().unwrap();
+        let turn_start = SystemTime::now();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(scan_dir.path().join("index.html"), "<html>hi</html>").unwrap();
+
+        let captured =
+            capture_turn_scoped_deliverable(scan_dir.path(), "tui-s3", true, turn_start).unwrap();
+        assert!(
+            captured.is_none(),
+            "D-15: turn_opt_out=true must suppress capture"
+        );
+    }
+
+    #[test]
+    fn empty_scan_root_yields_none() {
+        let (_env_guard, _db_dir) = redirect_artifacts_db();
+        let scan_dir = tempfile::tempdir().unwrap();
+        let turn_start = SystemTime::now();
+
+        let captured =
+            capture_turn_scoped_deliverable(scan_dir.path(), "tui-s4", false, turn_start).unwrap();
+        assert!(captured.is_none());
+    }
+}
+
+// ── Phase 41.1 Plan 10 tests: clarify wiring guard (G-41.1-1) ──────────────────
+
+/// Regression fence for the G-41.1-1 fix: `build_messaging_wiring` (the pure
+/// builder `spawn_turn` calls) must always wire `clarify_dispatcher: Some(..)`
+/// when given a `Some` sender — if a future change reverts to passing `None`
+/// through, `ClarifyTool` falls back to `clarify_tool.rs`'s raw `println!`
+/// and this test fails. Mirrors `approval_gate_tui.rs`'s
+/// `#[cfg(all(test, feature = "test-support"))]` channel round-trip tests.
+#[cfg(all(test, feature = "test-support"))]
+mod clarify_wiring_tests {
+    use super::build_messaging_wiring;
+
+    #[test]
+    fn build_messaging_wiring_wires_clarify_dispatcher_some() {
+        let (clarify_tx, _clarify_rx) = tokio::sync::mpsc::unbounded_channel::<
+            crate::tui_rata::clarify_dispatcher_tui::ClarifyRequest,
+        >();
+        let session_key = ironhermes_core::SessionKey {
+            platform: ironhermes_core::types::Platform::Local,
+            chat_id: "guard-test".to_string(),
+            user_id: None,
+        };
+        let registry = std::sync::Arc::new(ironhermes_tools::PendingClarifyRegistry::new());
+
+        let wiring = build_messaging_wiring(session_key, Some(clarify_tx), registry, None);
+
+        assert!(
+            wiring.clarify_dispatcher.is_some(),
+            "G-41.1-1 regression fence: tui_rata's messaging_wiring MUST wire \
+             clarify_dispatcher: Some(TuiClarifyDispatcher) — None would route \
+             every clarify call to clarify_tool.rs's raw println! fallback and \
+             corrupt the raw-mode/alt-screen transcript"
+        );
+    }
+
+    /// The builder is a pure pass-through: a `None` sender (e.g. the channel
+    /// hasn't been wired yet) still wires `clarify_dispatcher: None`, never
+    /// panics or silently substitutes a dispatcher — proving the `Some(..)`
+    /// case above is asserting the caller's real input, not a hardcoded
+    /// `Some` inside the builder.
+    #[test]
+    fn build_messaging_wiring_passes_through_none_sender() {
+        let session_key = ironhermes_core::SessionKey {
+            platform: ironhermes_core::types::Platform::Local,
+            chat_id: "guard-test-none".to_string(),
+            user_id: None,
+        };
+        let registry = std::sync::Arc::new(ironhermes_tools::PendingClarifyRegistry::new());
+
+        let wiring = build_messaging_wiring(session_key, None, registry, None);
+
+        assert!(wiring.clarify_dispatcher.is_none());
     }
 }

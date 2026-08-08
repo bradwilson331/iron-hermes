@@ -17,24 +17,24 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Set up a test environment with HERMES_HOME pointing to a tempdir.
+/// Set up a test environment with IRONHERMES_HOME pointing to a tempdir.
 /// Returns the tempdir (must stay alive for the test duration) and the skills root path.
 fn setup_test_env() -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
-        std::env::set_var("HERMES_HOME", tmp.path());
+        std::env::set_var("IRONHERMES_HOME", tmp.path());
     }
     let skills_root = tmp.path().join("skills");
     std::fs::create_dir_all(&skills_root).unwrap();
     (tmp, skills_root)
 }
 
-/// Restore previous HERMES_HOME value.
+/// Restore previous IRONHERMES_HOME value.
 fn restore_env(prev: Option<String>) {
     unsafe {
         match prev {
-            Some(v) => std::env::set_var("HERMES_HOME", v),
-            None => std::env::remove_var("HERMES_HOME"),
+            Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+            None => std::env::remove_var("IRONHERMES_HOME"),
         }
     }
 }
@@ -69,7 +69,7 @@ async fn mount_github_mocks(server: &MockServer) {
 #[tokio::test]
 async fn install_github_happy_path() {
     let _guard = ENV_LOCK.lock().await;
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
     let server = MockServer::start().await;
@@ -127,7 +127,7 @@ async fn install_github_happy_path() {
 #[tokio::test]
 async fn install_rejects_already_installed() {
     let _guard = ENV_LOCK.lock().await;
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
     let server = MockServer::start().await;
@@ -174,7 +174,7 @@ async fn install_rejects_already_installed() {
 #[tokio::test]
 async fn install_community_scan_blocked() {
     let _guard = ENV_LOCK.lock().await;
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
     let server = MockServer::start().await;
@@ -235,7 +235,7 @@ async fn install_community_scan_blocked() {
 #[tokio::test]
 async fn install_trusted_scan_warn_but_load() {
     let _guard = ENV_LOCK.lock().await;
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
     let server = MockServer::start().await;
@@ -278,7 +278,7 @@ async fn install_trusted_scan_warn_but_load() {
 #[tokio::test]
 async fn install_failure_leaves_no_partial_state() {
     let _guard = ENV_LOCK.lock().await;
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
     let server = MockServer::start().await;
@@ -331,7 +331,7 @@ async fn install_failure_leaves_no_partial_state() {
 #[tokio::test]
 async fn install_content_hash_matches_bundle_hash() {
     let _guard = ENV_LOCK.lock().await;
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
     let server = MockServer::start().await;
@@ -362,7 +362,7 @@ async fn install_content_hash_matches_bundle_hash() {
 #[tokio::test]
 async fn install_uses_category_from_frontmatter() {
     let _guard = ENV_LOCK.lock().await;
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
     let server = MockServer::start().await;

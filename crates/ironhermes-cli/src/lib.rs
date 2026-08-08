@@ -8,8 +8,29 @@
 //! genuinely need. Do NOT `pub use` internals that shouldn't become
 //! API.
 
+/// Process-global env lock for tests, mirroring `main.rs`'s.
+///
+/// `setup.rs` is compiled into BOTH this lib target and the `ironhermes` bin
+/// target, so `crate::test_env_lock()` must resolve in each crate root. Each test
+/// binary is its own process, so one lock per crate root is exactly one lock per
+/// process — which is the point: independent per-MODULE mutexes do not serialise
+/// against each other, so tests in different modules that mutate the same
+/// process-global var (`OPENROUTER_API_KEY`, `IRONHERMES_HOME`, …) stomp each
+/// other and flake. Every env-mutating test in this crate must take THIS lock.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+pub mod approval_gate;
 pub mod kanban;
 pub mod memory_cmd;
+/// Phase 42 EXEC-01: Quick Command dispatch (guard → approval → TerminalTool, LLM-free).
+pub mod quick_command;
 pub mod setup;
 pub mod skills_cmd;
 
@@ -56,6 +77,9 @@ pub mod repl_input;
 // `cmd_list_to_string` + `cmd_refresh_from_url_with_path` without spawning
 // the binary — matches the toolset_cmd / session_cmd / status_cmd pattern.
 pub mod pricing_cmd;
+
+/// WR-03 (phase 47.4): detect profiles possibly exfiltrated during the CR-03 window.
+pub mod profile_audit;
 
 pub use io_gate::{can_prompt, is_terminal_stdin};
 pub use repl_input::{ExternalPrinterHandle, PromptRequest, ReplInputChannel, ReplLine};

@@ -6,7 +6,7 @@ use serde_json::json;
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
-use tracing::debug;
+use tracing::info;
 
 use crate::registry::{Prerequisite, Tool};
 
@@ -201,10 +201,17 @@ pub(crate) fn map_read_outcome(
 ///
 /// Used for walk, stop, relax_servos — no response is read.
 async fn send_fire_and_forget(addr: &str, cmd: &str) -> anyhow::Result<()> {
-    let mut stream = TcpStream::connect(addr).await?;
-    stream.write_all(cmd.as_bytes()).await?;
-    stream.flush().await?;
-    Ok(())
+    // ADV-01: 5-second timeout guards against a stalled/unreachable robot
+    // holding the caller indefinitely. Mirrors the 3-second timeout already
+    // used in send_and_read_line (D-18).
+    timeout(Duration::from_secs(5), async {
+        let mut stream = TcpStream::connect(addr).await?;
+        stream.write_all(cmd.as_bytes()).await?;
+        stream.flush().await?;
+        Ok(())
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("hexapod_tcp: send_fire_and_forget timed out after 5s ({addr})"))?
 }
 
 /// Send a command and read one `\n`-terminated response line (D-18, Pitfall 3).
@@ -336,6 +343,7 @@ impl Tool for HexapodTcpTool {
                           Required for hexapod_tcp to connect to the robot."
                 .to_string(),
             required: true,
+            group: None,
         }]
     }
 
@@ -366,7 +374,7 @@ impl Tool for HexapodTcpTool {
                     }
                 };
                 let addr = format!("{ip}:5002");
-                debug!("hexapod_tcp: action={action} addr={addr}");
+                info!("hexapod_tcp: action={action} addr={addr}");
 
                 match action {
                     "walk" => {

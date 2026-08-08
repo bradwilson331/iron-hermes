@@ -84,6 +84,7 @@ impl Tool for BrowserClickTool {
                 "Chromium or Google Chrome browser binary on PATH or at a standard install location"
                     .to_string(),
             required: true,
+            group: None,
         }]
     }
 

@@ -8,22 +8,26 @@
 #   install.sh --force     # overwrite existing service files / cron entry
 #
 # Effects:
-#   1. Creates ~/.ironhermes/{scripts,logs}/
-#   2. Copies gateway-run.sh + gateway-watchdog.sh into ~/.ironhermes/scripts/
-#   3. macOS: renders + bootstraps com.ironhermes.gateway in ~/Library/LaunchAgents/
+#   1. Installs the freshly built binary (target/release/ironhermes, or
+#      $IRONHERMES_RELEASE_BIN) to ~/.local/bin/ironhermes (or $IRONHERMES_BIN)
+#   2. Creates ~/.ironhermes/{scripts,logs}/
+#   3. Copies gateway-run.sh + gateway-watchdog.sh into ~/.ironhermes/scripts/
+#   4. macOS: renders + bootstraps com.ironhermes.gateway in ~/Library/LaunchAgents/
 #      Linux: renders + enables ironhermes-gateway.service in ~/.config/systemd/user/
 #      --cron: appends a 1-min crontab entry calling the watchdog
-#   4. Prints verification commands.
+#   5. Prints verification commands.
 
 set -euo pipefail
 
 SOURCE_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "$SOURCE_DIR/../.." && pwd)"
 HOME_DIR="$HOME"
 IRONHERMES_HOME_DIR="${IRONHERMES_HOME:-$HOME_DIR/.ironhermes}"
 SCRIPTS_DIR="$IRONHERMES_HOME_DIR/scripts"
 LOGS_DIR="$IRONHERMES_HOME_DIR/logs"
 ENV_FILE="$IRONHERMES_HOME_DIR/.env"
 BIN="${IRONHERMES_BIN:-$HOME_DIR/.local/bin/ironhermes}"
+RELEASE_BIN="${IRONHERMES_RELEASE_BIN:-$REPO_ROOT/target/release/ironhermes}"
 
 LABEL="com.ironhermes.gateway"
 PLIST_DEST="$HOME_DIR/Library/LaunchAgents/${LABEL}.plist"
@@ -51,6 +55,21 @@ done
 log()  { printf '[install] %s\n' "$*"; }
 die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
 warn() { printf '[install] WARN: %s\n' "$*" >&2; }
+
+# ---------- install binary ----------
+# The service execs $BIN (see gateway-run.sh) — a rebuild does nothing until it
+# lands there, so copy the release build in as the first real install step.
+# `install` unlinks the destination first, so overwriting a currently-running
+# binary is safe (no ETXTBSY); the service picks it up on its next (re)start.
+if [ -x "$RELEASE_BIN" ]; then
+    mkdir -p "$(dirname "$BIN")"
+    install -m 755 "$RELEASE_BIN" "$BIN"
+    log "installed $RELEASE_BIN -> $BIN"
+elif [ -x "$BIN" ]; then
+    warn "no release build at $RELEASE_BIN — keeping the EXISTING (possibly stale) $BIN; run 'cargo build --release' and re-run to deploy fresh code"
+else
+    die "no binary: neither $RELEASE_BIN nor $BIN exists (build with 'cargo build --release' or set IRONHERMES_RELEASE_BIN/IRONHERMES_BIN)"
+fi
 
 # ---------- preflight ----------
 [ -x "$BIN" ] || die "binary not executable: $BIN (build with 'cargo build --release' or set IRONHERMES_BIN)"
@@ -90,7 +109,8 @@ install_macos() {
     log "bootstrapped $LABEL"
 
     if [ "$START" -eq 1 ]; then
-        launchctl kickstart "gui/$UID/$LABEL"
+        # -k kills a running instance first so a re-install picks up the new binary.
+        launchctl kickstart -k "gui/$UID/$LABEL"
         log "kickstarted $LABEL"
     fi
 
@@ -111,10 +131,11 @@ install_linux() {
     log "wrote $SERVICE_DEST"
 
     systemctl --user daemon-reload
+    systemctl --user enable ironhermes-gateway.service
     if [ "$START" -eq 1 ]; then
-        systemctl --user enable --now ironhermes-gateway.service
-    else
-        systemctl --user enable ironhermes-gateway.service
+        # restart (not enable --now) so a re-install over a RUNNING service
+        # actually swaps in the new binary instead of no-opping.
+        systemctl --user restart ironhermes-gateway.service
     fi
 
     cat <<EOF

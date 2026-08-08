@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use chrono::Utc;
 use ironhermes_core::Config;
 use ironhermes_cron::job::{CronJob, JobState, RepeatConfig, ScheduleParsed};
-use ironhermes_cron::{DeliveryTarget, TgSendApi};
+use ironhermes_cron::{DeliveryRegistry, DeliverySend, DeliveryTarget, TgSendApi};
 use ironhermes_cron_runner::dispatch_all_targets;
 
 struct FakeTgClient {
@@ -77,11 +77,32 @@ impl TgSendApi for FakeTgClient {
     }
 }
 
+// Phase 47.6 Plan 07: the text path now resolves through DeliveryRegistry —
+// FakeTgClient also plays the registry-resident DeliverySend role, delegating
+// to the same send_message implementation above.
+#[async_trait::async_trait]
+impl DeliverySend for FakeTgClient {
+    async fn send_text(
+        &self,
+        chat_id: &str,
+        content: &str,
+        thread_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        TgSendApi::send_message(self, chat_id, content, thread_id).await
+    }
+}
+
 fn fake_tg(fail: bool) -> Arc<FakeTgClient> {
     Arc::new(FakeTgClient {
         calls: Arc::new(Mutex::new(vec![])),
         fail,
     })
+}
+
+fn telegram_registry(tg: &Arc<FakeTgClient>) -> DeliveryRegistry {
+    let mut registry = DeliveryRegistry::new();
+    registry.insert("telegram", tg.clone() as Arc<dyn DeliverySend>);
+    registry
 }
 
 fn make_job(deliver: &str) -> CronJob {
@@ -137,8 +158,16 @@ async fn telegram_target_invokes_send_message() {
     let job = make_job("telegram:12345");
     let config = config_no_wrap();
     let tg_client: Arc<dyn TgSendApi> = fake.clone();
-    let errors =
-        dispatch_all_targets(vec![target], "hello world", &job, &config, Some(&tg_client)).await;
+    let registry = telegram_registry(&fake);
+    let errors = dispatch_all_targets(
+        vec![target],
+        "hello world",
+        &job,
+        &config,
+        Some(&tg_client),
+        &registry,
+    )
+    .await;
     assert!(errors.is_empty(), "expected no errors: {:?}", errors);
     let calls = fake.calls.lock().unwrap();
     assert_eq!(calls.len(), 1, "expected exactly one send_message call");
@@ -157,7 +186,9 @@ async fn empty_targets_does_not_call_tg() {
     let job = make_job("local");
     let config = Config::default();
     let tg_client: Arc<dyn TgSendApi> = fake.clone();
-    let errors = dispatch_all_targets(vec![], "some output", &job, &config, Some(&tg_client)).await;
+    let registry = telegram_registry(&fake);
+    let errors = dispatch_all_targets(vec![], "some output", &job, &config, Some(&tg_client), &registry)
+        .await;
     assert!(errors.is_empty());
     let calls = fake.calls.lock().unwrap();
     assert!(
@@ -179,6 +210,7 @@ async fn tg_send_failure_is_non_fatal() {
     let job = make_job("telegram:99999");
     let config = config_no_wrap();
     let tg_client: Arc<dyn TgSendApi> = fake.clone();
+    let registry = telegram_registry(&fake);
     // Must return without panic — D-09: delivery failure is non-fatal
     let errors = dispatch_all_targets(
         vec![target],
@@ -186,6 +218,7 @@ async fn tg_send_failure_is_non_fatal() {
         &job,
         &config,
         Some(&tg_client),
+        &registry,
     )
     .await;
     // Error should be accumulated

@@ -48,6 +48,21 @@ fn open_store(dir: &TempDir) -> KanbanStore {
     KanbanStore::new(dir.path().join("kanban.db")).expect("open test store")
 }
 
+/// Allow-all dispatch gate for tests that exercise dispatcher steps OTHER than
+/// the Phase 47.4 pre-spawn gate.
+///
+/// The production default is the real fail-closed predicate, which resolves
+/// `$IRONHERMES_HOME/profiles/<assignee>/`. These tests use synthetic
+/// assignees ("alice", …) that have no profile directory, so without this
+/// they would be gate-blocked before reaching the behaviour under test — and
+/// would read the developer's real `~/.ironhermes` in the process.
+///
+/// The gate itself is covered against the REAL predicate, through the real
+/// dispatch loop, in `tests/dispatch_gate_loop.rs`.
+fn allow_all_gate() -> ironhermes_kanban::dispatcher::DispatchGateFn {
+    Arc::new(|_assignee: &str| ironhermes_core::dispatch_gate::DispatchDecision::Allow)
+}
+
 fn make_ctx_failing_spawn(
     store: Arc<TokioMutex<KanbanStore>>,
     config: KanbanConfig,
@@ -67,7 +82,7 @@ fn make_ctx_failing_spawn(
             })
         },
     );
-    Arc::new(DispatcherContext::with_spawn_fn(store, config, spawn_fn))
+    Arc::new(DispatcherContext::with_spawn_fn(store, config, spawn_fn).with_gate_fn(allow_all_gate()))
 }
 
 fn make_ctx_ok_spawn(
@@ -84,7 +99,55 @@ fn make_ctx_ok_spawn(
             Box<dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>> + Send>,
         > { Box::pin(async move { Ok(fake_pid) }) },
     );
-    Arc::new(DispatcherContext::with_spawn_fn(store, config, spawn_fn))
+    Arc::new(DispatcherContext::with_spawn_fn(store, config, spawn_fn).with_gate_fn(allow_all_gate()))
+}
+
+#[tokio::test]
+async fn configured_default_workdir_is_passed_to_worker() {
+    let dir = TempDir::new().unwrap();
+    let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
+
+    {
+        let mut store = store_arc.lock().await;
+        store
+            .create_task(
+                "uses configured workspace",
+                "alice",
+                CreateTaskOptions::default(),
+            )
+            .unwrap();
+    }
+
+    let configured_workspace = dir.path().join("operator-workspace");
+    let captured_workspace = Arc::new(std::sync::Mutex::new(None::<String>));
+    let captured_workspace_inner = Arc::clone(&captured_workspace);
+    let spawn_fn = Arc::new(
+        move |_task: ironhermes_kanban::types::Task,
+              _run: ironhermes_kanban::types::TaskRun,
+              workspace: String,
+              _board_slug: String|
+              -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>> + Send>,
+        > {
+            let captured_workspace_for_call = Arc::clone(&captured_workspace_inner);
+            Box::pin(async move {
+                *captured_workspace_for_call.lock().unwrap() = Some(workspace);
+                Ok(42)
+            })
+        },
+    );
+    let config = KanbanConfig {
+        default_workdir: Some(configured_workspace.clone()),
+        ..KanbanConfig::default()
+    };
+    let ctx = DispatcherContext::with_spawn_fn(store_arc, config, spawn_fn).with_gate_fn(allow_all_gate());
+
+    run_dispatch_tick(&ctx).await.unwrap();
+
+    assert_eq!(
+        captured_workspace.lock().unwrap().as_deref(),
+        Some(configured_workspace.to_string_lossy().as_ref())
+    );
 }
 
 // Seed a task into running state directly via SQL (bypasses atomic_claim which
@@ -115,6 +178,38 @@ fn seed_running(
             params![run_id, task_id, claim_lock, claim_pid, now],
         )
         .unwrap();
+}
+
+/// RAII guard that sets an env var and restores the previous value on drop.
+/// Used to sandbox `IRONHERMES_HOME` for the one test in this file that
+/// exercises the REAL `spawn_worker_for_board` (log dir creation lives
+/// under `get_hermes_home()`).
+struct ScopedEnv {
+    key: String,
+    prev: Option<String>,
+}
+
+impl ScopedEnv {
+    fn set(key: &str, value: &str) -> Self {
+        let prev = std::env::var(key).ok();
+        // Safety: test-only; this file's tests do not run this specific
+        // test in parallel against this key from multiple threads.
+        unsafe { std::env::set_var(key, value) };
+        Self {
+            key: key.to_string(),
+            prev,
+        }
+    }
+}
+
+impl Drop for ScopedEnv {
+    fn drop(&mut self) {
+        // Safety: see `set` above.
+        match &self.prev {
+            Some(v) => unsafe { std::env::set_var(&self.key, v) },
+            None => unsafe { std::env::remove_var(&self.key) },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -163,7 +258,7 @@ async fn tick_promotes_todo_when_parents_done() {
 
         // Manually complete the parent (mark as done).
         store
-            .complete_task(&parent.id, None, None, None, None, None, "alice")
+            .complete_task(&parent.id, None, None, None, None, None, "alice", None)
             .unwrap();
 
         (parent.id, child.id)
@@ -1522,7 +1617,7 @@ fn make_ctx_auto_decompose(
             })
         },
     );
-    let mut ctx = DispatcherContext::with_spawn_fn(store, config, spawn_fn);
+    let mut ctx = DispatcherContext::with_spawn_fn(store, config, spawn_fn).with_gate_fn(allow_all_gate());
     ctx.decompose_fn = Some(decompose_fn);
     ctx
 }
@@ -1811,7 +1906,8 @@ async fn goal_mode_no_dispatcher_change() {
             store_arc.clone(),
             KanbanConfig::default(),
             spawn_fn,
-        ),
+        )
+        .with_gate_fn(allow_all_gate()),
     );
 
     run_dispatch_tick(&ctx).await.expect("tick failed");
@@ -2317,5 +2413,79 @@ async fn goal_mode_card_consecutive_failures_caps_reclaim() {
     assert!(
         gave_up.is_some(),
         "gave_up event must be appended when goal_mode card trips the failure_limit breaker"
+    );
+}
+
+/// Phase 46.4 Plan 02 (D-01 / D-02): a task whose `workspace` column is a
+/// deliberately bad value (non-absolute here — a relative path) is claimed
+/// normally, but `resolve_workspace_dir`'s fail-loud guard inside the REAL
+/// `spawn_worker_for_board` rejects it before `.spawn()` — proving the guard's
+/// `Err` propagates through the dispatcher's existing `outcome='spawn_failed'`
+/// path rather than silently creating a literal directory.
+///
+/// Uses `DispatcherContext::new` (its default `spawn_fn` delegates to the real
+/// `crate::worker_spawn::spawn_worker_for_board`, NOT a mock) — so the guard
+/// is exercised end-to-end here; unit branch coverage for every rejection
+/// case (empty / `$`-containing / relative / missing-absolute) lives in
+/// `worker_spawn.rs`'s `mod tests`.
+#[tokio::test]
+async fn bad_workspace_path_yields_spawn_failed() {
+    // Sandbox IRONHERMES_HOME so the real spawn path's log-dir creation
+    // (`kanban_logs_dir()` under `get_hermes_home()`) never touches the
+    // developer's real ~/.ironhermes.
+    let home_dir = TempDir::new().unwrap();
+    let _home_guard = ScopedEnv::set("IRONHERMES_HOME", home_dir.path().to_str().unwrap());
+
+    let dir = TempDir::new().unwrap();
+    let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
+
+    let task_id = {
+        let mut store = store_arc.lock().await;
+        let task = store
+            .create_task(
+                "bad workspace task",
+                "alice",
+                CreateTaskOptions {
+                    // No `dir:`/`project:` prefix, so `create_task`'s
+                    // `validate_dir_workspace` gate does not reject it at
+                    // creation time — the rejection under test happens later,
+                    // inside `resolve_workspace_dir` at spawn time.
+                    workspace: Some("relative/not/absolute/workspace".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        task.id
+    };
+
+    let ctx = Arc::new(
+        DispatcherContext::new(store_arc.clone(), KanbanConfig::default())
+            .with_gate_fn(allow_all_gate()),
+    );
+    run_dispatch_tick(&ctx)
+        .await
+        .expect("tick itself must not error — spawn failure is handled per-task");
+
+    let store = store_arc.lock().await;
+    let runs = store.get_runs(&task_id).unwrap();
+    let latest_run = runs
+        .last()
+        .expect("a task_run row must exist after the claim + spawn attempt");
+    assert_eq!(
+        latest_run.outcome.as_deref(),
+        Some("spawn_failed"),
+        "bad workspace path must be rejected fail-loud into outcome='spawn_failed'"
+    );
+    assert!(
+        !latest_run.error.as_deref().unwrap_or("").is_empty(),
+        "spawn_failed run must carry a non-empty, actionable error string"
+    );
+
+    // No literal directory should have been created at the test's CWD — the
+    // guard rejects before .spawn(), so nothing shell/OS-level ever attempts
+    // to interpret the bad workspace string as a real path relative to CWD.
+    assert!(
+        !std::path::Path::new("relative").exists(),
+        "resolve_workspace_dir's guard must reject before any directory creation is attempted"
     );
 }

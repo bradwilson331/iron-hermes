@@ -112,6 +112,21 @@ pub fn schema() -> Vec<ConfigField> {
             url: None,
         },
         ConfigField {
+            key: "agent.timezone".into(),
+            description: Some(
+                "IANA timezone name for Timestamp slot (e.g. America/Los_Angeles). \
+                 Unset → host local."
+                    .into(),
+            ),
+            secret: false,
+            required: false,
+            cache_breaking: false, // D-07: ephemeral slot only, never breaks cached prefix
+            default: None,
+            choices: None,
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
             key: "memory.provider".into(),
             description: Some("Memory backend: file/sqlite/grafeo/duckdb".into()),
             secret: false,
@@ -316,6 +331,212 @@ pub fn schema() -> Vec<ConfigField> {
             env_var: None,
             url: Some("https://openrouter.ai/docs/features/provider-routing".into()),
         },
+        // --- Phase 36.3.12 Plan 01: terminal.* exec-backend surface (D-06/D-07/D-09) ---
+        ConfigField {
+            key: "terminal.backend".into(),
+            description: Some(
+                "Exec backend selection: local|docker|ssh. Operator-config-only — no \
+                 tool-call argument can set it (D-06). Default: local."
+                    .into(),
+            ),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: Some(serde_json::json!("local")),
+            choices: Some(vec!["local".into(), "docker".into(), "ssh".into()]),
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "terminal.container_runtime".into(),
+            description: Some(
+                "Container CLI to shell out to for the docker backend: docker|podman. \
+                 Explicit, no auto-detect (D-07). Default: docker."
+                    .into(),
+            ),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: Some(serde_json::json!("docker")),
+            choices: Some(vec!["docker".into(), "podman".into()]),
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "terminal.image".into(),
+            description: Some(
+                "Base image for the docker backend's persistent container. \
+                 Default: debian:stable-slim."
+                    .into(),
+            ),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: Some(serde_json::json!("debian:stable-slim")),
+            choices: None,
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "terminal.forward_env".into(),
+            description: Some(
+                "Explicit credential allowlist forwarded across the docker/ssh backend \
+                 boundary (D-09). Default: empty — nothing secret crosses unless opted in."
+                    .into(),
+            ),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: Some(serde_json::json!([])),
+            choices: None,
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "terminal.container_reap_after_secs".into(),
+            description: Some(
+                "Orphan-reaper lifetime knob (seconds); reaper GCs labeled containers idle \
+                 longer than 2x this value. Default: 86400 (24h)."
+                    .into(),
+            ),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: Some(serde_json::json!(86400)),
+            choices: None,
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "terminal.container.cpu".into(),
+            description: Some("Container CPU limit (fractional cores). Default: 1.0.".into()),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: Some(serde_json::json!(1.0)),
+            choices: None,
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "terminal.container.memory_mib".into(),
+            description: Some("Container memory limit in MiB. Default: 5120 (5 GiB).".into()),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: Some(serde_json::json!(5120)),
+            choices: None,
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "terminal.container.disk_mib".into(),
+            description: Some(
+                "Container disk limit in MiB for the workspace mount/tmpfs. \
+                 Default: 51200 (50 GiB)."
+                    .into(),
+            ),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: Some(serde_json::json!(51200)),
+            choices: None,
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "terminal.container.pids_limit".into(),
+            description: Some("Container --pids-limit process-count cap. Default: 256.".into()),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: Some(serde_json::json!(256)),
+            choices: None,
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "terminal.container.persistent".into(),
+            description: Some(
+                "Bind-mount (persistent, survives container recreation) vs tmpfs \
+                 (ephemeral). Default: true."
+                    .into(),
+            ),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: Some(serde_json::json!(true)),
+            choices: None,
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "terminal.container.network".into(),
+            description: Some(
+                "Container networking. Default: false (--network=none, security-hardened \
+                 default per D-09)."
+                    .into(),
+            ),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: Some(serde_json::json!(false)),
+            choices: None,
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "terminal.ssh.host".into(),
+            description: Some(
+                "SSH host for the ssh backend. Required when terminal.backend: ssh.".into(),
+            ),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: None,
+            choices: None,
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "terminal.ssh.user".into(),
+            description: Some(
+                "SSH user for the ssh backend. Required when terminal.backend: ssh.".into(),
+            ),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: None,
+            choices: None,
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "terminal.ssh.port".into(),
+            description: Some("SSH port for the ssh backend. Default: 22.".into()),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: Some(serde_json::json!(22)),
+            choices: None,
+            env_var: None,
+            url: None,
+        },
+        ConfigField {
+            key: "terminal.ssh.key_path".into(),
+            description: Some(
+                "Path to an SSH private key file. Unset uses the ssh CLI's default \
+                 identity resolution."
+                    .into(),
+            ),
+            secret: false,
+            required: false,
+            cache_breaking: false,
+            default: None,
+            choices: None,
+            env_var: None,
+            url: None,
+        },
     ]
 }
 
@@ -502,5 +723,67 @@ mod tests {
             );
             assert!(!f.required, "extras key {} must not be required", f.key);
         }
+    }
+
+    // =========================================================================
+    // Phase 36.3.12 Plan 01: terminal.* schema entries + D-06/D-07 config-only lock
+    // =========================================================================
+
+    #[test]
+    fn schema_contains_terminal_backend_keys() {
+        let s = schema();
+        for key in &[
+            "terminal.backend",
+            "terminal.container_runtime",
+            "terminal.forward_env",
+            "terminal.container_reap_after_secs",
+            "terminal.ssh.host",
+        ] {
+            assert!(
+                s.iter().any(|f| f.key == *key),
+                "schema missing terminal key: {key}"
+            );
+        }
+    }
+
+    /// D-06: backend selection is a config field only — no setter or public API
+    /// on `TerminalConfig` accepts an LLM/tool-call argument to change `backend`.
+    /// `TerminalConfig` is a plain serde struct with public fields populated
+    /// exclusively from the parsed `Config` — the type itself proves the
+    /// absence of any mutator API (there is none to call), and this test locks
+    /// the round-trip contract that IS the config-only surface.
+    #[test]
+    fn terminal_config_backend_is_config_only_d06() {
+        use crate::config::TerminalConfig;
+
+        let yaml = r#"
+backend: ssh
+ssh:
+  host: build-box.internal
+  user: hermes
+"#;
+        let tc: TerminalConfig = serde_yaml::from_str(yaml).expect("must parse");
+        assert_eq!(tc.backend, "ssh");
+        let ssh = tc.ssh.expect("ssh sub-config must be populated");
+        assert_eq!(ssh.host, "build-box.internal");
+        assert_eq!(ssh.user, "hermes");
+        assert_eq!(ssh.port, 22, "ssh.port must default to 22");
+        assert_eq!(ssh.key_path, None);
+    }
+
+    /// D-07: `container_runtime` is explicit — round-trips whatever value the
+    /// operator configures (podman here), never auto-detected/overridden.
+    #[test]
+    fn terminal_config_container_runtime_podman_roundtrips_d07() {
+        use crate::config::TerminalConfig;
+
+        let yaml = "container_runtime: podman\n";
+        let tc: TerminalConfig = serde_yaml::from_str(yaml).expect("must parse");
+        assert_eq!(tc.container_runtime, "podman");
+
+        // Round-trip through serialize -> deserialize preserves the value.
+        let ser = serde_yaml::to_string(&tc).unwrap();
+        let back: TerminalConfig = serde_yaml::from_str(&ser).unwrap();
+        assert_eq!(back.container_runtime, "podman");
     }
 }

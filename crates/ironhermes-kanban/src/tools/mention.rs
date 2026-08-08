@@ -10,7 +10,7 @@
 //! ```text
 //! args
 //!  │
-//!  ├─ task_id (or $HERMES_KANBAN_TASK) ──► store.get_task()
+//!  ├─ task_id (or $IRONHERMES_KANBAN_TASK) ──► store.get_task()
 //!  │                                              │
 //!  │                                         parent.body
 //!  │                                              │
@@ -111,7 +111,7 @@ impl Tool for KanbanMentionTool {
                 "properties": {
                     "task_id": {
                         "type": "string",
-                        "description": "Parent task ID (defaults to $HERMES_KANBAN_TASK)."
+                        "description": "Parent task ID (defaults to $IRONHERMES_KANBAN_TASK)."
                     },
                     "body_override": {
                         "type": "string",
@@ -129,7 +129,7 @@ impl Tool for KanbanMentionTool {
                     },
                     "board": {
                         "type": "string",
-                        "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
+                        "description": "Board slug to target. Omit to use IRONHERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
                     }
                 },
                 "additionalProperties": false
@@ -138,7 +138,7 @@ impl Tool for KanbanMentionTool {
     }
 
     fn is_available(&self) -> bool {
-        std::env::var("HERMES_KANBAN_TASK").is_ok() || self.explicit_enable
+        crate::kanban_env("TASK").is_some() || self.explicit_enable
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<String> {
@@ -152,18 +152,18 @@ impl Tool for KanbanMentionTool {
             ));
         }
 
-        // ── Step 1: Resolve task_id ─────────────────────────────────────────
+        // ── Step 1: Resolve task_id via dual-read ───────────────────────────
         let task_id = match args
             .get("task_id")
             .and_then(|v| v.as_str())
             .map(String::from)
-            .or_else(|| std::env::var("HERMES_KANBAN_TASK").ok())
+            .or_else(|| crate::kanban_env("TASK"))
         {
             Some(id) if !id.is_empty() => id,
             _ => {
                 return Ok(crate::tools::common::reject_with_board(
                     "invalid_task_id",
-                    "task_id is required when $HERMES_KANBAN_TASK is not set",
+                    "task_id is required when $IRONHERMES_KANBAN_TASK is not set",
                     Some(&board_ctx),
                 ));
             }
@@ -465,10 +465,10 @@ mod tests {
             "should be available when explicit_enable=true"
         );
 
-        // explicit_enable=false + no HERMES_KANBAN_TASK → not available.
+        // explicit_enable=false + no IRONHERMES_KANBAN_TASK → not available.
         // SAFETY: see doc comment above — only safe under --test-threads=1.
         unsafe {
-            std::env::remove_var("HERMES_KANBAN_TASK");
+            std::env::remove_var("IRONHERMES_KANBAN_TASK");
         }
         let tool_no_env = KanbanMentionTool::new(make_store(), false);
         assert!(
@@ -476,19 +476,19 @@ mod tests {
             "should not be available when explicit_enable=false and env not set"
         );
 
-        // explicit_enable=false + HERMES_KANBAN_TASK set → available.
+        // explicit_enable=false + IRONHERMES_KANBAN_TASK set → available.
         unsafe {
-            std::env::set_var("HERMES_KANBAN_TASK", "t_test001");
+            std::env::set_var("IRONHERMES_KANBAN_TASK", "t_test001");
         }
         let tool_with_env = KanbanMentionTool::new(make_store(), false);
         assert!(
             tool_with_env.is_available(),
-            "should be available when HERMES_KANBAN_TASK is set"
+            "should be available when IRONHERMES_KANBAN_TASK is set"
         );
 
         // Clean up.
         unsafe {
-            std::env::remove_var("HERMES_KANBAN_TASK");
+            std::env::remove_var("IRONHERMES_KANBAN_TASK");
         }
     }
 }

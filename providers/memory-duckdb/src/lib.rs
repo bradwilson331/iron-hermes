@@ -215,7 +215,7 @@ impl MemoryProvider for DuckDbMemoryProvider {
                 secret: false,
                 required: false,
                 cache_breaking: false,
-                default: Some(json!("$HERMES_HOME/memory.duckdb")),
+                default: Some(json!("$IRONHERMES_HOME/memory.duckdb")),
                 choices: None,
                 env_var: None,
                 url: None,

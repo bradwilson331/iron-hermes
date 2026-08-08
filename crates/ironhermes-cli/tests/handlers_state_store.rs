@@ -157,8 +157,7 @@ fn make_test_ctx_with_state_store(
     let store = StateStore::new(f.path()).expect("StateStore::new failed");
     let arc_store = Arc::new(Mutex::new(store));
 
-    let agent_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let ctx = CommandContext::new(Platform::Local, session_id.to_string(), agent_running)
+    let ctx = CommandContext::new(Platform::Local, session_id.to_string())
         .with_state_store(Arc::new(TestStateStoreAdapter(arc_store.clone())));
 
     (ctx, arc_store, f)
@@ -187,8 +186,7 @@ fn dispatch(name: &str, args: &[&str], ctx: &CommandContext) -> CommandResult {
 
 #[test]
 fn cmd_sessions_no_state_store_returns_not_configured() {
-    let agent_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let ctx = CommandContext::new(Platform::Local, "s1".to_string(), agent_running);
+    let ctx = CommandContext::new(Platform::Local, "s1".to_string());
     let result = dispatch("sessions", &[], &ctx);
     match result {
         CommandResult::Output(s) => assert!(
@@ -261,8 +259,7 @@ fn cmd_sessions_accepts_limit_arg() {
 
 #[test]
 fn cmd_resume_no_state_store_returns_not_configured() {
-    let agent_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let ctx = CommandContext::new(Platform::Local, "s1".to_string(), agent_running);
+    let ctx = CommandContext::new(Platform::Local, "s1".to_string());
     let result = dispatch("resume", &["some-session"], &ctx);
     match result {
         CommandResult::Output(s) => assert!(
@@ -324,8 +321,7 @@ fn cmd_resume_unknown_session_returns_error() {
 
 #[test]
 fn cmd_save_no_state_store_returns_not_configured() {
-    let agent_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let ctx = CommandContext::new(Platform::Local, "s1".to_string(), agent_running);
+    let ctx = CommandContext::new(Platform::Local, "s1".to_string());
     let result = dispatch("save", &[], &ctx);
     match result {
         CommandResult::Output(s) => assert!(
@@ -361,8 +357,7 @@ fn cmd_save_with_session_exports_it() {
 
 #[test]
 fn cmd_history_no_store_no_snapshot_returns_not_configured() {
-    let agent_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let ctx = CommandContext::new(Platform::Local, "s1".to_string(), agent_running);
+    let ctx = CommandContext::new(Platform::Local, "s1".to_string());
     let result = dispatch("history", &[], &ctx);
     match result {
         CommandResult::Output(s) => assert!(
@@ -376,12 +371,11 @@ fn cmd_history_no_store_no_snapshot_returns_not_configured() {
 #[test]
 fn cmd_history_with_snapshot_shows_messages() {
     use ironhermes_core::types::ChatMessage;
-    let agent_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let history = vec![
         ChatMessage::user("hello there"),
         ChatMessage::assistant("hi!"),
     ];
-    let ctx = CommandContext::new(Platform::Local, "s1".to_string(), agent_running)
+    let ctx = CommandContext::new(Platform::Local, "s1".to_string())
         .with_history(Arc::new(std::sync::RwLock::new(history)));
 
     let result = dispatch("history", &[], &ctx);
@@ -398,8 +392,7 @@ fn cmd_history_with_snapshot_shows_messages() {
 
 #[test]
 fn cmd_history_empty_snapshot_says_no_messages() {
-    let agent_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let ctx = CommandContext::new(Platform::Local, "s1".to_string(), agent_running)
+    let ctx = CommandContext::new(Platform::Local, "s1".to_string())
         .with_history(Arc::new(std::sync::RwLock::new(vec![])));
 
     let result = dispatch("history", &[], &ctx);
@@ -436,8 +429,7 @@ fn cmd_history_with_session_id_arg_queries_store() {
 
 #[test]
 fn cmd_title_no_args_returns_error() {
-    let agent_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let ctx = CommandContext::new(Platform::Local, "s1".to_string(), agent_running);
+    let ctx = CommandContext::new(Platform::Local, "s1".to_string());
     let result = dispatch("title", &[], &ctx);
     assert!(
         matches!(result, CommandResult::Error(_)),
@@ -448,8 +440,7 @@ fn cmd_title_no_args_returns_error() {
 
 #[test]
 fn cmd_title_no_state_store_returns_informational() {
-    let agent_running = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let ctx = CommandContext::new(Platform::Local, "s1".to_string(), agent_running);
+    let ctx = CommandContext::new(Platform::Local, "s1".to_string());
     let result = dispatch("title", &["My", "Title"], &ctx);
     match result {
         CommandResult::Output(s) => assert!(

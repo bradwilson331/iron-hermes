@@ -1,7 +1,15 @@
 [package]
 name = "ironhermes-exec"
-version = "0.2.1"
+version.workspace = true
 edition = "2024"
+
+[features]
+# Phase 36.3.12 Plan 05 (D-02/D-05): gates the Docker/podman backend's
+# integration tests, which spawn real containers against a live daemon.
+# The default `cargo test -p ironhermes-exec` build stays daemon-free —
+# see `crates/ironhermes-exec/src/backend/docker.rs`'s `integration_tests`
+# module header for how to run these.
+docker-integration = []
 
 [dependencies]
 # Plan 21.7-07: ProcessRegistrySnapshotHandle trait lives in ironhermes-core
@@ -21,6 +29,12 @@ tokio-util = { workspace = true }
 # Phase 21.7 Plan 02 — ProcessRegistry runtime deps
 regex = { workspace = true }
 shell-words = { workspace = true }
+# Phase 36.3.12 Plan 05 — docker.rs's orphan-reaper parses `{{.State.StartedAt}}`
+# (RFC3339) to compute container idle time (D-02 §4.6).
+chrono = { workspace = true }
+# Phase 36.3.12 Plan 06 — ssh.rs's ControlMaster socket-path digest (§5.1).
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

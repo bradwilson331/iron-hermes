@@ -109,6 +109,7 @@ impl Tool for HexapodVideoTool {
                           Required for hexapod_video to connect to the robot's video stream."
                 .to_string(),
             required: true,
+            group: None,
         }]
     }
 

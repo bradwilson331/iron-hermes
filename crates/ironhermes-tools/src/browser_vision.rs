@@ -148,6 +148,7 @@ impl Tool for BrowserVisionTool {
                                standard install location"
                     .to_string(),
                 required: true,
+                group: None,
             },
             Prerequisite {
                 kind: "config_field".to_string(),
@@ -157,6 +158,7 @@ impl Tool for BrowserVisionTool {
                                (e.g. gpt-4o, claude-3.5-sonnet, gemini-pro)"
                     .to_string(),
                 required: true,
+                group: None,
             },
         ]
     }

@@ -237,7 +237,7 @@ fn prompt_required(rl: &mut rustyline::DefaultEditor, prompt: &str) -> Result<St
 /// Top-level entry: `hermes setup [section]`.
 pub async fn run_setup(section: Option<&str>, mode: WizardMode) -> Result<()> {
     let hermes_home = get_hermes_home();
-    std::fs::create_dir_all(&hermes_home).context("creating HERMES_HOME")?;
+    std::fs::create_dir_all(&hermes_home).context("creating IRONHERMES_HOME")?;
 
     let mut config = Config::load().unwrap_or_default();
     let mut rl = make_wizard_editor()?;
@@ -492,9 +492,9 @@ async fn run_memory_section(
     )?;
     apply_memory_provider_answer(config, &backend, "file")?;
 
-    // HERMES_HOME path (informational only — actual env var resolution is shell-time).
+    // IRONHERMES_HOME path (informational only — actual env var resolution is shell-time).
     let home_default = hermes_home.display().to_string();
-    let home = prompt_with_default(rl, "HERMES_HOME path", &home_default)?;
+    let home = prompt_with_default(rl, "IRONHERMES_HOME path", &home_default)?;
     let _resolved = ironhermes_core::wizard::apply_hermes_home_answer(&home, &home_default);
     // Phase 24 (CFG-04) actually persists this — for now we just echo it back.
 
@@ -795,24 +795,140 @@ pub(crate) fn apply_skip_prompts(hermes_home: &Path, tool_name: &str) -> Result<
     Ok(())
 }
 
+/// D-09 (Phase 41.3 Plan 09): one still-unconfigured any-of group from a
+/// tool's `prerequisites()` — the wizard issues exactly one "pick a
+/// provider" prompt for this, never one prompt per member (that would defeat
+/// the point of a group: the operator makes one decision, not N).
+struct GroupPromptPlan<'a> {
+    group: String,
+    members: Vec<&'a ironhermes_tools::Prerequisite>,
+}
+
+/// D-09: partition `prereqs` into one [`GroupPromptPlan`] per DISTINCT group
+/// id that is not yet satisfied by ANY member (`satisfied_group_members(..) ==
+/// 0`), in first-appearance order. A group with at least one member already
+/// configured is not re-prompted — the wizard should not nag about a
+/// provider the operator already set up. Ungrouped entries are untouched
+/// here; they keep flowing through `list_unavailable()`'s existing required-
+/// prereq loop, unchanged from pre-D-09 behavior.
+fn group_prompt_plans(prereqs: &[ironhermes_tools::Prerequisite]) -> Vec<GroupPromptPlan<'_>> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut plans = Vec::new();
+    for p in prereqs {
+        let Some(group) = p.group.as_deref() else {
+            continue;
+        };
+        if !seen.insert(group.to_string()) {
+            continue;
+        }
+        if ironhermes_tools::registry::satisfied_group_members(prereqs, group) > 0 {
+            continue; // already configured — nothing to ask
+        }
+        plans.push(GroupPromptPlan {
+            group: group.to_string(),
+            members: ironhermes_tools::registry::group_members(prereqs, group),
+        });
+    }
+    plans
+}
+
+/// D-09: the operator's answer to a group's "pick a provider" prompt.
+enum GroupChoice {
+    Picked(usize),
+    Skip,
+}
+
+/// D-09: prompt once for a whole group — list every member by provider name,
+/// let the operator pick one by number, with an explicit skip option. Does
+/// NOT prompt for the chosen member's value itself; that reuses the existing
+/// `prompt_for_prereq_value` masking/skip/defer machinery so a group member's
+/// value entry behaves identically to an ungrouped one.
+fn prompt_for_group_choice(
+    rl: &mut rustyline::DefaultEditor,
+    tool_name: &str,
+    plan: &GroupPromptPlan,
+) -> Result<GroupChoice> {
+    use rustyline::error::ReadlineError;
+
+    println!(
+        "  {} supports multiple interchangeable providers for this capability:",
+        tool_name
+    );
+    for (i, member) in plan.members.iter().enumerate() {
+        println!("    {}. {} — {}", i + 1, member.name, member.description);
+    }
+    let raw = match rl
+        .readline("  Pick a provider by number (Enter to skip, this tool works without one): ")
+    {
+        Ok(s) => s,
+        Err(ReadlineError::Interrupted) => return Err(anyhow!("interrupted")),
+        Err(ReadlineError::Eof) => return Err(anyhow!("EOF on stdin")),
+        Err(e) => return Err(anyhow!("readline error: {}", e)),
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(GroupChoice::Skip);
+    }
+    match trimmed.parse::<usize>() {
+        Ok(n) if n >= 1 && n <= plan.members.len() => Ok(GroupChoice::Picked(n - 1)),
+        _ => {
+            println!("  Not a valid choice — skipping.");
+            Ok(GroupChoice::Skip)
+        }
+    }
+}
+
+/// D-09: run one group's full prompt — the choice prompt, then (if a member
+/// was picked) that member's value prompt via the existing single-prereq
+/// machinery. Declining (skip, or an unrecognised choice) writes nothing and
+/// returns `Ok(())` — a group member is never independently `required`
+/// (`Prerequisite::grouped_env_var`), so the tool stays available via its
+/// keyless default (D-09) regardless of what the operator does here.
+fn run_group_prereq_prompt(
+    rl: &mut rustyline::DefaultEditor,
+    hermes_home: &Path,
+    tool_name: &str,
+    plan: &GroupPromptPlan,
+) -> Result<()> {
+    match prompt_for_group_choice(rl, tool_name, plan)? {
+        GroupChoice::Skip => Ok(()),
+        GroupChoice::Picked(i) => {
+            let member = plan.members[i];
+            match prompt_for_prereq_value(rl, tool_name, member)? {
+                PrereqAnswer::Value(v) => apply_prereq_value(hermes_home, member, &v),
+                PrereqAnswer::Skip => apply_skip_prompts(hermes_home, tool_name),
+                PrereqAnswer::Defer => Ok(()),
+            }
+        }
+    }
+}
+
 /// Phase 25 D-18 / TOOL-05: walk every Tool's prerequisites() and prompt the
 /// operator for missing required values. Skip option writes to tools.skip_prompts.
 ///
 /// The old Phase 23 stub signature was `run_tools_section(_config, _rl)`.
 /// Phase 25 replaces it with `run_tools_section(rl, hermes_home)` — writes
 /// go through hermes_home directly (atomic .env upsert + config setter).
+///
+/// D-09 (Phase 41.3 Plan 09): also walks every registered tool's FULL
+/// prerequisite list (not just `list_unavailable()`'s required-only view) to
+/// offer one "pick a provider" prompt per unconfigured any-of group.
+/// `list_unavailable()` alone would never surface a group-only tool like
+/// `web_search`/`web_answer` at all — every grouped entry is `required:
+/// false` by construction, so those tools never appear in its required-only
+/// filter regardless of how many (zero) provider keys are configured. This
+/// is the wizard's own group-aware surface; `list_unavailable()`'s ungrouped
+/// loop is unchanged.
 pub async fn run_tools_section(
     rl: &mut rustyline::DefaultEditor,
     hermes_home: &Path,
 ) -> Result<()> {
     let registry = build_full_registry();
     let unavailable = registry.list_unavailable();
-    if unavailable.is_empty() {
-        println!("All tool prerequisites satisfied — nothing to configure.");
-        return Ok(());
-    }
+    let mut prompted_anything = false;
 
     for (tool_name, missing_prereqs) in &unavailable {
+        prompted_anything = true;
         println!();
         println!(
             "Tool: {} ({} unsatisfied required prerequisite{})",
@@ -828,6 +944,26 @@ pub async fn run_tools_section(
                 PrereqAnswer::Defer => continue,
             }
         }
+    }
+
+    for tool_name in registry.list_tools() {
+        let Some(tool) = registry.get(tool_name) else {
+            continue;
+        };
+        let prereqs = tool.prerequisites();
+        for plan in group_prompt_plans(&prereqs) {
+            prompted_anything = true;
+            println!();
+            println!(
+                "Tool: {} — optional provider (group: {})",
+                tool_name, plan.group
+            );
+            run_group_prereq_prompt(rl, hermes_home, tool_name, &plan)?;
+        }
+    }
+
+    if !prompted_anything {
+        println!("All tool prerequisites satisfied — nothing to configure.");
     }
     Ok(())
 }
@@ -915,6 +1051,7 @@ pub async fn run_skills_section(
                         .or_else(|| env_entry.prompt.clone())
                         .unwrap_or_else(|| format!("required by skill '{}'", skill.name)),
                     required: env_entry.required_for.is_some(),
+                    group: None,
                 };
                 let answer = prompt_for_prereq_value(rl, &skill.name, &prereq)?;
                 match answer {
@@ -945,6 +1082,7 @@ pub async fn run_skills_section(
                         .clone()
                         .unwrap_or_else(|| format!("config field for skill '{}'", skill.name)),
                     required: false,
+                    group: None,
                 };
                 let answer = prompt_for_prereq_value(rl, &skill.name, &prereq)?;
                 match answer {
@@ -1409,8 +1547,8 @@ mod tests {
             "LOG_LEVEL must NOT match"
         );
         assert!(
-            !is_secret_prereq_name("HERMES_HOME"),
-            "HERMES_HOME must NOT match"
+            !is_secret_prereq_name("IRONHERMES_HOME"),
+            "IRONHERMES_HOME must NOT match"
         );
     }
 
@@ -1867,10 +2005,11 @@ mod tests {
     /// Test 4: backfill uses process env when .env file is absent.
     #[test]
     fn backfill_uses_process_env_when_dotenv_absent() {
-        use std::sync::Mutex;
-        use std::sync::OnceLock;
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        // Crate-wide lock, NOT a fn-local one: `preflight.rs` mutates the same
+        // process-global `OPENROUTER_API_KEY`, and two independent mutexes do not
+        // serialise against each other — that mismatch made this test flaky
+        // (it read the var after preflight's `remove_var` wiped it → None).
+        let _guard = crate::test_env_lock();
 
         let tmp = tempfile::TempDir::new().unwrap();
         let hermes_home = tmp.path();
@@ -1882,7 +2021,7 @@ mod tests {
         .unwrap();
         // No .env file.
 
-        // SAFETY: single-threaded test gated by ENV_LOCK mutex.
+        // SAFETY: test-only env mutation; serialised by crate::test_env_lock.
         unsafe { std::env::set_var("OPENROUTER_API_KEY", "sk-from-env") };
 
         let config = ironhermes_core::config::Config::load_from(&hermes_home.join("config.yaml"))
@@ -1890,7 +2029,7 @@ mod tests {
         let result = backfill_providers_api_key_env(&config, hermes_home);
 
         // Clean up process env before any assert.
-        // SAFETY: single-threaded test gated by ENV_LOCK mutex.
+        // SAFETY: test-only env mutation; serialised by crate::test_env_lock.
         unsafe { std::env::remove_var("OPENROUTER_API_KEY") };
 
         result.expect("backfill should succeed");
@@ -1935,18 +2074,11 @@ mod tests {
     // Phase 35.1 Plan 05: find_project_skills_source + install_skills_from_source tests
     // -------------------------------------------------------------------------
 
-    /// Env-var mutex for tests that mutate process environment.
-    fn skills_env_lock() -> &'static std::sync::Mutex<()> {
-        use std::sync::{Mutex, OnceLock};
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-    }
-
     /// find_project_skills_source returns Some(path) when IRONHERMES_SOURCE is set.
     #[test]
     fn find_project_skills_source_uses_ironhermes_source_env_var() {
-        let _guard = skills_env_lock().lock().unwrap_or_else(|p| p.into_inner());
-        // SAFETY: single-threaded test gated by skills_env_lock mutex.
+        let _guard = crate::test_env_lock();
+        // SAFETY: test-only env mutation; serialised by crate::test_env_lock.
         unsafe { std::env::set_var("IRONHERMES_SOURCE", "/tmp/fake-root") };
         let result = find_project_skills_source();
         unsafe { std::env::remove_var("IRONHERMES_SOURCE") };
@@ -1960,8 +2092,8 @@ mod tests {
     /// find_project_skills_source does not panic when IRONHERMES_SOURCE is unset.
     #[test]
     fn find_project_skills_source_does_not_panic_without_env_var() {
-        let _guard = skills_env_lock().lock().unwrap_or_else(|p| p.into_inner());
-        // SAFETY: single-threaded test gated by skills_env_lock mutex.
+        let _guard = crate::test_env_lock();
+        // SAFETY: test-only env mutation; serialised by crate::test_env_lock.
         unsafe { std::env::remove_var("IRONHERMES_SOURCE") };
         // Should return Some or None without panicking.
         let result = find_project_skills_source();
@@ -2058,5 +2190,143 @@ mod tests {
             result.is_ok(),
             "must return Ok when optional-skills is absent"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 41.3 Plan 09 (D-09): group-aware wizard prompt tests.
+    // -----------------------------------------------------------------
+
+    /// A fixture prereq list mirroring `WebSearchTool::prerequisites()`'s
+    /// exact shape: three grouped, non-required `env_var` entries sharing one
+    /// group id — but with fixture-only names so these tests never depend on
+    /// the real process env for EXA_API_KEY/BRAVE_API_KEY/TAVILY_API_KEY.
+    fn three_member_group_fixture() -> Vec<ironhermes_tools::Prerequisite> {
+        vec![
+            ironhermes_tools::Prerequisite::grouped_env_var(
+                "SETUP_TEST_PROVIDER_A_KEY",
+                "Provider A — one of several interchangeable providers.",
+                "setup_test_provider_group",
+            ),
+            ironhermes_tools::Prerequisite::grouped_env_var(
+                "SETUP_TEST_PROVIDER_B_KEY",
+                "Provider B — one of several interchangeable providers.",
+                "setup_test_provider_group",
+            ),
+            ironhermes_tools::Prerequisite::grouped_env_var(
+                "SETUP_TEST_PROVIDER_C_KEY",
+                "Provider C — one of several interchangeable providers.",
+                "setup_test_provider_group",
+            ),
+        ]
+    }
+
+    #[test]
+    fn group_prompt_asks_once_per_group_not_once_per_member() {
+        let _g = env_lock_for_group_prompt_tests()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        for key in [
+            "SETUP_TEST_PROVIDER_A_KEY",
+            "SETUP_TEST_PROVIDER_B_KEY",
+            "SETUP_TEST_PROVIDER_C_KEY",
+        ] {
+            // SAFETY: env_lock held; single-threaded test binary (--test-threads=1).
+            unsafe { std::env::remove_var(key) };
+        }
+
+        let prereqs = three_member_group_fixture();
+        let plans = group_prompt_plans(&prereqs);
+
+        assert_eq!(
+            plans.len(),
+            1,
+            "a three-member group must produce exactly ONE prompt plan, not one per member"
+        );
+        assert_eq!(
+            plans[0].members.len(),
+            3,
+            "the single plan must carry all three members"
+        );
+    }
+
+    #[test]
+    fn group_prompt_requests_only_the_chosen_providers_key() {
+        let _g = env_lock_for_group_prompt_tests()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        for key in [
+            "SETUP_TEST_PROVIDER_A_KEY",
+            "SETUP_TEST_PROVIDER_B_KEY",
+            "SETUP_TEST_PROVIDER_C_KEY",
+        ] {
+            unsafe { std::env::remove_var(key) };
+        }
+
+        let prereqs = three_member_group_fixture();
+        let plans = group_prompt_plans(&prereqs);
+        let plan = &plans[0];
+
+        // Simulate the operator choosing the SECOND member (index 1) — the
+        // group-choice prompt itself is I/O and not exercised here; this
+        // proves the apply step only ever touches the chosen member.
+        let chosen = plan.members[1];
+        assert_eq!(chosen.name, "SETUP_TEST_PROVIDER_B_KEY");
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        apply_prereq_value(tmp.path(), chosen, "chosen-value").unwrap();
+
+        let contents = std::fs::read_to_string(tmp.path().join(".env")).unwrap();
+        assert!(
+            contents.contains("SETUP_TEST_PROVIDER_B_KEY=chosen-value"),
+            "the chosen member's key must be written: {contents}"
+        );
+        assert!(
+            !contents.contains("SETUP_TEST_PROVIDER_A_KEY")
+                && !contents.contains("SETUP_TEST_PROVIDER_C_KEY"),
+            "no other group member's key may be written: {contents}"
+        );
+    }
+
+    #[test]
+    fn declining_a_group_leaves_the_tool_available() {
+        let _g = env_lock_for_group_prompt_tests()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        for key in [
+            "SETUP_TEST_PROVIDER_A_KEY",
+            "SETUP_TEST_PROVIDER_B_KEY",
+            "SETUP_TEST_PROVIDER_C_KEY",
+        ] {
+            unsafe { std::env::remove_var(key) };
+        }
+
+        let prereqs = three_member_group_fixture();
+        let plans = group_prompt_plans(&prereqs);
+        assert_eq!(plans.len(), 1, "the group must still need a prompt");
+
+        // Simulate a decline: no apply_prereq_value / apply_skip_prompts call
+        // at all (mirrors GroupChoice::Skip in run_group_prereq_prompt).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let env_path = tmp.path().join(".env");
+        assert!(
+            !env_path.exists(),
+            "declining must not write any .env entry"
+        );
+
+        // Every grouped member is `required: false` by construction — the
+        // ungrouped-AND clause of the default `is_available()` never sees
+        // them, so an unanswered group can never independently block a
+        // tool's availability (D-09's guarantee, which both real
+        // group-having tools this phase ships — web_search/web_answer —
+        // additionally re-affirm with their own always-available override).
+        assert!(
+            prereqs.iter().all(|p| !p.required),
+            "grouped prerequisites must never be independently required"
+        );
+    }
+
+    fn env_lock_for_group_prompt_tests() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 }

@@ -18,7 +18,7 @@ pub mod scanner;
 pub mod store;
 pub mod tick;
 
-pub use adapter::TgSendApi;
+pub use adapter::{DeliveryRegistry, DeliverySend, TgSendApi};
 pub use delivery::*;
 pub use job::*;
 pub use parser::*;

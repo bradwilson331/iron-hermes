@@ -1,10 +1,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use ironhermes_core::commands::running_agent::{
-    AGENT_RUNNING_REJECT_MSG, RunningAgentGuard, is_bypass,
-};
+// Phase 39.1 (R39.1-06): is_bypass, RunningAgentGuard, and AGENT_RUNNING_REJECT_MSG
+// are no longer used — all four agent_running gate sites have been removed.
+// Concurrency is now managed via ConcurrencyLayer + TurnRegistry.
+use ironhermes_core::concurrency::{ConcurrencyLayer, Surface, TurnEntry, TurnId, TurnRegistry};
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use tokio::sync::{Mutex as TokioMutex, RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
@@ -16,10 +16,17 @@ use ironhermes_agent::subagent_registry::SubagentRegistry;
 use ironhermes_agent::{
     AgentRuntime, MemoryManager, PromptBuilder, TurnRequest, build_main_client,
 };
-use ironhermes_core::commands::context::{CommandContext, ToolsetSessionHandle};
+use ironhermes_core::commands::context::{
+    CoreContextHandles, McpReloader, ProcessRegistrySnapshotHandle, StateStoreHandle,
+    SubagentListSnapshot, ToolsetSessionHandle, build_core_context,
+};
 use ironhermes_core::commands::{
     CommandResult as CoreCommandResult, CommandRouter, ResolveResult, registry::build_registry,
 };
+// Phase 41.1 Plan 04 (D-08): shared pure skill-invocation resolver (Plan 01).
+// Both gateway skill-invoke sites use it to compute the run-turn trigger_text,
+// then synthesize an identity-inheriting MessageEvent and fire run_agent.
+use ironhermes_core::commands::skill_dispatch::{build_skill_invocation, resolve_skill_invocation};
 use ironhermes_core::{
     ChatMessage, Config, ContentPart, ImageUrl, MessageContent, MessageEvent, Platform,
     ProviderResolver, Role, SkillRegistry,
@@ -32,8 +39,36 @@ use crate::multimodal::ProcessedAttachments;
 use crate::rate_limiter::{PerUserRateLimiter, with_rate_limit_retry};
 use crate::session::{SessionKey, SessionStore};
 use crate::session_queue::{QueueError, SessionQueue};
-use crate::stream_consumer::StreamConsumer;
+use crate::stream_consumer::{DeliveryMode, StreamConsumer, send_chunked};
 use crate::user_queue::{DispatchOutcome, UserQueueManager};
+
+/// Phase 41.1 Plan 04 (UI-SPEC Copywriting Contract / §C): build the run-turn
+/// meta text sent immediately before the skill's run turn on Telegram. Bare
+/// invoke → `▶ Ran skill /{name}`; argued invoke → `▶ Ran skill /{name} · "{args}"`,
+/// with `args` truncated to 40 chars (char-safe) and an inner `…` appended only
+/// when truncated. Mirrors the Web/TUI `run_turn_meta_chip` verbatim so every
+/// surface renders identical copy.
+///
+/// Bare-vs-argued is derived by comparing `trigger_text` to the bare-invoke
+/// run-now instruction (the same value `build_skill_invocation` computes for a
+/// bare invoke) — alias-robust, never re-parsing the raw slash token.
+fn run_turn_meta_text(name: &str, trigger_text: &str) -> String {
+    let bare_instruction =
+        format!("Run the {name} skill now: carry out its instructions immediately.");
+    if trigger_text == bare_instruction {
+        format!("▶ Ran skill /{name}")
+    } else {
+        const MAX: usize = 40;
+        let mut chars = trigger_text.chars();
+        let head: String = chars.by_ref().take(MAX).collect();
+        let truncated = chars.next().is_some();
+        if truncated {
+            format!("▶ Ran skill /{name} · \"{head}…\"")
+        } else {
+            format!("▶ Ran skill /{name} · \"{head}\"")
+        }
+    }
+}
 
 /// Bridges incoming Telegram messages to the AgentLoop with streaming output.
 pub struct GatewayMessageHandler {
@@ -95,6 +130,12 @@ pub struct GatewayMessageHandler {
     /// main.rs so lifecycle events update state. Per-request on_session_end
     /// sleeps 200ms to drain pending fire-and-forget transcript writes.
     subagent_registry: Option<Arc<RwLock<SubagentRegistry>>>,
+    /// Phase 41.3 Plan 04 (D-11/D-12): MCP reload handle for the gateway's
+    /// slash-dispatch `CommandContext` — the gateway previously had no MCP
+    /// handle at all. Cloned from `GatewayRunner.mcp_manager` (already used
+    /// there for GAP-8 shutdown wiring) via `set_mcp_manager` below, and wired
+    /// into `CoreContextHandles.mcp_reloader` in `handle_slash_command`.
+    mcp_manager: Option<Arc<ironhermes_mcp::McpManager>>,
     /// Phase 25.1 D-03/D-17: shared browser session Arc threaded from the runner.
     /// All 11 browser_* tools share this Arc (registered via register_browser_tools
     /// in main.rs run_gateway). Per-request AgentLoop calls with_browser_session
@@ -187,6 +228,43 @@ pub struct GatewayMessageHandler {
     /// above. Field name is historical — the type is platform-agnostic
     /// (`Option<Arc<dyn AudioDispatcher>>`), so Discord/Slack stubs mount cleanly.
     pub telegram_audio_dispatcher: Option<Arc<dyn ironhermes_tools::AudioDispatcher>>,
+
+    /// Phase 36.3.8 D-02: per-turn MessageDispatcher slot for send_message.
+    /// Telegram start path mounts TelegramAdapter clone-cast via
+    /// `set_telegram_message_dispatcher`. Local/web paths leave this `None`
+    /// — SendMessageTool's Local arm prints to stdout without a dispatcher.
+    telegram_message_dispatcher: Option<Arc<dyn ironhermes_tools::MessageDispatcher>>,
+
+    /// Phase 36.3.8 D-04: per-turn ClarifyDispatcher slot for clarify.
+    /// Telegram start path mounts TelegramAdapter clone-cast (sends inline_keyboard).
+    /// Web uses a text-fallback dispatcher. Local leaves this `None` (stdout list).
+    telegram_clarify_dispatcher: Option<Arc<dyn ironhermes_tools::ClarifyDispatcher>>,
+
+    /// Phase 36.3.8 D-05/T-36.3.8-ROUTE: shared PendingClarifyRegistry Arc.
+    /// MUST be the same Arc passed to GatewayRunner's callback_query dispatch loop
+    /// (Plan 03) so a button tap resolves the correct awaiter. Constructed once in
+    /// runner.rs and cloned into both the runner loop and this handler via
+    /// `set_clarify_registry`. Always-initialized to a fresh empty registry so
+    /// handlers built outside the runner compile without a None guard.
+    clarify_registry: Arc<ironhermes_tools::clarify_registry::PendingClarifyRegistry>,
+
+    /// Phase 39.1 (R39.1-09 / D-09): shared process-wide turn registry.
+    /// Wired by `GatewayRunner::build_gateway_handler` via `set_turn_registry`.
+    /// Always-initialized to a local default so handlers built without a runner
+    /// (e.g. tests) compile and run without a None check.
+    turn_registry: Arc<TurnRegistry>,
+
+    /// Phase 39.1 (R39.1-03 / D-03): per-session + global semaphore layer.
+    /// Wired by `GatewayRunner::build_gateway_handler` via `set_concurrency`.
+    /// `None` → fall back to old serialized-RunningAgentGuard behaviour (only
+    /// during tests that don't call `set_concurrency`).
+    concurrency: Option<Arc<ConcurrencyLayer>>,
+
+    /// Phase 45 D-11: shared approval coordinator for the /approve + /deny
+    /// slash commands and per-turn GatewayApprovalGate injection.
+    /// Constructed from `config.approvals.timeout_secs`, the platform adapter,
+    /// and the existing ApprovalsStore. `None` = gate unavailable (fail-closed).
+    approval_coordinator: Option<Arc<crate::approval::ApprovalCoordinator>>,
 }
 
 impl GatewayMessageHandler {
@@ -220,6 +298,9 @@ impl GatewayMessageHandler {
             agent_runtime: None,
             process_registry: None,
             subagent_registry: None,
+            // Phase 41.3 Plan 04 (D-11/D-12): no MCP handle until GatewayRunner
+            // calls set_mcp_manager (mirrors process_registry / subagent_registry).
+            mcp_manager: None,
             browser_session: None,
             toolset_session: None,
             workspace: None, // Phase 25.3 D-W-2: wired by GatewayRunner::build_gateway_handler
@@ -254,6 +335,29 @@ impl GatewayMessageHandler {
             // Telegram mounts TelegramAdapter; Discord/Slack mount
             // NotSupportedAudioDispatcher per D-03-b.
             telegram_audio_dispatcher: None,
+            // Phase 36.3.8 D-02/D-04: no messaging dispatchers until the runner's
+            // Telegram start path calls set_telegram_message_dispatcher /
+            // set_telegram_clarify_dispatcher. Other platforms leave these None.
+            telegram_message_dispatcher: None,
+            telegram_clarify_dispatcher: None,
+            // Phase 36.3.8 D-05/T-36.3.8-ROUTE: default empty registry so handlers
+            // built without a runner compile. Replaced by the runner's shared Arc via
+            // set_clarify_registry so the button-tap resolution map is shared.
+            clarify_registry: Arc::new(
+                ironhermes_tools::clarify_registry::PendingClarifyRegistry::new(),
+            ),
+            // Phase 39.1 (R39.1-09): default local registry; replaced by the
+            // process-wide shared Arc via `set_turn_registry` when wired through
+            // `build_gateway_handler`. Tests that call `::new()` directly get an
+            // isolated registry, which is correct for per-test isolation.
+            turn_registry: Arc::new(TurnRegistry::new()),
+            // Phase 39.1 (R39.1-03): None until wired; run_agent falls back to
+            // inline RAII guard path when None (backward-compat for tests).
+            concurrency: None,
+            // Phase 45 D-11: no coordinator until set_approval_coordinator is called
+            // by the platform runner. Handlers built via direct ::new() see None and
+            // leave the gate unavailable (fail-closed — no approvals without wiring).
+            approval_coordinator: None,
         }
     }
 
@@ -286,6 +390,14 @@ impl GatewayMessageHandler {
         self.agent_runtime = Some(runtime);
     }
 
+    /// Phase 45 D-11: install the ApprovalCoordinator so /approve, /deny, and
+    /// per-turn GatewayApprovalGate injection are active. Caller is the platform
+    /// runner (run_gateway on the Telegram start path, or any surface that wants
+    /// chat-native approval prompts).
+    pub fn set_approval_coordinator(&mut self, coord: Arc<crate::approval::ApprovalCoordinator>) {
+        self.approval_coordinator = Some(coord);
+    }
+
     /// Plan 21.7-06 (D-29, D-24): install the gateway-scoped ProcessRegistry
     /// so per-request on_session_end can invoke `drain_and_kill_session`.
     pub fn set_process_registry(&mut self, reg: Arc<RwLock<ProcessRegistry>>) {
@@ -297,6 +409,15 @@ impl GatewayMessageHandler {
     /// fire-and-forget transcript writes (sleep 200ms).
     pub fn set_subagent_registry(&mut self, reg: Arc<RwLock<SubagentRegistry>>) {
         self.subagent_registry = Some(reg);
+    }
+
+    /// Phase 41.3 Plan 04 (D-11/D-12): install the McpManager handle so the
+    /// gateway's slash-dispatch `CommandContext` can wire `mcp_reloader` — the
+    /// gateway had no MCP handle on `CommandContext` before this plan (the
+    /// existing `GatewayRunner.mcp_manager` only served GAP-8 shutdown wiring).
+    /// Caller is `GatewayRunner::build_gateway_handler`.
+    pub fn set_mcp_manager(&mut self, mgr: Arc<ironhermes_mcp::McpManager>) {
+        self.mcp_manager = Some(mgr);
     }
 
     /// Phase 25.1 D-17: install the shared browser session Arc so each per-request
@@ -416,6 +537,51 @@ impl GatewayMessageHandler {
         self.telegram_audio_dispatcher = Some(dispatcher);
     }
 
+    /// Phase 36.3.8 D-02: install a MessageDispatcher for per-turn send_message wiring.
+    /// Telegram start path mounts TelegramAdapter clone-cast. Mirrors
+    /// `set_telegram_audio_dispatcher` directly above.
+    pub fn set_telegram_message_dispatcher(
+        &mut self,
+        dispatcher: Arc<dyn ironhermes_tools::MessageDispatcher>,
+    ) {
+        self.telegram_message_dispatcher = Some(dispatcher);
+    }
+
+    /// Phase 36.3.8 D-04: install a ClarifyDispatcher for per-turn clarify wiring.
+    /// Telegram start path mounts TelegramAdapter clone-cast (inline_keyboard).
+    pub fn set_telegram_clarify_dispatcher(
+        &mut self,
+        dispatcher: Arc<dyn ironhermes_tools::ClarifyDispatcher>,
+    ) {
+        self.telegram_clarify_dispatcher = Some(dispatcher);
+    }
+
+    /// Phase 36.3.8 D-05/T-36.3.8-ROUTE: install the shared PendingClarifyRegistry Arc.
+    /// MUST be the same Arc as the one in the runner callback_query loop so a button
+    /// tap resolves the correct awaiter (single-instance sharing invariant).
+    pub fn set_clarify_registry(
+        &mut self,
+        registry: Arc<ironhermes_tools::clarify_registry::PendingClarifyRegistry>,
+    ) {
+        self.clarify_registry = registry;
+    }
+
+    /// Phase 39.1 (R39.1-09 / D-09): install the shared process-wide TurnRegistry.
+    /// Called by `GatewayRunner::build_gateway_handler` so all surfaces share one
+    /// registry Arc. Handlers built via `::new()` directly keep their isolated
+    /// default registry (correct for test isolation).
+    pub fn set_turn_registry(&mut self, registry: Arc<TurnRegistry>) {
+        self.turn_registry = registry;
+    }
+
+    /// Phase 39.1 (R39.1-03 / D-03): install the ConcurrencyLayer so `run_agent`
+    /// acquires per-session + global semaphore before spawning a turn. When None
+    /// (handlers built outside `build_gateway_handler`), `run_agent` falls back to
+    /// the legacy single-turn RAII path for backward compat.
+    pub fn set_concurrency(&mut self, layer: Arc<ConcurrencyLayer>) {
+        self.concurrency = Some(layer);
+    }
+
     /// Set the hook registry for event emission.
     pub fn set_hook_registry(&mut self, registry: Arc<ironhermes_hooks::HookRegistry>) {
         self.hook_registry = Some(registry);
@@ -447,6 +613,126 @@ impl GatewayMessageHandler {
         self.active_skills = skills;
     }
 
+    /// Phase 42 EXEC-06, MIGRATED by Phase 36.3.12 Plan 07 (D-08, checker BLOCKER
+    /// T-36.3.12-25): guarded gateway shell-exec entry (fail-closed, D-12/D-13).
+    ///
+    /// Builds a `DangerousCommandGuardrail` from `self.config.dangerous_commands`
+    /// and routes through `ironhermes_hooks::execute_gated_command` — the SAME
+    /// chokepoint every other surface uses — instead of the gateway-local
+    /// `crate::shell_exec::shell_exec` helper (which never audited its `Allow` path
+    /// and never forced approval on a remote/credential-forwarding run). Reuses the
+    /// already-registered `terminal` tool instance (`AgentRuntime::terminal_tool_arc`)
+    /// so `background=true` keeps its `ProcessRegistry` wiring.
+    ///
+    /// # yolo note (INV-21.7-05)
+    ///
+    /// Gateway sessions NEVER read a per-request yolo flag from the incoming
+    /// message. Pass `yolo=false` for all production call sites. The parameter
+    /// is exposed here so callers that derive the flag from a process-wide config
+    /// value (e.g. `config.autonomous.yolo`) can thread it through.
+    pub async fn handle_shell_exec(
+        &self,
+        command: &str,
+        yolo: bool,
+        session_id: &str,
+        chat_id: &str,
+        approval_gate: Option<&dyn ironhermes_core::ApprovalGate>,
+    ) -> ironhermes_hooks::GatedOutcome {
+        let guard = ironhermes_hooks::DangerousCommandGuardrail::from_config(
+            &self.config.dangerous_commands,
+        );
+        let audit_log = ironhermes_core::AuditLog::load(self.config.audit.clone());
+        let is_remote_backend = self.config.terminal.backend == "ssh";
+        let forward_env_nonempty = !self.config.terminal.forward_env.is_empty();
+        let tool = self
+            .agent_runtime
+            .as_ref()
+            .and_then(|rt| rt.terminal_tool_arc());
+        let command_owned = command.to_string();
+
+        let outcome = ironhermes_hooks::execute_gated_command(
+            "terminal",
+            command,
+            &guard,
+            approval_gate,
+            &audit_log,
+            session_id,
+            "gateway",
+            chat_id,
+            yolo,
+            is_remote_backend,
+            forward_env_nonempty,
+            || async move {
+                match tool {
+                    Some(t) => {
+                        t.execute(serde_json::json!({ "command": command_owned }))
+                            .await
+                    }
+                    None => Err(anyhow::anyhow!(
+                        "terminal tool not registered on this runtime"
+                    )),
+                }
+            },
+        )
+        .await;
+        // WR-03: log spawn failures at warn! so operators can detect them in
+        // monitoring. `Failed` is distinct from `Ran` (command ran, produced
+        // output) and `Denied`/`Blocked` (guardrail decisions).
+        if let ironhermes_hooks::GatedOutcome::Failed(ref reason) = outcome {
+            tracing::warn!(
+                target: "ironhermes::gateway::shell_exec",
+                command = %command,
+                reason = %reason,
+                "shell_exec subprocess spawn failed (WR-03)"
+            );
+        }
+        outcome
+    }
+
+    /// Phase 36.17.9: handle `/voice on|off|tts|status` for a gateway chat.
+    ///
+    /// `on`/`tts`/`off` persist the per-session voice mode write-through to the
+    /// durable `gateway_routes` record (and update the in-memory session when
+    /// present), so the choice survives a gateway restart. `status` (or no arg)
+    /// reports the current mode, preferring the live session value and falling
+    /// back to the persisted route.
+    async fn handle_voice_command(&self, key: &SessionKey, args: &[&str]) -> String {
+        match args.first().copied() {
+            Some(mode @ ("on" | "off" | "tts")) => {
+                self.session_store.write().await.set_voice_mode(key, mode);
+                match mode {
+                    "on" => "Voice mode: on — I'll speak replies to your voice messages.",
+                    "tts" => "Voice mode: tts — I'll speak every reply.",
+                    _ => "Voice mode: off — replies are text only.",
+                }
+                .to_string()
+            }
+            Some("status") | None => {
+                let mode = self.current_voice_mode(key).await;
+                format!("Voice mode: {mode}")
+            }
+            Some(other) => {
+                format!("Unknown /voice option '{other}'. Use: on | off | tts | status")
+            }
+        }
+    }
+
+    /// Resolve the effective voice mode for a chat: the live in-memory session
+    /// value if present, else the durable `gateway_routes` value, else `off`.
+    async fn current_voice_mode(&self, key: &SessionKey) -> String {
+        if let Some(mode) = self.session_store.read().await.voice_mode(key) {
+            return mode;
+        }
+        let key_str = key.to_string_key();
+        let store_arc = self.session_store.read().await.state_store().clone();
+        let persisted = store_arc
+            .lock()
+            .ok()
+            .and_then(|s| s.get_route(&key_str).ok().flatten())
+            .map(|r| r.voice_mode);
+        persisted.unwrap_or_else(|| "off".to_string())
+    }
+
     /// Dispatch a slash command via the unified CommandRouter (Phase 21.1 Plan 02).
     ///
     /// Replaces the old hardcoded match on /start, /new, /clear, /help.
@@ -465,14 +751,8 @@ impl GatewayMessageHandler {
         let session_key =
             SessionKey::new(platform.clone(), &event.chat_id).with_user(&event.sender_id);
 
-        // Phase 36 / GW-05: per-session running flag retrieved from SessionStore (D-03/D-05/D-06).
-        // Construction here is the single source of truth — handle_with_multimodal and
-        // MessageHandler::handle non-slash arms also call get_running_flag for their own guard check.
-        let agent_running = self
-            .session_store
-            .read()
-            .await
-            .get_running_flag(&session_key);
+        // Phase 39.1 (R39.1-06 / D-06): agent_running removed — CommandContext no longer
+        // carries the AtomicBool gate. get_running_flag() is no longer needed here.
         // Phase 36.2 follow-up: use the canonical SQLite session UUID for
         // CommandContext.session_id so /usage, /history, /export, /rename all
         // filter on the same id that agent_loop writes to the sessions /
@@ -490,70 +770,80 @@ impl GatewayMessageHandler {
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| session_key.to_string_key())
         };
-        let ctx = CommandContext::new(platform.clone(), ctx_session_id, agent_running.clone());
-        // Phase 36.2 chat-fix follow-up: attach the StateStoreHandle so /usage,
-        // /sessions, /history, /export, etc. can reach the SQLite session/usage
-        // tables. Without this the gateway returns "Session storage not
-        // configured." even though session_store already owns the StateStore.
-        // Mirrors the TUI (tui_rata/commands.rs) and web (iron_hermes_ui/ws.rs)
-        // wiring that landed in commits a9fb0d0d / 402113b3.
-        let ctx = {
+        // Phase 41.3 Plan 04 (D-11/D-12): the nine core handles this build site
+        // owns are collected into CoreContextHandles and built via the shared
+        // build_core_context factory. process_registry, mcp_reloader, and
+        // trajectory_writer are newly wired here — the gateway was 6-of-9
+        // before this plan (baseline: 41.3-04-PLAN.md planning_provenance).
+        //
+        // Phase 36.2 chat-fix follow-up (state_store): attach the StateStoreHandle
+        // so /usage, /sessions, /history, /export, etc. can reach the SQLite
+        // session/usage tables. Mirrors the TUI (tui_rata/commands.rs) and web
+        // (iron_hermes_ui/ws.rs) wiring that landed in commits a9fb0d0d / 402113b3.
+        let state_store_handle: Arc<dyn StateStoreHandle> = {
             let store_arc = self.session_store.read().await.state_store().clone();
-            let handle: std::sync::Arc<dyn ironhermes_core::commands::context::StateStoreHandle> =
-                std::sync::Arc::new(ironhermes_state::StateStoreHandleAdapter(store_arc));
-            ctx.with_state_store(handle)
+            Arc::new(ironhermes_state::StateStoreHandleAdapter(store_arc))
         };
-        // Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1): attach the
-        // production toolset session handle so /toolset list/show/enable/disable
-        // works in Telegram. Without this, cmd_toolset (handlers.rs:782) short-
-        // circuits on None with the documented fallback string.
-        let ctx = if let Some(handle) = &self.toolset_session {
-            ctx.with_toolset_session(handle.clone())
-        } else {
-            ctx
-        };
-        // Phase 25.3 D-W-2: attach Workspace for /sessions --workspace + trajectory scoping.
-        let ctx = if let Some(ws) = &self.workspace {
-            ctx.with_workspace(ws.clone())
-        } else {
-            ctx
-        };
-        // Phase 21.8.2: wire skill_registry so /skills and SKILL-13 fallback work in gateway.
-        // D-03: read via lock so we always see the latest atomic swap.
-        let ctx = {
-            let snapshot: Option<Arc<SkillRegistry>> =
-                self.skill_registry.lock().ok().and_then(|g| g.clone());
-            if let Some(sr) = snapshot {
-                ctx.with_skill_registry(sr)
-            } else {
-                ctx
-            }
-        };
+        // Phase 21.8.2: wire skill_registry so /skills and SKILL-13 fallback work in
+        // gateway. D-03: read via lock so we always see the latest atomic swap.
+        let skill_registry_snapshot: Option<Arc<SkillRegistry>> =
+            self.skill_registry.lock().ok().and_then(|g| g.clone());
         // Phase 32.3 Plan 04 (D-08 / RESEARCH Pitfall 3): attach the
-        // subagent_registry so /agents list|kill|interrupt|prune|status
-        // actually reach cmd_agents instead of hitting the "subagent registry
-        // not wired" fallback. The gateway has had `self.subagent_registry`
-        // since Plan 21.7-07 but `handle_slash_command` never called
-        // `with_subagent_registry` — this fixes the pre-existing wiring gap
-        // identified in 32.3-RESEARCH.md Pitfall 3 (lines 336-355) and
-        // confirmed at handler.rs:386-406 before this change.
-        let ctx = if let Some(ref reg) = self.subagent_registry {
-            use ironhermes_agent::subagent_registry::SubagentRegistryHandle;
-            use ironhermes_core::commands::context::SubagentListSnapshot;
-            let handle: Arc<dyn SubagentListSnapshot> =
-                Arc::new(SubagentRegistryHandle::new(reg.clone()));
-            ctx.with_subagent_registry(handle)
-        } else {
-            ctx
+        // subagent_registry so /agents list|kill|interrupt|prune|status actually
+        // reach cmd_agents instead of hitting the "subagent registry not wired"
+        // fallback. The gateway has had `self.subagent_registry` since Plan
+        // 21.7-07 but `handle_slash_command` never called `with_subagent_registry`
+        // — this fixed the pre-existing wiring gap identified in 32.3-RESEARCH.md
+        // Pitfall 3 (lines 336-355).
+        let subagent_registry_handle: Option<Arc<dyn SubagentListSnapshot>> =
+            self.subagent_registry.as_ref().map(|reg| {
+                use ironhermes_agent::subagent_registry::SubagentRegistryHandle;
+                Arc::new(SubagentRegistryHandle::new(reg.clone())) as Arc<dyn SubagentListSnapshot>
+            });
+        // Phase 41.3 Plan 04 (D-12): previously missing — process_registry has
+        // existed on the handler since Plan 21.7-06 but was never wired onto
+        // CommandContext.
+        let process_registry_handle: Option<Arc<dyn ProcessRegistrySnapshotHandle>> =
+            self.process_registry.as_ref().map(|reg| {
+                Arc::new(ironhermes_exec::process_registry::ProcessRegistryHandle::new(reg.clone()))
+                    as Arc<dyn ProcessRegistrySnapshotHandle>
+            });
+        // Phase 41.3 Plan 04 (D-12): previously missing — the gateway had no MCP
+        // handle on CommandContext at all before this plan.
+        let mcp_reloader_handle: Option<Arc<dyn McpReloader>> = self
+            .mcp_manager
+            .as_ref()
+            .map(|mgr| mgr.clone() as Arc<dyn McpReloader>);
+        // Phase 41.3 Plan 04 (D-12): previously missing on the slash-dispatch path.
+        // Sourced the same way the gateway already does for agent runs (run_agent,
+        // `self.session_store.write().await.get_or_create_trajectory_writer(...)`),
+        // evaluated here for the same canonical session id used to build this
+        // CommandContext. Supersedes the Phase 25.3-15 CR-02 close-out note that
+        // slash dispatch does not attach a trajectory writer — Plan 04 changes
+        // that by reusing the per-session, SessionStore-cached writer (no new
+        // process-wide handle, no behavior change for `run_agent`'s own writer).
+        let trajectory_writer_handle = {
+            let mut store = self.session_store.write().await;
+            store.get_or_create_trajectory_writer(&ctx_session_id)
         };
-        // Phase 25.3-15 CR-02 close-out: slash-dispatch CommandContext no longer
-        // attaches a trajectory writer. The previous implementation attached a
-        // process-wide handle that was unreachable from `hermes session export`.
-        // Per-tool trajectory writes happen inside `run_agent` via the
-        // SessionStore-cached, per-session writer keyed by the canonical
-        // SQLite session UUID. Slash commands themselves do not currently
-        // record trajectory entries; if Phase 25.4 needs that, it can pull
-        // the per-session handle out of `SessionStore` here.
+
+        let core_handles = CoreContextHandles {
+            subagent_registry: subagent_registry_handle,
+            process_registry: process_registry_handle,
+            skill_registry: skill_registry_snapshot,
+            state_store: Some(state_store_handle),
+            // Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1): production
+            // toolset session handle so /toolset list/show/enable/disable works
+            // in Telegram. Without this, cmd_toolset (handlers.rs:782) short-
+            // circuits on None with the documented fallback string.
+            toolset_session: self.toolset_session.clone(),
+            turn_registry: Some(self.turn_registry.clone()),
+            // Phase 25.3 D-W-2: Workspace for /sessions --workspace + trajectory scoping.
+            workspace: self.workspace.clone(),
+            mcp_reloader: mcp_reloader_handle,
+            trajectory_writer: trajectory_writer_handle,
+        };
+        let ctx = build_core_context(platform.clone(), ctx_session_id.clone(), core_handles);
 
         // Phase 36.3.7.5 BUG-36.3.7.5-06: attach chat-origin so /kanban create's
         // auto-subscribe hook can write the originating chat to kanban_subscriptions.
@@ -566,12 +856,84 @@ impl GatewayMessageHandler {
         // subscriptions. KanbanStoreWriterImpl lives in ironhermes-kanban
         // (not ironhermes-cli — the latter depends on ironhermes-gateway, so
         // a gateway -> cli dep would be circular).
+        //
+        // Phase 46.5-04 D-06: resolve the operator's `kanban.default_notify`
+        // target from `self.config.kanban` (mirrors the parse pattern in
+        // runner.rs's dispatcher setup) and thread it into
+        // KanbanStoreWriterImpl so create_task_simple (the programmatic
+        // KanbanStoreWriter task-creation path, e.g. the kanban_create LLM
+        // tool) auto-subscribes it too, alongside the CLI cmd_create path.
+        //
+        // SECURITY (T-46.5-20): the target is read exclusively from
+        // self.config.kanban (operator config) — never from `event` or any
+        // other per-message/task-controlled data.
         let ctx = {
             use ironhermes_core::commands::context::KanbanStoreWriter;
-            let writer: std::sync::Arc<dyn KanbanStoreWriter> =
-                std::sync::Arc::new(ironhermes_kanban::KanbanStoreWriterImpl::new());
+            let kanban_config: ironhermes_kanban::KanbanConfig = if self.config.kanban.is_null() {
+                ironhermes_kanban::KanbanConfig::default()
+            } else {
+                serde_yaml::from_value(self.config.kanban.clone()).unwrap_or_default()
+            };
+            let writer: std::sync::Arc<dyn KanbanStoreWriter> = std::sync::Arc::new(
+                ironhermes_kanban::KanbanStoreWriterImpl::with_default_notify(
+                    kanban_config.default_notify,
+                ),
+            );
             ctx.with_kanban_store_writer(writer)
         };
+
+        // Phase 39.1 (R39.1-09 / D-09): TurnRegistry visibility for /agents turns,
+        // /stop, and /agents cancel <id> is now wired via CoreContextHandles above
+        // (turn_registry: Some(self.turn_registry.clone())) — no separate chain call
+        // needed here after the Phase 41.3 Plan 04 factory migration.
+
+        // Phase 45 D-11: /approve and /deny intercept — handled BEFORE the
+        // command router so the router never sees these as unknown commands (which
+        // would fall through to agent turn). ctx_session_id is the canonical
+        // SQLite session UUID derived above (consistent with what the coordinator
+        // uses as the pending-map key).
+        let command_base = command_input
+            .split_whitespace()
+            .next()
+            .unwrap_or(command_input);
+        if command_base == "/approve" || command_base == "/deny" {
+            if let Some(ref coord) = self.approval_coordinator {
+                let approved = command_base == "/approve";
+                // CR-01 fix (47.6 code review): resolve() (keyed on THIS
+                // event's own SessionKey-derived ctx_session_id) always
+                // works for DM-originated approvals and MUST stay the
+                // first attempt — do not regress that path. It only misses
+                // for a Buzz channel-originated approval whose operator
+                // reply arrives as a DM (see resolve_by_chat_id's doc
+                // comment for the full session-identity mismatch). Fall
+                // back to the chat_id-keyed lookup ONLY in that specific
+                // combination (Buzz + DM reply) so Telegram/Discord/Slack
+                // and Buzz DM-to-DM approvals are entirely unaffected.
+                let resolved = if coord.resolve(&ctx_session_id, approved).await {
+                    true
+                } else if event.platform == Platform::Buzz && event.chat_type == "dm" {
+                    coord.resolve_by_chat_id(&event.sender_id, approved).await
+                } else {
+                    false
+                };
+                let reply = if resolved {
+                    if approved {
+                        "Approved — running command."
+                    } else {
+                        "Denied — command cancelled."
+                    }
+                } else {
+                    "No pending approval for this session."
+                };
+                with_rate_limit_retry(|| adapter.send_message(&event.chat_id, reply, None)).await?;
+            } else {
+                with_rate_limit_retry(|| {
+                    adapter.send_message(&event.chat_id, "Approval gate not configured.", None)
+                })
+                .await?;
+            }
+            return Ok(());
+        }
 
         let parts: Vec<&str> = command_input.split_whitespace().collect();
         let args: Vec<&str> = if parts.len() > 1 {
@@ -582,17 +944,42 @@ impl GatewayMessageHandler {
 
         match self.command_router.resolve(command_input, platform) {
             ResolveResult::Exact(def) | ResolveResult::PrefixMatch(def) => {
-                // Phase 36 (D-02, D-01): running-agent guard check.
-                // Check uses def.name (post-alias canonical name) so /reset → "new" correctly
-                // bypasses (Pitfall 4 mitigation). Guard fires BEFORE personality/agents
-                // interceptors — rejection takes priority over dispatch-time concerns.
-                if agent_running.load(Ordering::SeqCst) && !is_bypass(def.name) {
-                    with_rate_limit_retry(|| {
-                        adapter.send_message(&event.chat_id, AGENT_RUNNING_REJECT_MSG, None)
-                    })
-                    .await?;
-                    return Ok(());
+                // Phase 39.1 (R39.1-06 / D-06): agent_running gate REMOVED.
+                // All slash commands dispatch unconditionally while turns are in flight.
+                // The channel never rejects: /stop cancels session turns, /agents shows them,
+                // /new warns then proceeds (R39.1-07 warn-not-block).
+
+                // Phase 39.1 (R39.1-07 / D-06-RISK): /new and /reset warn if turns are in
+                // flight, then proceed. The warn is advisory only — the user may /stop first
+                // if they want a clean slate. ctx_session_id is the canonical SQLite UUID
+                // (or string-key fallback) used by TurnRegistry entries.
+                let in_flight_warn = if def.name == "new" || def.name == "reset" {
+                    ironhermes_core::commands::handlers::in_flight_warning(
+                        &self.turn_registry,
+                        &ctx_session_id,
+                    )
+                    .await
+                } else {
+                    None
+                };
+                if let Some(warn) = in_flight_warn {
+                    with_rate_limit_retry(|| adapter.send_message(&event.chat_id, &warn, None))
+                        .await?;
                 }
+
+                // Phase 39.1 (R39.1-05 / D-05): /stop cancels all in-flight session turns
+                // via the shared TurnRegistry. The existing cmd_stop in core still clears
+                // the agent_running flag (backward compat); the registry cancel is the new
+                // concurrent-turn signal.
+                if def.name == "stop" {
+                    let cancelled = self.turn_registry.cancel_session(&ctx_session_id).await;
+                    tracing::info!(
+                        session = %ctx_session_id,
+                        cancelled,
+                        "gateway /stop: cancelled in-flight turn(s) via TurnRegistry (Phase 39.1 R39.1-05)"
+                    );
+                }
+
                 // Phase 21.8.3.1 D-05 gateway analog (RESEARCH Open Question 1, Option B):
                 // Intercept /personality clear BEFORE core dispatch. Core's cmd_personality
                 // has no "clear" case — it would return Error("Unknown personality: clear")
@@ -631,6 +1018,17 @@ impl GatewayMessageHandler {
                         .await?;
                     return Ok(());
                 }
+                // Phase 36.17.9: `/voice on|off|tts|status` manages this chat's
+                // per-session voice mode, persisted into the durable gateway_routes
+                // record so it survives a restart. Core's `cmd_voice` is a help/headless
+                // stub that ignores ctx, so the gateway owns the stateful path here
+                // (mirrors the TUI's post-router voice arm).
+                if def.name == "voice" {
+                    let reply = self.handle_voice_command(&session_key, &args).await;
+                    with_rate_limit_retry(|| adapter.send_message(&event.chat_id, &reply, None))
+                        .await?;
+                    return Ok(());
+                }
                 let core_result = ironhermes_core::commands::handlers::dispatch(
                     def,
                     &args,
@@ -652,8 +1050,10 @@ impl GatewayMessageHandler {
                         .await?;
                     }
                     CoreCommandResult::Output(text) => {
-                        with_rate_limit_retry(|| adapter.send_message(&event.chat_id, &text, None))
-                            .await?;
+                        // G-41.1-5: long replies (e.g. /skills' 172-skill catalog)
+                        // must chunk at Telegram's 4096-char limit instead of a
+                        // single unguarded send that 400s with "text is too long".
+                        send_chunked(&adapter, &event.chat_id, &text).await?;
                     }
                     CoreCommandResult::NewSession { .. } => {
                         // /start special handling: reset session then LLM greeting.
@@ -661,7 +1061,11 @@ impl GatewayMessageHandler {
                         if def.name == "start" {
                             {
                                 let mut store = self.session_store.write().await;
-                                store.remove(&session_key);
+                                // Phase 47.5 (D-04): durable reset — ends the SQLite
+                                // session and clears the route, distinct end_reason
+                                // from /new so the two commands stay distinguishable
+                                // in durable audit state.
+                                let _ = store.reset_session(&session_key, "start");
                             }
                             let mut intro_event = event.clone();
                             intro_event.content =
@@ -670,6 +1074,7 @@ impl GatewayMessageHandler {
                             let no_attachments = ProcessedAttachments {
                                 text_prefix: None,
                                 image_data_uri: None,
+                                image_cache_path: None,
                             };
                             return self
                                 .run_agent(&intro_event, adapter, cancel, no_attachments)
@@ -684,6 +1089,13 @@ impl GatewayMessageHandler {
                         // needed here because the gateway holds no long-lived,
                         // session-scoped engine handle (the engine is rebuilt fresh
                         // per turn in run_turn).
+                        // Phase 47.5 (D-04): the reset is now DURABLE — it also
+                        // ends the SQLite session row and clears the gateway_routes
+                        // entry, so it survives a gateway restart and applies even
+                        // when nothing is in memory (a durable-only reset resolves
+                        // its target from the route). This is what makes the
+                        // "Conversation cleared. Starting fresh." reply below
+                        // truthful post-restart.
                         tracing::debug!(
                             session = ?session_key,
                             "gateway /new: session removed; per-session compression state discarded (34b D-10)"
@@ -699,9 +1111,17 @@ impl GatewayMessageHandler {
                         if let Some(ref queue) = self.session_queue {
                             queue.clear(&session_key);
                         }
+                        // Phase 45 D-11: cancel any pending approval for this session so
+                        // the oneshot::Sender is dropped (fail-closed) and the waiting
+                        // agent turn is unblocked before the session history is cleared.
+                        // resolve(false) sends false over the channel; the coordinator
+                        // removes the entry from the pending map. No-op when None.
+                        if let Some(ref coord) = self.approval_coordinator {
+                            coord.resolve(&ctx_session_id, false).await;
+                        }
                         let had_session = {
                             let mut store = self.session_store.write().await;
-                            store.remove(&session_key).is_some()
+                            store.reset_session(&session_key, "new")
                         };
                         let msg = if had_session {
                             "Conversation cleared. Starting fresh."
@@ -876,21 +1296,46 @@ impl GatewayMessageHandler {
                         .await;
                         return Ok(());
                     }
-                    ironhermes_core::commands::CommandResult::SkillActivated { name, body } => {
+                    // Phase 41.1 Plan 04 (D-08 / SKILL-13): one-shot activate+run.
+                    // Activate the body into the per-session overlay AND fire a run
+                    // turn immediately — no longer activate-only. `dispatch()` does
+                    // not construct this variant today (every surface builds its own
+                    // NotFound fallback below), so this arm is DEFENSIVE, but it must
+                    // stay behavior-identical to the fallback if a future dispatch
+                    // path ever returns it.
+                    ironhermes_core::commands::CommandResult::SkillActivated {
+                        name,
+                        body,
+                        args,
+                    } => {
+                        // Compute the run-turn trigger text (D-02) BEFORE moving body
+                        // into the overlay.
+                        let invocation = build_skill_invocation(name.clone(), body.clone(), args);
                         // Phase 21.8.2 D-Plan03-05 / D-07: store in per-session overlay so
-                        // the next AgentLoop call site reads + prepends body to system prompt.
+                        // run_agent's skill_overlays read site prepends body to the prompt.
                         if let Ok(mut overlays) = self.skill_overlays.lock() {
                             overlays
                                 .entry(session_key.clone())
                                 .or_insert_with(Vec::new)
                                 .push((name.clone(), body));
                         }
-                        let activation_msg = format!("Skill '{}' activated for this turn.", name);
+                        // Task 2: run-turn meta text replaces the retired activation
+                        // copy — sent via the same with_rate_limit_retry send_message
+                        // call site, immediately before the run turn's reply.
+                        let meta_msg = run_turn_meta_text(&name, &invocation.trigger_text);
                         let _ = with_rate_limit_retry(|| {
-                            adapter.send_message(&event.chat_id, &activation_msg, None)
+                            adapter.send_message(&event.chat_id, &meta_msg, None)
                         })
                         .await;
-                        return Ok(());
+                        // D-08 (T-41.1-04-01): synthesize a run turn whose identity
+                        // (platform/chat_id/sender_id/message_id) inherits from the real
+                        // event via ..event.clone() — NEVER reconstructed from name/args
+                        // (mirrors the Queued arm + its anti-impersonation comment below).
+                        let synthetic = MessageEvent {
+                            content: invocation.trigger_text.clone(),
+                            ..event.clone()
+                        };
+                        return self.run_agent(&synthetic, adapter, cancel, processed).await;
                     }
                     // Phase 36.17.1 Plan 03 Task 2: /queue dispatch intercept.
                     //
@@ -934,9 +1379,9 @@ impl GatewayMessageHandler {
                         //   3. On Err(CapacityReached): fires ❌ reaction + "⏳ Queue is full
                         //      (128 messages). Wait for the agent to drain before sending more."
                         //      (D-11 inherited from parent phase) and returns Err.
-                        //   4. On Ok: push_multimodal(&key, (None, None)) — text-only command,
-                        //      sidecar receives (None, None); worker's take_multimodal returns
-                        //      Some((None, None)) which unwrap_or normalizes — no FIFO skew
+                        //   4. On Ok: push_multimodal(&key, (None, None, None)) — text-only command,
+                        //      sidecar receives (None, None, None); worker's take_multimodal returns
+                        //      Some((None, None, None)) which unwrap_or normalizes — no FIFO skew
                         //      (RESEARCH Pitfall 4).
                         //   5. On Ok: notify_one() — wakes the parked worker (the FIX).
                         let queued_event = MessageEvent {
@@ -945,7 +1390,7 @@ impl GatewayMessageHandler {
                         };
                         if let Some(uqm) = self.user_queue_manager.as_ref() {
                             // Production path (handler wired via GatewayRunner::run_gateway).
-                            match uqm.dispatch(queued_event, None, None).await {
+                            match uqm.dispatch(queued_event, None, None, None).await {
                                 Ok(outcome) => {
                                     // Depth-aware reply preserved (context_lock #3):
                                     // depth = session_queue.len(&session_key) computed AFTER
@@ -1068,6 +1513,39 @@ impl GatewayMessageHandler {
                         }
                         return Ok(());
                     }
+                    CoreCommandResult::AgentsList(turns) => {
+                        // Phase 39.1 (R39.1-09): render `/agents turns` on the
+                        // gateway/Telegram surface. Plan 39.1-01 introduced the
+                        // AgentsList variant in core; this arm keeps the gateway
+                        // match exhaustive and surfaces the active TurnRegistry
+                        // entries as a text reply.
+                        let msg = if turns.is_empty() {
+                            "No active turns.".to_string()
+                        } else {
+                            let mut out = format!("Active turns ({}):\n", turns.len());
+                            for t in &turns {
+                                out.push_str(&format!(
+                                    "• {} — {} — session {} — {}ms\n",
+                                    t.turn_id, t.surface, t.session_id, t.elapsed_ms
+                                ));
+                            }
+                            out
+                        };
+                        with_rate_limit_retry(|| adapter.send_message(&event.chat_id, &msg, None))
+                            .await?;
+                    }
+                    // Phase 36.6.3 Plan 03 (TUI-INPUT-02, D-06): bare `/model`/
+                    // `/provider` open an interactive picker on the TUI —
+                    // meaningless on the gateway (no overlay surface). Fall
+                    // back to the pre-existing plain-text output
+                    // (model_list_text()/status_text()) so nothing regresses.
+                    CoreCommandResult::OpenModelPicker { fallback_text }
+                    | CoreCommandResult::OpenProviderPicker { fallback_text } => {
+                        with_rate_limit_retry(|| {
+                            adapter.send_message(&event.chat_id, &fallback_text, None)
+                        })
+                        .await?;
+                    }
                 }
             }
             ResolveResult::Ambiguous(candidates) => {
@@ -1086,35 +1564,43 @@ impl GatewayMessageHandler {
             ResolveResult::NotFound => {
                 // Phase 21.8.2 D-06/D-08: SKILL-13 dynamic fallback before agent passthrough.
                 // Registered commands win because 3-stage resolution ran first.
-                let cmd_token = command_input
-                    .trim_start_matches('/')
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("");
-                if !cmd_token.is_empty() {
-                    let snapshot: Option<Arc<SkillRegistry>> =
-                        self.skill_registry.lock().ok().and_then(|g| g.clone());
-                    if let Some(registry) = snapshot
-                        && let Some(record) = registry.find(cmd_token)
-                        && let Some(body) = registry.read_content(&record.name)
-                    {
-                        // D-Plan03-05 / D-07: store in per-session overlay so
-                        // the NEXT agent turn picks it up via the run_agent
-                        // skill_overlays read site.
-                        if let Ok(mut overlays) = self.skill_overlays.lock() {
-                            overlays
-                                .entry(session_key.clone())
-                                .or_insert_with(Vec::new)
-                                .push((record.name.clone(), body));
-                        }
-                        let skill13_msg =
-                            format!("Skill '{}' activated for this turn.", record.name);
-                        let _ = with_rate_limit_retry(|| {
-                            adapter.send_message(&event.chat_id, &skill13_msg, None)
-                        })
-                        .await;
-                        return Ok(());
+                //
+                // Phase 41.1 Plan 04 (D-08): resolve the fell-through slash token
+                // against the SkillRegistry via the shared pure resolver (Plan 01).
+                // On a match, ACTIVATE the body into the per-session overlay AND
+                // fire a run turn immediately (one-shot activate+run) — no longer
+                // activate-only. `command_input` already had any @botname suffix
+                // stripped (line ~695); the resolver extracts the trailing args as
+                // the argued-invoke trigger_text (D-02).
+                let snapshot: Option<Arc<SkillRegistry>> =
+                    self.skill_registry.lock().ok().and_then(|g| g.clone());
+                if let Some(registry) = snapshot
+                    && let Some(invocation) = resolve_skill_invocation(&registry, command_input)
+                {
+                    // D-Plan03-05 / D-07: store in per-session overlay so run_agent's
+                    // skill_overlays read site prepends the body to the turn prompt.
+                    if let Ok(mut overlays) = self.skill_overlays.lock() {
+                        overlays
+                            .entry(session_key.clone())
+                            .or_insert_with(Vec::new)
+                            .push((invocation.name.clone(), invocation.body.clone()));
                     }
+                    // Task 2: run-turn meta text replaces the retired activation copy,
+                    // sent via the same with_rate_limit_retry send_message call site
+                    // immediately before the run turn's reply.
+                    let meta_msg = run_turn_meta_text(&invocation.name, &invocation.trigger_text);
+                    let _ = with_rate_limit_retry(|| {
+                        adapter.send_message(&event.chat_id, &meta_msg, None)
+                    })
+                    .await;
+                    // D-08 (T-41.1-04-01): synthesize a run turn whose identity
+                    // inherits from the real event via ..event.clone() — NEVER
+                    // reconstructed from the skill name / user-controlled args.
+                    let synthetic = MessageEvent {
+                        content: invocation.trigger_text.clone(),
+                        ..event.clone()
+                    };
+                    return self.run_agent(&synthetic, adapter, cancel, processed).await;
                 }
                 // D-08: Unknown commands pass through to agent as normal message, preserving attachments
                 return self.run_agent(event, adapter, cancel, processed).await;
@@ -1142,66 +1628,8 @@ impl GatewayMessageHandler {
                 .handle_slash_command(event, adapter, cancel, processed)
                 .await;
         }
-        // Phase 36 (D-02, Pitfall 1) + Phase 36.17.1 (D-01, D-13):
-        //   - if `session_queue` is set (handler built via GatewayRunner): enqueue
-        //     instead of rejecting; cap-hit fires the D-13 Telegram UX (❌ + chat
-        //     reply). Free-text enqueues are SILENT per D-13 — the existing
-        //     UserQueueManager transport-layer 👁 reaction is the visible signal.
-        //   - if `session_queue` is None (handler built directly via ::new(),
-        //     e.g. Phase 36 GW-05 tests at running_agent_guard_tests.rs): keep
-        //     the original AGENT_RUNNING_REJECT_MSG behavior for backward-compat.
-        {
-            let session_key =
-                SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
-            let agent_running = self
-                .session_store
-                .read()
-                .await
-                .get_running_flag(&session_key);
-            if agent_running.load(Ordering::SeqCst) {
-                if let Some(queue) = self.session_queue.as_ref() {
-                    // Phase 36.17.1: enqueue branch. `try_push` is sync — guard
-                    // drops before any await (RESEARCH Pitfall 2 mitigation).
-                    match queue.try_push(&session_key, event.clone()) {
-                        Ok(()) => {
-                            tracing::debug!(
-                                session = %session_key.to_string_key(),
-                                depth = queue.len(&session_key),
-                                "SessionQueue: enqueued event while agent busy (Phase 36.17.1)"
-                            );
-                        }
-                        Err(QueueError::CapacityReached { .. }) => {
-                            // D-13 UX: best-effort ❌ reaction, then chat reply.
-                            // `.ok()` so a reaction failure does not poison the
-                            // chat reply (Telegram may rate-limit reactions).
-                            adapter
-                                .add_reaction(&event.chat_id, &event.message_id, "❌")
-                                .await
-                                .ok();
-                            with_rate_limit_retry(|| {
-                                adapter.send_message(
-                                    &event.chat_id,
-                                    "⏳ Queue is full (128 messages). Wait for the agent to drain before sending more.",
-                                    None,
-                                )
-                            })
-                            .await?;
-                            tracing::warn!(
-                                session = %session_key.to_string_key(),
-                                "SessionQueue: capacity reached, message dropped (Phase 36.17.1)"
-                            );
-                        }
-                    }
-                } else {
-                    // Backward-compat fallback: original Phase 36 reject path.
-                    with_rate_limit_retry(|| {
-                        adapter.send_message(&event.chat_id, AGENT_RUNNING_REJECT_MSG, None)
-                    })
-                    .await?;
-                }
-                return Ok(());
-            }
-        }
+        // Phase 39.1 (R39.1-06): gate removed — semaphore in run_agent handles cap;
+        // over-cap messages stay in SessionQueue via the worker loop's try_acquire.
         self.run_agent(event, adapter, cancel, processed).await
     }
 
@@ -1219,28 +1647,64 @@ impl GatewayMessageHandler {
         cancel: CancellationToken,
         processed: ProcessedAttachments,
     ) -> Result<()> {
-        // Phase 36 (D-06): RAII running-agent guard. Retrieve the per-session flag
-        // and bind it to a RunningAgentGuard at the top of the function body so
-        // Drop fires on every exit path — Ok, Err/?, panic, cancellation.
-        // This single guard covers all 5 call sites of run_agent (D-06 discipline:
-        // one guard inside the function, not 5 guards at call sites — Pitfall 2).
-        let _running_flag = {
-            let session_key =
-                SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
-            self.session_store
-                .read()
-                .await
-                .get_running_flag(&session_key)
-        };
-        let _agent_guard = RunningAgentGuard::new(_running_flag);
+        // Phase 39.1 (R39.1-05): per-turn semaphore permits are acquired by the
+        // per-chat worker loop (runner.rs) BEFORE calling handle_with_multimodal.
+        // run_agent itself does not re-acquire — that would double-consume permits
+        // from the same ConcurrencyLayer. The caller is responsible for holding
+        // the OwnedSemaphorePermits for the duration of this call.
 
-        // Fire MessageReceived hook with real platform and chat_id
+        // Per-turn CancellationToken (R39.1-05): child of the process-level cancel
+        // so that process shutdown propagates, but /stop can cancel just this turn.
+        let turn_cancel = cancel.child_token();
+
+        // Build the session_id string used for TurnEntry + in_flight_warning.
+        // Format matches the CommandContext session_id for gateway sessions.
+        let gw_session_id = format!("gw:{}:{}", event.chat_id, event.sender_id);
+
+        // Register this turn in the TurnRegistry BEFORE any agent work
+        // (register-before-spawn discipline; see registry.rs).
+        let turn_id = TurnId::new_v4();
+        let turn_entry = TurnEntry {
+            turn_id,
+            session_id: gw_session_id.clone(),
+            surface: Surface::Gateway,
+            started_at: std::time::Instant::now(),
+            cancel: turn_cancel.clone(),
+        };
+        self.turn_registry.register(turn_entry).await;
+
+        // RAII deregister guard: spawns an async task to remove the entry on drop.
+        // Covers all exit paths (Ok return, ? propagation, panic).
+        struct TurnGuard {
+            registry: Arc<TurnRegistry>,
+            turn_id: TurnId,
+        }
+        impl Drop for TurnGuard {
+            fn drop(&mut self) {
+                let registry = self.registry.clone();
+                let id = self.turn_id;
+                // tokio::spawn is safe here — we are always inside a tokio runtime.
+                tokio::spawn(async move {
+                    registry.deregister(id).await;
+                });
+            }
+        }
+        let _turn_guard = TurnGuard {
+            registry: self.turn_registry.clone(),
+            turn_id,
+        };
+
+        // Fire MessageReceived hook with real platform and chat_id.
+        // Phase 47.6 Plan 09 (P0-3): report the EVENT's own platform, not a
+        // fixed Telegram literal — external hook consumers use this field as
+        // an audit trail, and a hardcoded value makes every Buzz turn
+        // indistinguishable from a Telegram one in their records.
         if let Some(ref registry) = self.hook_registry {
             let request_id = uuid::Uuid::new_v4().to_string();
             let hook_event = ironhermes_hooks::HookEvent::new(
                 &request_id,
                 ironhermes_hooks::HookEventKind::MessageReceived {
-                    platform: "telegram".to_string(),
+                    platform: event.platform.to_string(),
                     chat_id: event.chat_id.clone(),
                     content_preview: ironhermes_hooks::event::preview(&event.content, 200),
                 },
@@ -1248,11 +1712,25 @@ impl GatewayMessageHandler {
             registry.fire(hook_event);
         }
 
-        // 1. Send initial placeholder message; get message_id for StreamConsumer
-        let placeholder =
-            with_rate_limit_retry(|| adapter.send_message(&event.chat_id, "\u{2588}", None))
-                .await?;
-        let placeholder_id = placeholder.message_id.clone();
+        // 1. Send initial placeholder message; get message_id for StreamConsumer.
+        //
+        // Phase 47.6 Plan 09 (D-13, T-47.6-09-04): on an adapter whose events
+        // are immutable (Buzz), `supports_in_place_edits()` is false — there
+        // is no placeholder to send and nothing to edit later, so the send
+        // is skipped entirely. `placeholder_id` is `None` on that path; every
+        // placeholder-dependent step below (StreamConsumer construction, the
+        // D-10 reinsert edit, and the RC-1 turn-end fallback) branches on
+        // whether a placeholder id is present, NOT on the adapter directly —
+        // this keeps the branch point in exactly one place per call site.
+        let supports_in_place_edits = adapter.supports_in_place_edits();
+        let placeholder_id: Option<String> = if supports_in_place_edits {
+            let placeholder =
+                with_rate_limit_retry(|| adapter.send_message(&event.chat_id, "\u{2588}", None))
+                    .await?;
+            Some(placeholder.message_id.clone())
+        } else {
+            None
+        };
 
         // 2. Spawn typing indicator task (D-16): sends "typing" every 5 seconds
         let typing_cancel = cancel.child_token();
@@ -1272,33 +1750,66 @@ impl GatewayMessageHandler {
         let _ = adapter.send_chat_action(&event.chat_id, "typing").await;
 
         // 3. Get or create session; clone messages immediately to avoid holding lock across await
+        // Per-turn snapshot of model at turn start (R39.1-07, D-06-RISK Pattern 3).
+        // A mid-turn `/model` change only takes effect for the NEXT turn — this turn
+        // runs with `model` frozen here.
         let model = self.config.model.default.clone();
-        let key = SessionKey::new(Platform::Telegram, &event.chat_id).with_user(&event.sender_id);
+        // Per-turn snapshot of active personality overlay (R39.1-07, A3 verification):
+        // The overlay is applied into PromptBuilder below (before any .await) from the
+        // Mutex-guarded map, which is equivalent to snapshotting it here.  Verified:
+        // cmd_personality returns CommandResult::PersonalityApplied and the surface
+        // post-router hook applies the overlay AFTER the handler returns — the
+        // in-flight turn's prompt_builder.set_overlay() call (below) already captures
+        // a snapshot from the Mutex at the moment this turn starts, making mid-turn
+        // /personality safe (RESEARCH §D-06-RISK Resolution).
+        // Phase 47.6 Plan 09 (P0-3, T-47.6-09-02): the session key's platform
+        // comes from the EVENT, not a fixed Telegram literal. Session keys are
+        // the persistence identity — a wrong platform here silently merges
+        // two platforms' conversation histories into one thread (a Buzz
+        // conversation would write into Telegram's session/memory namespace
+        // and both surfaces would read each other's history). `source`
+        // (used for session-store bookkeeping) derives from `key.platform`
+        // immediately below, so it follows automatically once the key is right.
+        let key =
+            SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
         let source = key.platform.to_string();
 
         // Build user message content — incorporate multimodal data
         let user_message = build_user_message(event, processed);
 
-        let mut session_messages = {
+        // Phase 39.1 (R39.1-02): get or create session, add user message, capture
+        // history Arc and starting messages snapshot — all under one write lock.
+        let (mut session_messages, history_arc) = {
             let mut store = self.session_store.write().await;
             let _session = store.get_or_create(key.clone(), &model, &source);
             // Add user message via write-through (persists to SQLite)
             store.add_message_to_session(&key, user_message);
-            store
+            let msgs = store
                 .get(&key)
                 .map(|s| s.messages.clone())
-                .unwrap_or_default()
+                .unwrap_or_default();
+            // Clone the Arc WHILE we hold the write lock so the session definitely exists.
+            // This handle stays valid for the lifetime of this turn regardless of /new
+            // (RESEARCH Pitfall 3: Arc refcount keeps the Vec alive).
+            let arc = store.get(&key).map(|s| s.history_arc());
+            (msgs, arc)
         };
 
         // 4. Build system message via PromptBuilder (loads SOUL.md + project context + memory)
         let cwd = std::env::current_dir().unwrap_or_default();
-        let mut prompt_builder = PromptBuilder::new(&model, "telegram")
+        // Phase 47.6 Plan 09 (P0-3): the prompt surface string follows the
+        // EVENT's own platform, not a fixed "telegram" literal, so a Buzz
+        // turn's system prompt correctly names the buzz surface.
+        let mut prompt_builder = PromptBuilder::new(&model, event.platform.to_string())
             .with_provider(&self.config.model.provider)
             .load_context(&cwd);
-        // Phase 25.3 D-W-2: inject the resolved workspace root so the Telegram
-        // surface renders `[Workspace: <root>]` in the Identity slot, matching
-        // run_chat / run_single. Frozen-snapshot — same Workspace instance for
-        // every per-message handler clone (set by GatewayRunner::set_workspace).
+        // Phase 25.3 D-W-2 (retargeted by Phase 47.6 Plan 09): inject the
+        // resolved workspace root so the CURRENT surface renders
+        // `[Workspace: <root>]` in the Identity slot, matching run_chat /
+        // run_single. Frozen-snapshot — same Workspace instance for every
+        // per-message handler clone (set by GatewayRunner::set_workspace).
+        // This behaviour is not Telegram-specific: it applies to whichever
+        // surface (Telegram, Discord, Slack, Buzz, ...) is running this turn.
         if let Some(ref ws) = self.workspace {
             prompt_builder = prompt_builder.with_workspace_root(&ws.root);
         }
@@ -1331,6 +1842,8 @@ impl GatewayMessageHandler {
         {
             prompt_builder.set_overlay(overlay_text.clone());
         }
+        // Phase 38.1 (D-04/D-05): freeze session timezone into PromptBuilder Timestamp slot.
+        prompt_builder.set_timezone(self.config.agent.timezone.clone());
         let system_msg = prompt_builder.build_system_message();
         // Prepend system message
         let mut messages = vec![system_msg];
@@ -1354,7 +1867,44 @@ impl GatewayMessageHandler {
         let mut body_tx = Some(body_tx);
 
         // 6. Spawn StreamConsumer task
-        let mut consumer = StreamConsumer::new(adapter.clone(), &event.chat_id, &placeholder_id);
+        // Phase 47.6 Plan 09 (D-13): edit-capable adapters keep the exact
+        // pre-existing constructor and placeholder-and-edit behaviour. An
+        // adapter with no in-place-edit support (Buzz) gets the send-once
+        // consumer instead — no placeholder id to hold, and the turn's
+        // entire response publishes once at final flush (see
+        // `StreamConsumer::new_with_mode` / `DeliveryMode::SendOnce`).
+        let mut consumer = match placeholder_id.as_ref() {
+            Some(pid) => StreamConsumer::new(adapter.clone(), &event.chat_id, pid),
+            None => StreamConsumer::new_with_mode(
+                adapter.clone(),
+                &event.chat_id,
+                None,
+                DeliveryMode::SendOnce,
+            )
+            // Phase 47.6 Plan 08 (T-47.6-08-REPLY): thread the reply onto
+            // the triggering message for a Buzz CHANNEL turn only — a DM
+            // turn (`event.chat_type == "dm"`) must never set this, so
+            // `send_dm`'s existing `thread_id` semantics (a plain event id
+            // extra-tag on the rumor) are completely untouched.
+            //
+            // Live UAT fix (47.6 plan 08 restart): thread onto the RESOLVED
+            // THREAD ROOT (`event.thread_id`, computed by
+            // `buzz::resolve_thread_root` on receive), never the triggering
+            // message's own id (`event.message_id`) — a bare "first e-tag"
+            // reply target gets rejected by the Buzz relay
+            // ("root tag does not match thread ancestry") whenever the
+            // triggering message is itself mid-thread. `event.thread_id` is
+            // always `Some` for a Buzz channel message (falls back to the
+            // message's own id when it is itself the thread root), so the
+            // `unwrap_or_else` below is a defensive fallback, never the
+            // common case.
+            .with_reply_to((event.chat_type == "channel").then(|| {
+                event
+                    .thread_id
+                    .clone()
+                    .unwrap_or_else(|| event.message_id.clone())
+            })),
+        };
         let consumer_handle = tokio::spawn(async move {
             let mut tool_rx_open = true;
             loop {
@@ -1434,18 +1984,23 @@ impl GatewayMessageHandler {
         ));
         let extractor_cb = std::sync::Arc::clone(&extractor_gw);
         let stream_tx_clone = stream_tx.clone();
-        let stream_callback: StreamCallback = Box::new(move |delta: &str| {
+        // Wrapped in Option so they can be taken into TurnRequest (Some branch) or
+        // dropped explicitly before consumer_handle.await (else branch). Without this,
+        // dropping only stream_tx/tool_tx leaves stream_tx_clone/tool_tx_clone alive
+        // inside the callbacks, keeping channels open and hanging consumer_handle.await.
+        let mut stream_callback_opt: Option<StreamCallback> = Some(Box::new(move |delta: &str| {
             let scrubbed = scrubber_gw_cb.lock().unwrap().feed(delta);
             let visible = extractor_cb.lock().unwrap().feed(&scrubbed);
             if !visible.is_empty() {
                 let _ = stream_tx_clone.try_send(visible);
             }
-        });
+        }));
 
         let tool_tx_clone = tool_tx.clone();
-        let tool_callback: ToolProgressCallback = Box::new(move |name: &str, _args: &str| {
-            let _ = tool_tx_clone.try_send(name.to_string());
-        });
+        let mut tool_callback_opt: Option<ToolProgressCallback> =
+            Some(Box::new(move |name: &str, _args: &str| {
+                let _ = tool_tx_clone.try_send(name.to_string());
+            }));
 
         // Phase 25.3-15 CR-02: the per-message session_id_str (`gw:<chat_id>:<sender_id>`)
         // feeds hooks / on_session_end and is intentionally distinct from the
@@ -1527,19 +2082,205 @@ impl GatewayMessageHandler {
             }
         });
 
+        // Phase 36.3.8 D-02/D-04/D-05: per-turn messaging + clarify wiring.
+        // Mirrors tts_wiring pattern above. Uses the real `key` SessionKey and the
+        // same `turn_cancel` CancellationToken registered in the TurnEntry so /stop
+        // reaches a suspended clarify (D-06 / T-36.3.8-02). The clarify_registry is
+        // the SAME Arc constructed once in runner.rs and shared between the
+        // callback_query loop (Plan 03) and this per-turn registration (T-36.3.8-ROUTE).
+        // Always Some on Telegram (both dispatchers set); None dispatchers are fine
+        // for surfaces that don't call set_telegram_*_dispatcher.
+        let messaging_wiring = Some(ironhermes_agent::MessagingPerTurnWiring {
+            session_key: key.clone(),
+            message_dispatcher: self.telegram_message_dispatcher.clone(),
+            clarify_dispatcher: self.telegram_clarify_dispatcher.clone(),
+            clarify_registry: self.clarify_registry.clone(),
+            cancel_token: Some(turn_cancel.clone()),
+        });
+
+        // Phase 45 D-11: construct a per-turn GatewayApprovalGate that binds the
+        // coordinator to this turn's approval target. When the agent triggers
+        // NeedsApproval, the gate sends an approval prompt to that target and
+        // awaits the /approve or /deny response. `None` when no coordinator
+        // is wired.
+        //
+        // Phase 47.6 Plan 09 (P0-3, T-47.6-09-01): the target is derived via
+        // `approval_target_for`, NOT `event.chat_id` directly. For every
+        // platform except Buzz this is behaviorally identical to
+        // `event.chat_id` (today's behaviour, preserved exactly). For a Buzz
+        // event that arrived in a CHANNEL, the derivation returns the
+        // sender's own identity instead — see `approval_target_for`'s doc
+        // comment for why (D-14: the prompt must reach the person who ran
+        // the command privately, not the whole channel).
+        let approval_target = approval_target_for(event);
+        let approval_gate_for_turn: Option<std::sync::Arc<dyn ironhermes_core::ApprovalGate>> =
+            self.approval_coordinator.as_ref().map(|coord| {
+                std::sync::Arc::new(crate::approval::GatewayApprovalGate::new(
+                    coord.clone(),
+                    approval_target.clone(),
+                )) as std::sync::Arc<dyn ironhermes_core::ApprovalGate>
+            });
+
+        // Phase 36.3.12 D-08 (Task 3, checker BLOCKER T-36.3.12-25): build a per-turn
+        // terminal intercept that routes LLM-issued `terminal` tool calls through
+        // `ironhermes_hooks::execute_gated_command` — the SAME chokepoint every other
+        // surface uses (Plan 07). This is a MIGRATION off the gateway-local
+        // `crate::shell_exec::shell_exec` helper: that helper never audited its
+        // `Allow` path (Pitfall 3) and never forced approval on a remote backend /
+        // credential-forwarding run (D-08) — leaving the gateway as the one D-08
+        // carve-out this phase exists to close. The gateway's existing
+        // `GatewayApprovalGate` (built above as `approval_gate_for_turn`) is STILL
+        // passed through unchanged — this migration changes the execution/audit
+        // chokepoint, NOT the approval UI (a Warn/NeedsApproval command still reaches
+        // the same operator/Telegram prompt).
+        //
+        // All captured values are Send + Sync + 'static. The closure is stored via
+        // register_intercepted_or_replace in run_turn so the tool stays visible to
+        // the model but its invocation path changes per-turn.
+        //
+        // Phase 45 BL-02 fix (preserved): key the terminal-approval pending entry on
+        // the SAME canonical session id the coordinator + /approve path use
+        // (turn_session_id = the SQLite session UUID), not event.chat_id — chat_id is
+        // still carried separately by GatewayApprovalGate for prompt delivery.
+        let _ti_session = turn_session_id.clone();
+        let _ti_gate = approval_gate_for_turn.clone();
+        let _ti_dcfg = self.config.dangerous_commands.clone();
+        let _ti_audit_cfg = self.config.audit.clone();
+        let _ti_yolo = self.config.autonomous.yolo;
+        let _ti_is_remote = self.config.terminal.backend == "ssh";
+        let _ti_fwd_env_nonempty = !self.config.terminal.forward_env.is_empty();
+        let _ti_terminal_tool = self
+            .agent_runtime
+            .as_ref()
+            .and_then(|rt| rt.terminal_tool_arc());
+        let _ti_chat_id = event.chat_id.clone();
+        let terminal_intercept: Option<ironhermes_tools::registry::InterceptHandler> = {
+            let session_id = _ti_session;
+            let gate = _ti_gate;
+            let dcfg = _ti_dcfg;
+            let audit_cfg = _ti_audit_cfg;
+            let yolo = _ti_yolo;
+            let is_remote_backend = _ti_is_remote;
+            let forward_env_nonempty = _ti_fwd_env_nonempty;
+            let tool = _ti_terminal_tool;
+            let chat_id = _ti_chat_id;
+            Some(std::sync::Arc::new(move |args: serde_json::Value| {
+                let cmd = args
+                    .get("command")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let sid = session_id.clone();
+                let g = gate.clone();
+                let guard = ironhermes_hooks::DangerousCommandGuardrail::from_config(&dcfg);
+                let audit_log = ironhermes_core::AuditLog::load(audit_cfg.clone());
+                let cid = chat_id.clone();
+                let tool = tool.clone();
+                Box::pin(async move {
+                    let outcome = ironhermes_hooks::execute_gated_command(
+                        "terminal",
+                        &cmd,
+                        &guard,
+                        g.as_deref(),
+                        &audit_log,
+                        &sid,
+                        "gateway",
+                        &cid,
+                        yolo,
+                        is_remote_backend,
+                        forward_env_nonempty,
+                        || async move {
+                            match tool {
+                                Some(t) => t.execute(args).await,
+                                None => Err(anyhow::anyhow!(
+                                    "terminal tool not registered on this runtime"
+                                )),
+                            }
+                        },
+                    )
+                    .await;
+                    Ok(outcome.to_string())
+                })
+            }))
+        };
+
+        // Phase 36.3.12 D-08/D-11: build a per-turn execute_code intercept —
+        // mirrors the terminal_intercept block immediately above. Gate-only (D-11):
+        // classify_arg is an EMPTY opaque string (Python source is not shell syntax)
+        // and is_remote_backend/forward_env_nonempty are always false (execute_code
+        // never routes to a remote backend). Every resolution — including
+        // background=true calls — is still audited (D-08/D-12).
+        let _eci_session = turn_session_id.clone();
+        let _eci_gate = approval_gate_for_turn.clone();
+        let _eci_dcfg = self.config.dangerous_commands.clone();
+        let _eci_audit_cfg = self.config.audit.clone();
+        let _eci_yolo = self.config.autonomous.yolo;
+        let _eci_execute_code_tool = self
+            .agent_runtime
+            .as_ref()
+            .and_then(|rt| rt.execute_code_tool_arc());
+        let _eci_chat_id = event.chat_id.clone();
+        let execute_code_intercept: Option<ironhermes_tools::registry::InterceptHandler> = {
+            let session_id = _eci_session;
+            let gate = _eci_gate;
+            let dcfg = _eci_dcfg;
+            let audit_cfg = _eci_audit_cfg;
+            let yolo = _eci_yolo;
+            let tool = _eci_execute_code_tool;
+            let chat_id = _eci_chat_id;
+            Some(std::sync::Arc::new(move |args: serde_json::Value| {
+                let sid = session_id.clone();
+                let g = gate.clone();
+                let guard = ironhermes_hooks::DangerousCommandGuardrail::from_config(&dcfg);
+                let audit_log = ironhermes_core::AuditLog::load(audit_cfg.clone());
+                let cid = chat_id.clone();
+                let tool = tool.clone();
+                Box::pin(async move {
+                    let outcome = ironhermes_hooks::execute_gated_command(
+                        "execute_code",
+                        "", // D-11: opaque — Python source is not shell syntax
+                        &guard,
+                        g.as_deref(),
+                        &audit_log,
+                        &sid,
+                        "gateway",
+                        &cid,
+                        yolo,
+                        false, // D-11: execute_code never routes to a remote backend
+                        false, // D-11: execute_code never forwards credentials cross-boundary
+                        || async move {
+                            match tool {
+                                Some(t) => t.execute(args).await,
+                                None => Err(anyhow::anyhow!(
+                                    "execute_code tool not registered on this runtime"
+                                )),
+                            }
+                        },
+                    )
+                    .await;
+                    Ok(outcome.to_string())
+                })
+            }))
+        };
+
         let agent_result = if let Some(ref rt) = self.agent_runtime {
             let request = TurnRequest {
                 messages,
                 session_id: turn_session_id,
-                cancel_token: None, // gateway has no per-turn cancel today
-                stream: Some(stream_callback),
-                tool_progress: Some(tool_callback),
+                cancel_token: Some(turn_cancel.clone()), // Phase 39.1 R39.1-05: per-turn cancel
+                stream: stream_callback_opt.take(),
+                tool_progress: tool_callback_opt.take(),
                 tool_result: None,
                 trajectory_writer,
                 pressure_tracker: None, // run_turn makes a fresh tracker per turn
                 state_store: Some(state_store_for_turn),
                 compression_count: 0,
-                tts_wiring, // Phase 36.17.7 D-01
+                tts_wiring,                            // Phase 36.17.7 D-01
+                messaging_wiring,                      // Phase 36.3.8 D-02/D-04/D-05
+                turn_id: Some(turn_id),                // Phase 39.2: correlate with TurnRegistry
+                approval_gate: approval_gate_for_turn, // Phase 45 D-11
+                terminal_intercept, // Phase 45 D-11: gated terminal tool override
+                execute_code_intercept, // Phase 36.3.12 D-08/D-11: gated execute_code override
             };
             rt.run_turn(request).await
         } else {
@@ -1566,8 +2307,18 @@ impl GatewayMessageHandler {
             let _ = stream_tx.try_send(tail);
         }
 
-        // 9. The callbacks were moved into TurnRequest; drop the channel senders
-        // so the StreamConsumer observes channel close and flushes its final batch.
+        // 9. Drop callbacks + channel senders so StreamConsumer observes channel
+        // close and flushes its final batch.
+        //
+        // stream_callback_opt / tool_callback_opt capture stream_tx_clone /
+        // tool_tx_clone. When rt.run_turn() is called (Some branch), .take() has
+        // already consumed the Option so both are None here — drop is a no-op.
+        // When agent_runtime is None (else branch), the Options still hold the
+        // callbacks and thus the clones. Dropping here closes all sender clones
+        // so the consumer's recv() returns None and consumer_handle.await completes
+        // instead of hanging (Phase 39.1 bug fix).
+        drop(stream_callback_opt);
+        drop(tool_callback_opt);
         drop(stream_tx);
         drop(tool_tx);
         consumer_handle.await.ok();
@@ -1575,6 +2326,19 @@ impl GatewayMessageHandler {
         // 10. Cancel typing indicator
         cancel.cancel();
         typing_handle.await.ok();
+
+        // RC-1 / REQ-37.2-03: hoist body_rx consumption to a single site BEFORE the
+        // D-10 block so both D-10 and the RC-1 fallback share the same `final_body`
+        // binding. This eliminates Pitfall 1 (double-await of a oneshot) — the D-10
+        // local `body_rx.await` that was previously at line 1681 is removed here.
+        // If the consumer task panicked, `body_rx` returns Err — `unwrap_or_default()`
+        // produces "" which correctly triggers the RC-1 empty-stream path.
+        let final_body = body_rx.await.unwrap_or_default();
+
+        // RC-1 / Pitfall 5: track whether D-10 performed a placeholder re-edit so
+        // the RC-1 fallback below does NOT also touch the placeholder (double-edit
+        // would erase the failed-tag literals D-10 just inserted).
+        let mut placeholder_handled_by_d10 = false;
 
         // Phase 36.17.2.2 D-19: dispatch extracted `<MEDIA: ...>` attachments.
         //
@@ -1591,7 +2355,24 @@ impl GatewayMessageHandler {
         // user's text + media are independent of whether the turn completed
         // cleanly — attachments extracted before an agent error should
         // still be sent).
-        let media_refs = extractor_gw.lock().unwrap().take_attachments();
+        let mut media_refs = extractor_gw.lock().unwrap().take_attachments();
+        // fix(47): deterministic media delivery. The model may wrap the <MEDIA:>
+        // tag in a code fence (which the extractor intentionally passes through
+        // as literal text, NOT an attachment) or reword/drop it entirely. The
+        // image_gen / video tools ALWAYS emit a bare <MEDIA: /path> in their
+        // tool-result text, so append any media referenced by THIS turn's tool
+        // results that the model's own stream did not already surface (deduped
+        // by source) — it then dispatches through the same send_media + D-10
+        // reinsert path below. On the agent-error path (`Err`) there is no
+        // `appended`, so only the stream-extracted refs are sent (unchanged).
+        if let Ok(ref ar) = agent_result {
+            let tool_texts = ar
+                .appended
+                .iter()
+                .filter(|m| m.role == ironhermes_core::types::Role::Tool)
+                .filter_map(|m| m.content_text());
+            crate::media_tag::append_undelivered_media_from_texts(&mut media_refs, tool_texts);
+        }
         if !media_refs.is_empty() {
             if let Some(media_sender) = self.media_sender.as_ref() {
                 let mut failed_tags: Vec<String> = Vec::new();
@@ -1612,18 +2393,28 @@ impl GatewayMessageHandler {
                         }
                     }
                 }
-                if !failed_tags.is_empty() {
+                // Phase 47.6 Plan 09: D-10's re-edit is placeholder-dependent —
+                // guard it on `placeholder_id` being present (edit-capable
+                // adapter). In practice `media_sender` is only ever `Some` on
+                // the Telegram start path today, so this guard is currently
+                // a no-op safety net rather than a live branch, but it keeps
+                // this block correct if a future edit-capable+MediaSender
+                // adapter is added.
+                if !failed_tags.is_empty()
+                    && let Some(placeholder_id) = placeholder_id.as_ref()
+                {
                     // D-10: ONE combined re-edit of the placeholder appending
                     // each failed tag literal on its own line (not one edit
                     // per failure). The final body from `StreamConsumer::flush(true)`
-                    // arrived via the `body_rx` oneshot above; concat the
-                    // appended failed-tag literals, run through
+                    // arrived via the hoisted `final_body` binding above (RC-1
+                    // Option A hoist — the local `body_rx.await` that was here
+                    // has been removed to prevent Pitfall 1 double-await).
+                    // Concat the failed-tag literals, run through
                     // `escape_outside_code_blocks` so the entire reinsert body
                     // satisfies MarkdownV2 (the appended literals contain
                     // paths with `.` / `/` / etc. — reserved chars that the
                     // escape preserves correctly inside link grammar and
                     // escapes outside).
-                    let final_body = body_rx.await.unwrap_or_default();
                     let appended = failed_tags.join("\n");
                     let reinsert_body = if final_body.is_empty() {
                         appended
@@ -1632,7 +2423,7 @@ impl GatewayMessageHandler {
                     };
                     let escaped = crate::markdown_v2::escape_outside_code_blocks(&reinsert_body);
                     if let Err(e) = adapter
-                        .edit_message_markdown_v2(&event.chat_id, &placeholder_id, &escaped)
+                        .edit_message_markdown_v2(&event.chat_id, placeholder_id, &escaped)
                         .await
                     {
                         tracing::error!(
@@ -1642,28 +2433,131 @@ impl GatewayMessageHandler {
                             "D-10 reinsert edit failed; placeholder retains its post-flush body without tag literals"
                         );
                     }
+                    // Pitfall 5: D-10 performed a placeholder edit; RC-1 fallback
+                    // must not also touch the placeholder.
+                    placeholder_handled_by_d10 = true;
                 }
             } else {
+                // Phase 47.6 Plan 09 (D-15): stop dropping agent-emitted media
+                // on platforms with no MediaSender. Keep the existing warn! so
+                // the log record does not regress — it is now accompanied by a
+                // real user-visible message rather than replacing one. This
+                // arm is out of scope for the `Some` branch above (D-10's
+                // per-ref send_media loop, failed-tag accumulation, and
+                // combined re-edit remain Telegram's shipped behaviour,
+                // untouched).
                 tracing::warn!(
                     chat_id = %event.chat_id,
                     ref_count = media_refs.len(),
-                    "media tags emitted on platform without MediaSender — dropping refs (D-18)"
+                    "media tags emitted on platform without MediaSender — sending text notice (D-15)"
                 );
+                let notice = media_fallback_notice(&media_refs);
+                if let Err(e) =
+                    with_rate_limit_retry(|| adapter.send_message(&event.chat_id, &notice, None))
+                        .await
+                {
+                    tracing::error!(
+                        chat_id = %event.chat_id,
+                        error = %e,
+                        "media fallback notice failed to send"
+                    );
+                }
             }
+        }
+
+        // RC-1 / REQ-37.2-01 / REQ-37.2-02 / REQ-37.2-06: turn-end fallback.
+        //
+        // Fires only when the streamed body was empty (D-05 invariant: turns that
+        // streamed text are untouched) AND D-10 did not already re-edit the
+        // placeholder (Pitfall 5 guard).
+        //
+        // Decision tree (mirrors deliver_turn_end_fallback in lib.rs):
+        //   - empty final_body + Some(non-empty final_response) → edit placeholder (REQ-37.2-01)
+        //   - empty final_body + None/empty final_response → delete placeholder (REQ-37.2-02)
+        //   - non-empty final_body → streamed path, emit trace only (REQ-37.2-06)
+        if final_body.trim().is_empty() && !placeholder_handled_by_d10 {
+            // Phase 47.6 Plan 09 (D-13): this whole fallback is
+            // placeholder-dependent — with no placeholder there is nothing
+            // to edit or delete, and an empty turn on a send-once adapter
+            // must simply publish nothing (there is no message to remove,
+            // and publishing an empty-turn notice would itself be a
+            // permanent, unretractable event on an immutable-event surface).
+            match placeholder_id.as_ref() {
+                Some(placeholder_id) => match agent_result {
+                    Ok(ref result) => {
+                        match result.final_response.as_deref() {
+                            Some(fr) if !fr.trim().is_empty() => {
+                                // REQ-37.2-01: edit placeholder with escaped final_response
+                                let escaped = crate::markdown_v2::escape_outside_code_blocks(fr);
+                                let _ = adapter
+                                    .edit_message_markdown_v2(
+                                        &event.chat_id,
+                                        placeholder_id,
+                                        &escaped,
+                                    )
+                                    .await;
+                                tracing::info!(
+                                    had_text = true,
+                                    delivered = true,
+                                    target = %event.chat_id,
+                                    reason = "final_response_fallback",
+                                    "turn-end: delivered via final_response fallback"
+                                );
+                            }
+                            _ => {
+                                // REQ-37.2-02: truly empty turn — delete the placeholder
+                                let _ =
+                                    adapter.delete_message(&event.chat_id, placeholder_id).await;
+                                tracing::warn!(
+                                    had_text = false,
+                                    delivered = false,
+                                    target = %event.chat_id,
+                                    reason = "tool_only_turn",
+                                    "turn-ended-empty: placeholder removed"
+                                );
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Error path handled below in `match agent_result`; skip fallback.
+                    }
+                },
+                None => {
+                    tracing::info!(
+                        had_text = false,
+                        delivered = false,
+                        target = %event.chat_id,
+                        reason = "empty_turn_send_once",
+                        "turn-ended-empty: no placeholder to remove (send-once mode, D-13)"
+                    );
+                }
+            }
+        } else if !final_body.trim().is_empty() {
+            // REQ-37.2-06: normal stream path — body was flushed by consumer
+            tracing::info!(
+                had_text = true,
+                delivered = true,
+                target = %event.chat_id,
+                reason = "streamed",
+                "turn-end: delivered via stream"
+            );
         }
 
         match agent_result {
             Ok(result) => {
                 info!("Agent completed, turns_used={}", result.turns_used);
 
-                // Fire ResponseSent hook with real platform and chat_id
+                // Fire ResponseSent hook with real platform and chat_id.
+                // Phase 47.6 Plan 09 (P0-3): mirrors the MessageReceived hook
+                // above — reports the event's own platform, not a fixed
+                // Telegram literal.
                 if let Some(ref registry) = self.hook_registry
                     && let Some(ref response) = result.final_response
                 {
                     let hook_event = ironhermes_hooks::HookEvent::new(
                         &uuid::Uuid::new_v4().to_string(),
                         ironhermes_hooks::HookEventKind::ResponseSent {
-                            platform: "telegram".to_string(),
+                            platform: event.platform.to_string(),
                             chat_id: event.chat_id.clone(),
                             response_preview: ironhermes_hooks::event::preview(response, 200),
                         },
@@ -1741,10 +2635,30 @@ impl GatewayMessageHandler {
                 // pre-send, and the agent gave up after retries. `appended` is the
                 // round-trip output (assistant turns + matching tool results, in order),
                 // and excludes one-shot pressure-tier system advisories. Compression-safe.
+                //
+                // Phase 39.1 (R39.1-02, D-02): append the full `result.appended` batch
+                // under a SINGLE write-lock acquisition so no concurrent turn can
+                // interleave its messages between ours.  If the session was removed by
+                // a concurrent `/new` before we get here, fall back to the `Arc`-backed
+                // history handle captured at turn start — the Vec stays alive via
+                // refcount (RESEARCH Pitfall 3).  Lock is NEVER held across `.await`.
                 if !result.appended.is_empty() {
                     let mut store = self.session_store.write().await;
-                    for msg in result.appended {
-                        store.add_message_to_session(&key, msg);
+                    let session_still_exists = store.get(&key).is_some();
+                    if session_still_exists {
+                        // Fast path: session is live — add all messages under one write lock.
+                        store.add_messages_batch_to_session(&key, result.appended);
+                    } else {
+                        // Fallback: session removed by /new. Append to Arc-backed Vec so
+                        // this turn's output is not silently dropped (Pitfall 3 mitigation).
+                        drop(store); // release write lock before Arc lock
+                        if let Some(ref arc) = history_arc {
+                            let mut guard = arc.lock().unwrap_or_else(|e| e.into_inner());
+                            for msg in result.appended {
+                                guard.push(msg);
+                            }
+                            // Note: SQLite write-through skipped — session row was ended by /new.
+                        }
                     }
                 }
             }
@@ -1818,67 +2732,20 @@ impl MessageHandler for GatewayMessageHandler {
             let no_attachments = ProcessedAttachments {
                 text_prefix: None,
                 image_data_uri: None,
+                image_cache_path: None,
             };
             return self
                 .handle_slash_command(event, adapter, cancel, no_attachments)
                 .await;
         }
         // Phase 36 (D-02, Pitfall 1) + Phase 36.17.1 (D-01, D-13):
-        // Mirror of `handle_with_multimodal`'s busy-branch behavior (text-only
-        // path — no multimodal attachments forwarded). When `session_queue`
-        // is set, enqueue + D-13 cap-hit UX; otherwise fall back to the
-        // original AGENT_RUNNING_REJECT_MSG path for backward compatibility
-        // with Phase 36 GW-05 reject tests that bypass `set_session_queue`.
-        {
-            let session_key =
-                SessionKey::new(event.platform.clone(), &event.chat_id).with_user(&event.sender_id);
-            let agent_running = self
-                .session_store
-                .read()
-                .await
-                .get_running_flag(&session_key);
-            if agent_running.load(Ordering::SeqCst) {
-                if let Some(queue) = self.session_queue.as_ref() {
-                    match queue.try_push(&session_key, event.clone()) {
-                        Ok(()) => {
-                            tracing::debug!(
-                                session = %session_key.to_string_key(),
-                                depth = queue.len(&session_key),
-                                "SessionQueue: enqueued event while agent busy (Phase 36.17.1)"
-                            );
-                        }
-                        Err(QueueError::CapacityReached { .. }) => {
-                            adapter
-                                .add_reaction(&event.chat_id, &event.message_id, "❌")
-                                .await
-                                .ok();
-                            with_rate_limit_retry(|| {
-                                adapter.send_message(
-                                    &event.chat_id,
-                                    "⏳ Queue is full (128 messages). Wait for the agent to drain before sending more.",
-                                    None,
-                                )
-                            })
-                            .await?;
-                            tracing::warn!(
-                                session = %session_key.to_string_key(),
-                                "SessionQueue: capacity reached, message dropped (Phase 36.17.1)"
-                            );
-                        }
-                    }
-                } else {
-                    with_rate_limit_retry(|| {
-                        adapter.send_message(&event.chat_id, AGENT_RUNNING_REJECT_MSG, None)
-                    })
-                    .await?;
-                }
-                return Ok(());
-            }
-        }
+        // Phase 39.1 (R39.1-06): gate removed — semaphore in run_agent handles cap;
+        // over-cap messages stay in SessionQueue via the worker loop's try_acquire.
         // No multimodal data via this path (text-only fallback)
         let no_attachments = ProcessedAttachments {
             text_prefix: None,
             image_data_uri: None,
+            image_cache_path: None,
         };
         self.run_agent(event, adapter, cancel, no_attachments).await
     }
@@ -1913,15 +2780,84 @@ pub(crate) fn requires_confirm(subcommand: &str, args: &[&str]) -> bool {
     !args.contains(&"confirm")
 }
 
+/// Derive the approval-prompt delivery target for a turn's `MessageEvent`
+/// (Phase 47.6 Plan 09, P0-3 / T-47.6-09-01 / D-14).
+///
+/// For every platform OTHER than Buzz, returns `event.chat_id` — this
+/// preserves today's approval-prompt behaviour exactly and MUST stay the
+/// default arm, so a future platform can never accidentally inherit Buzz's
+/// routing.
+///
+/// For Buzz:
+/// - A direct message: returns `event.chat_id`, which plan 05 sets to the
+///   peer's npub, so the approval prompt returns to the same encrypted DM.
+/// - A channel event (`event.chat_type == "channel"`): returns
+///   `event.sender_id` instead of the channel identifier. `event.sender_id`
+///   on Buzz is the author's pubkey hex, which `parse_buzz_chat_target`
+///   (plan 05) accepts as a direct-message target — so the prompt is
+///   gift-wrapped to the person who ran the command rather than posted where
+///   the whole channel can read it.
+///
+/// D-14 specifies the approval prompt arrives as a DM, and an approval
+/// prompt carries the pending id plus the gated command's description.
+/// Posting that into a channel both discloses what the operator is doing
+/// and hands the pending id to everyone who can then race a reply. Plan 06's
+/// guard rejects channel-borne approval COMMANDS (the inbound half); this
+/// derivation is the other half — it keeps the PROMPT out of the channel in
+/// the first place (the outbound half).
+pub(crate) fn approval_target_for(event: &MessageEvent) -> String {
+    if event.platform == Platform::Buzz && event.chat_type == "channel" {
+        event.sender_id.clone()
+    } else {
+        event.chat_id.clone()
+    }
+}
+
+/// Render a text notice naming every media artifact that could not be
+/// attached on the current turn's surface (Phase 47.6 Plan 09, D-15).
+///
+/// D-15 already settled this for the cron/kanban delivery arms: when there
+/// is no `MediaSender` installed for the current platform, an agent-emitted
+/// `<MEDIA: ...>` tag must not vanish silently with only a log line — it
+/// becomes a text message naming the artifact and its local path (or URL),
+/// with a one-line header explaining why the recipient is reading a path
+/// instead of seeing the image. This is deliberately a text notice, NOT a
+/// `MediaSender` implementation — D-15 leaves the URL-embed / relay-blob /
+/// file-server choice open for a later plan (P2-2).
+pub(crate) fn media_fallback_notice(refs: &[crate::media_tag::MediaRef]) -> String {
+    let mut lines = vec![
+        "Media could not be attached on this platform — the artifact(s) below \
+         were generated but are not shown inline:"
+            .to_string(),
+    ];
+    for r in refs {
+        let location = match &r.source {
+            crate::media_tag::MediaSource::Path(p) => p.display().to_string(),
+            crate::media_tag::MediaSource::Url(u) => u.clone(),
+        };
+        lines.push(format!("- {location}"));
+    }
+    lines.join("\n")
+}
+
 fn build_user_message(event: &MessageEvent, processed: ProcessedAttachments) -> ChatMessage {
     if let Some(data_uri) = processed.image_data_uri {
         // Vision input: multipart message with optional caption + image
         let mut parts = Vec::new();
-        let text = if !event.content.is_empty() {
+        let mut text = if !event.content.is_empty() {
             event.content.clone()
         } else {
             "What is in this image?".to_string()
         };
+        // When the inbound photo was persisted to the image cache, tell the model the
+        // exact PATH so it can drive `video_animate` (image-to-video). `video_animate`
+        // base64-encodes a file path or fetches a public URL — it CANNOT consume the
+        // inline vision data URI, so a path is mandatory for image-to-video.
+        if let Some(ref path) = processed.image_cache_path {
+            text.push_str(&format!(
+                "\n\n[System: the attached image is saved at \"{path}\". If the user wants a video generated from this image, call the video_animate tool with image_url set to that exact path. Do NOT paste image data inline.]"
+            ));
+        }
         parts.push(ContentPart::Text { text });
         parts.push(ContentPart::ImageUrl {
             image_url: ImageUrl {
@@ -2243,5 +3179,362 @@ mod tests {
         let _ = handler
             .command_router
             .resolve("/help", &ironhermes_core::types::Platform::Telegram);
+    }
+
+    // ── Phase 41.1 Plan 04: Telegram one-shot skill activate+run (D-08) ──────
+
+    use ironhermes_core::{MessageEvent, MessageResponse};
+
+    /// Build an isolated `SkillRegistry` containing a single skill on disk.
+    /// The returned `TempDir` MUST be kept alive: `read_content` reads the file.
+    fn skill_run_test_registry(name: &str, body: &str) -> (tempfile::TempDir, Arc<SkillRegistry>) {
+        let dir = tempfile::tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let skill_dir = skills_dir.join(name);
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: a test skill\n---\n{body}"),
+        )
+        .unwrap();
+        let registry = SkillRegistry::load_with_paths(&[skills_dir]);
+        (dir, Arc::new(registry))
+    }
+
+    /// Mock adapter recording every `send_message` call as `(chat_id, content)`.
+    ///
+    /// It returns `Err` for the `run_agent` placeholder block ("█") so the heavy
+    /// `run_agent` body short-circuits at its first `.await?` (handler.rs ~1596)
+    /// BEFORE any network / AgentRuntime work — while still proving, via the
+    /// recorded placeholder send, that `run_agent` was actually entered with the
+    /// synthesized event's inherited `chat_id`.
+    struct RecordingAdapter {
+        sends: Arc<std::sync::Mutex<Vec<(String, String)>>>,
+    }
+
+    const PLACEHOLDER_BLOCK: &str = "\u{2588}";
+
+    #[async_trait]
+    impl PlatformAdapter for RecordingAdapter {
+        fn platform(&self) -> Platform {
+            Platform::Telegram
+        }
+        async fn send_message(
+            &self,
+            chat_id: &str,
+            content: &str,
+            _thread_id: Option<&str>,
+        ) -> Result<MessageResponse> {
+            self.sends
+                .lock()
+                .unwrap()
+                .push((chat_id.to_string(), content.to_string()));
+            if content == PLACEHOLDER_BLOCK {
+                // Short-circuit run_agent right after the placeholder send.
+                anyhow::bail!("test short-circuit after placeholder");
+            }
+            Ok(MessageResponse {
+                message_id: "mock-msg-id".to_string(),
+                chat_id: chat_id.to_string(),
+                platform: Platform::Telegram,
+            })
+        }
+        async fn send_message_markdown_v2(
+            &self,
+            chat_id: &str,
+            content: &str,
+            thread_id: Option<&str>,
+        ) -> Result<MessageResponse> {
+            self.send_message(chat_id, content, thread_id).await
+        }
+        async fn edit_message(&self, _c: &str, _m: &str, _content: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn edit_message_markdown_v2(&self, _c: &str, _m: &str, _content: &str) -> Result<()> {
+            Ok(())
+        }
+        async fn delete_message(&self, _c: &str, _m: &str) -> Result<()> {
+            Ok(())
+        }
+        fn is_running(&self) -> bool {
+            true
+        }
+    }
+
+    fn skill_run_event(content: &str, chat_id: &str, sender_id: &str) -> MessageEvent {
+        MessageEvent {
+            platform: Platform::Telegram,
+            message_id: "orig-msg-42".to_string(),
+            chat_id: chat_id.to_string(),
+            sender_id: sender_id.to_string(),
+            content: content.to_string(),
+            attachments: Vec::new(),
+            thread_id: None,
+            chat_type: "dm".to_string(),
+            chat_name: None,
+            sender_name: None,
+            replied_to_id: None,
+        }
+    }
+
+    fn no_attachments() -> ProcessedAttachments {
+        ProcessedAttachments {
+            text_prefix: None,
+            image_data_uri: None,
+            image_cache_path: None,
+        }
+    }
+
+    /// D-08 (real SKILL-13 path): a bare `/<skill>` whose token is not a builtin
+    /// command falls through to the NotFound fallback, which must ACTIVATE the
+    /// skill body into the session overlay AND fire `run_agent` immediately —
+    /// not merely push an overlay and reply with the retired activation copy.
+    ///
+    /// Proof that `run_agent` actually fired (not overlay-only): the mock adapter
+    /// records the `run_agent` placeholder ("█") send. Proof of identity
+    /// inheritance (T-41.1-04-01): that placeholder was sent to the ORIGINAL
+    /// event's `chat_id`, i.e. the synthesized event carried the real identity
+    /// via `..event.clone()`, never one reconstructed from the skill name/args.
+    #[tokio::test(flavor = "current_thread")]
+    async fn skill_notfound_fallback_fires_run_agent() {
+        let mut handler = make_handler();
+        let (_dir, registry) = skill_run_test_registry("uat-run-skill", "UAT SKILL BODY");
+        handler.set_skill_registry(registry);
+
+        let sends = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let adapter: Arc<dyn PlatformAdapter> = Arc::new(RecordingAdapter {
+            sends: sends.clone(),
+        });
+
+        let chat_id = "chat-inherit-777";
+        let sender_id = "user-inherit-XYZ";
+        let event = skill_run_event("/uat-run-skill", chat_id, sender_id);
+
+        // Err from the placeholder short-circuit is expected and ignored — the
+        // assertions are on the recorded sends.
+        let _ = handler
+            .handle_slash_command(&event, adapter, CancellationToken::new(), no_attachments())
+            .await;
+
+        let recorded = sends.lock().unwrap().clone();
+        // run_agent fired: its placeholder block was sent.
+        let placeholder = recorded
+            .iter()
+            .find(|(_, content)| content == PLACEHOLDER_BLOCK)
+            .expect("run_agent must fire (placeholder '█' send) — not overlay-only");
+        // Identity inherited: the placeholder went to the ORIGINAL chat_id.
+        assert_eq!(
+            placeholder.0, chat_id,
+            "synthesized run turn must inherit chat_id from the real event (..event.clone())"
+        );
+
+        // Activation still happens: the skill body is in the per-session overlay,
+        // keyed by the real event identity, so run_agent's skill_overlays read
+        // site prepends it to the turn's system prompt.
+        let session_key = SessionKey::new(Platform::Telegram, chat_id).with_user(sender_id);
+        let overlays = handler.skill_overlays.lock().unwrap();
+        let session_overlays = overlays
+            .get(&session_key)
+            .expect("skill overlay activated for the real session identity");
+        assert!(
+            session_overlays
+                .iter()
+                .any(|(n, b)| n == "uat-run-skill" && b.contains("UAT SKILL BODY")),
+            "the SKILL.md body must be activated into the session overlay"
+        );
+    }
+
+    /// Source assertion (defensive SkillActivated arm — mirrors the Web plan's
+    /// Pitfall-3 source coverage). `dispatch()` never constructs `SkillActivated`
+    /// today, so this arm cannot be reached via normal routing; assert at the
+    /// source level that BOTH skill-invoke sites synthesize a `MessageEvent` via
+    /// `..event.clone()` and fire `self.run_agent(&synthetic, ...)` — neither
+    /// returns `Ok(())` without running the agent.
+    #[test]
+    fn skill_activated_fires_run_agent() {
+        let src = include_str!("handler.rs");
+        // Needles are assembled from split fragments so this test's OWN source
+        // never contains the verbatim strings it scans for — otherwise
+        // `include_str!("handler.rs")` would match the assertions themselves and
+        // pass vacuously (the "tests that verify their own assumptions" trap).
+        let build_needle = ["build_skill_inv", "ocation("].concat();
+        let run_fire_needle = ["self.run_agent(&sy", "nthetic"].concat();
+        let content_needle = ["content: invocation.trigger_", "text.clone()"].concat();
+
+        // The SkillActivated arm computes the run-turn trigger via the shared resolver.
+        assert!(
+            src.contains(build_needle.as_str()),
+            "SkillActivated arm must compute trigger_text via build_skill_invocation"
+        );
+        // Both invoke sites (SkillActivated arm + NotFound fallback) synthesize an
+        // identity-inheriting event and fire run_agent — neither returns Ok(())
+        // without running the agent.
+        let run_fire_sites = src.matches(run_fire_needle.as_str()).count();
+        assert!(
+            run_fire_sites >= 2,
+            "both skill-invoke sites must fire run_agent on a synthesized event — found {run_fire_sites}"
+        );
+        // Identity: the synthesized event only sets `content` and inherits every
+        // identity field via `..event.clone()`, never reconstructed from name/args.
+        assert!(
+            src.contains(content_needle.as_str()),
+            "synthesized skill-run event content must be the resolved trigger_text"
+        );
+        assert!(
+            src.contains("..event.clone()"),
+            "synthesized skill-run event must inherit identity via ..event.clone()"
+        );
+    }
+
+    /// Task 2 (UI-SPEC Copywriting Contract / §C): the retired "activated for
+    /// this turn" copy is gone; the run-turn meta text follows the shared
+    /// bare/argued/40-char-truncation contract (identical to the Web/TUI chip).
+    #[test]
+    fn skill_run_turn_meta_text_bare_and_argued() {
+        // Bare invoke: trigger_text is the run-now instruction → no args suffix.
+        let bare_trigger = "Run the gsd-config skill now: carry out its instructions immediately.";
+        assert_eq!(
+            run_turn_meta_text("gsd-config", bare_trigger),
+            "▶ Ran skill /gsd-config"
+        );
+        // Argued invoke ≤ 40 chars: quoted verbatim, no ellipsis.
+        assert_eq!(
+            run_turn_meta_text("gsd-config", "show me the config"),
+            "▶ Ran skill /gsd-config · \"show me the config\""
+        );
+        // Argued invoke > 40 chars: char-safe truncation with an inner ellipsis.
+        let long = "a".repeat(45);
+        let head = "a".repeat(40);
+        assert_eq!(
+            run_turn_meta_text("gsd-config", &long),
+            format!("▶ Ran skill /gsd-config · \"{head}…\"")
+        );
+
+        // The retired activation copy no longer appears anywhere in the source.
+        // Needle assembled from fragments so this assertion doesn't match itself.
+        let retired = ["activated for ", "this turn"].concat();
+        let src = include_str!("handler.rs");
+        assert!(
+            !src.contains(retired.as_str()),
+            "the retired skill-activation copy must be gone"
+        );
+    }
+
+    // ── Phase 47.6 Plan 09 (P0-3 / D-14): approval_target_for ───────────────
+
+    fn approval_test_event(
+        platform: Platform,
+        chat_type: &str,
+        chat_id: &str,
+        sender_id: &str,
+    ) -> MessageEvent {
+        MessageEvent {
+            platform,
+            message_id: "m1".to_string(),
+            chat_id: chat_id.to_string(),
+            sender_id: sender_id.to_string(),
+            content: "test".to_string(),
+            attachments: Vec::new(),
+            thread_id: None,
+            chat_type: chat_type.to_string(),
+            chat_name: None,
+            sender_name: None,
+            replied_to_id: None,
+        }
+    }
+
+    #[test]
+    fn approval_target_for_telegram_is_the_chat_id() {
+        let channel = approval_test_event(Platform::Telegram, "channel", "chat-1", "user-1");
+        let dm = approval_test_event(Platform::Telegram, "dm", "chat-2", "user-2");
+        assert_eq!(approval_target_for(&channel), "chat-1");
+        assert_eq!(approval_target_for(&dm), "chat-2");
+    }
+
+    #[test]
+    fn approval_target_for_buzz_channel_is_the_sender() {
+        let event = approval_test_event(
+            Platform::Buzz,
+            "channel",
+            "channel-id-abc",
+            "sender-hex-123",
+        );
+        assert_eq!(approval_target_for(&event), "sender-hex-123");
+    }
+
+    #[test]
+    fn approval_target_for_buzz_dm_is_the_chat_id() {
+        let event = approval_test_event(Platform::Buzz, "dm", "npub1peer...", "sender-hex-123");
+        assert_eq!(approval_target_for(&event), "npub1peer...");
+    }
+
+    #[test]
+    fn approval_target_never_equals_a_buzz_channel_id() {
+        // Table over several channel identifier shapes — the derived target
+        // must never equal the channel id, regardless of its literal form.
+        let channel_ids = [
+            "channel-id-abc",
+            "h-tag-value",
+            "0123456789abcdef",
+            "#general",
+        ];
+        for channel_id in channel_ids {
+            let event =
+                approval_test_event(Platform::Buzz, "channel", channel_id, "sender-hex-xyz");
+            let target = approval_target_for(&event);
+            assert_ne!(
+                target, channel_id,
+                "approval target must never equal the Buzz channel id (got {target})"
+            );
+            assert_eq!(target, "sender-hex-xyz");
+        }
+    }
+
+    // ── Phase 47.6 Plan 09 (D-15): media_fallback_notice ─────────────────────
+
+    fn path_ref(path: &str) -> crate::media_tag::MediaRef {
+        crate::media_tag::MediaRef {
+            source: crate::media_tag::MediaSource::Path(std::path::PathBuf::from(path)),
+            kind: crate::media_tag::MediaKind::Photo,
+            original_tag_text: format!("<MEDIA: {path}>"),
+        }
+    }
+
+    #[test]
+    fn media_fallback_notice_names_the_local_path() {
+        let refs = vec![path_ref("/tmp/plan09-image.png")];
+        let notice = media_fallback_notice(&refs);
+        assert!(
+            notice.contains("/tmp/plan09-image.png"),
+            "notice must name the artifact's local path: {notice}"
+        );
+    }
+
+    #[test]
+    fn media_fallback_notice_names_every_ref() {
+        let refs = vec![path_ref("/tmp/plan09-a.png"), path_ref("/tmp/plan09-b.mp4")];
+        let notice = media_fallback_notice(&refs);
+        assert!(
+            notice.contains("/tmp/plan09-a.png"),
+            "first ref missing: {notice}"
+        );
+        assert!(
+            notice.contains("/tmp/plan09-b.mp4"),
+            "second ref missing: {notice}"
+        );
+    }
+
+    #[test]
+    fn media_fallback_notice_url_source_names_the_url() {
+        let refs = vec![crate::media_tag::MediaRef {
+            source: crate::media_tag::MediaSource::Url("https://example.com/x.png".to_string()),
+            kind: crate::media_tag::MediaKind::Photo,
+            original_tag_text: "<MEDIA: https://example.com/x.png>".to_string(),
+        }];
+        let notice = media_fallback_notice(&refs);
+        assert!(
+            notice.contains("https://example.com/x.png"),
+            "notice must name the URL source: {notice}"
+        );
     }
 }

@@ -20,6 +20,7 @@
 use std::path::PathBuf;
 use tempfile::TempDir;
 
+use ironhermes_kanban::schema::SCHEMA_VERSION;
 use ironhermes_kanban::store::{CreateTaskOptions, KanbanStore};
 use rusqlite::Connection;
 
@@ -61,14 +62,17 @@ fn fresh_db_has_v3_columns() {
         names
     );
 
-    // schema_version row is at 3.
+    // schema_version row lands at the current SCHEMA_VERSION (4 as of Phase 46.4).
     let version: i64 = store
         .conn
         .query_row("SELECT version FROM schema_version LIMIT 1", [], |r| {
             r.get(0)
         })
         .expect("read schema_version");
-    assert_eq!(version, 3, "fresh DB must land at schema_version 3");
+    assert_eq!(
+        version, SCHEMA_VERSION,
+        "fresh DB must land at current SCHEMA_VERSION"
+    );
 }
 
 /// Migration-ladder path: a hand-crafted v2 DB (has goal_mode / goal_max_turns /
@@ -134,6 +138,12 @@ fn v2_db_upgrades_to_v3() {
         "v2 → v3 migration must add goal_toolset column; actual columns: {:?}",
         names
     );
+    // Phase 46.4: the ladder continues on to v4, adding output_path too.
+    assert!(
+        names.contains(&"output_path"),
+        "v2 → v4 full migration must add output_path column; actual columns: {:?}",
+        names
+    );
 
     let version: i64 = store
         .conn
@@ -142,8 +152,8 @@ fn v2_db_upgrades_to_v3() {
         })
         .expect("read schema_version after migration");
     assert_eq!(
-        version, 3,
-        "schema_version row must be bumped to 3 after migration"
+        version, SCHEMA_VERSION,
+        "schema_version row must be bumped to current SCHEMA_VERSION after migration"
     );
 
     // Existing rows must be preserved. goal_toolset is NULL on pre-v3 rows.
@@ -181,7 +191,10 @@ fn migration_is_idempotent() {
             r.get(0)
         })
         .expect("read schema_version on second open");
-    assert_eq!(version, 3, "schema_version must remain 3 on re-open");
+    assert_eq!(
+        version, SCHEMA_VERSION,
+        "schema_version must remain at current SCHEMA_VERSION on re-open"
+    );
 
     // goal_toolset column must still be present.
     let cols = read_tasks_columns(&store.conn);

@@ -289,13 +289,14 @@ async fn spawn_test_worker(
                 .await;
 
             // M1 sidecar consumption — one take_multimodal per pop (FIFO lockstep).
-            let (text_prefix, image_data_uri) = uqm
+            let (text_prefix, image_data_uri, image_cache_path) = uqm
                 .take_multimodal(&session_key)
                 .await
-                .unwrap_or((None, None));
+                .unwrap_or((None, None, None));
             let processed = ironhermes_gateway::multimodal::ProcessedAttachments {
                 text_prefix,
                 image_data_uri,
+                image_cache_path,
             };
 
             // M5: real handler call path. Under RecordingFailingAdapter,
@@ -360,6 +361,7 @@ async fn test_5_same_chat_messages_emit_5_eye_reactions_and_fifo_order_through_h
             make_event_full("chat_burst", "msg_1", "first", "user_burst"),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -390,6 +392,7 @@ async fn test_5_same_chat_messages_emit_5_eye_reactions_and_fifo_order_through_h
                     &format!("body_{}", i),
                     "user_burst",
                 ),
+                None,
                 None,
                 None,
             )
@@ -502,7 +505,7 @@ async fn test_dispatch_returns_worker_spawned_only_for_first_per_session_key() {
 
     // First dispatch for (chat_A, u1) — new worker.
     let r1 = uqm
-        .dispatch(make_event_full("chat_A", "m1", "x", "u1"), None, None)
+        .dispatch(make_event_full("chat_A", "m1", "x", "u1"), None, None, None)
         .await
         .unwrap();
     assert!(
@@ -513,7 +516,7 @@ async fn test_dispatch_returns_worker_spawned_only_for_first_per_session_key() {
 
     // Second dispatch for same triple — existing worker.
     let r2 = uqm
-        .dispatch(make_event_full("chat_A", "m2", "y", "u1"), None, None)
+        .dispatch(make_event_full("chat_A", "m2", "y", "u1"), None, None, None)
         .await
         .unwrap();
     assert!(
@@ -524,7 +527,7 @@ async fn test_dispatch_returns_worker_spawned_only_for_first_per_session_key() {
 
     // Different sender_id on same chat → different SessionKey → fresh worker (D-13).
     let r3 = uqm
-        .dispatch(make_event_full("chat_A", "m3", "z", "u2"), None, None)
+        .dispatch(make_event_full("chat_A", "m3", "z", "u2"), None, None, None)
         .await
         .unwrap();
     assert!(
@@ -535,7 +538,7 @@ async fn test_dispatch_returns_worker_spawned_only_for_first_per_session_key() {
 
     // Different chat_id → different SessionKey → fresh worker.
     let r4 = uqm
-        .dispatch(make_event_full("chat_B", "m4", "w", "u1"), None, None)
+        .dispatch(make_event_full("chat_B", "m4", "w", "u1"), None, None, None)
         .await
         .unwrap();
     assert!(
@@ -573,6 +576,7 @@ async fn test_worker_exit_dispatch_race() {
     let r1 = uqm
         .dispatch(
             make_event_full("chat_race", "race_1", "first", "u1"),
+            None,
             None,
             None,
         )
@@ -616,6 +620,7 @@ async fn test_worker_exit_dispatch_race() {
     let r2 = uqm
         .dispatch(
             make_event_full("chat_race", "race_2", "second", "u1"),
+            None,
             None,
             None,
         )
@@ -665,6 +670,7 @@ async fn test_multimodal_payload_roundtrips_through_sidecar_to_handler() {
             make_event_full("chat_mm", "mm_1", "first", "u_mm"),
             Some("PREFIX_A".to_string()),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -687,6 +693,7 @@ async fn test_multimodal_payload_roundtrips_through_sidecar_to_handler() {
             make_event_full("chat_mm", "mm_2", "second", "u_mm"),
             None,
             Some("data:image/png;base64,IMG_B".to_string()),
+            None,
         )
         .await
         .unwrap();
@@ -698,6 +705,7 @@ async fn test_multimodal_payload_roundtrips_through_sidecar_to_handler() {
             make_event_full("chat_mm", "mm_3", "third", "u_mm"),
             Some("PREFIX_C".to_string()),
             Some("data:image/png;base64,IMG_C".to_string()),
+            None,
         )
         .await
         .unwrap();
@@ -801,6 +809,7 @@ async fn test_dispatch_returns_capacity_reached_at_128() {
             make_event_full("chat_cap", "overflow", "boom", "u1"),
             None,
             None,
+            None,
         )
         .await;
     assert!(
@@ -892,6 +901,7 @@ async fn test_slash_command_bypasses_per_chat_worker() {
     let processed = ironhermes_gateway::multimodal::ProcessedAttachments {
         text_prefix: None,
         image_data_uri: None,
+        image_cache_path: None,
     };
 
     let start = Instant::now();
@@ -1038,6 +1048,7 @@ async fn test_queue_command_wakes_parked_worker() {
             make_event_full("chat_qw", "free_1", "initial free-text body", "u_qw"),
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1107,6 +1118,7 @@ async fn test_queue_command_wakes_parked_worker() {
         let processed = ironhermes_gateway::multimodal::ProcessedAttachments {
             text_prefix: None,
             image_data_uri: None,
+            image_cache_path: None,
         };
         let _ = handler
             .handle_with_multimodal(

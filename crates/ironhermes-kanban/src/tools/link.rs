@@ -78,7 +78,7 @@ impl Tool for KanbanLinkTool {
                     },
                     "board": {
                         "type": "string",
-                        "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
+                        "description": "Board slug to target. Omit to use IRONHERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
                     }
                 },
                 "required": ["parent_id", "child_id"]
@@ -87,7 +87,7 @@ impl Tool for KanbanLinkTool {
     }
 
     fn is_available(&self) -> bool {
-        std::env::var("HERMES_KANBAN_TASK").is_ok() || self.explicit_enable
+        crate::kanban_env("TASK").is_some() || self.explicit_enable
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<String> {
@@ -187,19 +187,19 @@ mod tests {
     fn is_available_respects_env() {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
-            std::env::remove_var("HERMES_KANBAN_TASK");
+            std::env::remove_var("IRONHERMES_KANBAN_TASK");
         }
         let store = make_store();
         let tool = KanbanLinkTool::new(store.clone(), false);
         assert!(!tool.is_available());
 
         unsafe {
-            std::env::set_var("HERMES_KANBAN_TASK", "t_test");
+            std::env::set_var("IRONHERMES_KANBAN_TASK", "t_test");
         }
         let tool2 = KanbanLinkTool::new(store.clone(), false);
         assert!(tool2.is_available());
         unsafe {
-            std::env::remove_var("HERMES_KANBAN_TASK");
+            std::env::remove_var("IRONHERMES_KANBAN_TASK");
         }
 
         let tool3 = KanbanLinkTool::new(store, true);

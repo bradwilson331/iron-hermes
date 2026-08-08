@@ -21,10 +21,10 @@ pub mod tarball;
 pub mod well_known;
 
 /// Process-global serialization lock for tests that mutate the shared
-/// `HERMES_HOME` env var. Every `HERMES_HOME`-touching test across all modules
+/// `IRONHERMES_HOME` env var. Every `IRONHERMES_HOME`-touching test across all modules
 /// MUST hold this single lock — independent per-module mutexes do NOT serialize
 /// against each other, so concurrent tests in different modules previously
-/// stomped each other's `HERMES_HOME` and produced flaky cross-module failures.
+/// stomped each other's `IRONHERMES_HOME` and produced flaky cross-module failures.
 ///
 /// Returns the underlying `tokio::sync::Mutex` so callers can choose between:
 /// - `test_env_lock().lock().await` in async tests (no clippy::await_holding_lock)

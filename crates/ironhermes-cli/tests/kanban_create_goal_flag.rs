@@ -6,7 +6,7 @@
 //! correct shape (D-01: `goal: bool` defaults `false`; `goal_max_turns: u32`
 //! defaults `20` via `default_value_t`). They do NOT exercise `cmd_create`
 //! end-to-end against a live DB — that path requires a tempdir-scoped
-//! HERMES_HOME and is covered by the kanban-crate producer tests
+//! IRONHERMES_HOME and is covered by the kanban-crate producer tests
 //! (`tests/goal_mode_persistence.rs` from Plan 01).
 //!
 //! NOTE: `KanbanCommands` does NOT derive `Debug` (Phase 36.3.7 baseline; not
@@ -152,7 +152,7 @@ fn clap_no_goal_default_is_false() {
 // ---------------------------------------------------------------------------
 //
 // This test uses ironhermes-kanban's KanbanStore directly (not the cmd_create
-// wrapper) because cmd_create resolves a board context from HERMES_HOME, which
+// wrapper) because cmd_create resolves a board context from IRONHERMES_HOME, which
 // would either contaminate the developer's real DB or require process-wide env
 // mutation. The kanban-crate persistence tests (Plan 01,
 // goal_mode_persistence.rs) already exercise the full producer path. This test

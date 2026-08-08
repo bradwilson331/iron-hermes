@@ -1,6 +1,6 @@
 //! `kanban_show` — read the current task and return the worker_context envelope (D-21).
 //!
-//! Defaults `task_id` to `$HERMES_KANBAN_TASK` when called with no args so workers
+//! Defaults `task_id` to `$IRONHERMES_KANBAN_TASK` when called with no args so workers
 //! can simply call `kanban_show({})` without threading the task id explicitly.
 //!
 //! The `worker_context` envelope shape (reference.md "How workers interact with the board"):
@@ -56,7 +56,7 @@ impl Tool for KanbanShowTool {
 
     fn description(&self) -> &str {
         "Read the current Kanban task: title, body, prior attempts, parent handoffs, comments, \
-         workspace. Defaults task_id to $HERMES_KANBAN_TASK when omitted."
+         workspace. Defaults task_id to $IRONHERMES_KANBAN_TASK when omitted."
     }
 
     fn schema(&self) -> ToolSchema {
@@ -68,11 +68,11 @@ impl Tool for KanbanShowTool {
                 "properties": {
                     "task_id": {
                         "type": "string",
-                        "description": "Task ID to inspect. Omit to use $HERMES_KANBAN_TASK (worker mode default)."
+                        "description": "Task ID to inspect. Omit to use $IRONHERMES_KANBAN_TASK (worker mode default)."
                     },
                     "board": {
                         "type": "string",
-                        "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
+                        "description": "Board slug to target. Omit to use IRONHERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
                     }
                 },
                 "required": []
@@ -80,10 +80,10 @@ impl Tool for KanbanShowTool {
         )
     }
 
-    /// Available when `HERMES_KANBAN_TASK` is set (worker mode) or `explicit_enable` is true
-    /// (orchestrator mode) — D-20.
+    /// Available when `IRONIRONHERMES_KANBAN_TASK` is set (worker mode) or `explicit_enable` is true
+    /// (orchestrator mode) — D-20. Dual-read: also accepts legacy `IRONHERMES_KANBAN_TASK`.
     fn is_available(&self) -> bool {
-        std::env::var("HERMES_KANBAN_TASK").is_ok() || self.explicit_enable
+        crate::kanban_env("TASK").is_some() || self.explicit_enable
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<String> {
@@ -97,18 +97,18 @@ impl Tool for KanbanShowTool {
             ));
         }
 
-        // Resolve task_id: from arg, then from HERMES_KANBAN_TASK env.
+        // Resolve task_id: from arg, then from IRONIRONHERMES_KANBAN_TASK env (dual-read via kanban_env).
         let task_id = match args
             .get("task_id")
             .and_then(|v| v.as_str())
             .map(String::from)
-            .or_else(|| std::env::var("HERMES_KANBAN_TASK").ok())
+            .or_else(|| crate::kanban_env("TASK"))
         {
             Some(t) => t,
             None => {
                 return Ok(crate::tools::common::reject_with_board(
                     "missing_task_id",
-                    "task_id is required when $HERMES_KANBAN_TASK is not set",
+                    "task_id is required when $IRONHERMES_KANBAN_TASK is not set",
                     Some(&board_ctx),
                 ));
             }
@@ -267,7 +267,7 @@ mod tests {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Remove the env var to ensure a clean state.
         unsafe {
-            std::env::remove_var("HERMES_KANBAN_TASK");
+            std::env::remove_var("IRONHERMES_KANBAN_TASK");
         }
         let store = make_store();
         let tool = KanbanShowTool::new(store.clone(), false);
@@ -277,15 +277,15 @@ mod tests {
         );
 
         unsafe {
-            std::env::set_var("HERMES_KANBAN_TASK", "t_test123");
+            std::env::set_var("IRONHERMES_KANBAN_TASK", "t_test123");
         }
         let tool2 = KanbanShowTool::new(store.clone(), false);
         assert!(
             tool2.is_available(),
-            "should be available when HERMES_KANBAN_TASK is set"
+            "should be available when IRONHERMES_KANBAN_TASK is set"
         );
         unsafe {
-            std::env::remove_var("HERMES_KANBAN_TASK");
+            std::env::remove_var("IRONHERMES_KANBAN_TASK");
         }
 
         let tool3 = KanbanShowTool::new(store, true);

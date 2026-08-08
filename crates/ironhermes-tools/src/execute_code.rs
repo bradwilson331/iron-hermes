@@ -158,6 +158,14 @@ impl Tool for ExecuteCodeTool {
         )
     }
 
+    /// D-04 (Phase 41.3): must sit strictly above `ExecConfig.timeout_secs`
+    /// (default 300, `config.rs:3110`) so the sandbox's own bound fires
+    /// first and returns its structured error, with this registry ceiling
+    /// as a backstop that should never win the race.
+    fn timeout_secs(&self) -> Option<u64> {
+        Some(360)
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
         let code = args["code"]
             .as_str()
@@ -455,6 +463,69 @@ mod tests {
             msg.contains("ProcessRegistry"),
             "error must mention ProcessRegistry: {msg}"
         );
+    }
+
+    // --- Phase 36.3.12 D-08/D-11 — chokepoint composition test ---------------
+
+    /// D-08/D-11: proves the SAME composition every surface's `execute_code_intercept`
+    /// closure uses (Plan 07) — wrapping `ExecuteCodeTool::execute` in
+    /// `ironhermes_hooks::execute_gated_command` with an opaque (empty) `classify_arg`
+    /// — produces exactly one `AuditLog` entry for the call. This is not testing the
+    /// intercept wiring itself (that lives in ironhermes-cli/ironhermes-gateway,
+    /// outside this crate) but proves the compositional CONTRACT this crate's
+    /// `execute_code` dispatch must satisfy: it is safe to wrap with zero changes to
+    /// `Sandbox::run` (D-11 gate-only — no `create_environment` call exists anywhere
+    /// in this file), and every resolution — Allow included — is audited (D-08).
+    #[tokio::test]
+    async fn execute_code_audit() {
+        let rpc_registry = Arc::new(ToolRegistry::new());
+        let config = ExecConfig::default();
+        let tool = ExecuteCodeTool::new(rpc_registry, config, None);
+
+        let guard = ironhermes_hooks::DangerousCommandGuardrail::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = ironhermes_core::AuditLog::with_path(
+            dir.path().join("audit.jsonl"),
+            ironhermes_core::AuditConfig::default(),
+        );
+
+        let outcome = ironhermes_hooks::execute_gated_command(
+            "execute_code",
+            "", // D-11: opaque — Python source is not shell syntax
+            &guard,
+            None,
+            &log,
+            "sess-audit",
+            "test",
+            "chat-audit",
+            false,
+            false, // D-11: execute_code never routes to a remote backend
+            false, // D-11: execute_code never forwards credentials cross-boundary
+            || async move { tool.execute(json!({"code": "print('audited')"})).await },
+        )
+        .await;
+
+        let ran_output = match outcome {
+            ironhermes_hooks::GatedOutcome::Ran(s) => s,
+            other => panic!("expected Ran, got {other:?}"),
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&ran_output).expect("execute_code output is valid JSON");
+        assert_eq!(parsed["status"], "success");
+        assert!(parsed["output"].as_str().unwrap().contains("audited"));
+
+        let contents = std::fs::read_to_string(dir.path().join("audit.jsonl"))
+            .expect("audit.jsonl must exist");
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "an execute_code call must produce exactly one audit entry (D-08 Allow-path floor)"
+        );
+        let entry: ironhermes_core::AuditEntry =
+            serde_json::from_str(lines[0]).expect("valid AuditEntry JSON");
+        assert_eq!(entry.tool, "execute_code");
+        assert_eq!(entry.decision, "allowed");
     }
 
     /// background=true with a registry spawns into the registry and returns

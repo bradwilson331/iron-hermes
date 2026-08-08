@@ -49,7 +49,7 @@ use ironhermes_tools::memory_tool::SharedMemoryManager;
 
 use crate::agent_loop::{StreamCallback, ToolProgressCallback, ToolResultCallback};
 use crate::agent_wiring::attach_context_engine;
-use crate::any_client::{build_main_client, wire_fallback_if_configured};
+use crate::any_client::{build_main_client, build_role_client, wire_fallback_if_configured};
 use crate::app_runtime_factory::{
     AppRuntimeBundle, AppRuntimeFactoryInput, DelegateTaskWiring, build_app_runtime_bundle,
 };
@@ -100,6 +100,25 @@ pub struct TtsPerTurnWiring {
     pub audio_dispatcher: Option<Arc<dyn ironhermes_tools::AudioDispatcher>>,
 }
 
+/// Phase 36.3.8 D-02/D-04/D-05: lightweight per-turn messaging + clarify descriptor.
+///
+/// Built by each surface handler and threaded into `TurnRequest` so
+/// `AgentRuntime::run_turn` can call `ToolRegistry::register_messaging_tools` on
+/// the durable `bundle.registry` before the agent loop runs.
+///
+/// `message_dispatcher: None` — correct for Local platform (stdout in tool).
+/// `clarify_dispatcher: None` — drives the stdout numbered fallback in ClarifyTool.
+/// `clarify_registry` MUST be the same Arc held by the gateway callback loop
+/// (T-36.3.8-ROUTE: one map, one awaiter resolution path).
+/// `cancel_token: None` — creates a never-firing arm (WASM-safe via unwrap_or_default).
+pub struct MessagingPerTurnWiring {
+    pub session_key: ironhermes_core::SessionKey,
+    pub message_dispatcher: Option<Arc<dyn ironhermes_tools::MessageDispatcher>>,
+    pub clarify_dispatcher: Option<Arc<dyn ironhermes_tools::ClarifyDispatcher>>,
+    pub clarify_registry: Arc<ironhermes_tools::clarify_registry::PendingClarifyRegistry>,
+    pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+}
+
 /// Everything that legitimately varies turn-to-turn. The channel builds the
 /// message vector (session stores differ per channel) and supplies the per-turn
 /// callbacks + identifiers.
@@ -125,6 +144,51 @@ pub struct TurnRequest {
     /// `Some(...)` causes `run_turn` to call `register_tts_tools` on
     /// `bundle.registry` at the top of the turn, before the agent loop runs.
     pub tts_wiring: Option<TtsPerTurnWiring>,
+    /// Phase 36.3.8 D-02/D-04/D-05: per-turn messaging + clarify wiring.
+    /// `None` skips messaging tool registration (backwards-compatible: existing
+    /// callers that don't set this field compile with Option::None via Default).
+    /// `Some(...)` causes `run_turn` to call `register_messaging_tools` on
+    /// `bundle.registry` at the top of the turn, before the agent loop runs.
+    pub messaging_wiring: Option<MessagingPerTurnWiring>,
+    /// Phase 39.2: black-box recorder run_id. Set by the surface layer before
+    /// calling `run_turn`; `None` = recorder generates a fresh UUID for this turn.
+    pub turn_id: Option<uuid::Uuid>,
+    /// Phase 45 D-11: per-turn approval gate. `None` skips gate injection (the
+    /// NeedsApproval arm in AgentLoop is fail-closed: GateUnavailable returned).
+    /// Gateway surfaces supply a `GatewayApprovalGate` bound to the coordinator
+    /// + chat_id for this turn; other surfaces leave this `None`.
+    pub approval_gate: Option<std::sync::Arc<dyn ironhermes_core::ApprovalGate>>,
+    /// Phase 45 D-11: per-turn terminal tool intercept handler. When `Some`, the
+    /// gateway installs a gated override (via `register_intercepted_or_replace`)
+    /// so LLM-issued `terminal` tool calls route through `handle_shell_exec` instead
+    /// of the default `TerminalTool::execute`. Other surfaces leave this `None`.
+    pub terminal_intercept: Option<ironhermes_tools::registry::InterceptHandler>,
+    /// Phase 36.3.12 D-08/D-11: per-turn `execute_code` tool intercept handler.
+    /// Mirrors `terminal_intercept` exactly — when `Some`, `run_turn` installs it
+    /// via `register_intercepted_or_replace("execute_code", ...)` so LLM-issued
+    /// `execute_code` calls route through the caller's gating closure (built around
+    /// `ironhermes_hooks::execute_gated_command`, gate-only per D-11 — the Python
+    /// script still runs on the local `Sandbox`). `None` skips gating (no surface in
+    /// this phase should leave this `None` in production — see
+    /// `AgentRuntime::execute_code_tool_arc` for the underlying tool the closure
+    /// wraps).
+    pub execute_code_intercept: Option<ironhermes_tools::registry::InterceptHandler>,
+}
+
+/// Vision auto-routing (fix): true when any message carries inline image content
+/// (a `ContentPart::ImageUrl` inside a `Parts` body). Such a turn must run on a
+/// vision-capable model, or the provider rejects it with a 400 ("Image content is
+/// not supported by this model"). Used by [`AgentRuntime::run_turn`] to route
+/// image-bearing turns to the configured `roles.vision` model.
+fn messages_contain_image(messages: &[ChatMessage]) -> bool {
+    use ironhermes_core::{ContentPart, MessageContent};
+    messages.iter().any(|m| {
+        matches!(
+            &m.content,
+            Some(MessageContent::Parts(parts))
+                if parts.iter().any(|p| matches!(p, ContentPart::ImageUrl { .. }))
+        )
+    })
 }
 
 /// Durable, channel-agnostic agent unit. Build once via [`from_config`], then
@@ -156,8 +220,24 @@ pub struct AgentRuntime {
     /// Phase 36.2 CR-04: paths the PressureTracker mtime-snapshots so a
     /// SOUL.md / AGENTS.md / CLAUDE.md edit fires the cache-break warning.
     /// Resolved once at runtime construction (cwd-derived candidates + the
-    /// $HERMES_HOME identity files). Empty list = no context-file tracking.
+    /// $IRONHERMES_HOME identity files). Empty list = no context-file tracking.
     context_file_paths: Vec<PathBuf>,
+    /// Phase 39.2: black-box event recorder. `None` = recording disabled.
+    /// Set via `with_bb_recorder()` after `from_config`; initialized by
+    /// `app_runtime_factory.rs` for all production surfaces.
+    pub bb_recorder: Option<Arc<ironhermes_blackbox::BlackBoxRecorder>>,
+    /// Phase 36.3.12 D-08/D-10: the regular-tool `Arc` for `"terminal"`, captured
+    /// ONCE here (before any turn ever runs) so every surface's gating closure —
+    /// built fresh per turn in `TurnRequest.terminal_intercept` — can invoke the
+    /// SAME already-configured tool instance (preserving its `ProcessRegistry`
+    /// wiring for `background=true`) on turn 2+, after
+    /// `register_intercepted_or_replace` has permanently moved `"terminal"` out of
+    /// the registry's regular `tools` map. `None` if the factory never registered a
+    /// "terminal" tool (defensive; production always registers one).
+    terminal_tool_arc: Option<Arc<dyn ironhermes_tools::registry::Tool>>,
+    /// Phase 36.3.12 D-08/D-11: same capture as `terminal_tool_arc`, for
+    /// `"execute_code"`.
+    execute_code_tool_arc: Option<Arc<dyn ironhermes_tools::registry::Tool>>,
 }
 
 impl AgentRuntime {
@@ -238,7 +318,7 @@ impl AgentRuntime {
         .await?;
 
         // Phase 36.2 CR-04: resolve the context files PressureTracker will
-        // mtime-snapshot. Mirrors PromptBuilder's load order: HERMES_HOME
+        // mtime-snapshot. Mirrors PromptBuilder's load order: IRONHERMES_HOME
         // identity files + every CONTEXT_CANDIDATES filename under cwd. Paths
         // need not exist at startup — agent_loop tolerates missing files.
         let mut context_file_paths: Vec<PathBuf> = Vec::new();
@@ -248,6 +328,23 @@ impl AgentRuntime {
         for filename in crate::context_loader::CONTEXT_CANDIDATES {
             context_file_paths.push(cwd_stored.join(filename));
         }
+
+        // Phase 39.2: take bb_recorder from the bundle so we share a single
+        // writer task (one JSONL file, one flush loop) across the runtime lifetime.
+        // build_app_runtime_bundle initializes it using get_hermes_home().
+        let bb_recorder = bundle.bb_recorder.clone();
+
+        // Phase 36.3.12 D-08/D-10/D-11: capture the regular-tool Arcs for
+        // "terminal" and "execute_code" BEFORE any surface ever calls
+        // `register_intercepted_or_replace` (which permanently moves the name from
+        // the `tools` map into `intercepts` on first use). Captured once here so
+        // every turn's gating closure — built fresh per turn by CLI/TUI/gateway —
+        // can invoke the SAME already-configured tool instance even on turn 2+,
+        // when the registry no longer has these names in its regular `tools` map.
+        let (terminal_tool_arc, execute_code_tool_arc) = {
+            let reg = bundle.registry.read().await;
+            (reg.get_arc("terminal"), reg.get_arc("execute_code"))
+        };
 
         Ok(Self {
             config,
@@ -262,7 +359,23 @@ impl AgentRuntime {
             previous_model: std::sync::Mutex::new(None),
             session_turn_count: std::sync::atomic::AtomicUsize::new(0),
             context_file_paths,
+            bb_recorder,
+            terminal_tool_arc,
+            execute_code_tool_arc,
         })
+    }
+
+    /// Phase 36.3.12 D-08/D-10: the regular `"terminal"` tool instance captured at
+    /// construction time, for surfaces building a gating closure (`terminal_intercept`)
+    /// that needs to invoke the real dispatch (preserving its `ProcessRegistry`
+    /// wiring for `background=true`) after the name has been intercepted.
+    pub fn terminal_tool_arc(&self) -> Option<Arc<dyn ironhermes_tools::registry::Tool>> {
+        self.terminal_tool_arc.clone()
+    }
+
+    /// Phase 36.3.12 D-08/D-11: same as `terminal_tool_arc`, for `"execute_code"`.
+    pub fn execute_code_tool_arc(&self) -> Option<Arc<dyn ironhermes_tools::registry::Tool>> {
+        self.execute_code_tool_arc.clone()
     }
 
     /// Run one top-level agent turn. This is the budget lifecycle boundary:
@@ -273,6 +386,22 @@ impl AgentRuntime {
     pub async fn run_turn(&self, mut req: TurnRequest) -> Result<AgentResult> {
         // ── budget lifecycle: refill before the turn ──────────────────────
         self.budget.reset();
+
+        // ── Phase 39.2: black-box turn instrumentation ────────────────────
+        let bb_start = std::time::Instant::now();
+        let bb_run_id = req.turn_id.unwrap_or_else(uuid::Uuid::new_v4);
+        if let Some(ref rec) = self.bb_recorder {
+            rec.try_record(ironhermes_blackbox::BlackBoxRecorder::make_event(
+                bb_run_id,
+                ironhermes_blackbox::Stage::Input,
+                "turn_started",
+                "hermes-2026-06",
+                serde_json::json!({
+                    "session_id": &req.session_id,
+                    "turn_id": bb_run_id.to_string(),
+                }),
+            ));
+        }
 
         // Phase 36.17.7 D-01: register TTS tools for this turn's session.
         // `ToolRegistry::register` uses `HashMap::insert` (upsert by name — verified
@@ -287,6 +416,101 @@ impl AgentRuntime {
                 self.config.clone(),
             );
             drop(reg);
+        }
+
+        // Phase 36.3.8 D-02/D-04/D-05: register send_message + clarify per turn.
+        // Mirrors tts_wiring block above exactly. ToolRegistry::register is an
+        // upsert by name so repeated turns idempotently replace the prior instances.
+        // The clarify_registry Arc MUST be the same instance held by the gateway
+        // callback loop so a button tap resolves the correct awaiter (T-36.3.8-ROUTE).
+        if let Some(ref wiring) = req.messaging_wiring {
+            let mut reg = self.bundle.registry.write().await;
+            reg.register_messaging_tools(
+                wiring.session_key.clone(),
+                wiring.message_dispatcher.clone(),
+                wiring.clarify_dispatcher.clone(),
+                wiring.clarify_registry.clone(),
+                wiring.cancel_token.clone(),
+                self.config.clone(),
+            );
+            drop(reg);
+        }
+
+        // Phase 36.3.12 WR-05: track whether this turn installs a session-scoped
+        // intercept (terminal and/or execute_code) so it can be evicted below once
+        // the turn completes, on both the success and failure paths. Without this,
+        // `ToolRegistry.intercepts[name].1[session_id]` — holding this turn's
+        // captured closure (Arc<Config>, tool Arc, gate Arc) — is retained for the
+        // process lifetime once installed by `register_intercepted_or_replace`
+        // below; on the gateway's single shared `Arc<AgentRuntime>`, every distinct
+        // session that ever ran a gated turn grew this map by one entry forever
+        // (CR-01's own cleanup method, `unregister_intercepts_for_session`, was
+        // fully implemented and unit-tested but never wired to a caller — WR-05).
+        let mut session_intercept_installed: Option<String> = None;
+
+        // Phase 45 D-11: per-turn terminal intercept (gateway surface only).
+        // `register_intercepted_or_replace` steals the schema from the regular
+        // `terminal` tool if it is already registered, so the LLM still sees the
+        // tool — but calls are now routed through `handle_shell_exec` (with the
+        // DangerousCommandGuardrail + ApprovalGate) instead of TerminalTool::execute.
+        if let Some(handler) = req.terminal_intercept {
+            let fallback = ironhermes_core::ToolSchema::new(
+                "terminal",
+                "Execute a shell command (gateway-gated; dangerous commands require approval)",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "Shell command to execute" }
+                    },
+                    "required": ["command"]
+                }),
+            );
+            let mut reg = self.bundle.registry.write().await;
+            reg.register_intercepted_or_replace("terminal", &req.session_id, fallback, handler);
+            drop(reg);
+            session_intercept_installed = Some(req.session_id.clone());
+        }
+
+        // Phase 36.3.12 D-08/D-11: per-turn execute_code intercept — mirrors the
+        // terminal_intercept block immediately above. `register_intercepted_or_replace`
+        // steals the schema from the regular `execute_code` tool if it is already
+        // registered, so the LLM still sees the tool — but calls are now routed
+        // through the caller's gating closure (execute_gated_command, gate-only per
+        // D-11) instead of `ExecuteCodeTool::execute` directly.
+        if let Some(handler) = req.execute_code_intercept {
+            let fallback = ironhermes_core::ToolSchema::new(
+                "execute_code",
+                "Execute a Python script in an isolated sandbox (gated; every resolution is \
+                 audited). The script can call agent tools via 'from hermes_tools import \
+                 <tool>'. Returns stdout, stderr, and exit code. Set background=true to run as \
+                 a tracked background process (no sandbox; returns {process_id, pid} \
+                 immediately).",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "Python script source code to execute."
+                        },
+                        "background": {
+                            "type": "boolean",
+                            "description": "When true, spawn the script as a tracked background process (no sandbox, no RPC).",
+                            "default": false
+                        },
+                        "watch_patterns": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Regex patterns to match against stdout/stderr lines (background mode only).",
+                            "default": []
+                        }
+                    },
+                    "required": ["code"]
+                }),
+            );
+            let mut reg = self.bundle.registry.write().await;
+            reg.register_intercepted_or_replace("execute_code", &req.session_id, fallback, handler);
+            drop(reg);
+            session_intercept_installed = Some(req.session_id.clone());
         }
 
         let context_length = self.resolver.resolve_for_main().context_length();
@@ -310,6 +534,22 @@ impl AgentRuntime {
                 Some(merged)
             }
         };
+
+        // Phase 39.2: emit routing stage event after provider/model is resolved.
+        if let Some(ref rec) = self.bb_recorder {
+            let provider_name = self.resolver.main_provider();
+            let model_name = self.resolver.resolve_for_main().default_model.clone();
+            rec.try_record(ironhermes_blackbox::BlackBoxRecorder::make_event(
+                bb_run_id,
+                ironhermes_blackbox::Stage::Routing,
+                "model_selected",
+                "hermes-2026-06",
+                serde_json::json!({
+                    "provider_name": provider_name,
+                    "model_id": model_name,
+                }),
+            ));
+        }
 
         // ── Phase 34b D-09/D-11: centralized @-ref preprocessing ─────────
         // Runs ONCE here, BEFORE attach_context_engine/agent.run, over the
@@ -402,8 +642,41 @@ impl AgentRuntime {
             }
         };
 
+        // Vision auto-routing (fix): when this turn carries image content, run it
+        // on the configured `roles.vision` model instead of the active chat model.
+        // The active model may not support vision (e.g. kimi-k3), which the
+        // provider rejects with a 400 "Image content is not supported by this
+        // model". Falls back to the main client when the turn has no image OR no
+        // vision role is resolvable — the provider error is then surfaced as-is
+        // (now visible via the full-chain error surfacing).
+        let (turn_client, vision_routed_to) = if messages_contain_image(&req.messages) {
+            match build_role_client(&self.resolver, "vision") {
+                Ok(Some(vision_client)) => {
+                    let vm = vision_client.model().to_string();
+                    tracing::info!(
+                        vision_model = %vm,
+                        active_model = %self.client.model(),
+                        "vision auto-route: turn carries image content; routing to the vision-role model"
+                    );
+                    (vision_client, Some(vm))
+                }
+                _ => (self.client.clone(), None),
+            }
+        } else {
+            (self.client.clone(), None)
+        };
+
+        // Transparency (user request): never switch models silently — surface the
+        // auto-routed vision model as a leading note in the turn's own stream so
+        // the user sees which model answered. Display-only (emitted through the
+        // stream callback; not persisted into conversation history). No-op when
+        // the surface supplied no stream callback (e.g. non-streaming callers).
+        if let (Some(vm), Some(cb)) = (&vision_routed_to, req.stream.as_ref()) {
+            cb(&format!("_[image → vision model `{vm}`]_\n\n"));
+        }
+
         let mut agent = AgentLoop::new(
-            self.client.clone(),
+            turn_client,
             self.bundle.registry.clone(),
             self.max_iterations,
         )
@@ -412,7 +685,15 @@ impl AgentRuntime {
         .with_browser_session(self.bundle.browser_session.clone())
         .with_active_skills(self.bundle.active_skills.clone())
         .with_compression(context_length, self.config.agent.context_compression)
-        .with_compression_count(req.compression_count);
+        .with_compression_count(req.compression_count)
+        // Phase 36.3.12 CR-01 (D-08/D-10): give AgentLoop the turn's REAL session_id.
+        // Unconditional because `TurnRequest.session_id` is a plain `String`, never an
+        // `Option`. Without this, `AgentLoop.session_id` stays `None` on every
+        // production `run_turn` path, and every session-scoped intercept lookup added
+        // for "terminal"/"execute_code" would miss (fail-closed) on every tool call —
+        // Plan 09's own orientation note #5. `req.session_id` is cloned here because it
+        // is moved later (into `attach_context_engine`, below).
+        .with_session_id(req.session_id.clone());
 
         if let Some(ref mgr) = self.memory_manager {
             agent = agent.with_memory_manager(mgr.clone());
@@ -456,6 +737,14 @@ impl AgentRuntime {
             // it is intentionally omitted here. If a future surface needs
             // session_search exposed as a model tool, register it once on
             // AgentRuntime construction — not per-turn in run_turn.
+        }
+
+        // Phase 45 D-11: inject approval gate if the surface provided one.
+        // Fail-closed: when None, the NeedsApproval arm in AgentLoop returns
+        // GateUnavailable (consistent with the headless-CLI and web surfaces
+        // that never wire a gate). Moving the gate out of req avoids cloning.
+        if let Some(gate) = req.approval_gate {
+            agent = agent.with_approval_gate(gate);
         }
 
         // Phase 36.2 code-review fix CR-02: wire provider name + api-key hash
@@ -518,6 +807,11 @@ impl AgentRuntime {
             self.memory_manager.clone(),
         );
 
+        // Phase 39.2: thread bb_recorder + bb_run_id into AgentLoop for Model-stage events.
+        if let Some(ref rec) = self.bb_recorder {
+            agent = agent.with_bb_recorder(Arc::clone(rec), bb_run_id);
+        }
+
         // ── Phase 34b Plan 02 (D-07/D-09): central per-turn engine hooks ─────
         // Invoked ONCE here — the single per-turn locus — never per-surface.
         // Grab a handle to the attached engine (None on surfaces that disable
@@ -540,7 +834,53 @@ impl AgentRuntime {
         // Each surface (CLI, gateway, web) reads this field after run_turn returns and
         // renders the --- Context Warnings --- block out-of-band (not embedded in the
         // model-bound message text — that embedding was removed in Phase 34b Plan 03).
-        let mut out = agent.run(req.messages).await?;
+        let run_result = agent.run(req.messages).await;
+
+        // Phase 39.2: emit output or error stage event after run completes.
+        match &run_result {
+            Ok(result) => {
+                if let Some(ref rec) = self.bb_recorder {
+                    rec.try_record(ironhermes_blackbox::BlackBoxRecorder::make_event(
+                        bb_run_id,
+                        ironhermes_blackbox::Stage::Output,
+                        "turn_completed",
+                        "hermes-2026-06",
+                        serde_json::json!({
+                            "finished_naturally": result.finished_naturally,
+                            "total_latency_ms": bb_start.elapsed().as_millis() as u64,
+                        }),
+                    ));
+                }
+            }
+            Err(e) => {
+                if let Some(ref rec) = self.bb_recorder {
+                    rec.try_record(ironhermes_blackbox::BlackBoxRecorder::make_event(
+                        bb_run_id,
+                        ironhermes_blackbox::Stage::Error,
+                        "turn_failed",
+                        "hermes-2026-06",
+                        serde_json::json!({
+                            "error_kind": e.to_string(),
+                            "total_latency_ms": bb_start.elapsed().as_millis() as u64,
+                        }),
+                    ));
+                }
+            }
+        }
+        // Phase 36.3.12 WR-05: evict this turn's session-scoped intercept(s) now that
+        // the turn has fully completed — `agent.run` above was awaited to completion,
+        // so no further intercept dispatch for this session_id can occur until the
+        // NEXT `run_turn` call re-installs it at the top of this function. Runs on
+        // both the success and failure paths (placed before the `?` below), because
+        // a failed turn leaves the closure captured in `ToolRegistry.intercepts` just
+        // as a successful one would.
+        if let Some(session_id) = session_intercept_installed {
+            let mut reg = self.bundle.registry.write().await;
+            reg.unregister_intercepts_for_session(&session_id);
+            drop(reg);
+        }
+
+        let mut out = run_result?;
 
         // Phase 34b Plan 02 (D-09): post-run per-turn usage hook. MUST appear
         // AFTER agent.run (asserted in invariants_34b).
@@ -604,6 +944,16 @@ impl AgentRuntime {
     pub fn mcp_manager(&self) -> Option<&Arc<ironhermes_mcp::McpManager>> {
         self.bundle.mcp_manager.as_ref()
     }
+    /// Phase 39.2: attach a black-box recorder. Called by `app_runtime_factory`
+    /// after `from_config`; `None` by default (recording disabled).
+    pub fn with_bb_recorder(
+        mut self,
+        recorder: Arc<ironhermes_blackbox::BlackBoxRecorder>,
+    ) -> Self {
+        self.bb_recorder = Some(recorder);
+        self
+    }
+
     /// Returns the merged `ToolsConfig` (config.tools with ALL_TOOLSETS defaults
     /// filled in). Needed by run_gateway to construct the `ToolsetSessionHandle`
     /// from the same baseline the registry filter uses.
@@ -625,6 +975,29 @@ impl AgentRuntime {
     /// the process so parallel test runs don't collide.
     #[cfg(any(test, feature = "test-support"))]
     pub fn for_tests() -> Self {
+        Self::for_tests_with_base_url("http://localhost:0")
+    }
+
+    /// Like [`Self::for_tests`], but the `AnyClient` points at `base_url`
+    /// instead of the unreachable `localhost:0` sink (Phase 47.6 Plan 09).
+    ///
+    /// This lets an integration test stand up a `wiremock::MockServer`
+    /// serving a canned chat-completions SSE stream and drive a REAL
+    /// `AgentRuntime::run_turn` end-to-end — real `AgentLoop`, real tool
+    /// registry, real hook registry — against that canned response, instead
+    /// of hand-driving the production composition (the approach
+    /// `telegram_media_delivery.rs` uses when a network response cannot be
+    /// simulated; see that file's module doc for why a `Fake` `AnyClient`
+    /// variant or an invasive delta-injection point was rejected there).
+    /// Still gated `#[cfg(any(test, feature = "test-support"))]` — this adds
+    /// no new non-test code path.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_tests_with_base_url(base_url: impl Into<String>) -> Self {
+        Self::for_tests_inner(base_url.into())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn for_tests_inner(base_url: String) -> Self {
         use crate::app_runtime_factory::AppRuntimeBundle;
         use ironhermes_core::{Config, ProviderResolver, SkillRegistry};
         use ironhermes_hooks::HookRegistry;
@@ -638,10 +1011,13 @@ impl AgentRuntime {
                 .expect("ProviderResolver::build with default Config must succeed in test context"),
         );
 
-        // Use ChatCompletions client pointing to localhost:0 — it won't connect
-        // but provides a valid AnyClient for struct construction.
+        // Use ChatCompletions client pointing to `base_url`. The zero-arg
+        // `for_tests()` passes "http://localhost:0" (won't connect, but
+        // provides a valid AnyClient for struct construction);
+        // `for_tests_with_base_url` lets a caller point this at a real
+        // (test-only) HTTP endpoint, e.g. a `wiremock::MockServer`.
         let client = crate::AnyClient::ChatCompletions(crate::client::LlmClient::new(
-            "http://localhost:0",
+            base_url,
             "test-key",
             "test-model",
         ));
@@ -671,6 +1047,7 @@ impl AgentRuntime {
             browser_session,
             mcp_manager: None,
             merged_tools: ironhermes_core::config::ToolsConfig::default(),
+            bb_recorder: None, // Phase 39.2: disabled in test helpers
         };
 
         let subagent_registry = Arc::new(RwLock::new(
@@ -690,6 +1067,11 @@ impl AgentRuntime {
             previous_model: std::sync::Mutex::new(None),
             session_turn_count: std::sync::atomic::AtomicUsize::new(0),
             context_file_paths: Vec::new(),
+            bb_recorder: None, // Phase 39.2: disabled in test helpers
+            // Phase 36.3.12 D-08: this test helper builds a minimal registry with
+            // no "terminal"/"execute_code" tools registered — no capture needed.
+            terminal_tool_arc: None,
+            execute_code_tool_arc: None,
         }
     }
 
@@ -723,6 +1105,62 @@ mod tests {
 
     /// Source text for this file — used by position-guard assertions below.
     const SOURCE: &str = include_str!("agent_runtime.rs");
+
+    /// Vision auto-routing (fix): the image detector fires only for a message
+    /// that actually carries a `ContentPart::ImageUrl` in a `Parts` body.
+    #[test]
+    fn messages_contain_image_detects_image_parts() {
+        use ironhermes_core::{ChatMessage, ContentPart, ImageUrl, MessageContent, Role};
+        let mk = |content: MessageContent| ChatMessage {
+            role: Role::User,
+            content: Some(content),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            is_recall_context: false,
+        };
+        // text-only (both the plain-Text and a Parts-of-only-text form) → no image
+        assert!(!messages_contain_image(&[mk(MessageContent::Text(
+            "hi".into()
+        ))]));
+        assert!(!messages_contain_image(&[mk(MessageContent::Parts(vec![
+            ContentPart::Text { text: "x".into() },
+        ]))]));
+        // Parts carrying an ImageUrl → image present
+        assert!(messages_contain_image(&[mk(MessageContent::Parts(vec![
+            ContentPart::Text {
+                text: "look".into(),
+            },
+            ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,AAAA".into(),
+                    detail: None,
+                },
+            },
+        ]))]));
+    }
+
+    /// Wiring guard (mirrors the budget-reset position guard): `run_turn` MUST
+    /// select the `roles.vision` client for image-bearing turns, gated on
+    /// `messages_contain_image`, BEFORE constructing `AgentLoop::new`. Prevents
+    /// the auto-route from silently going inert in a future refactor.
+    #[test]
+    fn run_turn_routes_image_turns_to_vision_role() {
+        let route_pos = SOURCE
+            .find("build_role_client(&self.resolver, \"vision\")")
+            .expect("run_turn must route image turns via build_role_client(.., \"vision\")");
+        let loop_pos = SOURCE
+            .find("AgentLoop::new(")
+            .expect("AgentLoop::new( must be present in run_turn");
+        assert!(
+            route_pos < loop_pos,
+            "vision auto-route client selection must occur BEFORE AgentLoop::new"
+        );
+        assert!(
+            SOURCE.contains("messages_contain_image(&req.messages)"),
+            "vision routing must be gated on messages_contain_image(&req.messages)"
+        );
+    }
 
     /// Regression gate: `run_turn` MUST call `self.budget.reset()` BEFORE
     /// constructing `AgentLoop::new`. If a future refactor drops or relocates
@@ -884,6 +1322,82 @@ mod tests {
              session_search per-turn. Tool registration must happen once on AgentRuntime \
              construction — not in run_turn. See agent_runtime.rs comment for context."
         );
+    }
+
+    /// WR-05 regression test (36.3.12-REVIEW.md): `run_turn` must evict a turn's
+    /// session-scoped `"terminal"` intercept from the shared `ToolRegistry` once
+    /// the turn completes — otherwise every distinct session that ever installs
+    /// one leaks an entry in `ToolRegistry.intercepts["terminal"].1` for the life
+    /// of the process. `unregister_intercepts_for_session` (registry.rs) was
+    /// fully implemented and unit-tested but had zero call sites before this fix
+    /// — this test exercises the real call site in `run_turn`, not the registry
+    /// method directly, so a future edit that drops or misplaces the call is
+    /// caught here.
+    ///
+    /// Uses `AgentRuntime::for_tests()`, whose client points at `localhost:0` —
+    /// `run_turn` always returns `Err` (connection refused) on the network call
+    /// (per `for_tests()`'s own doc comment). This is intentional, not
+    /// incidental: the WR-05 eviction step in `run_turn` runs BEFORE the
+    /// `run_result?` early return, so exercising the failure path proves
+    /// eviction happens on both the `Ok` and `Err` outcomes, not just success.
+    ///
+    /// Pre-fix (eviction call site removed from `run_turn`), this test failed
+    /// immediately on the first turn (each iteration re-asserts, so the failure
+    /// fires as soon as one session's intercept is left behind — verified by
+    /// temporarily disabling the eviction block and re-running):
+    /// ```text
+    /// thread '...' panicked at crates/ironhermes-agent/src/agent_runtime.rs:...:
+    /// assertion `left == right` failed: after session wr05-sess-0 (turn 1), \
+    /// "terminal" must have 0 session-scoped intercepts left registered in \
+    /// ToolRegistry — got 1. run_turn must evict this turn's intercept after \
+    /// the turn completes (WR-05); a leak here means every distinct session \
+    /// that ever installs a terminal intercept permanently grows the \
+    /// registry's intercepts map.
+    ///   left: 1
+    ///  right: 0
+    /// ```
+    #[tokio::test]
+    async fn wr05_terminal_intercept_does_not_accumulate_across_sessions() {
+        let runtime = AgentRuntime::for_tests();
+
+        for i in 0..3 {
+            let session_id = format!("wr05-sess-{i}");
+            let req = TurnRequest {
+                session_id: session_id.clone(),
+                messages: vec![ChatMessage::user("hi")],
+                terminal_intercept: Some(std::sync::Arc::new(|_args| {
+                    Box::pin(async { Ok("noop".to_string()) })
+                })),
+                ..Default::default()
+            };
+
+            let result = runtime.run_turn(req).await;
+            assert!(
+                result.is_err(),
+                "AgentRuntime::for_tests()'s client points at localhost:0 — run_turn \
+                 must fail to connect on every turn in this test (by design, per its \
+                 own doc comment); a non-error result means this test's assumptions \
+                 about for_tests() have changed and it needs to be revisited"
+            );
+
+            let count = runtime
+                .bundle
+                .registry
+                .read()
+                .await
+                .intercept_session_count("terminal");
+            assert_eq!(
+                count,
+                0,
+                "after session {session_id} (turn {}), \"terminal\" must have 0 \
+                 session-scoped intercepts left registered in ToolRegistry — got \
+                 {count}. run_turn must evict this turn's intercept after the turn \
+                 completes (WR-05); a leak here means every distinct session that \
+                 ever installs a terminal intercept permanently grows the \
+                 registry's intercepts map.",
+                i + 1,
+            );
+        }
     }
 
     /// INV-36.2-CR-09: Phase 36.2 code-review CR-09 regression net.
@@ -1078,6 +1592,7 @@ mod tests {
             browser_session,
             mcp_manager: None,
             merged_tools: ironhermes_core::config::ToolsConfig::default(),
+            bb_recorder: None, // Phase 39.2: disabled in test helpers
         };
         let subagent_registry = std::sync::Arc::new(tokio::sync::RwLock::new(
             crate::subagent_registry::SubagentRegistry::new(),
@@ -1096,6 +1611,11 @@ mod tests {
             previous_model: std::sync::Mutex::new(None),
             session_turn_count: std::sync::atomic::AtomicUsize::new(0),
             context_file_paths: Vec::new(),
+            bb_recorder: None, // Phase 39.2: disabled in test helpers
+            // Phase 36.3.12 D-08: this test helper builds a minimal registry with
+            // no "terminal"/"execute_code" tools registered — no capture needed.
+            terminal_tool_arc: None,
+            execute_code_tool_arc: None,
         };
 
         let result = runtime.resolved_extras_for_test_turn();

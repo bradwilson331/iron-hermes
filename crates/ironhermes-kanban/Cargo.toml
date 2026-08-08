@@ -9,6 +9,11 @@ description = "Kanban work-queue kernel for IronHermes (Phase 36.3.7)"
 [dependencies]
 ironhermes-core = { path = "../ironhermes-core" }
 ironhermes-tools = { path = "../ironhermes-tools" }
+# Phase 46.6 gap-closure (D-01/D-04): worker artifact-store redirect. Provides
+# ARTIFACTS_DB_ENV + default_db_path() so build_kanban_worker_env can point a
+# worker's artifact store at the ROOT store (mirrors the IRONHERMES_KANBAN_DB
+# board redirect). Native-only crate; kanban is native-only too.
+ironhermes-artifacts = { path = "../ironhermes-artifacts" }
 rusqlite = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

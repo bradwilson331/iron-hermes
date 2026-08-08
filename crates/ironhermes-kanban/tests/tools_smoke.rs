@@ -23,12 +23,12 @@ use rusqlite::params;
 use serde_json::{Value, json};
 use tokio::sync::Mutex as TokioMutex;
 
-// Phase 36.3.7.x test-isolation hardening: `HERMES_KANBAN_TASK` /
+// Phase 36.3.7.x test-isolation hardening: `IRONHERMES_KANBAN_TASK` /
 // `HERMES_PROFILE` are process-global env vars read by the kanban tools at
 // `execute()` time. Tests that manipulate them must serialize via this lock
 // or they race when cargo runs them in parallel (the failure shape is
 // `task not found: t_<other-test's-id>` because a sibling test overwrites
-// `HERMES_KANBAN_TASK` mid-execute). Each affected test takes the lock
+// `IRONHERMES_KANBAN_TASK` mid-execute). Each affected test takes the lock
 // before any `set_var` / `remove_var` / `tool.execute(...)` call.
 //
 // `unwrap_or_else(|e| e.into_inner())` recovers from poison: if a prior
@@ -105,7 +105,7 @@ fn seed_running_task(
 async fn kanban_show_unavailable_without_env() {
     let _env_guard = ENV_LOCK.lock().await;
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_TASK");
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
     }
     let store = make_store();
     let tool = KanbanShowTool::new(store, false);
@@ -119,7 +119,7 @@ async fn kanban_show_unavailable_without_env() {
 async fn kanban_show_available_with_explicit_enable() {
     let _env_guard = ENV_LOCK.lock().await;
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_TASK");
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
     }
     let store = make_store();
     let tool = KanbanShowTool::new(store, true);
@@ -177,13 +177,13 @@ async fn kanban_show_envelope_shape() {
 
     // Set env so tool is available.
     unsafe {
-        std::env::set_var("HERMES_KANBAN_TASK", &child_id);
+        std::env::set_var("IRONHERMES_KANBAN_TASK", &child_id);
     }
     let tool = KanbanShowTool::new(store, false);
     let result = tool.execute(json!({})).await.unwrap();
     let v: Value = serde_json::from_str(&result).unwrap();
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_TASK");
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
     }
 
     // Assert envelope shape.
@@ -219,7 +219,7 @@ async fn kanban_complete_rejects_stale_run_id() {
     };
 
     unsafe {
-        std::env::set_var("HERMES_KANBAN_TASK", &task_id);
+        std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id);
     }
     unsafe {
         std::env::set_var("HERMES_PROFILE", "bot");
@@ -235,7 +235,7 @@ async fn kanban_complete_rejects_stale_run_id() {
         .unwrap();
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_TASK");
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
     }
     unsafe {
         std::env::remove_var("HERMES_PROFILE");
@@ -256,7 +256,7 @@ async fn kanban_complete_rejects_phantom_created_cards() {
     };
 
     unsafe {
-        std::env::set_var("HERMES_KANBAN_TASK", &task_id);
+        std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id);
     }
     unsafe {
         std::env::set_var("HERMES_PROFILE", "bot");
@@ -272,7 +272,7 @@ async fn kanban_complete_rejects_phantom_created_cards() {
         .unwrap();
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_TASK");
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
     }
     unsafe {
         std::env::remove_var("HERMES_PROFILE");
@@ -327,7 +327,7 @@ async fn kanban_complete_rejects_wrong_profile_card() {
     };
 
     unsafe {
-        std::env::set_var("HERMES_KANBAN_TASK", &task_id);
+        std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id);
     }
     unsafe {
         std::env::set_var("HERMES_PROFILE", "bot");
@@ -343,7 +343,7 @@ async fn kanban_complete_rejects_wrong_profile_card() {
         .unwrap();
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_TASK");
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
     }
     unsafe {
         std::env::remove_var("HERMES_PROFILE");
@@ -378,7 +378,7 @@ async fn kanban_complete_accepts_valid_created_cards() {
     };
 
     unsafe {
-        std::env::set_var("HERMES_KANBAN_TASK", &task_id);
+        std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id);
     }
     unsafe {
         std::env::set_var("HERMES_PROFILE", "bot");
@@ -395,7 +395,7 @@ async fn kanban_complete_accepts_valid_created_cards() {
         .unwrap();
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_TASK");
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
     }
     unsafe {
         std::env::remove_var("HERMES_PROFILE");
@@ -403,6 +403,155 @@ async fn kanban_complete_accepts_valid_created_cards() {
 
     let v: Value = serde_json::from_str(&result).unwrap();
     assert_eq!(v["status"].as_str().unwrap(), "ok");
+}
+
+// ---------------------------------------------------------------------------
+// kanban_complete output_path tests (Phase 46.4 Plan 03 — D-10)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn kanban_complete_output_path_round_trips_through_get_task() {
+    let _env_guard = ENV_LOCK.lock().await;
+    let store = make_store();
+    let task_id = {
+        let mut s = store.lock().await;
+        seed_running_task(
+            &mut s,
+            "Output Path Task",
+            "bot-worker",
+            "r_op1",
+            Some("bot"),
+        )
+    };
+
+    unsafe {
+        std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id);
+    }
+    unsafe {
+        std::env::set_var("HERMES_PROFILE", "bot");
+    }
+    let tool = KanbanCompleteTool::new(store.clone(), false);
+
+    let result = tool
+        .execute(json!({
+            "summary": "done",
+            "output_path": "/tmp/deploy/artifact.tar.gz"
+        }))
+        .await
+        .unwrap();
+
+    unsafe {
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
+    }
+    unsafe {
+        std::env::remove_var("HERMES_PROFILE");
+    }
+
+    let v: Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(v["status"].as_str().unwrap(), "ok");
+
+    let s = store.lock().await;
+    let task = s.get_task(&task_id).unwrap();
+    assert_eq!(
+        task.output_path.as_deref(),
+        Some("/tmp/deploy/artifact.tar.gz"),
+        "output_path must round-trip through get_task after kanban_complete"
+    );
+}
+
+#[tokio::test]
+async fn kanban_complete_without_output_path_stays_none() {
+    let _env_guard = ENV_LOCK.lock().await;
+    let store = make_store();
+    let task_id = {
+        let mut s = store.lock().await;
+        seed_running_task(
+            &mut s,
+            "No Output Path Task",
+            "bot-worker",
+            "r_op2",
+            Some("bot"),
+        )
+    };
+
+    unsafe {
+        std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id);
+    }
+    unsafe {
+        std::env::set_var("HERMES_PROFILE", "bot");
+    }
+    let tool = KanbanCompleteTool::new(store.clone(), false);
+
+    let result = tool.execute(json!({ "summary": "done" })).await.unwrap();
+
+    unsafe {
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
+    }
+    unsafe {
+        std::env::remove_var("HERMES_PROFILE");
+    }
+
+    let v: Value = serde_json::from_str(&result).unwrap();
+    assert_eq!(v["status"].as_str().unwrap(), "ok");
+
+    let s = store.lock().await;
+    let task = s.get_task(&task_id).unwrap();
+    assert_eq!(
+        task.output_path, None,
+        "output_path must stay None when the tool arg is omitted"
+    );
+}
+
+#[tokio::test]
+async fn kanban_complete_second_call_without_output_path_preserves_earlier_value() {
+    let _env_guard = ENV_LOCK.lock().await;
+    let store = make_store();
+    let task_id = {
+        let mut s = store.lock().await;
+        seed_running_task(&mut s, "Preserve Task", "bot-worker", "r_op3", Some("bot"))
+    };
+
+    // First complete sets output_path directly via the store (mirrors a
+    // worker's kanban_complete call with the arg set).
+    {
+        let mut s = store.lock().await;
+        s.complete_task(
+            &task_id,
+            Some("first"),
+            None,
+            None,
+            None,
+            None,
+            "bot",
+            Some("/tmp/deploy/v1"),
+        )
+        .unwrap();
+    }
+
+    // Second complete call omits output_path (None) — must NOT clear the
+    // earlier value (COALESCE-preserve semantics, D-10).
+    {
+        let mut s = store.lock().await;
+        s.complete_task(
+            &task_id,
+            Some("second"),
+            None,
+            None,
+            None,
+            None,
+            "bot",
+            None,
+        )
+        .unwrap();
+    }
+
+    let s = store.lock().await;
+    let task = s.get_task(&task_id).unwrap();
+    assert_eq!(
+        task.output_path.as_deref(),
+        Some("/tmp/deploy/v1"),
+        "a subsequent complete_task call with output_path=None must preserve the earlier value"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -527,7 +676,7 @@ async fn kanban_block_with_review_required_prefix_logs_advisory() {
     };
 
     unsafe {
-        std::env::set_var("HERMES_KANBAN_TASK", &task_id);
+        std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id);
     }
     let tool = KanbanBlockTool::new(store.clone(), false);
 
@@ -540,7 +689,7 @@ async fn kanban_block_with_review_required_prefix_logs_advisory() {
         .unwrap();
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_TASK");
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
     }
 
     let v: Value = serde_json::from_str(&result).unwrap();
@@ -607,7 +756,7 @@ async fn kanban_comment_adds_comment_to_task() {
     };
 
     unsafe {
-        std::env::set_var("HERMES_KANBAN_TASK", &task_id);
+        std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id);
     }
     unsafe {
         std::env::set_var("HERMES_PROFILE", "bot");
@@ -620,7 +769,7 @@ async fn kanban_comment_adds_comment_to_task() {
         .unwrap();
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_TASK");
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
     }
     unsafe {
         std::env::remove_var("HERMES_PROFILE");
@@ -657,20 +806,20 @@ async fn kanban_heartbeat_appends_event_row() {
     };
 
     unsafe {
-        std::env::set_var("HERMES_KANBAN_TASK", &task_id);
+        std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id);
     }
     unsafe {
-        std::env::set_var("HERMES_KANBAN_RUN_ID", "r_hb");
+        std::env::set_var("IRONHERMES_KANBAN_RUN_ID", "r_hb");
     }
 
     let tool = KanbanHeartbeatTool::new(store.clone(), false);
     let result = tool.execute(json!({"note": "halfway"})).await.unwrap();
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_TASK");
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
     }
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_RUN_ID");
+        std::env::remove_var("IRONHERMES_KANBAN_RUN_ID");
     }
 
     let v: Value = serde_json::from_str(&result).unwrap();
@@ -704,10 +853,10 @@ async fn kanban_heartbeat_missing_task_id_errors_without_env() {
     let store = make_store();
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_TASK");
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
     }
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_RUN_ID");
+        std::env::remove_var("IRONHERMES_KANBAN_RUN_ID");
     }
 
     // explicit_enable=true so is_available() is true even without the env var;
@@ -2034,9 +2183,9 @@ async fn mention_invalid_task_id_rejected() {
     let _env_guard = ENV_LOCK.lock().await;
     let store = make_store();
 
-    // No HERMES_KANBAN_TASK set, no task_id arg — should reject.
+    // No IRONHERMES_KANBAN_TASK set, no task_id arg — should reject.
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_TASK");
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
     }
 
     let tool = KanbanMentionTool::new(store, true);
@@ -2055,7 +2204,7 @@ async fn mention_invalid_task_id_rejected() {
     );
 }
 
-// ─── Test 14: task_id defaults to HERMES_KANBAN_TASK env ─────────────────────
+// ─── Test 14: task_id defaults to IRONHERMES_KANBAN_TASK env ─────────────────────
 
 #[tokio::test]
 async fn mention_task_id_defaults_to_hermes_kanban_task_env() {
@@ -2069,15 +2218,15 @@ async fn mention_task_id_defaults_to_hermes_kanban_task_env() {
     };
 
     unsafe {
-        std::env::set_var("HERMES_KANBAN_TASK", &task_id);
+        std::env::set_var("IRONHERMES_KANBAN_TASK", &task_id);
     }
 
     let tool = KanbanMentionTool::new(store, false);
-    // Execute with no args — should use HERMES_KANBAN_TASK and return ok (no children).
+    // Execute with no args — should use IRONHERMES_KANBAN_TASK and return ok (no children).
     let result = tool.execute(json!({})).await.unwrap();
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_TASK");
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
     }
 
     let v: Value = serde_json::from_str(&result).unwrap();
@@ -2085,7 +2234,7 @@ async fn mention_task_id_defaults_to_hermes_kanban_task_env() {
     assert_eq!(
         v["task_id"].as_str().unwrap(),
         task_id,
-        "task_id must match HERMES_KANBAN_TASK"
+        "task_id must match IRONHERMES_KANBAN_TASK"
     );
     assert_eq!(
         v["mentions_parsed"].as_i64().unwrap(),
@@ -2402,4 +2551,52 @@ async fn mention_registered_eleventh_tool() {
         13,
         "exactly 13 kanban_* tools must be registered (kanban_decompose + kanban_specify added in Phase 36.3.7.10): {names:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Dual-read backward-compatibility regression test (260625-vr4)
+// ---------------------------------------------------------------------------
+
+/// INV-260625-vr4: legacy-only `HERMES_KANBAN_TASK` must still resolve via
+/// the dual-read fallback in `kanban_env("TASK")`.
+///
+/// Simulates a worker spawned by an old producer that only set `HERMES_KANBAN_TASK`
+/// without the IRONHERMES_KANBAN_TASK twin. The dual-read resolver must return
+/// Some so the tool gate activates correctly.
+#[tokio::test]
+async fn legacy_hermes_kanban_task_only_still_gates_tools_on() {
+    let _env_guard = ENV_LOCK.lock().await;
+    unsafe {
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
+        std::env::set_var("HERMES_KANBAN_TASK", "t_legacy_test");
+    }
+    assert!(
+        ironhermes_kanban::kanban_env("TASK").is_some(),
+        "legacy HERMES_KANBAN_TASK should still resolve via dual-read fallback"
+    );
+    unsafe {
+        std::env::remove_var("HERMES_KANBAN_TASK");
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
+    }
+}
+
+/// INV-260625-vr4: IRONHERMES_KANBAN_TASK must win over a simultaneously set
+/// legacy HERMES_KANBAN_TASK (primary-wins priority).
+#[tokio::test]
+async fn primary_ironhermes_kanban_task_wins_over_legacy() {
+    let _env_guard = ENV_LOCK.lock().await;
+    unsafe {
+        std::env::set_var("IRONHERMES_KANBAN_TASK", "t_primary");
+        std::env::set_var("HERMES_KANBAN_TASK", "t_legacy");
+    }
+    let result = ironhermes_kanban::kanban_env("TASK");
+    assert_eq!(
+        result.as_deref(),
+        Some("t_primary"),
+        "IRONHERMES_KANBAN_TASK must shadow HERMES_KANBAN_TASK when both are set"
+    );
+    unsafe {
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
+        std::env::remove_var("HERMES_KANBAN_TASK");
+    }
 }

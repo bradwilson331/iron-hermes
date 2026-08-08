@@ -100,6 +100,11 @@ pub trait ContextEngine: Send + Sync + 'static {
 pub struct LocalPruningEngine {
     context_length: usize,
     threshold: f32,
+    /// Phase 47.5 (D-05): an UPPER BOUND on the protected leading
+    /// system-message run — not a raw message count. `ContextCompressor`
+    /// applies `system_prefix_len(messages).min(protect_first_n)` internally,
+    /// so the first user/assistant pair is never pinned regardless of this
+    /// value.
     protect_first_n: usize,
     protect_last_tokens: usize,
     tool_pair_shift_tokens: usize,
@@ -401,20 +406,164 @@ mod tests {
 
     #[tokio::test]
     async fn test_protect_boundaries() {
+        // Phase 47.5 (D-05): `build_large_message_vec` is all-`Role::User` —
+        // no leading system-message run — so under the role-aware floor
+        // NOTHING is front-pinned (`system_prefix_len` is 0 regardless of the
+        // configured `protect_first_n`). This inverts the pre-47.5 assertion,
+        // which expected `messages[0..3]` to survive verbatim purely by raw
+        // index. That was exactly the D-01/D-05 bug: a non-system first
+        // conversation pair getting pinned forever.
         let mut messages = build_large_message_vec(30);
         let engine = LocalPruningEngine::new(1000, 0.5);
         let _ = engine
             .compress(&mut messages, make_stats(0))
             .await
             .expect("ok");
-        // First 3 should still be the original user messages.
-        #[allow(clippy::needless_range_loop)]
-        // i is used as messages[i] index; enumerate() would not provide the index format
-        for i in 0..3 {
-            let text = messages[i].content_text().unwrap_or("");
+        // None of the original leading user messages are guaranteed to
+        // survive verbatim at a fixed index anymore — the front is prunable.
+        assert!(
+            !messages
+                .iter()
+                .take(3)
+                .any(|m| m.content_text().unwrap_or("").starts_with("message 0 ")),
+            "no leading user message should be structurally pinned by raw index"
+        );
+    }
+
+    // ── Phase 47.5 Plan 03 (D-07): first-conversation-pair pin regression ──
+
+    /// D-07 RED test 3 (research Mechanism 1 / W2): the session's FIRST
+    /// conversation pair — whatever topic happened to open it — must not be
+    /// structurally pinned into every compressed context forever. Reproduces
+    /// the incident shape: a days-old off-topic reel exchange opens a long
+    /// session and derails an unrelated codebase question. Pre-fix,
+    /// `protect_first_n: 3` pins `messages[0..3]` = system + first user +
+    /// first assistant verbatim on every pass, so the reel content survives
+    /// in the head no matter how the conversation moves on.
+    #[tokio::test]
+    async fn compression_does_not_pin_first_conversation_pair() {
+        let mut msgs = vec![
+            ChatMessage::system("You are Hermes."),
+            ChatMessage::user("https://instagram.com/reel/offtopic"),
+            ChatMessage::assistant("Reel analysis: it's a cooking video."),
+        ];
+        // Bulk filler large enough to cross the 0.5 threshold of a 1_000-token
+        // test context (mirrors build_large_message_vec's ~50 tokens/message).
+        for i in 0..50 {
+            msgs.push(ChatMessage::user(format!("bulk message {i} ").repeat(20)));
+        }
+        msgs.push(ChatMessage::user("show me the /new command code"));
+
+        let engine = LocalPruningEngine::new(1_000, 0.5);
+        let _ = engine
+            .compress(&mut msgs, make_stats(0))
+            .await
+            .expect("ok");
+
+        // The system prompt survives at index 0.
+        assert_eq!(
+            msgs[0].role,
+            ironhermes_core::Role::System,
+            "system prompt must survive at index 0"
+        );
+        assert_eq!(
+            msgs[0].content_text(),
+            Some("You are Hermes."),
+            "system prompt content must survive unchanged at index 0"
+        );
+
+        // No message in the surviving head (first 3 positions) contains the
+        // off-topic reel content — the first conversation pair was prunable
+        // like everything else. RED today: protect_first_n=3 pins indices
+        // 0..3, so the reel user/assistant pair survives verbatim at 1..3.
+        for (i, m) in msgs.iter().take(3).enumerate() {
+            let text = m.content_text().unwrap_or("");
             assert!(
-                text.starts_with(&format!("message {i} ")),
-                "first {i} preserved, got: {text}"
+                !text.contains("instagram.com/reel") && !text.contains("Reel analysis"),
+                "head[{i}] must not contain pinned off-topic reel content, got: {text}"
+            );
+        }
+
+        // The current question still survives in the protected tail.
+        assert!(
+            msgs.iter().any(|m| m
+                .content_text()
+                .map(|t| t.contains("/new command code"))
+                .unwrap_or(false)),
+            "current question must survive compression in the protected tail"
+        );
+    }
+
+    /// Review finding 8: system-run matrix. Asserts the exact protected-front
+    /// length (`ContextCompressor::compute_protect_start`) against a
+    /// configured cap of 3, across zero/one/below-cap/above-cap leading
+    /// system-message shapes, plus the small-vec no-op guard (review finding
+    /// 13) — re-keying the guards on `front` (0 for an all-user vec) must not
+    /// start compressing tiny conversations.
+    #[tokio::test]
+    async fn compression_protects_system_run_matrix() {
+        use crate::context_compressor::ContextCompressor;
+
+        let cap = 3usize;
+        // Large enough that every small fixture below fits entirely inside
+        // the tail-token walk, so compute_protect_start's tail_start walk
+        // reaches index 0 and the returned value collapses to exactly the
+        // computed front (`tail_start.max(front)` == `front`).
+        let protect_last_tokens = 100_000usize;
+
+        // 0 system messages (all-user vec): protected front is 0 -- nothing
+        // is pinned.
+        let zero_system = vec![ChatMessage::user("a"), ChatMessage::user("b")];
+        let ps = ContextCompressor::compute_protect_start(&zero_system, protect_last_tokens, cap);
+        assert_eq!(ps, 0, "0 leading system messages -> protected front 0");
+
+        // 1 system message: protected front is 1 -- the system prompt and
+        // nothing else.
+        let one_system = vec![ChatMessage::system("sys"), ChatMessage::user("a")];
+        let ps = ContextCompressor::compute_protect_start(&one_system, protect_last_tokens, cap);
+        assert_eq!(ps, 1, "1 leading system message -> protected front 1");
+
+        // 2 system messages (below the cap): protected front is 2 -- the
+        // whole run.
+        let two_system = vec![
+            ChatMessage::system("sys1"),
+            ChatMessage::system("sys2"),
+            ChatMessage::user("a"),
+        ];
+        let ps = ContextCompressor::compute_protect_start(&two_system, protect_last_tokens, cap);
+        assert_eq!(
+            ps, 2,
+            "2 leading system messages (below cap 3) -> protected front 2 (whole run)"
+        );
+
+        // 5 system messages (above the cap): protected front is 3 -- capped,
+        // the deliberate upper-bound behavior.
+        let mut five_system: Vec<ChatMessage> = (0..5)
+            .map(|i| ChatMessage::system(format!("sys{i}")))
+            .collect();
+        five_system.push(ChatMessage::user("a"));
+        let ps = ContextCompressor::compute_protect_start(&five_system, protect_last_tokens, cap);
+        assert_eq!(
+            ps, 3,
+            "5 leading system messages (above cap 3) -> protected front capped at 3"
+        );
+
+        // Small-vec guard: a short all-user vec below the compression
+        // threshold comes back UNCHANGED — re-keying the no-op guards on
+        // `front` (0 here) must not start compressing tiny conversations.
+        let mut tiny = vec![ChatMessage::user("hi"), ChatMessage::user("there")];
+        let tiny_before = tiny.clone();
+        let engine = LocalPruningEngine::new(1_000, 0.5);
+        let _ = engine
+            .compress(&mut tiny, make_stats(0))
+            .await
+            .expect("ok");
+        assert_eq!(tiny.len(), tiny_before.len(), "tiny vec length unchanged");
+        for (a, b) in tiny.iter().zip(tiny_before.iter()) {
+            assert_eq!(
+                a.content_text(),
+                b.content_text(),
+                "tiny vec content unchanged"
             );
         }
     }

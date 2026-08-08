@@ -8,6 +8,17 @@
 //!
 //! Phase 35.1 D-07/D-08: after config validates, check whether a runnable LLM
 //! is configured. If not, auto-launch FirstRun wizard before proceeding.
+//!
+//! GAP-7 (D-06/D-10, Phase 46.9 gap-closure round 2): the gateway is a
+//! long-running daemon — an interactive stdin wizard prompt is always wrong
+//! for it. `run_preflight_check` now takes an `interactive: bool`. When
+//! true, behavior is byte-for-byte the original (all four wizard branches
+//! below, unchanged). When false (the gateway's `--non-interactive` flag, or
+//! any non-TTY stdin caller): a missing/invalid config fails fast with an
+//! actionable error instead of launching the wizard; a present+valid config
+//! with no runnable LLM proceeds after printing an actionable stderr notice
+//! (the gateway can still run cron/telegram and will surface auth errors at
+//! request time) instead of blocking on stdin.
 
 use anyhow::Result;
 use ironhermes_core::config::Config;
@@ -15,17 +26,109 @@ use ironhermes_tools::Prerequisite;
 
 use crate::Cli;
 
-pub async fn run_preflight_check(_cli: &Cli) -> Result<()> {
+/// GAP-7 (D-06): pure decision helper for the preflight gate. Given the
+/// three environment signals (config present / config valid / an LLM is
+/// runnable) plus whether this is an interactive entry point, decides the
+/// outcome without touching stdin or the filesystem — kept separate from
+/// `run_preflight_check` so it's unit-testable in isolation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreflightAction {
+    /// Launch the interactive (stdin-blocking) setup wizard. The caller
+    /// picks FirstRun vs. FixMode from the same input signals — this enum
+    /// only captures WHETHER to launch it.
+    LaunchWizard,
+    /// Proceed to the tool-prereq banner + `Ok(())`. Covers both a fully
+    /// runnable config, and (non-interactive only) a valid-but-not-runnable
+    /// config — the caller emits an actionable stderr notice in the latter
+    /// case, but never blocks on stdin.
+    Proceed,
+    /// Non-interactive only: config missing or invalid. The caller returns
+    /// an actionable `Err` instead of launching a stdin-blocking wizard.
+    FailFast,
+}
+
+fn preflight_action(
+    config_present: bool,
+    config_valid: bool,
+    runnable: bool,
+    interactive: bool,
+) -> PreflightAction {
+    if interactive {
+        if !config_present || !config_valid || !runnable {
+            PreflightAction::LaunchWizard
+        } else {
+            PreflightAction::Proceed
+        }
+    } else if !config_present || !config_valid {
+        PreflightAction::FailFast
+    } else {
+        // Present + valid: proceed whether or not it's runnable. A
+        // not-runnable config gets a stderr notice from the caller, but
+        // non-interactive mode NEVER blocks on stdin.
+        PreflightAction::Proceed
+    }
+}
+
+/// GAP-7 (D-06): actionable stderr notice for non-interactive mode when the
+/// config is present+valid but `has_runnable_llm` returned false. Mirrors
+/// the interactive wizard's concern (no usable provider key) without
+/// dropping into a stdin prompt.
+fn emit_non_interactive_llm_notice(out: &mut dyn std::io::Write) {
+    let _ = writeln!(
+        out,
+        "\u{26a0} No runnable LLM provider detected (checked OPENROUTER_API_KEY, \
+ANTHROPIC_API_KEY, OPENAI_API_KEY, a local config.model.base_url, and config.model.api_key) \
+\u{2014} proceeding non-interactively. Set one of those env vars (or run `hermes setup` \
+interactively) to fix this; requests will fail with an auth error until then."
+    );
+}
+
+pub async fn run_preflight_check(_cli: &Cli, interactive: bool) -> Result<()> {
     let cfg_path = Config::config_path();
-    if !cfg_path.exists() {
-        return crate::setup::run_setup(None, ironhermes_core::wizard::WizardMode::FirstRun).await;
+    let config_present = cfg_path.exists();
+    if !config_present {
+        return match preflight_action(false, false, false, interactive) {
+            PreflightAction::LaunchWizard => {
+                crate::setup::run_setup(None, ironhermes_core::wizard::WizardMode::FirstRun).await
+            }
+            PreflightAction::FailFast => Err(anyhow::anyhow!(
+                "No config at {}; run `hermes setup` interactively first",
+                cfg_path.display()
+            )),
+            PreflightAction::Proceed => {
+                unreachable!("preflight_action never returns Proceed when config_present=false")
+            }
+        };
     }
     match Config::load() {
-        Err(_) => crate::setup::run_setup(None, ironhermes_core::wizard::WizardMode::FixMode).await,
+        Err(_) => match preflight_action(true, false, false, interactive) {
+            PreflightAction::LaunchWizard => {
+                crate::setup::run_setup(None, ironhermes_core::wizard::WizardMode::FixMode).await
+            }
+            PreflightAction::FailFast => Err(anyhow::anyhow!(
+                "Config at {} failed to load; run `hermes setup` interactively to fix it",
+                cfg_path.display()
+            )),
+            PreflightAction::Proceed => {
+                unreachable!("preflight_action never returns Proceed when config_valid=false")
+            }
+        },
         Ok(config) => {
-            if !config.validate().is_empty() {
-                return crate::setup::run_setup(None, ironhermes_core::wizard::WizardMode::FixMode)
-                    .await;
+            let config_valid = config.validate().is_empty();
+            if !config_valid {
+                return match preflight_action(true, false, false, interactive) {
+                    PreflightAction::LaunchWizard => {
+                        crate::setup::run_setup(None, ironhermes_core::wizard::WizardMode::FixMode)
+                            .await
+                    }
+                    PreflightAction::FailFast => Err(anyhow::anyhow!(
+                        "Config at {} is invalid; run `hermes setup` interactively to fix it",
+                        cfg_path.display()
+                    )),
+                    PreflightAction::Proceed => unreachable!(
+                        "preflight_action never returns Proceed when config_valid=false"
+                    ),
+                };
             }
             // Phase 35.1 D-07/D-08: check for a runnable LLM after config
             // validates. A valid config skeleton with no usable provider key
@@ -33,12 +136,24 @@ pub async fn run_preflight_check(_cli: &Cli) -> Result<()> {
             // through setup instead. MUST run AFTER dotenvy loads in main.rs
             // (line ~275) so std::env::var() reflects the merged .env state.
             let hermes_home = ironhermes_core::constants::get_hermes_home();
-            if !has_runnable_llm(&config, &hermes_home) {
-                return crate::setup::run_setup(
-                    None,
-                    ironhermes_core::wizard::WizardMode::FirstRun,
-                )
-                .await;
+            let runnable = has_runnable_llm(&config, &hermes_home);
+            match preflight_action(true, true, runnable, interactive) {
+                PreflightAction::LaunchWizard => {
+                    return crate::setup::run_setup(
+                        None,
+                        ironhermes_core::wizard::WizardMode::FirstRun,
+                    )
+                    .await;
+                }
+                PreflightAction::FailFast => unreachable!(
+                    "preflight_action never returns FailFast when config_present && config_valid"
+                ),
+                PreflightAction::Proceed => {
+                    if !runnable {
+                        // Non-interactive + not-runnable: notice instead of wizard.
+                        emit_non_interactive_llm_notice(&mut std::io::stderr());
+                    }
+                }
             }
             // Phase 25 D-17: tool-prereq probe. Builds a registry, queries
             // list_unavailable(), filters by config.tools.skip_prompts, emits a
@@ -153,12 +268,13 @@ mod tests {
     use ironhermes_tools::Prerequisite;
     use tempfile::TempDir;
 
-    // Serialise all env-mutating tests to prevent races in parallel test runs.
-    fn env_lock() -> &'static std::sync::Mutex<()> {
-        use std::sync::OnceLock;
-        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
+    // Serialise all env-mutating tests. MUST be the crate-wide lock
+    // (`crate::test_env_lock`), not a module-local mutex: a per-module mutex
+    // serialises this module against ITSELF but not against other modules that
+    // mutate the SAME process-global vars — `setup.rs` also set/removes
+    // `OPENROUTER_API_KEY`, so two separate locks meant no mutual exclusion at all
+    // and `setup::tests::backfill_uses_process_env_when_dotenv_absent` flaked
+    // (it read the var after this module's `remove_var` had wiped it).
 
     fn make_prereq(name: &str) -> Prerequisite {
         Prerequisite {
@@ -166,7 +282,76 @@ mod tests {
             name: name.to_string(),
             description: "test prereq".to_string(),
             required: true,
+            group: None,
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // preflight_action unit tests (GAP-7 D-06, Phase 46.9 gap-closure round 2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn preflight_action_interactive_missing_config_launches_wizard() {
+        assert_eq!(
+            preflight_action(false, false, false, true),
+            PreflightAction::LaunchWizard
+        );
+    }
+
+    #[test]
+    fn preflight_action_interactive_invalid_config_launches_wizard() {
+        assert_eq!(
+            preflight_action(true, false, false, true),
+            PreflightAction::LaunchWizard
+        );
+    }
+
+    #[test]
+    fn preflight_action_interactive_not_runnable_launches_wizard() {
+        assert_eq!(
+            preflight_action(true, true, false, true),
+            PreflightAction::LaunchWizard
+        );
+    }
+
+    #[test]
+    fn preflight_action_interactive_runnable_proceeds() {
+        assert_eq!(
+            preflight_action(true, true, true, true),
+            PreflightAction::Proceed
+        );
+    }
+
+    #[test]
+    fn preflight_action_non_interactive_present_valid_not_runnable_proceeds() {
+        assert_eq!(
+            preflight_action(true, true, false, false),
+            PreflightAction::Proceed
+        );
+    }
+
+    #[test]
+    fn preflight_action_non_interactive_present_valid_runnable_proceeds() {
+        assert_eq!(
+            preflight_action(true, true, true, false),
+            PreflightAction::Proceed
+        );
+    }
+
+    #[test]
+    fn preflight_action_non_interactive_missing_config_fails_fast() {
+        assert_eq!(
+            preflight_action(false, false, false, false),
+            PreflightAction::FailFast
+        );
+    }
+
+    #[test]
+    fn preflight_action_non_interactive_invalid_config_fails_fast() {
+        assert_eq!(
+            preflight_action(true, false, false, false),
+            PreflightAction::FailFast
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -175,7 +360,7 @@ mod tests {
 
     #[test]
     fn has_runnable_llm_returns_true_when_openrouter_api_key_set_in_env() {
-        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _g = crate::test_env_lock();
         // SAFETY: test-only env mutation; serialised by env_lock.
         unsafe { std::env::set_var("OPENROUTER_API_KEY", "sk-abc") };
         let config = Config::default();
@@ -191,7 +376,7 @@ mod tests {
 
     #[test]
     fn has_runnable_llm_returns_true_when_local_base_url_configured() {
-        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _g = crate::test_env_lock();
         // SAFETY: clear API key env vars so only the base_url check fires.
         unsafe {
             std::env::remove_var("OPENROUTER_API_KEY");
@@ -217,7 +402,7 @@ mod tests {
 
     #[test]
     fn has_runnable_llm_returns_false_when_no_signal() {
-        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _g = crate::test_env_lock();
         // SAFETY: clear all relevant env vars.
         unsafe {
             std::env::remove_var("OPENROUTER_API_KEY");
@@ -235,7 +420,7 @@ mod tests {
 
     #[test]
     fn has_runnable_llm_returns_false_when_dotenv_has_empty_key_value() {
-        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _g = crate::test_env_lock();
         // SAFETY: clear env vars.
         unsafe {
             std::env::remove_var("OPENROUTER_API_KEY");
@@ -254,7 +439,7 @@ mod tests {
 
     #[test]
     fn has_runnable_llm_returns_true_when_dotenv_has_nonempty_key_value() {
-        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let _g = crate::test_env_lock();
         // SAFETY: clear env vars so only the .env file scan fires.
         unsafe {
             std::env::remove_var("OPENROUTER_API_KEY");

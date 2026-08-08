@@ -1,6 +1,6 @@
 //! `skills-lock.json` v1 — merge-clean lock file for installed skills.
 //!
-//! Replaces the Phase 19.1 `.hub/*.json` manifest. One file at $HERMES_HOME/skills-lock.json,
+//! Replaces the Phase 19.1 `.hub/*.json` manifest. One file at $IRONHERMES_HOME/skills-lock.json,
 //! skills[] sorted alphabetically by name, timestamp-free hashed region (installedAt is
 //! metadata, NOT in the hash). On-disk JSON is camelCase to match reference TS exactly
 //! (`/Users/you/code/skills/src/local-lock.ts`). See D-10..D-14 in CONTEXT.md.
@@ -172,15 +172,15 @@ mod tests {
     fn with_test_hermes_home<F: FnOnce(&Path)>(f: F) {
         let _guard = crate::test_env_lock().blocking_lock();
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("HERMES_HOME").ok();
+        let prev = std::env::var("IRONHERMES_HOME").ok();
         unsafe {
-            std::env::set_var("HERMES_HOME", tmp.path());
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
         }
         f(tmp.path());
         unsafe {
             match prev {
-                Some(v) => std::env::set_var("HERMES_HOME", v),
-                None => std::env::remove_var("HERMES_HOME"),
+                Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+                None => std::env::remove_var("IRONHERMES_HOME"),
             }
         }
     }
@@ -408,8 +408,8 @@ pub enum MigrationOutcome {
     Migrated(usize),
 }
 
-/// Idempotent one-way migration of `$HERMES_HOME/skills/.hub/lock.json` (19.1 `HubManifest`)
-/// into `$HERMES_HOME/skills-lock.json` (21.8 `SkillLock`).
+/// Idempotent one-way migration of `$IRONHERMES_HOME/skills/.hub/lock.json` (19.1 `HubManifest`)
+/// into `$IRONHERMES_HOME/skills-lock.json` (21.8 `SkillLock`).
 ///
 /// Guards:
 ///   1. If `skills-lock.json` exists AND has ≥1 entry → `NothingToMigrate` (idempotent).
@@ -475,15 +475,15 @@ mod migration_tests {
     fn with_test_hermes_home<F: FnOnce(&std::path::Path)>(f: F) {
         let _guard = crate::test_env_lock().blocking_lock();
         let tmp = tempfile::tempdir().unwrap();
-        let prev = std::env::var("HERMES_HOME").ok();
+        let prev = std::env::var("IRONHERMES_HOME").ok();
         unsafe {
-            std::env::set_var("HERMES_HOME", tmp.path());
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
         }
         f(tmp.path());
         unsafe {
             match prev {
-                Some(v) => std::env::set_var("HERMES_HOME", v),
-                None => std::env::remove_var("HERMES_HOME"),
+                Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+                None => std::env::remove_var("IRONHERMES_HOME"),
             }
         }
     }

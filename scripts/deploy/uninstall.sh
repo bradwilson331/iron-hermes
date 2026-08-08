@@ -5,6 +5,7 @@
 #   uninstall.sh           # remove native service for this OS (launchd/systemd)
 #   uninstall.sh --cron    # remove the watchdog crontab entry
 #   uninstall.sh --all     # remove both, plus staged scripts in ~/.ironhermes/scripts/
+#                          # and the installed binary (~/.local/bin/ironhermes)
 #
 # Logs in ~/.ironhermes/logs/ are kept.
 
@@ -13,6 +14,7 @@ set -euo pipefail
 HOME_DIR="$HOME"
 IRONHERMES_HOME_DIR="${IRONHERMES_HOME:-$HOME_DIR/.ironhermes}"
 SCRIPTS_DIR="$IRONHERMES_HOME_DIR/scripts"
+BIN="${IRONHERMES_BIN:-$HOME_DIR/.local/bin/ironhermes}"
 
 LABEL="com.ironhermes.gateway"
 PLIST_DEST="$HOME_DIR/Library/LaunchAgents/${LABEL}.plist"
@@ -88,6 +90,11 @@ if [ "$PURGE_SCRIPTS" -eq 1 ] && [ -d "$SCRIPTS_DIR" ]; then
     rm -f "$SCRIPTS_DIR/gateway-run.sh" "$SCRIPTS_DIR/gateway-watchdog.sh"
     rmdir "$SCRIPTS_DIR" 2>/dev/null || true
     log "removed staged scripts"
+fi
+
+if [ "$PURGE_SCRIPTS" -eq 1 ] && [ -f "$BIN" ]; then
+    rm -f "$BIN"
+    log "removed binary $BIN"
 fi
 
 log "done"

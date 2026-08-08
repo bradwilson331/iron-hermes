@@ -233,6 +233,18 @@ a { color: inherit; text-decoration: none; }
   pointer-events: none;
 }
 .sys-meta .v { color: var(--teal); font-weight: 700; }
+/* Phase 46.9 Plan 03 (D-07/status-bar-readout UI Considerations): the
+   active-model segment must not push `TOK n / ctx · READY` off-screen when
+   the model id is long — fixed max-width + ellipsis, matching the
+   `.truncate` utility's overflow treatment (components.css:238). */
+.sys-meta .model-id {
+  display: inline-block;
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
 
 /* Footer status (lighter than index.html ticker) */
 .app-footer {

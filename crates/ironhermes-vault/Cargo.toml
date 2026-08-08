@@ -1,0 +1,26 @@
+[package]
+name = "ironhermes-vault"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Pluggable SecretStore adapter for IronHermes provider API keys (Phase 46.8)"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true, features = ["sync", "fs", "io-util", "time", "rt"] }
+secrecy = { version = "0.10.3", features = ["serde"] }
+rusty_vault = { version = "=0.2.1", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+
+[features]
+rusty-vault = ["dep:rusty_vault"]

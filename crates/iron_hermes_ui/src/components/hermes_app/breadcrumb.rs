@@ -58,5 +58,8 @@ fn screen_short_name(s: Screen) -> &'static str {
         Screen::Providers => "PROVIDERS",
         // Phase 36.3.7.11 D-02: Kanban wheel-nav + dashboard breadcrumb label.
         Screen::Kanban => "KANBAN",
+        // Phase 46.6 Plan 05 (D-07): Artifacts gallery + sandboxed viewer.
+        Screen::Artifacts => "ARTIFACTS",
+        Screen::ArtifactViewer => "ARTIFACT",
     }
 }

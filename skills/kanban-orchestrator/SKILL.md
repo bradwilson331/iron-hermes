@@ -1,21 +1,21 @@
 ---
 name: kanban-orchestrator
-description: Decomposition playbook + anti-temptation rules for an orchestrator profile routing work through Kanban. The "don't do the work yourself" rule and the basic lifecycle are auto-injected into every kanban worker's system prompt; this skill is the deeper playbook when you're specifically playing the orchestrator role.
-version: 3.0.0
+description: Decomposition playbook + anti-temptation rules for an orchestrator profile routing work through Kanban. The basic worker lifecycle and the "never create follow-up tasks assigned to yourself" anti-pattern are auto-injected into every kanban worker's system prompt; the full decomposition/fan-out playbook is NOT injected — that's this skill, which you load when you're specifically playing the orchestrator role.
+version: 3.0.1
 platforms: [linux, macos, windows]
 metadata:
-  hermes:
-    tags: [kanban, multi-agent, orchestration, routing]
-    related_skills: [kanban-worker]
+  ironhermes:
+        tags: [kanban, multi-agent, orchestration, routing]
+        related_skills: [kanban-worker]
 ---
 
 # Kanban Orchestrator — Decomposition Playbook
 
-> The **core worker lifecycle** (including the `kanban_create` fan-out pattern and the "decompose, don't execute" rule) is auto-injected into every kanban process via the `KANBAN_GUIDANCE` system-prompt block. This skill is the deeper playbook when you're an orchestrator profile whose whole job is routing.
+> The **core worker lifecycle** plus the anti-pattern rule *"never create follow-up tasks assigned to yourself — assign to the right specialist profile"* are auto-injected into every kanban process via the `KANBAN_GUIDANCE` system-prompt block. KANBAN_GUIDANCE does **not** carry a decomposition playbook or a `kanban_create` fan-out pattern — that's this skill. Load it when you're an orchestrator profile whose whole job is routing.
 
 ## Profiles are user-configured — not a fixed roster
 
-Hermes setups vary widely. Some users run a single profile that does everything; some run a small fleet (`docker-worker`, `cron-worker`); some run a curated specialist team they've named themselves. There is **no default specialist roster** — the orchestrator skill does not know what profiles exist on this machine.
+IronHermes setups vary widely. Some users run a single profile that does everything; some run a small fleet (`docker-worker`, `cron-worker`); some run a curated specialist team they've named themselves. There is **no default specialist roster** — the orchestrator skill does not know what profiles exist on this machine.
 
 Before fanning out, you must ground the decomposition in the profiles that actually exist. The dispatcher silently fails to spawn unknown assignee names — it doesn't autocorrect, doesn't suggest, doesn't fall back. So a card assigned to `researcher` on a setup that only has `docker-worker` just sits in `ready` forever.
 
@@ -90,7 +90,7 @@ t1 = kanban_create(
     title="research: Postgres cost vs current",
     assignee="<profile-A>",  # whichever profile handles research on this setup
     body="Compare estimated infrastructure costs, migration costs, and ongoing ops costs over a 3-year window. Sources: AWS/GCP pricing, team time estimates, current Postgres bills from peers.",
-    tenant=os.environ.get("HERMES_TENANT"),
+    tenant=os.environ.get("IRONHERMES_TENANT"),
 )["task_id"]
 
 t2 = kanban_create(
@@ -176,7 +176,7 @@ Tell them what you created in plain prose, naming the actual profiles you used:
 
 **Don't pre-create the whole graph if the shape depends on intermediate findings.** If T3's structure depends on what T1 and T2 find, let T3 exist as a "synthesize findings" task whose own first step is to read parent handoffs and plan the rest. Orchestrators can spawn orchestrators.
 
-**Tenant inheritance.** If `HERMES_TENANT` is set in your env, pass `tenant=os.environ.get("HERMES_TENANT")` on every `kanban_create` call so child tasks stay in the same namespace.
+**Tenant inheritance.** If `IRONHERMES_TENANT` is set in your env, pass `tenant=os.environ.get("IRONHERMES_TENANT")` on every `kanban_create` call so child tasks stay in the same namespace.
 
 ## Recovering stuck workers
 

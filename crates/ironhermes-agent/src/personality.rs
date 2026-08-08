@@ -7,7 +7,7 @@ use tracing::debug;
 /// Registry of personality presets.
 ///
 /// Presets are text overlays inserted into slot 8 (SessionOverlay) of the prompt.
-/// Precedence (highest to lowest): config.yaml > HERMES_HOME/personalities/*.md > built-ins.
+/// Precedence (highest to lowest): config.yaml > IRONHERMES_HOME/personalities/*.md > built-ins.
 /// Per D-08, D-09 (Phase 15, Plan 02).
 pub struct PersonalityRegistry {
     presets: HashMap<String, String>,
@@ -76,7 +76,7 @@ fn builtin_presets() -> HashMap<String, String> {
 }
 
 impl PersonalityRegistry {
-    /// Load personality registry with built-ins, HERMES_HOME file presets, and config presets.
+    /// Load personality registry with built-ins, IRONHERMES_HOME file presets, and config presets.
     ///
     /// Precedence (D-09):
     /// 1. `config_personalities` (config.yaml) — highest, overwrites everything.
@@ -84,12 +84,12 @@ impl PersonalityRegistry {
     /// 3. `hermes_home/personalities/*.md` — extends built-ins but does NOT override them.
     ///    (Uses `entry().or_insert()` so built-ins take precedence over home files.)
     ///
-    /// Security: all custom .md files from HERMES_HOME/personalities/ are scanned by
+    /// Security: all custom .md files from IRONHERMES_HOME/personalities/ are scanned by
     /// `scan_context_content` and truncated at CONTEXT_FILE_MAX_CHARS (T-15-02, T-15-05).
     pub fn load(config_personalities: &HashMap<String, String>, hermes_home: &Path) -> Self {
         let mut presets = builtin_presets();
 
-        // Load HERMES_HOME/personalities/*.md — lower precedence than built-ins.
+        // Load IRONHERMES_HOME/personalities/*.md — lower precedence than built-ins.
         let personalities_dir = hermes_home.join("personalities");
         if personalities_dir.is_dir() {
             match std::fs::read_dir(&personalities_dir) {
@@ -260,7 +260,7 @@ mod tests {
         let registry = PersonalityRegistry::load(&empty_config(), home.path());
         assert!(
             registry.list().contains(&"mysoul"),
-            "mysoul from HERMES_HOME/personalities/ must appear in list()"
+            "mysoul from IRONHERMES_HOME/personalities/ must appear in list()"
         );
         assert_eq!(
             registry.get("mysoul"),
@@ -290,7 +290,7 @@ mod tests {
         assert_eq!(
             registry.get("pirate"),
             Some("Config-based pirate personality."),
-            "config.yaml value must win on name collision with HERMES_HOME file"
+            "config.yaml value must win on name collision with IRONHERMES_HOME file"
         );
     }
 
@@ -318,7 +318,7 @@ mod tests {
 
     #[test]
     fn test_personality_registry_home_does_not_override_builtins() {
-        // HERMES_HOME file named "helpful.md" should NOT override the built-in "helpful"
+        // IRONHERMES_HOME file named "helpful.md" should NOT override the built-in "helpful"
         let home = make_temp_dir();
         let personalities_dir = home.path().join("personalities");
         fs::create_dir_all(&personalities_dir).unwrap();
@@ -333,7 +333,7 @@ mod tests {
         let helpful = registry.get("helpful").unwrap();
         assert!(
             !helpful.contains("Home-based helpful override"),
-            "HERMES_HOME file must NOT override built-in presets; got: {}",
+            "IRONHERMES_HOME file must NOT override built-in presets; got: {}",
             helpful
         );
     }

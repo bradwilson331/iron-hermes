@@ -10,7 +10,6 @@
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::AtomicBool;
 
 use ironhermes_core::commands::context::{
     CommandContext, KanbanStoreReader, KanbanStoreWriter, SubscriptionView,
@@ -157,13 +156,9 @@ fn make_ctx_with_writer(
     let writer = writer.with_canned_subs(canned_subs);
     let reader: Arc<dyn KanbanStoreReader> = Arc::new(FakeKanbanStoreReader);
     let writer_arc: Arc<dyn KanbanStoreWriter> = Arc::new(writer);
-    let mut ctx = CommandContext::new(
-        Platform::Local,
-        "test-session".to_string(),
-        Arc::new(AtomicBool::new(false)),
-    )
-    .with_kanban_store(reader)
-    .with_kanban_store_writer(writer_arc);
+    let mut ctx = CommandContext::new(Platform::Local, "test-session".to_string())
+        .with_kanban_store(reader)
+        .with_kanban_store_writer(writer_arc);
     if let Some(c) = chat_id {
         ctx = ctx.with_chat_origin(c, thread_id);
     }
@@ -536,14 +531,10 @@ async fn auto_subscribe_lifecycle_end_to_end() {
 
     // 1. Dispatch /kanban create through cmd_kanban with chat_origin set.
     let reader: Arc<dyn KanbanStoreReader> = Arc::new(FakeKanbanStoreReader);
-    let ctx = CommandContext::new(
-        Platform::Local,
-        "test".to_string(),
-        Arc::new(AtomicBool::new(false)),
-    )
-    .with_kanban_store(reader)
-    .with_kanban_store_writer(writer_arc)
-    .with_chat_origin("42", None::<String>);
+    let ctx = CommandContext::new(Platform::Local, "test".to_string())
+        .with_kanban_store(reader)
+        .with_kanban_store_writer(writer_arc)
+        .with_chat_origin("42", None::<String>);
     let cmd = find_kanban_cmd();
     let r = router();
     let res = dispatch(

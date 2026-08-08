@@ -5,21 +5,40 @@
 fn with_skill_registry_present_in_main_rs() {
     let src = include_str!("../src/main.rs");
     // Both run_chat and run_single CommandContext builds go through the shared
-    // build_cmd_ctx helper (Phase 21.7-11 extraction), which contains the single
-    // .with_skill_registry( call that covers both dispatch sites.
-    let count = src.matches("with_skill_registry(").count();
+    // build_cmd_ctx helper (Phase 21.7-11 extraction).
+    //
+    // Phase 41.3 Plan 04 (D-11/D-12): build_cmd_ctx no longer calls
+    // `.with_skill_registry(...)` directly — it populates the
+    // `CoreContextHandles.skill_registry` field (Rust field-init shorthand,
+    // `skill_registry,`) and the shared `build_core_context` factory
+    // (ironhermes-core) applies the builder internally. Both anchors are
+    // checked so the test still proves "reaches CommandContext", not merely
+    // "the identifier appears somewhere".
+    assert!(
+        src.contains("build_core_context("),
+        "Phase 41.3 Plan 04: main.rs::build_cmd_ctx must construct its CommandContext \
+         via build_core_context (the D-11 shared factory)"
+    );
+    let count = src.matches("skill_registry,").count();
     assert!(
         count >= 1,
-        "Phase 21.8.2 Plan 02: main.rs must call .with_skill_registry( in build_cmd_ctx (covers run_chat + run_single); found {count}"
+        "Phase 21.8.2 Plan 02 (revised Phase 41.3 Plan 04): main.rs must populate \
+         CoreContextHandles.skill_registry in build_cmd_ctx (covers run_chat + \
+         run_single); found {count}"
     );
 }
 
 #[test]
 fn with_skill_registry_present_in_tui_rata_commands() {
     let src = include_str!("../src/tui_rata/commands.rs");
+    // Phase 41.3 Plan 04 (D-11/D-12): build_command_context no longer calls
+    // `.with_skill_registry(...)` directly — it populates
+    // `CoreContextHandles.skill_registry` from `app.skill_registry.clone()`.
     assert!(
-        src.contains(".with_skill_registry("),
-        "Phase 21.8.2 Plan 02: tui_rata/commands.rs build_command_context must call .with_skill_registry()"
+        src.contains("skill_registry: app.skill_registry.clone()"),
+        "Phase 21.8.2 Plan 02 (revised Phase 41.3 Plan 04): tui_rata/commands.rs \
+         build_command_context must populate CoreContextHandles.skill_registry \
+         from app.skill_registry"
     );
 }
 

@@ -10,21 +10,17 @@ use ironhermes_core::commands::context::CommandContext;
 use ironhermes_core::commands::registry::build_registry;
 use ironhermes_core::commands::{CommandResult, CommandRouter};
 use ironhermes_core::types::{ChatMessage, Platform};
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::Arc;
 
-// ── Fixture helpers ────────────────────────────────────────────────────���──────
+// ── Fixture helpers ────────────────────────────────────────────────────────────
 
-fn make_ctx(agent_running: bool) -> CommandContext {
-    CommandContext::new(
-        Platform::Local,
-        "test-session-id".to_string(),
-        Arc::new(AtomicBool::new(agent_running)),
-    )
+fn make_ctx() -> CommandContext {
+    CommandContext::new(Platform::Local, "test-session-id".to_string())
 }
 
 fn make_ctx_with_history(messages: Vec<ChatMessage>) -> CommandContext {
     let history = Arc::new(std::sync::RwLock::new(messages));
-    make_ctx(false).with_history(history)
+    make_ctx().with_history(history)
 }
 
 fn make_router() -> CommandRouter {
@@ -44,7 +40,7 @@ fn find_cmd(name: &str) -> ironhermes_core::commands::CommandDef {
 /// (the "No agent running" guard path — no registry threaded in test ctx).
 #[test]
 fn stop_no_process_registry_returns_informational() {
-    let ctx = make_ctx(false);
+    let ctx = make_ctx();
     let router = make_router();
     let cmd = find_cmd("stop");
     let result = ironhermes_core::commands::handlers::dispatch(&cmd, &[], &ctx, &router);
@@ -59,21 +55,24 @@ fn stop_no_process_registry_returns_informational() {
     }
 }
 
-/// /stop with agent_running=true but no ProcessRegistry returns advisory text.
+/// /stop with no ProcessRegistry returns advisory text.
+///
+/// Phase 39.1 Plan 06: agent_running AtomicBool removed — make_ctx() is always
+/// equivalent to the old make_ctx(false) and make_ctx(true) (gate is gone).
 #[test]
-fn stop_agent_running_no_registry_returns_advisory() {
-    let ctx = make_ctx(true); // agent running but no process registry
+fn stop_no_registry_returns_advisory() {
+    let ctx = make_ctx(); // no process registry
     let router = make_router();
     let cmd = find_cmd("stop");
     let result = ironhermes_core::commands::handlers::dispatch(&cmd, &[], &ctx, &router);
     match result {
         CommandResult::Output(s) => {
             assert!(
-                s.contains("Stopping agent") || s.contains("not yet wired"),
-                "Expected stopping advisory, got: {s}"
+                !s.is_empty(),
+                "Expected non-empty Output from /stop without process registry, got empty"
             );
         }
-        other => panic!("Expected Output from /stop(running), got {:?}", other),
+        other => panic!("Expected Output from /stop(no registry), got {:?}", other),
     }
 }
 
@@ -82,7 +81,7 @@ fn stop_agent_running_no_registry_returns_advisory() {
 /// INV-22.4-54 behavioral: /retry with no history context returns informational text.
 #[test]
 fn retry_no_history_returns_informational() {
-    let ctx = make_ctx(false); // no history threaded
+    let ctx = make_ctx(); // no history threaded
     let router = make_router();
     let cmd = find_cmd("retry");
     let result = ironhermes_core::commands::handlers::dispatch(&cmd, &[], &ctx, &router);
@@ -144,7 +143,7 @@ fn retry_with_user_message_returns_retrying() {
 /// INV-22.4-55 behavioral: /undo with no history context returns informational text.
 #[test]
 fn undo_no_history_returns_informational() {
-    let ctx = make_ctx(false); // no history threaded
+    let ctx = make_ctx(); // no history threaded
     let router = make_router();
     let cmd = find_cmd("undo");
     let result = ironhermes_core::commands::handlers::dispatch(&cmd, &[], &ctx, &router);
@@ -201,7 +200,7 @@ fn undo_with_history_returns_confirmation() {
 /// INV-22.4-56 behavioral: /rollback with no history context returns informational text.
 #[test]
 fn rollback_no_history_returns_informational() {
-    let ctx = make_ctx(false);
+    let ctx = make_ctx();
     let router = make_router();
     let cmd = find_cmd("rollback");
     let result = ironhermes_core::commands::handlers::dispatch(&cmd, &[], &ctx, &router);
@@ -244,7 +243,7 @@ fn rollback_with_history_returns_rollback_message() {
 /// INV-22.4-57 behavioral: /background with no agent_loop context returns informational text.
 #[test]
 fn background_no_agent_loop_returns_informational() {
-    let ctx = make_ctx(false); // no agent_loop threaded
+    let ctx = make_ctx(); // no agent_loop threaded
     let router = make_router();
     let cmd = find_cmd("background");
     let result =
@@ -263,7 +262,7 @@ fn background_no_agent_loop_returns_informational() {
 /// /background with no args returns usage hint.
 #[test]
 fn background_no_args_returns_usage() {
-    let ctx = make_ctx(false);
+    let ctx = make_ctx();
     let router = make_router();
     let cmd = find_cmd("background");
     let result = ironhermes_core::commands::handlers::dispatch(&cmd, &[], &ctx, &router);
@@ -284,7 +283,7 @@ fn background_no_args_returns_usage() {
 /// INV-22.4-58 behavioral: /btw with no agent_loop context returns informational text.
 #[test]
 fn btw_no_agent_loop_returns_informational() {
-    let ctx = make_ctx(false);
+    let ctx = make_ctx();
     let router = make_router();
     let cmd = find_cmd("btw");
     let result = ironhermes_core::commands::handlers::dispatch(&cmd, &["a thought"], &ctx, &router);
@@ -302,7 +301,7 @@ fn btw_no_agent_loop_returns_informational() {
 /// /btw with no args returns usage hint.
 #[test]
 fn btw_no_args_returns_usage() {
-    let ctx = make_ctx(false);
+    let ctx = make_ctx();
     let router = make_router();
     let cmd = find_cmd("btw");
     let result = ironhermes_core::commands::handlers::dispatch(&cmd, &[], &ctx, &router);
@@ -327,7 +326,7 @@ fn btw_no_args_returns_usage() {
 /// and performs the actual queue push side-effect.
 #[test]
 fn queue_with_args_returns_queued_variant() {
-    let ctx = make_ctx(false);
+    let ctx = make_ctx();
     let router = make_router();
     let cmd = find_cmd("queue");
     let result =
@@ -343,7 +342,7 @@ fn queue_with_args_returns_queued_variant() {
 /// /queue with no args returns usage hint.
 #[test]
 fn queue_no_args_returns_usage() {
-    let ctx = make_ctx(false);
+    let ctx = make_ctx();
     let router = make_router();
     let cmd = find_cmd("queue");
     let result = ironhermes_core::commands::handlers::dispatch(&cmd, &[], &ctx, &router);

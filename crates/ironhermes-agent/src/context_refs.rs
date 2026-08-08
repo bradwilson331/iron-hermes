@@ -131,7 +131,7 @@ const SENSITIVE_HOME_FILES: &[&str] = &[
     ".pypirc",
 ];
 
-/// Directories under `$HERMES_HOME` that are sensitive.
+/// Directories under `$IRONHERMES_HOME` that are sensitive.
 const SENSITIVE_HERMES_DIRS: &[&str] = &["skills/.hub"];
 
 // ---------------------------------------------------------------------------

@@ -21,7 +21,74 @@
 //! is empty (UI-SPEC §4.4). Inline error banner on submit failure.
 
 use crate::protocol::{CreateTaskPayload, KanbanStatus, PromptPayload};
+use crate::server::profile_api::list_profiles;
 use dioxus::prelude::*;
+
+// ============================================================================
+// AssigneePicker — pure helpers (Phase 47.4 Plan 04, D-12)
+// ============================================================================
+
+/// DOM id shared by `CreateTaskModal`'s assignee `<input>` `list` attribute
+/// and its paired `<datalist>`.
+#[allow(dead_code)] // used in CreateTaskModal rsx!; dead_code fires on test target
+pub(crate) const KN_ASSIGNEE_DATALIST_ID: &str = "kn-assignee-profiles";
+
+/// Tri-state load status for the known-profile name set, shared by
+/// `CreateTaskModal`'s datalist hint and `TaskDrawer`'s unmatched-assignee
+/// marker (D-12). `Resolved` carries the actual names so callers can test
+/// membership; `Loading`/`Error` intentionally do NOT carry a stale or
+/// empty name list — each has its own honest treatment, not a treatment
+/// that merely happens to look like zero known profiles.
+#[allow(dead_code)] // constructed in CreateTaskModal/TaskDrawer; dead_code fires on test target
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum ProfileNameLoadState {
+    Loading,
+    Error,
+    Resolved(Vec<String>),
+}
+
+/// The exact hint-line copy for a given load state (UI-SPEC Copywriting
+/// Contract). A pure fn so the cardinality template and the loading/error
+/// backstops are unit-testable without a browser.
+#[allow(dead_code)] // used in CreateTaskModal rsx!; dead_code fires on test target
+pub(crate) fn assignee_hint_text(state: &ProfileNameLoadState) -> String {
+    match state {
+        ProfileNameLoadState::Loading => "Loading profiles… · or type any assignee".to_string(),
+        ProfileNameLoadState::Error => {
+            "Profile list unavailable · or type any assignee".to_string()
+        }
+        ProfileNameLoadState::Resolved(names) => {
+            format!("{} known profiles · or type any assignee", names.len())
+        }
+    }
+}
+
+/// True only when the known-profile set is RESOLVED, the value is
+/// non-empty, and the value is absent from the resolved set (D-12,
+/// T-47.4-04-R1). An unresolved (loading or error) set never classifies a
+/// value as unmatched — the marker is a positive claim that requires
+/// evidence — and an empty value is "unassigned", a different thing from
+/// "unmatched".
+///
+/// Phase 47.4 Plan 12 (GAP-3, T-47.4-12-01): membership is compared
+/// ASCII-case-insensitively, never a Unicode case fold. Profile directory
+/// names are lowercase-only by construction
+/// (`ironhermes_core::profile::validate_profile_name`), while assignees are
+/// arbitrary free text under D-12, so an assignee differing from a real
+/// profile name only in case still names that profile — a Unicode fold
+/// would introduce locale-dependent matches the backend would not honour.
+#[allow(dead_code)] // used in TaskDrawer rsx!; dead_code fires on test target
+pub(crate) fn is_assignee_unmatched(state: &ProfileNameLoadState, assignee: &str) -> bool {
+    if assignee.is_empty() {
+        return false;
+    }
+    match state {
+        ProfileNameLoadState::Resolved(names) => {
+            !names.iter().any(|n| n.eq_ignore_ascii_case(assignee))
+        }
+        ProfileNameLoadState::Loading | ProfileNameLoadState::Error => false,
+    }
+}
 
 // ============================================================================
 // Shared modal shell
@@ -323,10 +390,25 @@ pub fn ArchiveConfirmModal(
 
 /// UI-SPEC §7.2 CreateTaskModal: title (required) + assignee + priority +
 /// tenant + body + Start in Triage checkbox.
+///
+/// `initial_assignee`: Phase 47.4 Plan 09 (D-05 + D-12) — seeds the
+/// `assignee` signal below with the board PROFILE lens name, if a lens is
+/// active when the modal opens. This is an INITIAL value only, read once
+/// at mount time (the modal is freshly mounted on every open per
+/// `kanban.rs`'s `if *create_modal_open.read() { ... }` gate) — the
+/// signal, its `<input>`, and its `oninput` handler are all unchanged
+/// from before this plan, so the seeded value stays freely editable.
+/// `None` seeds an empty string, exactly as before this plan added the
+/// parameter.
 #[component]
-pub fn CreateTaskModal(on_dismiss: EventHandler<()>, on_success: EventHandler<()>) -> Element {
+pub fn CreateTaskModal(
+    on_dismiss: EventHandler<()>,
+    on_success: EventHandler<()>,
+    initial_assignee: Option<String>,
+) -> Element {
     let mut title: Signal<String> = use_signal(String::new);
-    let mut assignee: Signal<String> = use_signal(String::new);
+    let mut assignee: Signal<String> =
+        use_signal(move || initial_assignee.clone().unwrap_or_default());
     let mut priority: Signal<i64> = use_signal(|| 2);
     let mut tenant: Signal<String> = use_signal(String::new);
     let mut body: Signal<String> = use_signal(String::new);
@@ -334,12 +416,50 @@ pub fn CreateTaskModal(on_dismiss: EventHandler<()>, on_success: EventHandler<()
     let mut submitting: Signal<bool> = use_signal(|| false);
     let mut error_msg: Signal<Option<String>> = use_signal(|| None);
 
+    // Phase 47.4 Plan 04 (D-12): known-profile names for the assignee
+    // datalist, seeded once into a local working copy — the crate's
+    // established fix for the hook-order hazard documented in
+    // providers.rs. Never call the resource's restart method after this
+    // line; do so and every hook declared afterward desyncs.
+    let profiles_resource = use_server_future(list_profiles)?;
+    let mut profile_names_sig: Signal<Vec<String>> = use_signal(Vec::new);
+    let mut profile_names_seeded: Signal<bool> = use_signal(|| false);
+    {
+        let loaded = match profiles_resource() {
+            Some(Ok(ref rows)) => {
+                Some(rows.iter().map(|r| r.name.clone()).collect::<Vec<String>>())
+            }
+            _ => None,
+        };
+        use_effect(move || {
+            if let Some(ref names) = loaded {
+                if !*profile_names_seeded.read() {
+                    profile_names_sig.set(names.clone());
+                    profile_names_seeded.set(true);
+                }
+            }
+        });
+    }
+
     let title_is_empty = title.read().is_empty();
     let is_submitting = *submitting.read();
     let submit_disabled = title_is_empty || is_submitting;
     let err_text = error_msg.read().clone();
     let pri = *priority.read();
     let start_triage = *start_in_triage.read();
+
+    // Load-state snapshot for the hint + datalist — read before rsx! per
+    // signal-borrow discipline (clippy.toml).
+    let profile_load_state = match profiles_resource() {
+        None => ProfileNameLoadState::Loading,
+        Some(Err(_)) => ProfileNameLoadState::Error,
+        Some(Ok(_)) => ProfileNameLoadState::Resolved(profile_names_sig.read().clone()),
+    };
+    let assignee_hint = assignee_hint_text(&profile_load_state);
+    let datalist_names: Vec<String> = match &profile_load_state {
+        ProfileNameLoadState::Resolved(names) => names.clone(),
+        _ => Vec::new(),
+    };
 
     rsx! {
         ModalShell {
@@ -361,8 +481,15 @@ pub fn CreateTaskModal(on_dismiss: EventHandler<()>, on_success: EventHandler<()
                 class: "kn-modal-input",
                 placeholder: "e.g. backend-dev",
                 value: "{assignee}",
+                list: KN_ASSIGNEE_DATALIST_ID,
                 oninput: move |evt| assignee.set(evt.value()),
             }
+            datalist { id: KN_ASSIGNEE_DATALIST_ID,
+                for name in datalist_names.iter().cloned() {
+                    option { key: "{name}", value: "{name}" }
+                }
+            }
+            div { class: "kn-modal-hint kn-modal-hint--info", "{assignee_hint}" }
             label { class: "kn-modal-label", "Priority" }
             div { class: "kn-modal-segmented",
                 for p in [0i64, 1, 2, 3] {
@@ -444,6 +571,154 @@ pub fn CreateTaskModal(on_dismiss: EventHandler<()>, on_success: EventHandler<()
                     "Create task"
                 }
             }
+        }
+    }
+}
+
+// ============================================================================
+// AssigneePicker pure-fn tests (Phase 47.4 Plan 04 Task 3)
+// ============================================================================
+//
+// `iron_hermes_ui` is a bin-only crate (no `src/lib.rs`) — integration
+// tests under `tests/` cannot reach `pub(crate)` items in this module (see
+// `tests/profile_health.rs`'s identical, already-established note from
+// Plan 01). These behavioral tests — including the required mutation
+// check — live here; `tests/assignee_picker.rs` locks this module's shape
+// and the D-12 negative guarantee via source-string assertions.
+#[cfg(test)]
+mod assignee_picker_tests {
+    use super::*;
+
+    fn resolved(names: &[&str]) -> ProfileNameLoadState {
+        ProfileNameLoadState::Resolved(names.iter().map(|s| s.to_string()).collect())
+    }
+
+    // --- is_assignee_unmatched -------------------------------------------
+
+    #[test]
+    fn matched_value_in_resolved_set_is_not_unmatched() {
+        let state = resolved(&["backend-dev", "researcher"]);
+        assert!(!is_assignee_unmatched(&state, "backend-dev"));
+    }
+
+    #[test]
+    fn empty_value_is_never_unmatched() {
+        let state = resolved(&["backend-dev"]);
+        assert!(!is_assignee_unmatched(&state, ""));
+    }
+
+    #[test]
+    fn empty_value_is_not_unmatched_even_with_empty_resolved_set() {
+        let state = resolved(&[]);
+        assert!(!is_assignee_unmatched(&state, ""));
+    }
+
+    #[test]
+    fn loading_set_never_classifies_as_unmatched() {
+        assert!(!is_assignee_unmatched(
+            &ProfileNameLoadState::Loading,
+            "some-random-person"
+        ));
+    }
+
+    #[test]
+    fn error_set_never_classifies_as_unmatched() {
+        assert!(!is_assignee_unmatched(
+            &ProfileNameLoadState::Error,
+            "some-random-person"
+        ));
+    }
+
+    #[test]
+    fn resolved_nonempty_value_absent_from_set_is_unmatched() {
+        let state = resolved(&["backend-dev", "researcher"]);
+        assert!(is_assignee_unmatched(&state, "some-random-person"));
+    }
+
+    #[test]
+    fn resolved_empty_set_with_nonempty_value_is_unmatched() {
+        // Zero known profiles — an ad-hoc/CLI-created assignee is still
+        // classified as unmatched (D-12: nothing is rewritten, but the
+        // marker still fires honestly against an empty known set).
+        let state = resolved(&[]);
+        assert!(is_assignee_unmatched(&state, "cli-created-worker"));
+    }
+
+    // --- assignee_hint_text ------------------------------------------------
+
+    #[test]
+    fn hint_at_zero_profiles_reads_locked_copy() {
+        let state = resolved(&[]);
+        assert_eq!(
+            assignee_hint_text(&state),
+            "0 known profiles · or type any assignee"
+        );
+    }
+
+    #[test]
+    fn hint_at_one_profile_reads_from_the_same_template() {
+        let state = resolved(&["backend-dev"]);
+        assert_eq!(
+            assignee_hint_text(&state),
+            "1 known profiles · or type any assignee"
+        );
+    }
+
+    #[test]
+    fn hint_at_many_profiles_reads_the_live_count() {
+        let state = resolved(&["a", "b", "c"]);
+        assert_eq!(
+            assignee_hint_text(&state),
+            "3 known profiles · or type any assignee"
+        );
+    }
+
+    #[test]
+    fn loading_hint_renders_distinct_copy_not_a_count() {
+        let text = assignee_hint_text(&ProfileNameLoadState::Loading);
+        assert_eq!(text, "Loading profiles… · or type any assignee");
+        assert!(!text.contains("known profiles"));
+    }
+
+    #[test]
+    fn error_hint_renders_distinct_copy_never_the_raw_error() {
+        let text = assignee_hint_text(&ProfileNameLoadState::Error);
+        assert_eq!(text, "Profile list unavailable · or type any assignee");
+        assert!(!text.contains("known profiles"));
+    }
+
+    // --- case-insensitive matching (Phase 47.4 Plan 12, GAP-3) -----------
+
+    #[test]
+    fn uppercase_assignee_matches_lowercase_profile_name() {
+        let state = resolved(&["bdev01"]);
+        assert!(!is_assignee_unmatched(&state, "BDEV01"));
+    }
+
+    #[test]
+    fn mixed_case_assignee_matches_lowercase_profile_name() {
+        let state = resolved(&["bdev01"]);
+        assert!(!is_assignee_unmatched(&state, "BdEv01"));
+    }
+
+    #[test]
+    fn genuinely_different_name_is_still_unmatched() {
+        let state = resolved(&["bdev01"]);
+        assert!(is_assignee_unmatched(&state, "bdev02"));
+    }
+
+    #[test]
+    fn resolved_state_preserves_enumeration_order_with_no_coercion() {
+        // No sorting, casing, or filtering happens between the enumerated
+        // profile rows and the Resolved variant's Vec<String> — the
+        // hint/predicate fns consume it exactly as given.
+        let names = vec!["Zeta-Worker".to_string(), "alpha".to_string()];
+        let state = ProfileNameLoadState::Resolved(names.clone());
+        match &state {
+            ProfileNameLoadState::Resolved(inner) => {
+                assert_eq!(inner, &names, "Resolved must preserve exact names and order")
+            }
+            _ => panic!("expected Resolved"),
         }
     }
 }

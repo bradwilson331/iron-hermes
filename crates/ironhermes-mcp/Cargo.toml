@@ -9,7 +9,12 @@ description = "MCP client infrastructure for IronHermes (Phase 21.2)"
 [dependencies]
 # MCP SDK — official Rust SDK from modelcontextprotocol org
 # Feature notes: transport-child-process = stdio subprocess, transport-streamable-http-client = HTTP/SSE
-rmcp = { version = "1.5", features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "=1.8.0", features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+    "auth",
+] }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }
@@ -17,10 +22,19 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 anyhow = { workspace = true }
 regex = { workspace = true }
+url = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
+oauth2 = { workspace = true }
 ironhermes-core = { path = "../ironhermes-core" }
 ironhermes-tools = { path = "../ironhermes-tools" }
+open = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
+async-trait = { workspace = true }
+rmcp = { version = "=1.8.0", features = [
+    "client",
+    "transport-streamable-http-client-reqwest",
+    "auth",
+] }

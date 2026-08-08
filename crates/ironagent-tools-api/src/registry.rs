@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use ironhermes_core::ToolSchema;
@@ -20,6 +22,14 @@ pub struct Prerequisite {
     /// true = blocks is_available() when missing; false = optional / advisory only.
     pub required: bool,
 }
+
+/// D-04/D-05/D-15 (Phase 41.3): trait-default wall-clock execution budget
+/// (seconds), returned by `Tool::timeout_secs()` when a tool does not
+/// override it, and used as the operator-config floor (D-06 level 4). 60s is
+/// 2x `WebConfig.timeout_secs`'s 30s HTTP-leg default, so a wedged web call
+/// surfaces inside a minute. Twin of `ironhermes-tools::registry`'s constant
+/// of the same name (Plan 02 Task 3 — twin-sync).
+pub const DEFAULT_TOOL_TIMEOUT_SECS: u64 = 60;
 
 #[async_trait]
 pub trait Tool: Send + Sync {
@@ -67,7 +77,67 @@ pub trait Tool: Send + Sync {
         raw.clone()
     }
 
+    /// D-04/D-05 (Phase 41.3): wall-clock execution budget for this tool, in
+    /// seconds. Default returns `Some(DEFAULT_TOOL_TIMEOUT_SECS)` — a tool
+    /// that declares nothing still inherits a bound. Opting out of the bound
+    /// is one greppable, reviewable line in the tool's own impl (`Some(0)` or
+    /// `None`). `resolve_tool_timeout` governs how this interacts with
+    /// operator config (D-06). Twin of the primary crate's identical method
+    /// (Plan 02 Task 3 — twin-sync); this twin's tool set is a subset, so
+    /// only the tools that actually exist here need an override.
+    fn timeout_secs(&self) -> Option<u64> {
+        Some(DEFAULT_TOOL_TIMEOUT_SECS)
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String>;
+}
+
+/// D-06 (Phase 41.3): resolve the effective wall-clock timeout for `tool`,
+/// highest-precedence first:
+///
+/// 1. `tools_cfg.timeout_overrides[name]` — operator, per-tool. A value `> 0`
+///    uses that many seconds; a value `<= 0` disables the bound. This arm
+///    **wins over a code-level `None` opt-out** — checked before the tool is
+///    even consulted — so a wedged opted-out tool can be capped from
+///    `config.yaml` with no rebuild.
+/// 2. `tool.timeout_secs()` — the tool's own declared budget. `Some(n)` with
+///    `n > 0` uses `n`; `Some(0)` or `None` means the tool opted out.
+/// 3. `tools_cfg.timeout_secs` — operator global default. The trait default
+///    body already returns `Some(DEFAULT_TOOL_TIMEOUT_SECS)` for every
+///    non-declaring tool, so this level is made reachable by comparing
+///    `tool.timeout_secs()` against that exact constant: an exact match means
+///    "did not declare its own budget", and the operator's global default
+///    applies instead of the trait constant.
+/// 4. `DEFAULT_TOOL_TIMEOUT_SECS` — the floor, reached when `tools_cfg.timeout_secs`
+///    is itself unconfigured (defaults to the same constant).
+///
+/// Reads `tools_cfg` fresh on every call (per the `Config::load()`-at-call-time
+/// idiom used throughout this crate) — never cache it on the registry. Twin of
+/// `ironhermes-tools::registry::resolve_tool_timeout` (Plan 02 Task 3 — twin-sync).
+pub fn resolve_tool_timeout(
+    tool: &dyn Tool,
+    name: &str,
+    tools_cfg: &ironhermes_core::config::ToolsConfig,
+) -> Option<Duration> {
+    // Level 1: per-tool operator override — wins over a code-level `None`,
+    // and is checked before the tool is consulted at all.
+    if let Some(&secs) = tools_cfg.timeout_overrides.get(name) {
+        return if secs > 0 {
+            Some(Duration::from_secs(secs as u64))
+        } else {
+            None
+        };
+    }
+
+    // Level 2: the tool's own declared budget.
+    match tool.timeout_secs() {
+        Some(0) | None => None,
+        Some(n) if n != DEFAULT_TOOL_TIMEOUT_SECS => Some(Duration::from_secs(n)),
+        // Level 3/4: the tool did not declare (its `timeout_secs()` returned
+        // exactly the trait-default constant) — the operator's global
+        // default is live here, itself defaulting to the same floor.
+        _ => Some(Duration::from_secs(tools_cfg.timeout_secs)),
+    }
 }
 
 /// D-12 / D-14 (Phase 25): async handler for intercepted tools.
@@ -95,6 +165,12 @@ pub struct ToolRegistry {
     /// When Some, get_definitions() applies toolset-level filtering (D-23).
     /// When None, no toolset filter is applied — preserves pre-Phase-25 behavior (A2/Pitfall 8).
     toolset_config: Option<ironhermes_core::config::ToolsConfig>,
+    /// D-03 (Phase 41.3): monotonic count of tool executions abandoned at
+    /// their resolved D-06 budget so far. Log + metric only observability —
+    /// no new UI, no `/agents` integration. Twin of the primary crate's
+    /// identical field (Plan 02 Task 3 — twin-sync). This registry has no
+    /// `scope_to()`-style clone site, so no extra propagation is needed.
+    timeout_counter: Arc<AtomicU64>,
 }
 
 impl ToolRegistry {
@@ -105,7 +181,14 @@ impl ToolRegistry {
             error_detail: ironhermes_hooks::ErrorDetailLevel::Full,
             intercepts: HashMap::new(),
             toolset_config: None,
+            timeout_counter: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// D-03 (Phase 41.3): read the current timeout count. Twin of the
+    /// primary crate's identical method (Plan 02 Task 3 — twin-sync).
+    pub fn timeout_count(&self) -> u64 {
+        self.timeout_counter.load(Ordering::Relaxed)
     }
 
     /// Set the toolset configuration for runtime filtering (D-22, Phase 25).
@@ -336,7 +419,14 @@ impl ToolRegistry {
         name: &str,
         args: &serde_json::Value,
     ) -> ironhermes_hooks::GuardrailDecision {
-        let mut last_warn = None;
+        // MED-01 fix: RANK pending decisions instead of last-write-wins. Precedence
+        // is Block > NeedsApproval > Warn > Allow. Previously `Warn` and
+        // `NeedsApproval` shared one last-write-wins cell, so a `Warn` guardrail
+        // ordered AFTER a `NeedsApproval` overwrote it → the agent-loop Allow|Warn
+        // arm executed the tool instead of parking it for approval (fail-OPEN
+        // downgrade, T-45-05 violation). NeedsApproval must never be downgraded to
+        // Warn. `Block` still wins immediately (returns on first match).
+        let mut pending: Option<ironhermes_hooks::GuardrailDecision> = None;
         for guardrail in &self.guardrails {
             match guardrail.check(name, args) {
                 ironhermes_hooks::GuardrailDecision::Allow => {}
@@ -347,15 +437,89 @@ impl ToolRegistry {
                         reason = %reason,
                         "Guardrail warning (proceeding)"
                     );
-                    last_warn = Some(ironhermes_hooks::GuardrailDecision::Warn { reason });
+                    // Only record Warn if nothing stronger (NeedsApproval) is pending.
+                    if !matches!(
+                        pending,
+                        Some(ironhermes_hooks::GuardrailDecision::NeedsApproval { .. })
+                    ) {
+                        pending = Some(ironhermes_hooks::GuardrailDecision::Warn { reason });
+                    }
                     // Continue -- a later guardrail might Block
+                }
+                ironhermes_hooks::GuardrailDecision::NeedsApproval { reason } => {
+                    tracing::warn!(
+                        tool = %name,
+                        guardrail = %guardrail.name(),
+                        reason = %reason,
+                        "Guardrail NeedsApproval — tool parked for chat approval (Phase 45)"
+                    );
+                    // NeedsApproval outranks Warn — always upgrade, never downgraded
+                    // by a later Warn (that would be fail-OPEN).
+                    pending =
+                        Some(ironhermes_hooks::GuardrailDecision::NeedsApproval { reason });
+                    // Continue — a later guardrail might still Block
                 }
                 ironhermes_hooks::GuardrailDecision::Block { reason } => {
                     return ironhermes_hooks::GuardrailDecision::Block { reason };
                 }
             }
         }
-        last_warn.unwrap_or(ironhermes_hooks::GuardrailDecision::Allow)
+        pending.unwrap_or(ironhermes_hooks::GuardrailDecision::Allow)
+    }
+
+    /// D-01 (Phase 41.3, Plan 02 Task 3 — twin-sync): the single shared wrap
+    /// around every tool-execution tail in this registry, mirroring
+    /// `ironhermes-tools::registry`'s identical helper. `execute_tool`,
+    /// `handle_tool_call`, and `dispatch_with_hook` all resolve the D-06
+    /// budget and build the timeout error the same way — exactly one bounded
+    /// call site and one timeout-error-string construction site in this
+    /// file. This twin has no skills-rewrite fallback (no `SkillRegistry`
+    /// handle exists on this `ToolRegistry` — confirmed by grep, not
+    /// assumed), so `resolve_name` and `display_name` are always the same
+    /// value here; the two-parameter shape is kept identical to the primary
+    /// crate for drift-detection symmetry.
+    async fn run_bounded(
+        &self,
+        tool: &dyn Tool,
+        resolve_name: &str,
+        display_name: &str,
+        args: serde_json::Value,
+    ) -> anyhow::Result<String> {
+        let tools_cfg = ironhermes_core::config::Config::load()
+            .map(|c| c.tools)
+            .unwrap_or_default();
+        let Some(budget) = resolve_tool_timeout(tool, resolve_name, &tools_cfg) else {
+            // Opted out (code-level `None`/`0`, not overridden) — run unbounded.
+            return tool.execute(args).await;
+        };
+
+        match tokio::time::timeout(budget, tool.execute(args)).await {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                let elapsed_secs = budget.as_secs();
+                // D-03: the session identifier is not in scope at this call
+                // site — this signature is shared by every call path and
+                // must not change to thread one through. Empty is the
+                // documented placeholder rather than a plumbing change.
+                tracing::warn!(
+                    tool = display_name,
+                    elapsed_secs,
+                    session = tracing::field::Empty,
+                    "tool execution timed out"
+                );
+                self.timeout_counter.fetch_add(1, Ordering::Relaxed);
+                // D-02: no cooperative cancellation — dropping this future
+                // (the `timeout` future is dropped by `match` returning) is
+                // real cancellation; every `ironhermes-exec` backend already
+                // sets `kill_on_drop(true)` so OS children are reaped with no
+                // new machinery.
+                Err(anyhow::anyhow!(
+                    "Tool '{}' timed out after {}s",
+                    display_name,
+                    elapsed_secs
+                ))
+            }
+        }
     }
 
     /// Execute a tool by name with the given args, WITHOUT running guardrail checks.
@@ -376,7 +540,7 @@ impl ToolRegistry {
             return Err(anyhow::anyhow!("Tool '{}' is not available", name));
         }
 
-        tool.execute(args).await
+        self.run_bounded(tool.as_ref(), name, name, args).await
     }
 
     /// Invoke a tool by name, bypassing `is_available()`.
@@ -397,7 +561,7 @@ impl ToolRegistry {
             .tools
             .get(name)
             .ok_or_else(|| anyhow::anyhow!("unknown tool: {name}"))?;
-        tool.execute(args).await
+        self.run_bounded(tool.as_ref(), name, name, args).await
     }
 
     /// Return the configured error detail level for guardrail block messages.
@@ -446,6 +610,15 @@ impl ToolRegistry {
                     );
                     // Continue to next guardrail — warn does not block
                 }
+                ironhermes_hooks::GuardrailDecision::NeedsApproval { reason } => {
+                    let error_msg = ironhermes_hooks::format_guardrail_error(
+                        name,
+                        &reason,
+                        guardrail.name(),
+                        &self.error_detail,
+                    );
+                    return Err(anyhow::anyhow!("{}", error_msg));
+                }
                 ironhermes_hooks::GuardrailDecision::Block { reason } => {
                     let error_msg = ironhermes_hooks::format_guardrail_error(
                         name,
@@ -465,7 +638,10 @@ impl ToolRegistry {
             hook(name, &args_str);
         }
 
-        tool.execute(args).await
+        // D-01 (Phase 41.3): `dispatch()` delegates to `dispatch_with_hook`
+        // with no tail of its own, so wrapping this tail bounds `dispatch()`
+        // by inheritance.
+        self.run_bounded(tool.as_ref(), name, name, args).await
     }
 
     pub fn list_tools(&self) -> Vec<&str> {
@@ -724,14 +900,21 @@ impl ToolRegistry {
     /// branch is wired to the session-scoped `ProcessRegistry`. Foreground
     /// behaviour is unchanged. Called from the three CLI sites + gateway
     /// runner when background spawning is desired.
+    ///
+    /// Phase 42 EXEC-03 / D-05: `env_allowlist` threads `TerminalConfig.terminal_env_allowlist`
+    /// from the caller's `Config` so operator-opted-in vars reach the child subprocess.
+    /// Pass `vec![]` when no config is available — the base `SAFE_ENV_KEYS` still apply.
     pub fn register_terminal_tool_with_process_registry(
         &mut self,
         process_registry: Arc<
             tokio::sync::RwLock<ironhermes_exec::process_registry::ProcessRegistry>,
         >,
+        env_allowlist: Vec<String>,
     ) {
         use crate::terminal::TerminalTool;
-        let tool = TerminalTool::new().with_process_registry(process_registry);
+        let tool = TerminalTool::new()
+            .with_env_allowlist(env_allowlist)
+            .with_process_registry(process_registry);
         self.register(Box::new(tool));
     }
 }

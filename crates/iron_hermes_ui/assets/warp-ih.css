@@ -242,6 +242,54 @@
 }
 .wh-icon-btn:hover { background: var(--w-bg-3); color: var(--fg-strong); }
 
+/* Phase 36.17.10 Plan 04 — cancel/stop button in chat bubble action row */
+/* Base: inline-flex, 24px visual height, 12px horizontal padding (48px hit-target
+   via the surrounding .chat-bubble-wrap), monospace 10px bold uppercase. */
+.wh-cancel-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 12px;
+  height: 24px;
+  border-radius: var(--w-radius-block);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s, box-shadow .12s;
+}
+/* State A — in-flight: danger border + color, translucent danger background */
+.wh-cancel-btn.is-stop {
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  background: color-mix(in oklab, var(--danger) 10%, transparent);
+}
+.wh-cancel-btn.is-stop:hover {
+  background: color-mix(in oklab, var(--danger) 20%, transparent);
+}
+.wh-cancel-btn.is-stop:focus-visible {
+  outline: 2px solid var(--danger);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--danger) 15%, transparent);
+}
+/* State B — queued: neutral border + dim color, transparent background */
+.wh-cancel-btn.is-remove {
+  border: 1px solid var(--w-border);
+  color: var(--fg-dim);
+  background: transparent;
+}
+.wh-cancel-btn.is-remove:hover {
+  background: var(--w-bg-3);
+  color: var(--fg);
+  border-color: var(--w-border-hi);
+}
+.wh-cancel-btn.is-remove:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--accent-primary) 15%, transparent);
+}
+
 /* a "command line" inside a cmd block */
 .wh-cmdline {
   display: flex; gap: 8px; align-items: baseline;
@@ -538,6 +586,7 @@
   border-radius: 5px;
   font-size: 13px;
   color: var(--fg);
+  overflow: hidden;
 }
 .wh-pal-row.is-active { background: var(--w-bg-3); }
 .wh-pal-row .wh-pal-glyph {
@@ -818,5 +867,11 @@
 
 /* Command palette: search icon, command text, description text */
 .wh-pal-icon { color: var(--accent-primary); font-weight: 700; }
-.wh-pal-cmd  { color: var(--fg-strong); }
-.wh-pal-desc { color: var(--fg-dim); }
+.wh-pal-cmd {
+  color: var(--fg-strong);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+.wh-pal-desc {
+  color: var(--fg-dim); flex: 1;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}

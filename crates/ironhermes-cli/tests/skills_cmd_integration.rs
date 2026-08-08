@@ -26,15 +26,15 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 fn with_hermes_home<F: FnOnce(PathBuf)>(f: F) {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     unsafe {
-        std::env::set_var("HERMES_HOME", tmp.path());
+        std::env::set_var("IRONHERMES_HOME", tmp.path());
     }
     f(tmp.path().to_path_buf());
     unsafe {
         match prev {
-            Some(v) => std::env::set_var("HERMES_HOME", v),
-            None => std::env::remove_var("HERMES_HOME"),
+            Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+            None => std::env::remove_var("IRONHERMES_HOME"),
         }
     }
 }
@@ -61,6 +61,44 @@ fn any_file_named(root: &Path, file_name: &str) -> bool {
         }
     }
     false
+}
+
+/// The install directory of the skill named `skill_name` under `skills_root`, if any.
+///
+/// Assertions MUST be scoped through this rather than scanning the whole skills root,
+/// for two reasons:
+///
+/// 1. `ensure_home_dirs` seeds the bundled kanban skills (`kanban-worker`,
+///    `kanban-orchestrator`) into `$IRONHERMES_HOME/skills` on ANY command
+///    (36.3.7-07, `16453267a`). A root-wide "is there a SKILL.md" check is therefore
+///    always true — it passes even if install did nothing, and can never go false
+///    after a remove. Both directions were silently wrong.
+/// 2. Installed skills land under a CATEGORY dir (`skills/<category>/<name>/SKILL.md`,
+///    e.g. `skills/general/ascii-art/`), while the seeded ones sit flat at
+///    `skills/<name>/`. Hard-coding either shape is wrong; search by name instead.
+fn skill_install_dir(skills_root: &Path, skill_name: &str) -> Option<PathBuf> {
+    if let Ok(dir) = std::fs::read_dir(skills_root) {
+        for entry in dir.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            if entry.file_name() == skill_name {
+                return Some(path);
+            }
+            if let Some(found) = skill_install_dir(&path, skill_name) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// Whether the named skill is installed (its dir exists AND holds a `SKILL.md`).
+fn skill_is_installed(skills_root: &Path, skill_name: &str) -> bool {
+    skill_install_dir(skills_root, skill_name)
+        .map(|d| d.join("SKILL.md").is_file())
+        .unwrap_or(false)
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -114,7 +152,7 @@ fn cmd_list_reads_lock_file() {
         std::fs::write(&lock_path, lock_json).unwrap();
 
         let out = std::process::Command::new(binary_path())
-            .env("HERMES_HOME", home.as_path())
+            .env("IRONHERMES_HOME", home.as_path())
             .args(["skills", "list", "--format", "json"])
             .output()
             .expect("run ironhermes skills list");
@@ -193,7 +231,7 @@ async fn install_list_remove_round_trip() {
         .mount(&server)
         .await;
 
-    // 2. Set HERMES_HOME and point SKILLS_DOWNLOAD_URL + SKILLS_AUDIT_URL at
+    // 2. Set IRONHERMES_HOME and point SKILLS_DOWNLOAD_URL + SKILLS_AUDIT_URL at
     // wiremock. This test bypasses ENV_LOCK because it spawns subprocesses
     // — subprocess env is copy-on-spawn and does NOT mutate the parent.
     let hermes_home = tempfile::tempdir().unwrap();
@@ -203,7 +241,7 @@ async fn install_list_remove_round_trip() {
     let bin = binary_path();
     let run = |args: &[&str]| -> std::process::Output {
         std::process::Command::new(&bin)
-            .env("HERMES_HOME", &home_path)
+            .env("IRONHERMES_HOME", &home_path)
             // All three hops re-routed at the single wiremock origin. The
             // `http://` scheme triggers the `any_override_is_http()` relaxer
             // in SkillsShBlobSource::new — see blob.rs.
@@ -245,9 +283,12 @@ async fn install_list_remove_round_trip() {
         "missing D-23 restart line: {install_stdout}"
     );
     // Filesystem: a SKILL.md appears under skills_root.
+    // Scoped to ascii-art (see `skill_install_dir`): a skills-root-wide scan is
+    // satisfied by the seeded bundled kanban skills, so it passed even if install
+    // had done nothing — a false green mirroring the post-remove check below.
     assert!(
-        any_file_named(&home_path.join("skills"), "SKILL.md"),
-        "SKILL.md must be on disk after install"
+        skill_is_installed(&home_path.join("skills"), "ascii-art"),
+        "ascii-art's SKILL.md must be on disk after install"
     );
     // Lock file contains ascii-art.
     let lock_raw = std::fs::read_to_string(home_path.join("skills-lock.json"))
@@ -269,10 +310,12 @@ async fn install_list_remove_round_trip() {
     // 3c. Remove — canonical verb.
     let remove_out = run(&["skills", "remove", "ascii-art"]);
     assert!(remove_out.status.success(), "remove failed");
-    // Filesystem: SKILL.md is gone.
+    // Filesystem: THIS skill's files are gone. Scoped to the skill's own install
+    // dir — "no SKILL.md anywhere under skills/" has been unsatisfiable since the
+    // bundled kanban skills started being seeded there, and is not what this means.
     assert!(
-        !any_file_named(&home_path.join("skills"), "SKILL.md"),
-        "SKILL.md must be gone after remove"
+        !skill_is_installed(&home_path.join("skills"), "ascii-art"),
+        "ascii-art's SKILL.md must be gone after remove"
     );
     // Lock file no longer contains ascii-art.
     if home_path.join("skills-lock.json").exists() {
@@ -318,10 +361,10 @@ fn make_skill_source(parent: &std::path::Path) -> std::path::PathBuf {
     skill_dir
 }
 
-/// Build a subprocess Command with HERMES_HOME set and no network env overrides.
+/// Build a subprocess Command with IRONHERMES_HOME set and no network env overrides.
 fn cmd_with_home(hermes_home: &std::path::Path) -> std::process::Command {
     let mut c = std::process::Command::new(binary_path());
-    c.env("HERMES_HOME", hermes_home);
+    c.env("IRONHERMES_HOME", hermes_home);
     c
 }
 
@@ -393,7 +436,7 @@ fn cmd_install_local_tilde_expands() {
 
     let out = std::process::Command::new(binary_path())
         .env("HOME", fake_home.path()) // controls dirs::home_dir() on unix
-        .env("HERMES_HOME", hermes_home.path())
+        .env("IRONHERMES_HOME", hermes_home.path())
         .args(["skills", "install", identifier, "--skip-audit"])
         .output()
         .expect("run ironhermes with tilde path");
@@ -546,8 +589,15 @@ fn cmd_update_local_dir_recopies_from_source() {
         }
         None
     }
-    let installed_skill_md = find_skill_md(&hermes_home.path().join("skills"))
-        .expect("installed SKILL.md must exist after update");
+    // Scope to THIS skill's install dir. `ensure_home_dirs` seeds the bundled
+    // kanban skills into `$IRONHERMES_HOME/skills` (36.3.7-07, `16453267a`), so the
+    // old walk of the whole skills root returned whichever SKILL.md came first in
+    // readdir order — `kanban-worker`, not the skill under test. That is why this
+    // asserted on a bundled skill's body and failed.
+    let installed_dir = skill_install_dir(&hermes_home.path().join("skills"), "my-local-skill")
+        .expect("my-local-skill must be installed after update");
+    let installed_skill_md =
+        find_skill_md(&installed_dir).expect("installed SKILL.md must exist after update");
     let installed_content = std::fs::read_to_string(&installed_skill_md).unwrap();
     assert!(
         installed_content.contains("updated"),
@@ -678,7 +728,7 @@ async fn cmd_install_local_does_not_call_audit_endpoint() {
     // NOTE: --skip-audit is NOT passed — we want to verify the audit is skipped automatically
     // for local installs (not via the flag).
     let out = std::process::Command::new(binary_path())
-        .env("HERMES_HOME", hermes_home.path())
+        .env("IRONHERMES_HOME", hermes_home.path())
         .env("SKILLS_AUDIT_URL", &audit_uri)
         .args([
             "skills",
@@ -852,6 +902,14 @@ fn cmd_remove_does_not_touch_source_dir() {
         String::from_utf8_lossy(&install_out.stderr)
     );
 
+    // The skill really landed. Without this, the scoped post-remove assertion below
+    // could pass vacuously (absent because it was never installed, not because
+    // `remove` worked). Present-then-absent is the invariant under test.
+    assert!(
+        skill_is_installed(&hermes_home.path().join("skills"), "remove-test-skill"),
+        "install must place remove-test-skill's SKILL.md under the skills root"
+    );
+
     // Snapshot source dir AFTER install (must be unchanged — install copies, not moves)
     let after_install = snapshot_dir(&skill_dir);
     assert_eq!(
@@ -878,10 +936,13 @@ fn cmd_remove_does_not_touch_source_dir() {
          before_install snapshot differs from after_remove snapshot."
     );
 
-    // Verify install dir under skills_root is gone
+    // Verify THIS skill's install dir under skills_root is gone. Scoped — the
+    // bundled kanban skills are seeded into the skills root by `ensure_home_dirs`,
+    // so a root-wide scan can never be empty and would fail regardless of what
+    // `remove` did.
     assert!(
-        !any_file_named(&hermes_home.path().join("skills"), "SKILL.md"),
-        "install dir must be cleaned up after remove"
+        !skill_is_installed(&hermes_home.path().join("skills"), "remove-test-skill"),
+        "remove-test-skill's install dir must be cleaned up after remove"
     );
 
     // Lock file must not contain the removed skill
@@ -987,7 +1048,7 @@ fn uat_replay_bradwilson_download_ascii_art_without_prefix_emits_hint() {
     // The identifier is the bare path (no local: prefix) — exactly the original failing input.
     let out = std::process::Command::new(binary_path())
         .current_dir(workspace.path())
-        .env("HERMES_HOME", hermes_home.path())
+        .env("IRONHERMES_HOME", hermes_home.path())
         .args(["skills", "install", "bradwilson/download/ascii-art/"])
         .output()
         .expect("run ironhermes skills install bradwilson/download/ascii-art/ (no prefix)");
@@ -1059,7 +1120,7 @@ fn installed_local_dir_skill_appears_in_skill_registry_catalog() {
         .arg("skills")
         .arg("install")
         .arg(format!("local:{}", source_dir.path().display()))
-        .env("HERMES_HOME", hermes_home.path())
+        .env("IRONHERMES_HOME", hermes_home.path())
         .env("HOME", hermes_home.path())
         .output()
         .expect("subprocess spawn");
@@ -1069,7 +1130,7 @@ fn installed_local_dir_skill_appears_in_skill_registry_catalog() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    // Verify on-disk: skill landed at <HERMES_HOME>/skills/<category>/<name>/SKILL.md
+    // Verify on-disk: skill landed at <IRONHERMES_HOME>/skills/<category>/<name>/SKILL.md
     let skills_root = hermes_home.path().join("skills");
     assert!(
         any_file_named(&skills_root, "SKILL.md"),

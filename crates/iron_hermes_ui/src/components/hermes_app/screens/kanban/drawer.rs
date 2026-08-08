@@ -30,9 +30,11 @@
 //! ScreenKanban handles these by setting modal-target signals that
 //! `modals.rs` reads.
 
+use super::modals::{is_assignee_unmatched, ProfileNameLoadState};
 use crate::protocol::{
     CommentRow, KanbanEventRow, KanbanStatus, TaskRunRow, WorkerContextEnvelope,
 };
+use crate::server::profile_api::list_profiles;
 use dioxus::prelude::*;
 use std::collections::HashMap;
 
@@ -56,6 +58,7 @@ use std::collections::HashMap;
 pub fn TaskDrawer(
     task_id: ReadSignal<Option<String>>,
     per_task_event_counter: ReadSignal<HashMap<String, u64>>,
+    profile_refresh_tick: ReadSignal<u32>,
     on_close: EventHandler<()>,
     on_open_complete_modal: EventHandler<String>,
     on_open_block_modal: EventHandler<String>,
@@ -111,6 +114,27 @@ pub fn TaskDrawer(
             Some(tid) => Some(crate::server::kanban_api::fetch_comments(tid, None).await),
             None => None,
         }
+    });
+
+    // Resource 5 (Phase 47.4 Plan 04, D-12): known-profile name set, used
+    // only to classify the assignee chip as unmatched. A plain
+    // use_resource (not the suspending server-future hook Task 1 uses for
+    // the create-task modal) — the drawer must keep rendering task detail
+    // immediately regardless of whether this back-of-house lookup has
+    // resolved; an unresolved value here classifies as "not unmatched"
+    // (see is_assignee_unmatched), which is exactly the honest treatment
+    // T-47.4-04-R1 requires. Registered unconditionally, same discipline
+    // as resources 1-4 above.
+    //
+    // Phase 47.4 Plan 12 (GAP-2/GAP-3 cause A): `profile_refresh_tick` is
+    // READ in the SYNC prefix (call syntax subscribes) so a bump from the
+    // wizard's on_created or the profile drawer's on_profile_updated
+    // re-runs this fetch — previously this resource had no dependency at
+    // all and only ever ran once at drawer mount, going permanently stale
+    // after the first profile create/edit.
+    let profile_names = use_resource(move || {
+        let _tick = profile_refresh_tick();
+        async move { list_profiles().await }
     });
 
     // Compose box state (Task 1 stub; Task 2 wires the actual POST via
@@ -194,6 +218,17 @@ pub fn TaskDrawer(
             ),
         };
 
+    // Phase 47.4 Plan 04 (D-12): known-profile load state, read AFTER the
+    // early-return guard above — only needed for the visible RSX subtree.
+    let profile_load_state = match profile_names.value()() {
+        Some(Ok(rows)) => {
+            ProfileNameLoadState::Resolved(rows.iter().map(|r| r.name.clone()).collect())
+        }
+        Some(Err(_)) => ProfileNameLoadState::Error,
+        None => ProfileNameLoadState::Loading,
+    };
+    let assignee_unmatched = is_assignee_unmatched(&profile_load_state, &assignee_str);
+
     // UI-SPEC §4.3 state-matrix derivations.
     let is_running = matches!(parsed_status, Some(KanbanStatus::InProgress));
     let is_done = matches!(parsed_status, Some(KanbanStatus::Done));
@@ -266,6 +301,9 @@ pub fn TaskDrawer(
                     }
                     if !assignee_str.is_empty() {
                         span { class: "kn-chip", "data-kind": "assignee", "{assignee_str}" }
+                        if assignee_unmatched {
+                            span { class: "kn-assignee-unmatched", "unmatched profile" }
+                        }
                     }
                     if !tenant_str.is_empty() {
                         span { class: "kn-chip", "data-kind": "tenant", "{tenant_str}" }

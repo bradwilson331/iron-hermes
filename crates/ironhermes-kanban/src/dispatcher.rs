@@ -41,6 +41,7 @@
 //! `ironhermes kanban diagnostics` (plan 06). It is NOT called from the tick
 //! loop to avoid log spam.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -58,12 +59,54 @@ use crate::store::{KanbanStore, ListFilters};
 use crate::types::{Task, TaskRun};
 
 // ---------------------------------------------------------------------------
+// read_stderr_tail (D-04)
+// ---------------------------------------------------------------------------
+
+/// Read the bounded tail of a worker's stderr log for the D-04 crash
+/// diagnostic.
+///
+/// Returns the last `max_lines` lines, further bounded to at most
+/// `max_bytes` bytes (whichever constraint yields the *smaller* result —
+/// this doubles as an information-disclosure control on the enriched
+/// `task_runs.error` diagnostic, T-46.5-11). Missing or unreadable files are
+/// non-fatal: this returns an empty `String` rather than propagating an
+/// error, since a stderr tail is a best-effort diagnostic, not a
+/// correctness-critical value.
+fn read_stderr_tail(path: &std::path::Path, max_bytes: usize, max_lines: usize) -> String {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(max_lines);
+    let by_lines = lines[start..].join("\n");
+
+    if by_lines.len() <= max_bytes {
+        return by_lines;
+    }
+
+    // Bound further by max_bytes, snapping forward to a valid UTF-8 char
+    // boundary so we never panic on a multi-byte split.
+    let bytes = by_lines.as_bytes();
+    let mut start_byte = bytes.len() - max_bytes;
+    while start_byte < bytes.len() && !by_lines.is_char_boundary(start_byte) {
+        start_byte += 1;
+    }
+    by_lines[start_byte..].to_string()
+}
+
+// ---------------------------------------------------------------------------
 // BoxFuture alias (for spawn_fn testability)
 // ---------------------------------------------------------------------------
 
 type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
 /// spawn_fn signature: (task, run, workspace, board_slug) -> pid
-type SpawnFn = Arc<dyn Fn(Task, TaskRun, String, String) -> BoxFuture<Result<u32>> + Send + Sync>;
+/// Injectable worker-spawn function. `pub` because it is the type of the
+/// public `DispatcherContext::spawn_fn` field and of the `with_spawn_fn`
+/// parameter, so out-of-crate tests need to be able to name it.
+pub type SpawnFn =
+    Arc<dyn Fn(Task, TaskRun, String, String) -> BoxFuture<Result<u32>> + Send + Sync>;
 
 // ---------------------------------------------------------------------------
 // DispatcherContext
@@ -74,6 +117,24 @@ type SpawnFn = Arc<dyn Fn(Task, TaskRun, String, String) -> BoxFuture<Result<u32
 /// The `spawn_fn` field is injectable for testing — the default uses the real
 /// `worker_spawn::spawn_worker`; tests substitute a closure that returns a
 /// synthetic PID or an error without actually exec'ing `ironhermes`.
+/// Injectable pre-spawn dispatch-gate predicate (Phase 47.4 GAP-1).
+///
+/// Default in every constructor is the real, fail-closed
+/// [`ironhermes_core::dispatch_gate::evaluate_profile_dispatch`]. Tests that
+/// exercise *other* dispatcher steps inject an allow-all so they stay
+/// hermetic instead of reading the developer's real `~/.ironhermes`; the gate
+/// itself is covered against the real predicate by
+/// `tests/dispatch_gate_loop.rs`, which sandboxes `IRONHERMES_HOME` and lays
+/// down actual profile fixtures rather than stubbing the decision.
+pub type DispatchGateFn =
+    Arc<dyn Fn(&str) -> ironhermes_core::dispatch_gate::DispatchDecision + Send + Sync>;
+
+/// The production dispatch gate: the shared, provider-aware, fail-closed
+/// predicate every dispatch path uses.
+fn default_gate_fn() -> DispatchGateFn {
+    Arc::new(|assignee: &str| ironhermes_core::dispatch_gate::evaluate_profile_dispatch(assignee))
+}
+
 pub struct DispatcherContext {
     pub store: Arc<TokioMutex<KanbanStore>>,
     pub config: KanbanConfig,
@@ -81,6 +142,9 @@ pub struct DispatcherContext {
     pub dispatcher_pid: u32,
     /// Injectable spawn function for tests. Default: `worker_spawn::spawn_worker`.
     pub spawn_fn: SpawnFn,
+    /// Injectable pre-spawn dispatch gate. Default: the real fail-closed
+    /// predicate. See [`DispatchGateFn`].
+    pub gate_fn: DispatchGateFn,
     /// Phase 36.3.7.10 — optional decomposer injection. None = auto_decompose has no
     /// effect (graceful degradation). Production: wired by CLI cmd_decompose or a future
     /// gateway runner update. Tests: inject a mock closure via `with_decompose_fn`.
@@ -106,11 +170,17 @@ impl DispatcherContext {
                     .await
                 })
             }),
+            gate_fn: default_gate_fn(),
             decompose_fn: None,
         }
     }
 
     /// Create a context with an injectable spawn function (for tests).
+    ///
+    /// The dispatch gate still defaults to the real fail-closed predicate —
+    /// overriding the spawn function must not silently disable the gate.
+    /// Tests that need to bypass it must say so explicitly via
+    /// [`Self::with_gate_fn`].
     pub fn with_spawn_fn(
         store: Arc<TokioMutex<KanbanStore>>,
         config: KanbanConfig,
@@ -122,8 +192,19 @@ impl DispatcherContext {
             hostname: crate::pid::current_hostname(),
             dispatcher_pid: std::process::id(),
             spawn_fn,
+            gate_fn: default_gate_fn(),
             decompose_fn: None,
         }
+    }
+
+    /// Override the pre-spawn dispatch gate (for tests).
+    ///
+    /// Intended for tests exercising dispatcher steps unrelated to the gate,
+    /// which would otherwise have to provision a real profile directory for
+    /// every fixture assignee. Production code must never call this.
+    pub fn with_gate_fn(mut self, gate_fn: DispatchGateFn) -> Self {
+        self.gate_fn = gate_fn;
+        self
     }
 }
 
@@ -201,8 +282,12 @@ pub async fn run_dispatch_tick(ctx: &DispatcherContext) -> Result<()> {
             }
         };
 
-        // Build a per-board context that shares config + spawn_fn + decompose_fn
-        // from the outer DispatcherContext but uses the per-board store.
+        // Build a per-board context that shares config + spawn_fn + gate_fn +
+        // decompose_fn from the outer DispatcherContext but uses the per-board
+        // store. `gate_fn` MUST be propagated, not re-defaulted: every board's
+        // tasks have to be judged by the same predicate the caller configured,
+        // and a silent fall-back to the default here would make an injected
+        // gate apply to the default board only.
         let board_ctx = DispatcherContext {
             store: board_store_arc,
             config: ctx.config.clone(),
@@ -216,6 +301,7 @@ pub async fn run_dispatch_tick(ctx: &DispatcherContext) -> Result<()> {
                     outer_spawn_fn(task, run, workspace, slug.clone())
                 }
             }),
+            gate_fn: Arc::clone(&ctx.gate_fn),
             decompose_fn: ctx.decompose_fn.clone(),
         };
 
@@ -400,8 +486,27 @@ async fn detect_crashed_workers(ctx: &DispatcherContext, now: f64) -> Result<()>
         // Phase 36.3.7.0 BUG-36.3.7-03: circuit breaker on crashed-detection path.
         // The bump above set consecutive_failures += 1; check the limit on the same
         // tick to match operator semantics (D-12 clarified by 36.3.7.0-03).
+        //
+        // D-04 (46.5): enrich the bare "worker process crashed (pid=…)" string
+        // with a real human reason plus a bounded tail of the worker's
+        // profile-scoped stderr log, so the diagnostic that lands in
+        // task_runs.error / the block/gave_up notification payload actually
+        // says something actionable. Reading the log is best-effort — a
+        // missing/unreadable file yields an empty tail, never a panic
+        // (read_stderr_tail is non-fatal by construction).
         {
-            let error_msg = format!("worker process crashed (pid={pid})");
+            let stderr_path = crate::paths::kanban_log_stderr_for(&task.assignee, &task.id);
+            let stderr_tail = read_stderr_tail(&stderr_path, 2048, 20);
+            let error_msg = if stderr_tail.is_empty() {
+                format!(
+                    "worker process exited unexpectedly (pid={pid}); no terminal event recorded."
+                )
+            } else {
+                format!(
+                    "worker process exited unexpectedly (pid={pid}); no terminal event recorded.\n\
+                     --- stderr tail ---\n{stderr_tail}"
+                )
+            };
             apply_circuit_breaker(ctx, &task, &run.id, &error_msg, now).await?;
         }
 
@@ -774,6 +879,95 @@ async fn promote_ready(ctx: &DispatcherContext, now: f64) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// project: workspace kind — dispatcher-side git worktree creation (D-06/D-07)
+// ---------------------------------------------------------------------------
+
+/// Create (or idempotently re-claim) an isolated `git worktree` for a
+/// `project:<repo>` workspace.
+///
+/// `repo` must be an absolute, existing directory (the confused-deputy gate
+/// on relative `project:` tails already runs at task-create time via
+/// [`crate::paths::validate_dir_workspace`] — this is a defense-in-depth
+/// re-check at spawn time). The worktree always lands at
+/// [`crate::paths::kanban_worktree_for`]`(task_id)`, which is deliberately
+/// OUTSIDE `repo` and distinct from the GSD `.claude/worktrees/` namespace
+/// (D-07: never mutate the referenced repo in-place).
+///
+/// If the target directory already exists on disk (a prior spawn/respawn
+/// already created it — e.g. after a reclaim), it is returned as-is rather
+/// than re-running `git worktree add`, which would otherwise fail on an
+/// already-populated path. This mirrors the eager-create-if-absent idiom
+/// `resolve_workspace_dir` already uses for scratch workspaces (D-31).
+///
+/// The actual `git worktree add` call is a native `tokio::process::Command`
+/// subprocess run FROM THE DISPATCHER — never delegated to the worker LLM
+/// (D-07). Mirrors the `Command::new(...).spawn().map_err(...)` shape
+/// `worker_spawn.rs` already uses for the worker subprocess itself.
+async fn create_project_worktree(repo: &str, task_id: &str) -> Result<String> {
+    let repo_path = std::path::Path::new(repo);
+    if !repo_path.is_absolute() {
+        return Err(KanbanError::Other(anyhow::anyhow!(
+            "project: repo path must be absolute: {repo}"
+        )));
+    }
+    if !repo_path.is_dir() {
+        return Err(KanbanError::Other(anyhow::anyhow!(
+            "project: repo path does not exist or is not a directory: {repo}"
+        )));
+    }
+
+    let target = crate::paths::kanban_worktree_for(task_id);
+
+    // Idempotent re-claim: a prior spawn already created this worktree.
+    if target.exists() {
+        return Ok(target.to_string_lossy().into_owned());
+    }
+
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            KanbanError::Other(anyhow::anyhow!(
+                "create kanban worktrees root {}: {e}",
+                parent.display()
+            ))
+        })?;
+    }
+
+    let branch = format!("wt/{task_id}");
+    let child = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("worktree")
+        .arg("add")
+        .arg(&target)
+        .arg("-b")
+        .arg(&branch)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            KanbanError::Other(anyhow::anyhow!(
+                "git worktree add for task {task_id}: failed to spawn git: {e}"
+            ))
+        })?;
+
+    let output = child.wait_with_output().await.map_err(|e| {
+        KanbanError::Other(anyhow::anyhow!(
+            "git worktree add for task {task_id}: failed waiting on git: {e}"
+        ))
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(KanbanError::Other(anyhow::anyhow!(
+            "git worktree add for task {task_id}: {stderr}"
+        )));
+    }
+
+    Ok(target.to_string_lossy().into_owned())
+}
+
+// ---------------------------------------------------------------------------
 // Steps 6–8: claim_and_spawn (includes respawn guard)
 // ---------------------------------------------------------------------------
 
@@ -823,7 +1017,7 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
              idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
              max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
              current_step_key, created_by, created_at, started_at, ended_at, \
-             goal_mode, goal_max_turns, goal_turns_used, goal_toolset \
+             goal_mode, goal_max_turns, goal_turns_used, goal_toolset, output_path \
              FROM tasks \
              WHERE status='ready' AND (scheduled_at IS NULL OR scheduled_at <= ?1) \
              ORDER BY priority DESC, created_at ASC \
@@ -832,10 +1026,12 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
         stmt.query_map(params![now, limit], |r| {
             // Phase 36.3.7.12: SELECT now returns 26 columns; bind goal_* into Task.
             // Phase 36.3.7.13: column 26 = goal_toolset TEXT NULL.
+            // Phase 46.4: column 27 = output_path TEXT NULL (D-10).
             let goal_mode_int: i64 = r.get(23)?;
             let goal_max_turns_i: i64 = r.get(24)?;
             let goal_turns_used_i: i64 = r.get(25)?;
             let goal_toolset: Option<String> = r.get(26)?;
+            let output_path: Option<String> = r.get(27)?;
             Ok(Task {
                 id: r.get(0)?,
                 title: r.get(1)?,
@@ -864,17 +1060,63 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
                 goal_max_turns: goal_max_turns_i.max(0) as u32,
                 goal_turns_used: goal_turns_used_i.max(0) as u32,
                 goal_toolset,
+                output_path,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?
     };
 
-    // For each ready task: check respawn guard, then atomic claim, then spawn.
+    // Memoize the dispatch-gate verdict per assignee so N ready tasks for the
+    // same profile do exactly one disk + resolver pass per tick.
+    let mut gate_cache: HashMap<String, ironhermes_core::dispatch_gate::DispatchDecision> =
+        HashMap::new();
+
+    // For each ready task: dispatch gate, then respawn guard, then atomic
+    // claim, then spawn.
     for task in ready_tasks {
+        // Step 6a: hard pre-spawn dispatch gate (Phase 47.4 GAP-1, UAT inline
+        // fix). Refuse any task whose assignee profile cannot resolve a
+        // provider key for the provider it is actually configured to use.
+        //
+        // This runs FIRST — ahead of the respawn guard — deliberately. The
+        // respawn guard's `blocker_auth` branch can only fire *after* a spawn
+        // has already failed with an auth error, so on its own it leaves an
+        // undispatchable task `ready` and re-guards it every tick forever
+        // (exactly what the 47.4 UAT observed). Blocking here turns that
+        // endless loop into one terminal `blocked` state, before any worker
+        // process is created.
+        //
+        // Plan 10 wired this predicate into `cmd_dispatch` only; the
+        // dispatcher that actually runs in production is `run_dispatch_loop`,
+        // spawned by the gateway. This is that gap's fix — every dispatch
+        // path now shares one predicate from `ironhermes_core`.
+        let decision = gate_cache
+            .entry(task.assignee.clone())
+            .or_insert_with(|| (ctx.gate_fn)(&task.assignee))
+            .clone();
+
+        if let ironhermes_core::dispatch_gate::DispatchDecision::Refuse { reason } = decision {
+            tracing::warn!(
+                event = "dispatch_gate_blocked",
+                task_id = %task.id,
+                assignee = %task.assignee,
+                reason = %reason,
+            );
+            let gate_reason = format!(
+                "{}{reason}",
+                ironhermes_core::dispatch_gate::DISPATCH_GATE_REASON_PREFIX
+            );
+            let mut store = ctx.store.lock().await;
+            if let Err(e) = store.block_task(&task.id, &gate_reason, None) {
+                tracing::warn!("[kanban] dispatch gate could not block task {}: {e}", task.id);
+            }
+            continue;
+        }
+
         // Step 7: respawn guard.
         let guard_reason = {
             let store = ctx.store.lock().await;
-            respawn_guard_reason(&store, &task, now)?
+            respawn_guard_reason(&store, &task, now, &ctx.config)?
         };
 
         if let Some(reason) = guard_reason {
@@ -923,19 +1165,50 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
             profile = %task.assignee,
         );
 
-        // Determine workspace for this task (D-31).
-        let workspace = task.workspace.clone().unwrap_or_else(|| {
-            crate::paths::kanban_workspace_for(&task.id)
-                .to_string_lossy()
-                .into_owned()
-        });
+        // Determine workspace for this task. An explicit per-task workspace wins,
+        // followed by the operator's config.yaml `kanban.default_workdir`, then
+        // the task-specific scratch workspace (D-31/D-32).
+        let workspace = task
+            .workspace
+            .clone()
+            .or_else(|| {
+                ctx.config
+                    .default_workdir
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| {
+                crate::paths::kanban_workspace_for(&task.id)
+                    .to_string_lossy()
+                    .into_owned()
+            });
 
-        // Resolve dir: prefix if present.
-        let workspace = if let Some(tail) = workspace.strip_prefix("dir:") {
-            tail.to_string()
-        } else {
-            workspace
-        };
+        // Resolve dir: prefix if present, or project: prefix (D-06/D-07): the
+        // dispatcher creates an isolated git worktree via a native subprocess
+        // — never delegated to the worker LLM. A worktree-creation Err is
+        // captured here (NOT `?`-propagated out of this per-task loop) so it
+        // flows into the existing outcome='spawn_failed' handling below
+        // exactly like an ordinary spawn failure, and the next candidate in
+        // `ready_tasks` still gets processed this tick.
+        let workspace_resolution: Result<String> =
+            if let Some(tail) = workspace.strip_prefix("dir:") {
+                Ok(tail.to_string())
+            } else if let Some(tail) = workspace.strip_prefix("project:") {
+                create_project_worktree(tail, &task.id).await
+            } else {
+                // D-05 (46.5): scratch-only retry re-init. Wipes a prior crashed
+                // run's leftovers before this retry spawns, so a stale file can't
+                // fool the worker into thinking it already completed. Guarded
+                // internally on task.workspace.is_none() (true here — this arm is
+                // only reached for scratch tasks) AND consecutive_failures > 0
+                // (no-op on first spawn). A wipe failure is captured (NOT
+                // `?`-propagated) so it flows into the same outcome='spawn_failed'
+                // handling below, exactly like the sibling project: arm above.
+                match crate::worker_spawn::reinit_scratch_workspace_if_retry(&task) {
+                    Ok(()) => Ok(workspace),
+                    Err(e) => Err(e),
+                }
+            };
 
         // Load the freshly-inserted task_run row.
         let run = {
@@ -948,9 +1221,15 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
 
         // Step 8: spawn worker. The board slug is captured in ctx.spawn_fn by the
         // per-board context wrapper in run_dispatch_tick; the empty string below
-        // is ignored by that wrapper (the wrapper uses its captured slug).
-        let spawn_result =
-            (ctx.spawn_fn)(task.clone(), run.clone(), workspace.clone(), String::new()).await;
+        // is ignored by that wrapper (the wrapper uses its captured slug). A
+        // failed workspace_resolution (project: worktree creation Err) short-
+        // circuits to the same Err arm below without ever calling spawn_fn.
+        let spawn_result = match workspace_resolution {
+            Ok(workspace) => {
+                (ctx.spawn_fn)(task.clone(), run.clone(), workspace, String::new()).await
+            }
+            Err(e) => Err(e),
+        };
 
         match spawn_result {
             Ok(pid) => {
@@ -1067,6 +1346,7 @@ pub fn respawn_guard_reason(
     store: &KanbanStore,
     task: &Task,
     now: f64,
+    config: &KanbanConfig,
 ) -> Result<Option<&'static str>> {
     // Check last closed run for blocker_auth.
     let last_run: Option<TaskRun> = {
@@ -1082,6 +1362,18 @@ pub fn respawn_guard_reason(
 
     if let Some(ref run) = last_run {
         // blocker_auth: last error matches 429/quota/auth/unauthorized.
+        //
+        // BOUNDED (Phase 47.4 UAT follow-up). This branch used to return
+        // unconditionally, which made the guard permanent: the error text of
+        // the newest closed run never changes, so a task whose profile was
+        // later repaired could never dispatch again and the operator's only
+        // recourse was to recreate it. That is exactly what the 47.4 UAT hit —
+        // `bdev01` was fixed by adding MOONSHOT_API_KEY, the dispatch gate
+        // correctly began allowing it, and this guard still held the task on
+        // the strength of a hours-old 401.
+        //
+        // `respawn_auth_backoff_seconds == 0` restores the old unbounded
+        // behaviour for operators who want it.
         if let Some(ref err) = run.error {
             let lower = err.to_lowercase();
             if lower.contains("429")
@@ -1089,21 +1381,28 @@ pub fn respawn_guard_reason(
                 || lower.contains("auth")
                 || lower.contains("unauthorized")
             {
-                return Ok(Some("blocker_auth"));
+                let backoff = config.respawn_auth_backoff_seconds;
+                let cooled_off = backoff > 0
+                    && run
+                        .ended_at
+                        .is_some_and(|ended_at| now - ended_at >= backoff as f64);
+                if !cooled_off {
+                    return Ok(Some("blocker_auth"));
+                }
             }
         }
 
-        // recent_success: last run completed within 3600 seconds.
+        // recent_success: last run completed within the configured window.
         if run.outcome.as_deref() == Some("completed")
             && let Some(ended_at) = run.ended_at
-            && now - ended_at < 3600.0
+            && now - ended_at < config.respawn_recent_success_seconds as f64
         {
             return Ok(Some("recent_success"));
         }
     }
 
-    // active_pr: any comment in the last 7 days with a GitHub PR URL.
-    let seven_days_ago = now - 7.0 * 24.0 * 3600.0;
+    // active_pr: any comment in the configured look-back with a GitHub PR URL.
+    let seven_days_ago = now - config.respawn_active_pr_seconds as f64;
     let has_active_pr: bool = store
         .conn
         .query_row(

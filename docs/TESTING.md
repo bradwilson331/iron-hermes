@@ -1,11 +1,11 @@
 <!-- generated-by: gsd-doc-writer -->
 # Testing
 
-IronHermes uses the Rust standard test harness (`cargo test`) across a Cargo workspace. There are 215 source files containing inline unit test modules (`#[cfg(test)]`) and 105 standalone integration test files under `tests/` directories. Snapshot testing uses `insta`; static-grep invariant tests use `include_str!` macros against source files.
+IronHermes uses the Rust standard test harness across a Cargo workspace, run in CI via `cargo nextest`. There are over 300 source files containing inline unit test modules (`#[cfg(test)]`) and more than 270 standalone integration test files under `tests/` directories. Snapshot testing uses `insta`; static-grep invariant tests use `include_str!` macros against source files.
 
 ## Test Framework and Setup
 
-The project is a pure Rust workspace — there is no separate JavaScript test runner. All testing goes through Cargo.
+The project is a pure Rust workspace — there is no separate JavaScript test runner. All testing goes through Cargo. CI runs the workspace suite through `cargo nextest` (configured in `.config/nextest.toml`); `cargo test` still works for local ad-hoc runs and is required for doctests, which nextest does not execute.
 
 **Test libraries (declared in `[workspace.dependencies]` in `Cargo.toml`):**
 
@@ -28,27 +28,41 @@ The project is a pure Rust workspace — there is no separate JavaScript test ru
    ```bash
    cargo install cargo-insta --locked
    ```
-3. Install dependencies and build the workspace (done automatically by `cargo test`):
+3. Install `cargo-nextest` to match the CI test runner:
+   ```bash
+   cargo install cargo-nextest --locked
+   ```
+4. Install dependencies and build the workspace (done automatically by `cargo test` / `cargo nextest run`):
    ```bash
    cargo build --workspace
    ```
+
+**macOS note:** freshly built `nextest`/`cargo test` binaries can stall indefinitely in `_dyld_start` while macOS Gatekeeper (XProtect/syspolicyd) performs first-run code-signing assessment. `cargo fmt` and `cargo clippy` are unaffected, and CI (Linux) does not hit this. If a local test run hangs with no output, wait out the Gatekeeper scan once per binary rebuild, or run tests on Linux/CI.
 
 ## Running Tests
 
 ### Full workspace
 
-Runs all unit and integration tests across every crate in the workspace:
+CI runs the workspace suite through `cargo nextest` (bounded by `.config/nextest.toml`: `test-threads = 8`, a 120s per-test `slow-timeout` with `terminate-after = 2`, no automatic retries):
+
+```bash
+cargo nextest run --no-fail-fast --workspace --all-features
+```
+
+`cargo test` remains available for local ad-hoc runs and is required for doctests, which nextest does not execute:
 
 ```bash
 cargo test --workspace --all-features
+cargo test --workspace --all-features --doc
 ```
 
 ### Single crate
 
 ```bash
-cargo test -p ironhermes-cli
-cargo test -p ironhermes-agent
-cargo test -p ironhermes-core
+cargo nextest run -p ironhermes-cli
+cargo nextest run -p ironhermes-agent
+cargo nextest run -p ironhermes-core
+cargo nextest run -p ironhermes-vault
 ```
 
 ### Single integration test file
@@ -57,6 +71,8 @@ cargo test -p ironhermes-core
 cargo test -p ironhermes-cli --test invariants_21_7
 cargo test -p ironhermes-agent --test budget_ordering_grep
 cargo test -p ironhermes-agent --test transcript_no_unwrap_lint
+cargo test -p ironhermes-core --test provider_vault_fallback
+cargo test -p ironhermes-core --test vault_resolve_integration --features rusty-vault
 ```
 
 ### Snapshot tests
@@ -64,8 +80,9 @@ cargo test -p ironhermes-agent --test transcript_no_unwrap_lint
 Run snapshot tests and review any pending changes interactively:
 
 ```bash
-# Run and reject any unreferenced snapshots (mirrors CI behaviour)
-cargo insta test --unreferenced=reject --workspace
+# Run and reject any unreferenced snapshots (mirrors CI behaviour — scoped to
+# ironhermes-cli, where every committed .snap lives)
+cargo insta test --unreferenced=reject -p ironhermes-cli --all-features
 
 # Accept new/changed snapshots interactively
 cargo insta review
@@ -170,9 +187,12 @@ Tests run automatically on every push and pull request targeting the `develop` o
 | Job | Trigger | Command |
 |---|---|---|
 | `phase-21-7-gates` | push / PR to `develop`, `main` | `bash scripts/ci-gates.sh` |
-| `insta-snapshots` | push / PR to `develop`, `main` | `cargo insta test --unreferenced=reject --workspace` |
-| `workspace-tests` | push / PR to `develop`, `main` | `cargo test --workspace --all-features` |
+| `insta-snapshots` | push / PR to `develop`, `main` | `cargo insta test --unreferenced=reject -p ironhermes-cli --all-features` |
+| `workspace-tests` | push / PR to `develop`, `main` | `cargo nextest run --no-fail-fast --workspace --all-features` + `cargo test --workspace --all-features --doc` |
 | `lint` | push / PR to `develop`, `main` | `cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
+| `cargo-audit` | push / PR to `develop`, `main` | `cargo audit` (RustSec advisory database check against `Cargo.lock`) |
+
+The `insta-snapshots` job is scoped to `ironhermes-cli` (where every committed `.snap` lives) rather than `--workspace`: `cargo-insta`'s default runner executes tests as in-process threads, which breaks tests written for nextest's per-process isolation. The `workspace-tests` job's `cargo nextest run` already asserts every snapshot across all crates; this job's unique job is orphaned-snapshot detection.
 
 ### Phase 21.7 CI gates
 

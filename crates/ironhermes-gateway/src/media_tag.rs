@@ -512,6 +512,38 @@ fn infer_kind(body: &str) -> MediaKind {
     }
 }
 
+/// fix(47): deterministic media delivery. Scans tool-result `tool_texts` for the
+/// bare `<MEDIA: ...>` tags the `image_gen` / video tools always author, and
+/// appends any whose [`MediaSource`] is not already present in `existing` — the
+/// refs the model itself echoed on the visible stream and already queued for
+/// dispatch. Also dedups within the scanned texts.
+///
+/// This decouples delivery from whether the model echoes the tag: some chat
+/// models wrap it in a code fence (which [`MediaTagExtractor`] intentionally
+/// passes through as literal text) or reword/drop it, so the attachment never
+/// sends. Tool-result text is authored by the tool, never fenced, so it always
+/// yields the ref. Unlike the web path, URL-form refs are kept (Telegram fetches
+/// and sends them). `existing` is extended in place — stream order first, then
+/// tool-result order.
+pub fn append_undelivered_media_from_texts<'a>(
+    existing: &mut Vec<MediaRef>,
+    tool_texts: impl IntoIterator<Item = &'a str>,
+) {
+    let mut seen: Vec<MediaSource> = existing.iter().map(|r| r.source.clone()).collect();
+    for text in tool_texts {
+        let mut extractor = MediaTagExtractor::new();
+        let _ = extractor.feed(text);
+        let _ = extractor.flush_tail();
+        for media_ref in extractor.take_attachments() {
+            if seen.contains(&media_ref.source) {
+                continue;
+            }
+            seen.push(media_ref.source.clone());
+            existing.push(media_ref);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -823,5 +855,77 @@ mod tests {
     fn open_tag_constant_is_pure_ascii() {
         assert!(OPEN_TAG.is_ascii());
         assert_eq!(OPEN_TAG, "<MEDIA:");
+    }
+
+    // -- fix(47): deterministic tool-result media delivery --------------------
+
+    /// The image_gen tool result (`Generated your image.\n<MEDIA: /path>`) yields
+    /// the ref even though this text was never streamed to the extractor — this
+    /// is the deterministic path that delivers even when the model fences/drops
+    /// the tag in its visible reply.
+    #[test]
+    fn append_from_tool_text_adds_bare_ref() {
+        let mut refs = Vec::new();
+        append_undelivered_media_from_texts(
+            &mut refs,
+            ["Generated your image.\n<MEDIA: /cache/a.webp>"],
+        );
+        assert_eq!(refs.len(), 1);
+        assert_eq!(
+            refs[0].source,
+            MediaSource::Path(PathBuf::from("/cache/a.webp"))
+        );
+        assert_eq!(refs[0].kind, MediaKind::Photo);
+    }
+
+    /// A source the model already echoed (present in `existing`) is not appended
+    /// again — no double-send.
+    #[test]
+    fn append_dedups_against_existing_source() {
+        let mut refs = vec![MediaRef {
+            source: MediaSource::Path(PathBuf::from("/cache/a.webp")),
+            kind: MediaKind::Photo,
+            original_tag_text: "<MEDIA: /cache/a.webp>".to_string(),
+        }];
+        append_undelivered_media_from_texts(&mut refs, ["<MEDIA: /cache/a.webp>"]);
+        assert_eq!(refs.len(), 1, "already-echoed source must not repeat");
+    }
+
+    /// The same path appearing in two tool results this turn is appended once.
+    #[test]
+    fn append_dedups_within_texts() {
+        let mut refs = Vec::new();
+        append_undelivered_media_from_texts(
+            &mut refs,
+            ["<MEDIA: /cache/a.webp>", "<MEDIA: /cache/a.webp>"],
+        );
+        assert_eq!(refs.len(), 1);
+    }
+
+    /// Video paths and URL-form refs are both preserved (Telegram sends both,
+    /// unlike the web path which only dispatches local files).
+    #[test]
+    fn append_preserves_url_and_video_refs() {
+        let mut refs = Vec::new();
+        append_undelivered_media_from_texts(
+            &mut refs,
+            ["<MEDIA: /cache/v.mp4>", "<MEDIA: https://ex.com/a.png>"],
+        );
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].kind, MediaKind::Video);
+        assert_eq!(
+            refs[1].source,
+            MediaSource::Url("https://ex.com/a.png".to_string())
+        );
+    }
+
+    /// Non-tool prose is the caller's concern to exclude; the helper only sees
+    /// the strings it is given, so a fenced tag passed in still extracts (proof
+    /// the caller must filter to Role::Tool text — which handler.rs does).
+    #[test]
+    fn append_extracts_from_any_text_given() {
+        let mut refs = Vec::new();
+        append_undelivered_media_from_texts(&mut refs, ["<MEDIA: /cache/a.webp>"]);
+        assert_eq!(refs.len(), 1, "tool-authored bare tags always extract");
     }
 }

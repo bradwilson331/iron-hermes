@@ -23,22 +23,17 @@ const SKILLS_DESCRIPTION: &str = "Browse and activate skill documents, and searc
 ///
 /// Precedence (first match wins):
 /// 1. `SkillsConfig.credential_dir` (explicit user override)
-/// 2. `$HERMES_HOME/credentials` (deployment convention)
-/// 3. `~/.ironhermes/credentials` (home fallback)
-/// 4. `./.ironhermes/credentials` (last-resort fallback when home is unavailable)
+/// 2. `$IRONHERMES_HOME/credentials` (deployment convention; defaults to
+///    `~/.ironhermes/credentials`, or `./.ironhermes/credentials` when the home
+///    directory is unavailable)
 pub fn default_credential_dir(config: &SkillsConfig) -> PathBuf {
     if let Some(explicit) = &config.credential_dir {
         return explicit.clone();
     }
-    if let Ok(hermes_home) = std::env::var("HERMES_HOME")
-        && !hermes_home.is_empty()
-    {
-        return PathBuf::from(hermes_home).join("credentials");
-    }
-    if let Some(home) = dirs::home_dir() {
-        return home.join(".ironhermes").join("credentials");
-    }
-    PathBuf::from(".ironhermes").join("credentials")
+    // Canonical home resolver: honors IRONHERMES_HOME, falls back to
+    // ~/.ironhermes (or ./.ironhermes when home is unavailable). Previously this
+    // read a non-canonical env var; all settings key off IRONHERMES_HOME.
+    ironhermes_core::constants::get_hermes_home().join("credentials")
 }
 
 // ---------------------------------------------------------------------------

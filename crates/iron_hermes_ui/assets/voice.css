@@ -1,0 +1,769 @@
+/*
+ * Phase 36.17.8 Plan 06 — Mic button CSS.
+ *
+ * Loaded unconditionally (after components.css in app.rs load order).
+ * All values use design-token CSS custom properties — NO hardcoded hex,
+ * NO rgb() literals, NO hardcoded colour strings (project memory rule).
+ *
+ * Token sources (loaded before this file):
+ *   design-tokens.css  — --accent-primary, --danger, --warn, --fg-dim,
+ *                         --fg-disabled, --bg
+ *   warp-ih.css        — --w-border, --w-border-focus
+ *   tokens.css         — --font-mono, --space-1, --space-4
+ *   screens.css        — .chat-input-pill sizing reference
+ */
+
+/* ── Mic button — base (Idle state) ─────────────────────────────────────── */
+
+.mic-btn {
+  /* Size mirrors .chat-input-pill button — snapped to 4px grid.
+     Existing pill uses 0 22px (off-grid); mic uses 0 20px (on-grid). */
+  padding: 0 20px;
+  min-height: 44px;
+
+  /* Square between the rounded-left textarea and rounded-right SEND. */
+  border-radius: 0;
+
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+
+  display: inline-flex;
+  align-items: center;
+  gap: 4px; /* --space-1: glyph→label gap */
+
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+
+  /* Idle: ghost fill over accent-primary — subordinate to ▓ SEND. */
+  background: color-mix(in oklab, var(--accent-primary) 6%, transparent);
+  border: 1px solid color-mix(in oklab, var(--accent-primary) 42%, transparent);
+  color: var(--accent-primary);
+}
+
+/* Focus ring — mirrors .wh-tab:focus-visible from warp-ih.css. */
+.mic-btn:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--accent-primary) 15%, transparent);
+}
+
+/* Hover: only in Idle — promote to solid accent fill. */
+.mic-btn:hover:not([aria-disabled="true"]):not(.is-recording):not(.is-transcribing):not(.is-requesting) {
+  background: var(--accent-primary);
+  color: var(--bg);
+  border-color: var(--accent-primary);
+}
+
+/* ── State 2 — Requesting permission ────────────────────────────────────── */
+
+.mic-btn.is-requesting {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+/* ── State 3 — Recording ────────────────────────────────────────────────── */
+
+.mic-btn.is-recording {
+  background: color-mix(in oklab, var(--danger) 10%, transparent);
+  border-color: var(--danger);
+  color: var(--danger);
+  cursor: pointer;
+}
+
+/* Pulse animation — gated on prefers-reduced-motion per UI-SPEC §Accessibility. */
+@keyframes mic-pulse {
+  0%   { box-shadow: 0 0 0 0   color-mix(in oklab, var(--danger) 40%, transparent); }
+  70%  { box-shadow: 0 0 0 6px color-mix(in oklab, var(--danger) 0%,  transparent); }
+  100% { box-shadow: 0 0 0 0   color-mix(in oklab, var(--danger) 0%,  transparent); }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .mic-btn.is-recording {
+    animation: mic-pulse 1.4s ease-out infinite;
+  }
+}
+
+/* ── State 4 — Transcribing ─────────────────────────────────────────────── */
+
+.mic-btn.is-transcribing {
+  background: color-mix(in oklab, var(--warn) 10%, transparent);
+  border-color: var(--warn);
+  color: var(--warn);
+  cursor: wait;
+  pointer-events: none;
+}
+
+/* ── State 5 — Error ────────────────────────────────────────────────────── */
+
+.mic-btn.is-error {
+  background: transparent;
+  border-color: var(--danger);
+  color: var(--danger);
+  cursor: not-allowed;
+}
+
+/* ── State 6 — Disabled (provider not configured) ───────────────────────── */
+
+.mic-btn[aria-disabled="true"] {
+  background: transparent;
+  border-color: var(--w-border);
+  color: var(--fg-disabled);
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* ── Inline status text (visible — below or beside the pill) ────────────── */
+
+.mic-status {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  margin-top: 4px;
+  min-height: 16px; /* prevent layout shift when text appears/disappears */
+}
+
+.mic-status.is-error { color: var(--danger); }
+.mic-status.is-warn  { color: var(--warn); }
+
+/* ── Screen-reader-only live region (companion to .mic-status) ──────────── */
+
+.mic-status-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Phase 36.17.9 Plan 02 — Voice-mode overlay, entry button, settings ─── */
+/* Appended verbatim from UI-SPEC.md §Orb WebGL Canvas CSS (lines 431-795). */
+/* Design-token only — zero hex literals, zero rgb() literals.               */
+
+/* Voice-mode overlay — full-screen takeover */
+.voice-mode-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  background: var(--w-bg-1);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+}
+
+/* Phase 36.17.10 (UAT): minimized voice mode — shrink to a bottom-right corner
+   widget so the chat transcript behind it stays visible. Toggled by the
+   ▤ MIN / ▢ EXPAND header button. The orb shrinks; transcript + controls hide. */
+.voice-mode-overlay--min {
+  inset: auto var(--space-3) var(--space-3) auto;     /* bottom-right corner */
+  width: min(320px, calc(100vw - 2 * var(--space-3)));
+  height: 200px;
+  border: 1px solid var(--w-border);
+  border-radius: var(--w-radius-block);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  justify-content: center;
+}
+.voice-mode-overlay--min #orb-canvas {
+  width: clamp(80px, 20vmin, 110px);
+  height: clamp(80px, 20vmin, 110px);
+}
+.voice-mode-overlay--min .voice-state-label { margin-top: var(--space-2); }
+.voice-mode-overlay--min .voice-transcript-card,
+.voice-mode-overlay--min .voice-controls-row,
+.voice-mode-overlay--min .voice-header-btn--settings {
+  display: none;
+}
+
+/* Orb canvas */
+#orb-canvas {
+  --orb-motion: full;
+  display: block;
+  width: clamp(240px, 50vmin, 480px);
+  height: clamp(240px, 50vmin, 480px);
+  border-radius: 50%;
+  background: var(--w-bg-0);
+  touch-action: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #orb-canvas { --orb-motion: none; }
+}
+
+/* State label pill */
+.voice-state-label {
+  margin-top: var(--space-4);
+  padding: 4px 12px;
+  border-radius: var(--w-radius-pill);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  border: 1px solid;
+}
+.voice-state-label.is-idle     { border-color: var(--accent-primary); color: var(--accent-primary); background: color-mix(in oklab, var(--accent-primary) 10%, transparent); }
+.voice-state-label.is-listening{ border-color: var(--danger);         color: var(--danger);         background: color-mix(in oklab, var(--danger) 10%, transparent); }
+.voice-state-label.is-thinking { border-color: var(--warn);           color: var(--warn);           background: color-mix(in oklab, var(--warn) 10%, transparent); }
+.voice-state-label.is-speaking { border-color: var(--success);        color: var(--success);        background: color-mix(in oklab, var(--success) 10%, transparent); }
+.voice-state-label.is-armed    { border-color: var(--accent-primary); color: var(--accent-primary); background: color-mix(in oklab, var(--accent-primary) 10%, transparent); }
+.voice-state-label.is-disabled { border-color: var(--w-border);       color: var(--fg-disabled);    background: transparent; }
+
+/* Transcript caption card */
+.voice-transcript-card {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  background: var(--w-bg-2);
+  border: 1px solid var(--w-border);
+  border-radius: var(--w-radius-block);
+  width: min(560px, calc(100vw - 2 * var(--space-5)));
+  min-height: calc(14px * 1.5 * 2 + 2 * var(--space-3));
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-normal);
+  color: var(--fg-dim);
+  overflow: hidden;
+}
+
+.voice-transcript-card.is-placeholder {
+  color: var(--fg-disabled);
+  font-style: italic;
+}
+
+/* Voice-mode controls row */
+.voice-controls-row {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-4);
+  background: var(--w-bg-0);
+  border-top: 1px solid var(--w-border);
+}
+
+/* Hint text in controls row */
+.voice-timeout-hint {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+/* Interrupt button */
+.voice-interrupt-btn {
+  min-height: 44px;
+  padding: 0 var(--space-3);
+  border-radius: var(--w-radius-block);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: 1px solid var(--danger);
+  color: var(--danger);
+  transition: background 0.12s, color 0.12s;
+}
+
+.voice-interrupt-btn:hover {
+  background: color-mix(in oklab, var(--danger) 10%, transparent);
+}
+
+.voice-interrupt-btn:focus-visible {
+  outline: 2px solid var(--danger);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--danger) 15%, transparent);
+}
+
+/* Close and settings header buttons */
+.voice-header-btn {
+  position: absolute;
+  top: var(--space-3);
+  min-height: 44px;
+  min-width: 44px;
+  padding: 0 var(--space-2);
+  border-radius: var(--w-radius-block);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: transparent;
+  border: 1px solid var(--w-border);
+  color: var(--fg-dim);
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+
+.voice-header-btn:hover {
+  background: var(--w-bg-3);
+  color: var(--fg);
+  border-color: var(--w-border-hi);
+}
+
+.voice-header-btn:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--accent-primary) 15%, transparent);
+}
+
+.voice-header-btn--close    { left: var(--space-3); }
+.voice-header-btn--minimize { left: calc(var(--space-3) + 96px); }
+.voice-header-btn--settings { right: var(--space-3); }
+
+/* Voice-mode entry button (in app header/toolbar) */
+.voice-entry-btn {
+  min-height: 44px;
+  padding: 0 var(--space-3);
+  border-radius: var(--w-radius-block);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+  background: color-mix(in oklab, var(--accent-primary) 6%, transparent);
+  border: 1px solid color-mix(in oklab, var(--accent-primary) 42%, transparent);
+  color: var(--accent-primary);
+}
+
+.voice-entry-btn:hover:not([aria-disabled="true"]):not(.is-active) {
+  background: var(--accent-primary);
+  color: var(--bg);
+  border-color: var(--accent-primary);
+}
+
+.voice-entry-btn.is-active {
+  background: color-mix(in oklab, var(--danger) 10%, transparent);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.voice-entry-btn[aria-disabled="true"] {
+  background: transparent;
+  border-color: var(--w-border);
+  color: var(--fg-disabled);
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.voice-entry-btn:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--accent-primary) 15%, transparent);
+}
+
+/* Settings panel */
+.voice-settings-panel {
+  position: absolute;
+  top: 48px;
+  right: 0;
+  width: 320px;
+  max-height: calc(100vh - 64px);
+  overflow-y: auto;
+  background: var(--w-bg-2);
+  border: 1px solid var(--w-border-hi);
+  border-radius: var(--w-radius-block);
+  z-index: 110;
+  padding: var(--space-3);
+  scrollbar-color: var(--w-bg-3) transparent;
+}
+
+@media (max-width: 400px) {
+  .voice-settings-panel { width: 100%; right: 0; left: 0; }
+}
+
+.voice-settings-section-header {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+  margin: 0 0 var(--space-2) 0;
+}
+
+.voice-settings-separator {
+  border: none;
+  border-top: 1px solid var(--w-border-hi);
+  margin: var(--space-3) 0;
+}
+
+.voice-settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.voice-settings-label {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: var(--weight-regular);
+  color: var(--fg-dim);
+}
+
+.voice-settings-value {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: var(--weight-regular);
+  color: var(--fg);
+}
+
+.voice-settings-hint {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+  margin-top: var(--space-1);
+  margin-bottom: var(--space-2);
+  line-height: var(--leading-normal);
+}
+
+/* Toggle switch */
+.voice-toggle {
+  position: relative;
+  width: 40px;
+  height: 24px;
+  border-radius: var(--w-radius-pill);
+  background: var(--w-bg-3);
+  cursor: pointer;
+  border: 1px solid var(--w-border-hi);
+  transition: background 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+}
+
+.voice-toggle.is-on {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+}
+
+.voice-toggle-thumb {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--fg-strong);
+  transition: transform 0.15s;
+}
+
+.voice-toggle.is-on .voice-toggle-thumb {
+  transform: translateX(16px);
+}
+
+.voice-toggle:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--accent-primary) 15%, transparent);
+}
+
+/* Wake-word phrase input */
+.voice-wake-phrase-input {
+  width: 100%;
+  background: var(--w-bg-1);
+  border: 1px solid var(--w-border-hi);
+  border-radius: var(--w-radius-block);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: var(--space-1) var(--space-2);
+  margin-top: var(--space-1);
+  box-sizing: border-box;
+}
+
+.voice-wake-phrase-input::placeholder { color: var(--fg-disabled); }
+
+.voice-wake-phrase-input:focus {
+  outline: none;
+  border-color: var(--w-border-focus);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent-primary) 15%, transparent);
+}
+
+.voice-wake-phrase-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Status pills (in settings panel) */
+.voice-status-pill {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  padding: 4px 8px;
+  border-radius: var(--w-radius-pill);
+  border: 1px solid;
+}
+
+.voice-status-pill.is-active     { color: var(--success); border-color: var(--success); background: color-mix(in oklab, var(--success) 10%, transparent); }
+.voice-status-pill.is-warn       { color: var(--warn);    border-color: var(--warn);    background: color-mix(in oklab, var(--warn) 10%, transparent); }
+.voice-status-pill.is-unavailable{ color: var(--fg-disabled); border-color: var(--w-border); background: transparent; }
+
+/* Screen-reader live region for voice mode state */
+.voice-mode-sr {
+  position: absolute;
+  width: 1px; height: 1px;
+  padding: 0; margin: -1px;
+  overflow: hidden;
+  clip: rect(0,0,0,0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Phase 36.17.10 Plan 02 — Voice settings form: selects, segmented control,
+   save bar, restart/live pills, secret rows.
+   Token-only — zero hex literals, zero rgb() literals (UI-SPEC mandate).    */
+
+/* ── Provider <select> ────────────────────────────────────────────────────── */
+
+.voice-settings-select {
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  /* Caret arrow via inline SVG in var(--fg-dim) colour (#818b98) */
+  background: var(--w-bg-1) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath fill='%23818b98' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E") no-repeat right 8px center;
+  border: 1px solid var(--w-border-hi);
+  border-radius: var(--w-radius-block);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  /* 28px right pad leaves room for the caret; 4px / 8px match text input */
+  padding: var(--space-1) 28px var(--space-1) var(--space-2);
+  width: 100%;
+  cursor: pointer;
+  box-sizing: border-box;
+  min-height: 32px; /* 44px touch target provided by surrounding .voice-settings-row */
+  transition: border-color 0.12s;
+}
+
+.voice-settings-select:hover:not(:disabled) {
+  border-color: var(--w-border-hi);
+  background-color: var(--w-bg-3);
+}
+
+.voice-settings-select:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent-primary) 15%, transparent);
+}
+
+.voice-settings-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Segmented control (Speak mode — Tool-driven / Auto every reply) ─────── */
+
+.voice-seg-control {
+  display: flex;
+  border: 1px solid var(--w-border-hi);
+  border-radius: var(--w-radius-block);
+  overflow: hidden;
+  width: 100%;
+}
+
+.voice-seg {
+  flex: 1;
+  padding: 6px var(--space-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.04em;
+  text-align: center;
+  cursor: pointer;
+  background: transparent;
+  color: var(--fg-dim);
+  border: none;
+  transition: background 0.12s, color 0.12s;
+  min-height: 32px;
+}
+
+/* Divider between segments (on the left segment only — avoids double border) */
+.voice-seg:not(:last-child) {
+  border-right: 1px solid var(--w-border-hi);
+}
+
+.voice-seg.is-active {
+  background: color-mix(in oklab, var(--accent-primary) 14%, transparent);
+  color: var(--accent-primary);
+}
+
+.voice-seg:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: -2px;
+}
+
+.voice-seg:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Save bar + Save button ───────────────────────────────────────────────── */
+
+.voice-settings-save-bar {
+  margin-top: var(--space-3);
+}
+
+.voice-settings-save-btn {
+  display: block;
+  width: 100%;
+  min-height: 44px; /* touch target minimum */
+  padding: 0 var(--space-3);
+  border-radius: var(--w-radius-block);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: var(--weight-bold);
+  letter-spacing: 0.10em;
+  text-transform: uppercase;
+  cursor: pointer;
+  background: var(--accent-primary);
+  border: 1px solid var(--accent-primary);
+  color: var(--bg);
+  transition: opacity 0.15s, background 0.12s;
+  box-sizing: border-box;
+}
+
+.voice-settings-save-btn:disabled {
+  cursor: default;
+}
+
+.voice-settings-save-btn:hover:not(:disabled) {
+  background: color-mix(in oklab, var(--accent-primary) 85%, transparent);
+  border-color: var(--accent-primary);
+}
+
+.voice-settings-save-btn:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--accent-primary) 15%, transparent);
+}
+
+/* ── Restart-required and live pills ─────────────────────────────────────── */
+
+/* "restart required" — beside STT/TTS provider selects after a change */
+.voice-pill-restart {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: var(--weight-bold);
+  white-space: nowrap;
+  padding: 2px 6px;
+  border: 1px solid var(--warn);
+  border-radius: var(--w-radius-pill);
+  background: color-mix(in oklab, var(--warn) 10%, transparent);
+  color: var(--warn);
+}
+
+/* "live" — beside Auto-speak and VAD fields (immediate effect, no restart) */
+.voice-pill-live {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: var(--weight-bold);
+  white-space: nowrap;
+  padding: 2px 6px;
+  border: 1px solid var(--success);
+  border-radius: var(--w-radius-pill);
+  background: color-mix(in oklab, var(--success) 10%, transparent);
+  color: var(--success);
+}
+
+/* ── Secret-field masked rows ─────────────────────────────────────────────── */
+
+/* Wraps a .voice-settings-row for a secret field + the hint text below it */
+.voice-settings-secret-row {
+  margin-bottom: var(--space-2);
+}
+
+.voice-settings-secret-row .voice-settings-value {
+  color: var(--fg-disabled);
+  letter-spacing: 0.05em;
+}
+
+/* ── Number inputs (for VAD fields added in Plan 03) ─────────────────────── */
+/* Defined here so Plan 03 can use without touching this file again.          */
+
+/* Hide WebKit native spinners */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* Hide Firefox native spinners */
+input[type="number"] {
+  -moz-appearance: textfield;
+}
+
+/* Plan 03 (VOICE-02): compact number input for VAD tuning fields (56px wide).   */
+/* Used by End-of-speech delay and Silence threshold rows in the VAD TIMING       */
+/* section. Right-aligned text, no spinners, token-only colors.                   */
+.voice-settings-number-input {
+  width: 56px;
+  background: var(--w-bg-1);
+  border: 1px solid var(--w-border-hi);
+  border-radius: var(--w-radius-block);
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  text-align: right;
+  padding: var(--space-1) var(--space-2);
+  box-sizing: border-box;
+  /* Spinner-hide rules above apply globally; this class provides the box style. */
+}
+
+.voice-settings-number-input:focus {
+  outline: none;
+  border-color: var(--w-border-focus);
+  box-shadow: 0 0 0 2px color-mix(in oklab, var(--accent-primary) 15%, transparent);
+}
+
+.voice-settings-number-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Phase 36.17.10: embedded voice settings on the Settings screen ──────────
+   .voice-settings-panel is styled as a floating overlay (absolute, top:48px,
+   right:0, fixed 320px width, own bg/border, z-index) for the voice-mode screen.
+   When embedded inside the Settings page Voice block (.voice-settings-embed),
+   neutralize that positioning so the form flows inline within the parent .panel
+   (matching the Runtime / UI Preferences blocks). */
+.voice-settings-embed .voice-settings-panel {
+  position: static;
+  top: auto;
+  right: auto;
+  left: auto;
+  width: 100%;
+  max-height: none;
+  overflow: visible;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  z-index: auto;
+  padding: 0;
+}

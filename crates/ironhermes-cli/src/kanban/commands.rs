@@ -47,12 +47,17 @@ pub fn open_store_for_board(board: Option<&str>) -> Result<KanbanStore> {
             // T-1: validate slug at CLI boundary before constructing any path.
             let slug = ironhermes_kanban::board::validate_board_slug(raw_slug)
                 .map_err(|e| anyhow::anyhow!("invalid --board slug: {}", e))?;
-            KanbanStore::open_for_board(&slug).context("Failed to open board DB")
+            // Honor IRONHERMES_KANBAN_DB (set by the dispatcher into the worker env) so a
+            // worker spawned under a profile home still opens the dispatcher's tracked DB,
+            // not a profile-scoped one where the task does not exist. Matches the LLM tools'
+            // KanbanStore::open_from_env_or_board path (tools/complete.rs).
+            KanbanStore::open_from_env_or_board(Some(&slug)).context("Failed to open board DB")
         }
         None => {
             let ctx = ironhermes_kanban::board::resolve_board_context(None)
                 .context("Failed to resolve board context")?;
-            KanbanStore::open(&ctx.db_path).context("Failed to open kanban DB")
+            // See above: honor IRONHERMES_KANBAN_DB before the profile-home-derived path.
+            KanbanStore::open_from_env_or_board(Some(&ctx.slug)).context("Failed to open kanban DB")
         }
     }
 }
@@ -184,6 +189,26 @@ pub async fn cmd_create(
     let task = store
         .create_task(&title, &assignee, opts)
         .context("Failed to create task")?;
+
+    // Phase 46.5-04 D-06: auto-subscribe the operator's configured
+    // default_notify target (source="auto") for this CLI (non-chat-origin)
+    // creation path, mirroring the existing chat-origin auto-subscribe
+    // hook. Non-fatal — the task was already created successfully; a
+    // subscribe failure must not fail `hermes kanban create`.
+    //
+    // SECURITY (T-46.5-20): the target comes exclusively from
+    // KanbanConfig.default_notify (operator config) — never from any of
+    // this command's task-controlled args (title/body/assignee/etc).
+    let main_config = Config::load().unwrap_or_default();
+    let kanban_config = load_kanban_config(&main_config);
+    if let Some(ref target) = kanban_config.default_notify
+        && let Err(e) = ironhermes_kanban::subscribe_default_notify(&mut store, target, &task.id)
+    {
+        eprintln!(
+            "warning: failed to auto-subscribe default_notify target for {}: {}",
+            task.id, e
+        );
+    }
 
     if json {
         println!(
@@ -391,6 +416,42 @@ pub async fn cmd_comment(
 }
 
 // ---------------------------------------------------------------------------
+// cmd_attach
+// ---------------------------------------------------------------------------
+
+/// Attach a local file to a task (D-04/D-03).
+///
+/// Converges on `KanbanStore::add_attachment` — the SAME traversal-safe
+/// writer the web upload surface uses (Plan 03). This function only reads
+/// the local file and derives its display filename; all storage (on-disk
+/// path construction, path-traversal defense, DB row insert) lives in
+/// `add_attachment`. No duplicated storage logic here.
+pub async fn cmd_attach(id: String, file: std::path::PathBuf, board: Option<&str>) -> Result<i32> {
+    let mut store = open_store_for_board(board)?;
+
+    let file_name = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow!("attachment path has no file name: {}", file.display()))?
+        .to_string();
+
+    let bytes = std::fs::read(&file)
+        .with_context(|| format!("read attachment file {}", file.display()))?;
+    let size_bytes = bytes.len();
+
+    let profile = profile_from_env();
+    let meta = store
+        .add_attachment(&id, &file_name, &bytes, None, Some(&profile))
+        .context("Failed to attach file")?;
+
+    println!(
+        "Attached {} ({} bytes) to {} as {}",
+        file_name, size_bytes, id, meta.id
+    );
+    Ok(0)
+}
+
+// ---------------------------------------------------------------------------
 // cmd_complete
 // ---------------------------------------------------------------------------
 
@@ -399,14 +460,16 @@ pub async fn cmd_complete(
     result: Option<String>,
     summary: Option<String>,
     metadata: Option<String>,
+    output_path: Option<String>,
     board: Option<&str>,
 ) -> Result<i32> {
-    // D-34: bulk complete with --summary/--metadata refused
-    if ids.len() > 1 && (summary.is_some() || metadata.is_some()) {
+    // D-34: bulk complete with --summary/--metadata refused.
+    // D-10: bulk complete with --output-path is also per-run and refused.
+    if ids.len() > 1 && (summary.is_some() || metadata.is_some() || output_path.is_some()) {
         eprintln!(
-            "bulk complete with --summary/--metadata refused per D-34 — \
+            "bulk complete with --summary/--metadata/--output-path refused per D-34 — \
              handoff is per-run; use individual complete calls or omit \
-             summary/metadata for bulk admin-close"
+             summary/metadata/output-path for bulk admin-close"
         );
         return Ok(2);
     }
@@ -428,6 +491,7 @@ pub async fn cmd_complete(
             None,
             None,
             &profile,
+            output_path.as_deref(),
         ) {
             Ok(()) => println!("{}: completed", id),
             Err(e) => {
@@ -497,7 +561,7 @@ pub async fn cmd_heartbeat(id: String, note: Option<String>, board: Option<&str>
     use ironhermes_kanban::KanbanEventKind;
 
     let mut store = open_store_for_board(board)?;
-    let run_id_env = std::env::var("HERMES_KANBAN_RUN_ID").ok();
+    let run_id_env = ironhermes_kanban::kanban_env("RUN_ID");
     let payload = note.as_ref().map(|n| serde_json::json!({ "note": n }));
 
     match store.append_event(
@@ -692,10 +756,10 @@ pub async fn cmd_mention(
     };
     use ironhermes_kanban::store::{MentionChildSpec, MentionPlan};
 
-    // 1. Resolve task_id from arg or $HERMES_KANBAN_TASK env.
+    // 1. Resolve task_id from arg or $IRONHERMES_KANBAN_TASK env (dual-read via kanban_env).
     let task_id = task_id
-        .or_else(|| std::env::var("HERMES_KANBAN_TASK").ok())
-        .ok_or_else(|| anyhow!("task_id required when HERMES_KANBAN_TASK is not set"))?;
+        .or_else(|| ironhermes_kanban::kanban_env("TASK"))
+        .ok_or_else(|| anyhow!("task_id required when IRONHERMES_KANBAN_TASK is not set"))?;
 
     // 2. Open store (sync handle; CLI is single-process).
     let mut store = open_store_for_board(board)?;
@@ -1024,6 +1088,18 @@ pub async fn cmd_assignees(json: bool, board: Option<&str>) -> Result<i32> {
 // cmd_dispatch
 // ---------------------------------------------------------------------------
 
+/// Phase 47.4 Plan 10 Task 2: `board: Option<&str>` (the parent `--board`
+/// flag) is already ignored by `run_dispatch_tick`'s own all-boards sweep —
+/// it always processes `"default"` plus every `ironhermes_kanban::paths::
+/// list_boards()` slug, regardless of which single board this invocation's
+/// `--board` flag or 4-tier resolver picked when opening `store` below. The
+/// dispatch gate mirrors that REAL behavior: the store opened via
+/// `open_store_for_board(board)` is swept as the `"default"` slot (exactly
+/// as `run_dispatch_tick` reuses its own `ctx.store` for `"default"`), and
+/// every OTHER named board is opened fresh and swept too. A per-board open
+/// failure is skipped with a warning; the sweep continues (mirrors
+/// `dispatcher.rs`'s own skip-on-error behavior). `run_dispatch_tick` itself
+/// is not changed.
 pub async fn cmd_dispatch(
     dry_run: bool,
     _max: Option<usize>,
@@ -1035,9 +1111,40 @@ pub async fn cmd_dispatch(
         eprintln!("--dry-run not yet implemented for dispatch; proceeding with live dispatch");
     }
 
-    let store = open_store_for_board(board).context("Failed to open kanban DB")?;
+    let mut store = open_store_for_board(board).context("Failed to open kanban DB")?;
 
-    let mut config = KanbanConfig::default();
+    // Phase 47.4 Plan 10 (GAP-1): hard pre-spawn dispatch gate. Refuse any
+    // ready task whose assignee profile cannot resolve a provider key for
+    // its configured main provider — BEFORE run_dispatch_tick ever attempts
+    // to spawn it. Blocked tasks are written to status='blocked' with a
+    // `dispatch gate: ` reason so the operator can audit/undo exactly the
+    // tasks this gate blocked. Swept across every board `run_dispatch_tick`
+    // will itself sweep (see doc comment above).
+    let mut gate_blocked = super::dispatch_gate::refuse_undispatchable_ready_tasks(&mut store);
+    let mut swept_boards = vec!["default".to_string()];
+    match ironhermes_kanban::paths::list_boards() {
+        Ok(named) => swept_boards.extend(named),
+        Err(e) => {
+            tracing::warn!(
+                "[kanban] dispatch gate could not enumerate boards: {e}; using default only"
+            );
+        }
+    }
+    for slug in swept_boards.iter().filter(|s| s.as_str() != "default") {
+        match KanbanStore::open_for_board(slug) {
+            Ok(mut named_store) => {
+                gate_blocked.extend(super::dispatch_gate::refuse_undispatchable_ready_tasks(
+                    &mut named_store,
+                ));
+            }
+            Err(e) => {
+                tracing::warn!("[kanban] dispatch gate skipping board '{slug}': {e}");
+            }
+        }
+    }
+
+    let main_config = Config::load().unwrap_or_default();
+    let mut config = load_kanban_config(&main_config);
     if let Some(fl) = failure_limit {
         config.failure_limit = fl as u32;
     }
@@ -1050,8 +1157,18 @@ pub async fn cmd_dispatch(
         .context("Dispatch tick failed")?;
 
     if json {
-        println!("{}", serde_json::json!({"status": "ok"}));
+        let gate_blocked_json: Vec<_> = gate_blocked
+            .iter()
+            .map(|(id, reason)| serde_json::json!({"task": id, "reason": reason}))
+            .collect();
+        println!(
+            "{}",
+            serde_json::json!({"status": "ok", "gate_blocked": gate_blocked_json})
+        );
     } else {
+        for (id, reason) in &gate_blocked {
+            eprintln!("dispatch gate: task {id} blocked — {reason}");
+        }
         println!("Dispatch tick completed.");
     }
     Ok(0)
@@ -1092,9 +1209,32 @@ pub async fn cmd_stats(json: bool, board: Option<&str>) -> Result<i32> {
 // cmd_log
 // ---------------------------------------------------------------------------
 
-pub async fn cmd_log(id: String, tail_bytes: Option<u64>) -> Result<i32> {
-    let stdout_path = ironhermes_kanban::kanban_log_stdout(&id);
-    let stderr_path = ironhermes_kanban::kanban_log_stderr(&id);
+pub async fn cmd_log(id: String, tail_bytes: Option<u64>, board: Option<&str>) -> Result<i32> {
+    // Resolve the task's assignee so we read from the profile-scoped log
+    // location (`~/.ironhermes/profiles/<assignee>/logs/kanban/`) written by
+    // the worker spawn. Fall back to the legacy root path per-file below so
+    // logs captured before the profile-scoped layout still display.
+    let assignee = open_store_for_board(board)
+        .ok()
+        .and_then(|store| store.get_task(&id).ok())
+        .map(|task| task.assignee)
+        .unwrap_or_default();
+
+    let resolve = |profile_scoped: std::path::PathBuf, legacy: std::path::PathBuf| {
+        if profile_scoped.exists() || !legacy.exists() {
+            profile_scoped
+        } else {
+            legacy
+        }
+    };
+    let stdout_path = resolve(
+        ironhermes_kanban::kanban_log_stdout_for(&assignee, &id),
+        ironhermes_kanban::kanban_log_stdout(&id),
+    );
+    let stderr_path = resolve(
+        ironhermes_kanban::kanban_log_stderr_for(&assignee, &id),
+        ironhermes_kanban::kanban_log_stderr(&id),
+    );
 
     for (label, path) in &[("STDOUT", &stdout_path), ("STDERR", &stderr_path)] {
         if path.exists() {
@@ -1192,14 +1332,21 @@ pub async fn cmd_gc(
         deleted, event_days
     );
 
-    // Remove old log files
-    let logs_dir = ironhermes_kanban::kanban_logs_dir();
-    if logs_dir.exists() {
-        let log_cutoff =
-            std::time::SystemTime::now() - std::time::Duration::from_secs(log_days * 86400);
+    // Remove old log files. Worker logs now live under each assignee's
+    // profile (`~/.ironhermes/profiles/<p>/logs/kanban/`), so sweep every
+    // profile's log dir as well as the legacy root (`~/.ironhermes/logs/kanban/`)
+    // for logs written before the profile-scoped layout.
+    let log_cutoff =
+        std::time::SystemTime::now() - std::time::Duration::from_secs(log_days * 86400);
+    let sweep = |dir: &std::path::Path| -> usize {
+        if !dir.exists() {
+            return 0;
+        }
+        let Ok(read_dir) = std::fs::read_dir(dir) else {
+            return 0;
+        };
         let mut removed = 0usize;
-        for entry in std::fs::read_dir(&logs_dir).context("Failed to read logs dir")? {
-            let entry = entry?;
+        for entry in read_dir.flatten() {
             if let Ok(meta) = entry.metadata()
                 && let Ok(modified) = meta.modified()
                 && modified < log_cutoff
@@ -1208,11 +1355,27 @@ pub async fn cmd_gc(
                 removed += 1;
             }
         }
-        println!(
-            "GC: removed {} old log files (older than {} days)",
-            removed, log_days
-        );
+        removed
+    };
+
+    // Collect every log dir to sweep: legacy root + one per profile.
+    let mut log_dirs = vec![ironhermes_kanban::kanban_logs_dir()];
+    let profiles_root = ironhermes_core::get_hermes_home().join(ironhermes_core::PROFILES_SUBDIR);
+    if let Ok(read_dir) = std::fs::read_dir(&profiles_root) {
+        for entry in read_dir.flatten() {
+            if entry.path().is_dir()
+                && let Some(name) = entry.file_name().to_str()
+            {
+                log_dirs.push(ironhermes_kanban::kanban_logs_dir_for_profile(name));
+            }
+        }
     }
+
+    let removed: usize = log_dirs.iter().map(|d| sweep(d)).sum();
+    println!(
+        "GC: removed {} old log files (older than {} days)",
+        removed, log_days
+    );
 
     Ok(0)
 }
@@ -1321,7 +1484,8 @@ pub async fn cmd_daemon(
     );
 
     let store = open_store_for_board(board).context("Failed to open kanban DB")?;
-    let mut config = KanbanConfig::default();
+    let main_config = Config::load().unwrap_or_default();
+    let mut config = load_kanban_config(&main_config);
     if let Some(fl) = failure_limit {
         config.failure_limit = fl as u32;
     }
@@ -1678,16 +1842,99 @@ fn build_runtime_decompose_fn(
 /// Returns `Err` with an actionable message naming BOTH `kanban.judge_model`
 /// AND `auxiliary.kanban_judge` when no provider can produce an API key —
 /// mirrors the decomposer error pattern at commands.rs:1448-1454.
+///
+/// Phase 47.4 (D-14): `build_runtime_judge_fn` now calls the override-taking
+/// sibling directly, so within the `ironhermes-cli` *binary* crate (which
+/// declares its own `mod kanban;` in `main.rs`, compiling this file a second
+/// time separately from the `ironhermes_cli` lib crate) this fn has no
+/// internal caller and would otherwise trip `dead_code`. It stays `pub` and
+/// unremoved because it is the required zero-arg-override entry point for
+/// every existing external (lib) caller, including the crate's own test
+/// suite — the `#[allow]` below documents the bin-vs-lib duplication, not a
+/// real dead-code bug.
+#[allow(dead_code)]
 pub fn resolve_judge_model_and_endpoint(
     kanban_config: &KanbanConfig,
     main_config: &Config,
 ) -> anyhow::Result<(ironhermes_core::provider::ResolvedEndpoint, String)> {
+    resolve_judge_model_and_endpoint_with_env_overrides(
+        kanban_config,
+        main_config,
+        &std::collections::HashMap::new(),
+    )
+}
+
+/// [`resolve_judge_model_and_endpoint`] with a profile-scoped API-key override
+/// map (Phase 47.4 D-14).
+///
+/// The web server resolves a judge cascade for an arbitrary kanban worker
+/// profile inside one running (multi-threaded) process, so the ordinary
+/// `ProviderResolver::build` — which reads keys from the *server process*
+/// environment (the ROOT profile) — would validate the operator's own key
+/// instead of the profile being probed. This sibling threads `overrides`
+/// (populated by the caller from the target profile's `.env`) through to
+/// [`ironhermes_core::provider::ProviderResolver::build_with_env_overrides`]
+/// so the cascade, the `with_context` message, and the fail-closed
+/// empty-`api_key` bail all live in exactly one place — this function.
+/// `resolve_judge_model_and_endpoint` delegates here with an empty map, so
+/// its behavior for every existing caller is unchanged.
+///
+/// Phase 47.4 Plan 17 (CR-01): this is the operator's own interactive
+/// resolution — `overrides` misses still fall back to the *process*
+/// environment. For any "what would the SCRUBBED spawned worker see?"
+/// question, use [`resolve_judge_model_and_endpoint_with_env_overrides_strict`]
+/// instead; this function's behavior for every existing caller is unchanged.
+pub fn resolve_judge_model_and_endpoint_with_env_overrides(
+    kanban_config: &KanbanConfig,
+    main_config: &Config,
+    overrides: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<(ironhermes_core::provider::ResolvedEndpoint, String)> {
+    resolve_judge_model_and_endpoint_with_env_scope(kanban_config, main_config, overrides, true)
+}
+
+/// [`resolve_judge_model_and_endpoint_with_env_overrides`] with the
+/// process-environment fallback **disabled** (Phase 47.4 Plan 17, CR-01) —
+/// `overrides` is the entire world, mirroring
+/// [`ironhermes_core::provider::ProviderResolver::build_with_env_overrides_strict`].
+///
+/// Answers "what would the SCRUBBED spawned worker see?" — the question
+/// VERIFY (`iron_hermes_ui`'s `build_probe_setup`) needs answered. A
+/// judge-tier key present only in the *server process* environment (e.g. the
+/// ROOT `.env` `main.rs` loads at startup) must never make this resolve `Ok`
+/// for a DIFFERENT profile being probed.
+pub fn resolve_judge_model_and_endpoint_with_env_overrides_strict(
+    kanban_config: &KanbanConfig,
+    main_config: &Config,
+    overrides: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<(ironhermes_core::provider::ResolvedEndpoint, String)> {
+    resolve_judge_model_and_endpoint_with_env_scope(kanban_config, main_config, overrides, false)
+}
+
+/// Shared body for [`resolve_judge_model_and_endpoint_with_env_overrides`]
+/// and its `_strict` sibling (Phase 47.4 Plan 17, CR-01) — the three-tier
+/// cascade, the `with_context` message, and the fail-closed empty-`api_key`
+/// bail live in exactly this one place. `allow_process_env` selects between
+/// [`ironhermes_core::provider::ProviderResolver::build_with_env_overrides`]
+/// and its `_strict` sibling, mirroring `build_with_env_scope`'s own shape
+/// (`ironhermes-core/src/provider.rs:244`).
+fn resolve_judge_model_and_endpoint_with_env_scope(
+    kanban_config: &KanbanConfig,
+    main_config: &Config,
+    overrides: &std::collections::HashMap<String, String>,
+    allow_process_env: bool,
+) -> anyhow::Result<(ironhermes_core::provider::ResolvedEndpoint, String)> {
+    use ironhermes_core::models_cache::ModelsCache;
     use ironhermes_core::provider::ProviderResolver;
 
-    let registry = ProviderResolver::build(main_config).with_context(|| {
+    let registry = if allow_process_env {
+        ProviderResolver::build_with_env_overrides(main_config, ModelsCache::load(), overrides)
+    } else {
+        ProviderResolver::build_with_env_overrides_strict(main_config, ModelsCache::load(), overrides)
+    }
+    .with_context(|| {
         "judge model not configured — set `kanban.judge_model` in config.yaml \
-         OR `auxiliary.kanban_judge` OR ensure `model.default` is set with a \
-         valid provider"
+     OR `auxiliary.kanban_judge` OR ensure `model.default` is set with a \
+     valid provider"
     })?;
 
     // Resolve endpoint + model per the three-tier cascade.
@@ -1743,11 +1990,88 @@ pub fn build_runtime_judge_fn(
     kanban_config: &KanbanConfig,
     main_config: &Config,
 ) -> anyhow::Result<ironhermes_kanban::JudgeFn> {
+    build_runtime_judge_fn_with_env_overrides(
+        kanban_config,
+        main_config,
+        &std::collections::HashMap::new(),
+    )
+}
+
+/// [`build_runtime_judge_fn`] with a profile-scoped API-key override map
+/// (Phase 47.4 D-14).
+///
+/// Builds the same `JudgeFn` closure — trusted static system prompt,
+/// `LlmClient` call, and fail-closed JSON verdict parsing — against a
+/// specific kanban worker profile's key material instead of the server
+/// process's own environment. `build_runtime_judge_fn` delegates here with
+/// an empty map. Stays in `ironhermes-cli` (not `ironhermes-kanban`) per the
+/// locked crate-isolation fence in `ironhermes-kanban/src/judge.rs`.
+///
+/// Phase 47.4 Plan 17 (CR-01): this is the operator's own interactive
+/// resolution — it resolves through
+/// [`resolve_judge_model_and_endpoint_with_env_overrides`], which falls back
+/// to the process environment. For any "what would the SCRUBBED spawned
+/// worker see?" question, use
+/// [`build_runtime_judge_fn_with_env_overrides_strict`] instead.
+pub fn build_runtime_judge_fn_with_env_overrides(
+    kanban_config: &KanbanConfig,
+    main_config: &Config,
+    overrides: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<ironhermes_kanban::JudgeFn> {
+    build_runtime_judge_fn_with_env_scope(kanban_config, main_config, overrides, true)
+}
+
+/// [`build_runtime_judge_fn_with_env_overrides`] with the process-environment
+/// fallback **disabled** (Phase 47.4 Plan 17, CR-01) — resolves through
+/// [`resolve_judge_model_and_endpoint_with_env_overrides_strict`], so
+/// `overrides` (the target profile's own `.env`) is the entire world.
+///
+/// Answers "what would the SCRUBBED spawned worker see?" — the question
+/// VERIFY (`iron_hermes_ui`'s `build_probe_setup`) needs answered. A
+/// judge-tier key present only in the *server process* environment must
+/// never let this build a closure the spawned worker's scrubbed environment
+/// (`.env_clear()` + profile `.env`) could not itself build.
+///
+/// Phase 47.4 (D-14 precedent, `resolve_judge_model_and_endpoint` above):
+/// `ironhermes-cli` is a *binary* crate that declares its own `mod kanban;`
+/// in `main.rs`, compiling this file a second time separately from the
+/// `ironhermes_cli` *lib* crate. Its only caller is `iron_hermes_ui`'s
+/// `build_probe_setup`, which depends on the lib crate — so within the bin
+/// crate's own compilation this fn has no internal caller and would
+/// otherwise trip `dead_code`. It stays `pub` and unremoved because it is
+/// the required strict entry point for that external (lib) caller; the
+/// `#[allow]` below documents the bin-vs-lib duplication, not a real
+/// dead-code bug.
+#[allow(dead_code)]
+pub fn build_runtime_judge_fn_with_env_overrides_strict(
+    kanban_config: &KanbanConfig,
+    main_config: &Config,
+    overrides: &std::collections::HashMap<String, String>,
+) -> anyhow::Result<ironhermes_kanban::JudgeFn> {
+    build_runtime_judge_fn_with_env_scope(kanban_config, main_config, overrides, false)
+}
+
+/// Shared body for [`build_runtime_judge_fn_with_env_overrides`] and its
+/// `_strict` sibling (Phase 47.4 Plan 17, CR-01) — the `JudgeFn` closure
+/// construction (trusted static system prompt, `LlmClient` call, fail-closed
+/// JSON verdict parsing) lives in exactly this one place. `allow_process_env`
+/// selects between [`resolve_judge_model_and_endpoint_with_env_overrides`]
+/// and its `_strict` sibling for the underlying cascade resolution.
+fn build_runtime_judge_fn_with_env_scope(
+    kanban_config: &KanbanConfig,
+    main_config: &Config,
+    overrides: &std::collections::HashMap<String, String>,
+    allow_process_env: bool,
+) -> anyhow::Result<ironhermes_kanban::JudgeFn> {
     use ironhermes_agent::client::LlmClient;
     use ironhermes_core::ChatMessage;
     use ironhermes_kanban::{JudgeOutput, JudgeRequest, JudgeVerdict};
 
-    let (endpoint, resolved_model) = resolve_judge_model_and_endpoint(kanban_config, main_config)?;
+    let (endpoint, resolved_model) = if allow_process_env {
+        resolve_judge_model_and_endpoint_with_env_overrides(kanban_config, main_config, overrides)?
+    } else {
+        resolve_judge_model_and_endpoint_with_env_overrides_strict(kanban_config, main_config, overrides)?
+    };
 
     let base_url = endpoint.base_url.clone();
     let api_key = endpoint.api_key.clone().unwrap_or_default();

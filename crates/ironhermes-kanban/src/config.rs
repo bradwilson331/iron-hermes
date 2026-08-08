@@ -13,16 +13,21 @@
 //! | `default_workdir` | `None` | D-32 (no board-level default) |
 //! | `notification_sources` | `None` | D-37 (RESERVED for deferred notifier phase) |
 //! | `notifier_poll_seconds` | `3` | Phase 36.3.7.5 BUG-36.3.7.5-03 |
+//! | `default_notify` | `None` | Phase 46.5-04 D-06 (config-driven notify target for non-chat-origin task creation) |
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+use crate::error::Result;
+use crate::store::KanbanStore;
 
 /// Top-level kanban configuration block.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KanbanConfig {
     /// Run the dispatcher tokio task inside the gateway runtime (D-09).
-    /// `HERMES_KANBAN_DISPATCH_IN_GATEWAY=0` env override at startup turns
-    /// this off without a config edit.
+    /// `IRONHERMES_KANBAN_DISPATCH_IN_GATEWAY=0` env override at startup turns
+    /// this off without a config edit (legacy `HERMES_KANBAN_DISPATCH_IN_GATEWAY=0`
+    /// also accepted during the deprecation window).
     #[serde(default = "default_dispatch_in_gateway")]
     pub dispatch_in_gateway: bool,
 
@@ -69,6 +74,25 @@ pub struct KanbanConfig {
     #[serde(default = "default_notifier_poll_seconds")]
     pub notifier_poll_seconds: u64,
 
+    /// Config-driven default notify target for block/give-up notifications
+    /// on tasks created via a non-chat-origin path (CLI `hermes kanban
+    /// create` / the `kanban_create` LLM tool) — Phase 46.5-04 D-06.
+    ///
+    /// `None` (the default) means only the existing chat-origin auto-
+    /// subscribe hook (`/kanban create` from a chat platform) and explicit
+    /// `notify-subscribe` calls apply — CLI/tool-created tasks get no
+    /// subscribers and the notifier silently skips them, exactly as today.
+    ///
+    /// SECURITY (T-46.5-20): this target is read EXCLUSIVELY from operator
+    /// config. It MUST NEVER be derived from task-controlled data (task
+    /// fields, attachment filename/metadata) — otherwise a task could
+    /// redirect its own block notification (which may carry a stderr
+    /// diagnostic, see D-04) to an attacker-chosen chat. See
+    /// `subscribe_default_notify` below, the sole writer of this
+    /// relationship.
+    #[serde(default)]
+    pub default_notify: Option<DefaultNotifyTarget>,
+
     /// Auto-run decomposer on triage tasks every dispatcher tick (Phase 36.3.7.10).
     /// Default `false` for v1 (opt-in) — reference.md §444.
     #[serde(default)]
@@ -105,6 +129,30 @@ pub struct KanbanConfig {
     #[serde(default)]
     pub judge_model: String,
 
+    /// How long the `blocker_auth` respawn guard holds a task after its last
+    /// closed run failed with an auth/quota/rate-limit error (Phase 47.4 UAT
+    /// follow-up).
+    ///
+    /// Before this was configurable it was **unbounded**: the guard returned
+    /// on any auth-ish error text in the newest closed run with no time check,
+    /// so a task whose profile was later repaired could never dispatch again —
+    /// the operator's only recourse was to recreate the task. Bounding it lets
+    /// a fixed profile recover on its own after a cool-off.
+    ///
+    /// `0` restores the old unbounded behaviour (guard forever).
+    #[serde(default = "default_respawn_auth_backoff_seconds")]
+    pub respawn_auth_backoff_seconds: u64,
+
+    /// How long the `recent_success` respawn guard suppresses a re-run after a
+    /// successful completion. Previously hardcoded to 3600.
+    #[serde(default = "default_respawn_recent_success_seconds")]
+    pub respawn_recent_success_seconds: u64,
+
+    /// Look-back window for the `active_pr` respawn guard. Previously
+    /// hardcoded to 7 days.
+    #[serde(default = "default_respawn_active_pr_seconds")]
+    pub respawn_active_pr_seconds: u64,
+
     /// Inner-loop iteration cap for goal-mode workers (Phase 36.3.7.13 F-03).
     ///
     /// The worker's `config.agent.max_iterations` is clamped to
@@ -131,6 +179,7 @@ impl Default for KanbanConfig {
             default_workdir: None,
             notification_sources: None,
             notifier_poll_seconds: default_notifier_poll_seconds(),
+            default_notify: None,
             auto_decompose: false,
             auto_decompose_per_tick: default_auto_decompose_per_tick(),
             orchestrator_profile: String::new(),
@@ -139,13 +188,94 @@ impl Default for KanbanConfig {
             auto_promote_children: default_auto_promote_children(),
             judge_model: String::new(),
             goal_inner_max_iterations: default_goal_inner_max_iterations(),
+            respawn_auth_backoff_seconds: default_respawn_auth_backoff_seconds(),
+            respawn_recent_success_seconds: default_respawn_recent_success_seconds(),
+            respawn_active_pr_seconds: default_respawn_active_pr_seconds(),
         }
     }
 }
 
 // ---------------------------------------------------------------------------
+// default_notify (Phase 46.5-04 D-06)
+// ---------------------------------------------------------------------------
+
+/// Operator-configured notify target for block/give-up events on
+/// non-chat-origin tasks (D-06). Deserialized from `kanban.default_notify`
+/// in `config.yaml`:
+///
+/// ```yaml
+/// kanban:
+///   default_notify:
+///     platform: telegram
+///     chat_id: "123456789"
+///     thread_id: "7"   # optional
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DefaultNotifyTarget {
+    /// Platform name (e.g. `"telegram"`) — passed verbatim to
+    /// `append_subscription` / the notifier's `send_fn` platform arg.
+    pub platform: String,
+    /// Platform-specific chat identifier.
+    pub chat_id: String,
+    /// Optional platform-specific thread identifier (e.g. Telegram
+    /// super-group topics). `None` is stored as `""` by `append_subscription`.
+    #[serde(default)]
+    pub thread_id: Option<String>,
+}
+
+/// Auto-subscribe `task_id` to the operator's configured `default_notify`
+/// target with `source="auto"` (D-06), mirroring the existing chat-origin
+/// auto-subscribe hook (`source="auto"`, written by `/kanban create`) for
+/// tasks created via a non-chat-origin path (CLI `hermes kanban create` /
+/// the `kanban_create` LLM tool).
+///
+/// Strictly additive: does not remove or alter any existing subscription
+/// row. A task may end up with multiple subscription rows (chat-origin +
+/// default-notify + explicit); the notifier fans out to each independently
+/// (`list_subscriptions_for_task` returns all of them) — no conflict.
+///
+/// # Security (T-46.5-20)
+///
+/// `target` MUST be sourced exclusively from `KanbanConfig.default_notify`
+/// (operator config) by the caller. This function does not — and must
+/// never — read `platform`/`chat_id`/`thread_id` from any task field,
+/// attachment filename, or other task-controlled data: doing so would let
+/// a task redirect its own block notification (which may carry a stderr
+/// diagnostic per D-04) to an attacker-chosen chat.
+pub fn subscribe_default_notify(
+    store: &mut KanbanStore,
+    target: &DefaultNotifyTarget,
+    task_id: &str,
+) -> Result<()> {
+    store.append_subscription(
+        task_id,
+        &target.platform,
+        &target.chat_id,
+        target.thread_id.as_deref(),
+        "auto",
+    )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Default helpers (named so serde can reach them from `#[serde(default = …)]`)
 // ---------------------------------------------------------------------------
+
+/// 1 hour. Long enough that a genuine 429/quota block is not hammered, short
+/// enough that a repaired profile recovers without operator surgery.
+fn default_respawn_auth_backoff_seconds() -> u64 {
+    3600
+}
+
+/// 1 hour — preserves the previously hardcoded `recent_success` window.
+fn default_respawn_recent_success_seconds() -> u64 {
+    3600
+}
+
+/// 7 days — preserves the previously hardcoded `active_pr` look-back.
+fn default_respawn_active_pr_seconds() -> u64 {
+    7 * 24 * 3600
+}
 
 fn default_dispatch_in_gateway() -> bool {
     true
@@ -203,6 +333,9 @@ mod tests {
         assert!(cfg.default_workdir.is_none());
         assert!(cfg.notification_sources.is_none());
         assert_eq!(cfg.notifier_poll_seconds, 3);
+        // Phase 46.5-04 D-06: default_notify defaults to None (no auto-
+        // subscribe beyond the existing chat-origin hook).
+        assert!(cfg.default_notify.is_none());
         assert!(!cfg.auto_decompose);
         assert_eq!(cfg.auto_decompose_per_tick, 3);
         assert!(cfg.orchestrator_profile.is_empty());

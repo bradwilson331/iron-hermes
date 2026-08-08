@@ -12,6 +12,7 @@ pub mod summary;
 pub mod youtube;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -19,7 +20,7 @@ use ironhermes_core::config::Config;
 use ironhermes_core::{SkillRegistry, SummarizationClientHandle, ToolSchema};
 use serde_json::json;
 use tokio::sync::Semaphore;
-use tracing::{Instrument, info_span, warn};
+use tracing::{Instrument, debug, info_span, warn};
 
 use crate::registry::Tool;
 use crate::web_local::truncate_content;
@@ -124,6 +125,17 @@ impl Tool for WebExtractTool {
         true
     }
 
+    /// Phase 41.3 D-04/D-16: registry budget for the WHOLE `web_extract` call
+    /// (all URLs, not per-URL). At the shipped defaults — 60s per-URL deadline,
+    /// `extract.max_parallel_summaries` = 4 — an 8-URL batch is at most
+    /// `ceil(8/4) = 2` rounds = 120s. 300s leaves headroom above that worst case,
+    /// so the `ToolRegistry::execute_tool` ceiling (Plan 01) stays a backstop
+    /// that should never fire in normal operation; D-16's per-URL deadlines are
+    /// what actually bound each URL.
+    fn timeout_secs(&self) -> Option<u64> {
+        Some(300)
+    }
+
     /// Phase 25.3 D-T-1 / Discretion D-2 override: delegate to `redact_url_args`
     /// (testable seam). See the free function's doc-comment for the contract.
     fn redact_args(&self, raw: &serde_json::Value) -> serde_json::Value {
@@ -226,17 +238,46 @@ impl Tool for WebExtractTool {
                         .await
                         .expect("semaphore not closed");
 
-                    let result = process_one_url(
-                        &url,
-                        use_llm_processing,
-                        min_length,
-                        &format_c,
-                        &cfg_c,
-                        &client_c,
-                        &registry_c,
-                        sem_c.clone(), // share sem so chunked summarization shares budget (D-15)
+                    // D-16: the per-URL deadline starts AFTER the permit is
+                    // acquired — a URL waiting behind extract.max_parallel_summaries
+                    // must not be charged for queue time it did not spend fetching.
+                    // No batch-level deadline is added (rejected option — three
+                    // interacting deadlines); this bounds only this one URL's task.
+                    let per_url_secs = cfg_c.extract.per_url_timeout_secs;
+                    let result = match tokio::time::timeout(
+                        Duration::from_secs(per_url_secs),
+                        process_one_url(
+                            &url,
+                            use_llm_processing,
+                            min_length,
+                            &format_c,
+                            &cfg_c,
+                            &client_c,
+                            &registry_c,
+                            sem_c.clone(), // share sem so chunked summarization shares budget (D-15)
+                        ),
                     )
-                    .await;
+                    .await
+                    {
+                        Ok(r) => r,
+                        Err(_elapsed) => {
+                            // Blackbox run 0eaed980: a bot-walled homepage never
+                            // answered and sank the whole 6-URL batch. This turns
+                            // that URL into an in-array error entry at its own idx
+                            // instead. Never log the raw url — redact first, as
+                            // fetch_web_with_chain already does everywhere else.
+                            let redacted =
+                                redact_secrets_in_url(&url, &cfg_c.extract.redact_url_patterns);
+                            warn!(
+                                "web_extract: URL exceeded per-URL deadline of {}s: {}",
+                                per_url_secs, redacted
+                            );
+                            ExtractionResult::error(
+                                &url,
+                                format!("extraction_timeout after {}s", per_url_secs),
+                            )
+                        }
+                    };
 
                     (idx, result)
                 }
@@ -361,77 +402,142 @@ async fn process_one_url(
     extraction
 }
 
-/// D-04 backend chain for `UrlClass::Web` URLs.
-/// Tries Firecrawl → Exa → Tavily → Local, with D-03 mid-fetch PDF reroute on the local path.
-/// On TOTAL chain failure, propagates Err so the per-URL pipeline can apply D-05 truncated-raw
-/// fallback on the original extraction (currently mapped to extraction_failed).
+/// Phase 41.3 D-17: backend chain for `UrlClass::Web` URLs, config-ordered via
+/// `tools.web_extract.chain` (read from the `cfg` already passed in — never
+/// re-loaded here) instead of the fixed Firecrawl→Exa→Tavily→Local env-order
+/// ladder that shipped in Phase 25.2 D-04. The unconfigured *default* chain
+/// reproduces that exact order (see `default_web_extract_chain_config` in
+/// `ironhermes-core::config`), so an operator who edits nothing sees no
+/// behavior change; an operator who promotes exa/tavily ahead of `local` gets
+/// that order honoured without a code change or rebuild — the direct fix for
+/// the bot-wall fallback in blackbox run `0eaed980`.
+///
+/// D-03's mid-fetch PDF reroute and the D-07 Markdown/HTML content contract
+/// survive unchanged on the `local` arm, wherever it sits in the configured
+/// chain. A chain entry whose API key env var is absent is skipped (debug
+/// log), not treated as a hard error — an operator listing four providers
+/// and holding two keys is normal. On TOTAL chain exhaustion, propagates Err
+/// so the per-URL pipeline can apply D-05 truncated-raw fallback on the
+/// original extraction (currently mapped to extraction_failed). The
+/// configured chain is never implicitly extended with `local` — the default
+/// chain ends in `local`, and an operator who removed it meant to.
 async fn fetch_web_with_chain(url: &str, cfg: &Config, format: &str) -> Result<ExtractionResult> {
     // Plan 16 / UAT Issue 9: log the REDACTED URL in every warn! site so secrets
     // never leak via tracing. cfg.extract.redact_url_patterns is the operator's
     // extension list (D-22).
     let url_for_log = redact_secrets_in_url(url, &cfg.extract.redact_url_patterns);
 
-    // 1. Firecrawl
-    if std::env::var("FIRECRAWL_API_KEY").is_ok() {
-        match firecrawl::fetch_with_firecrawl(url).await {
-            Ok(r) => return Ok(r),
-            Err(e) => warn!(
-                "web_extract: Firecrawl failed for {}: {}; trying Exa",
-                url_for_log, e
-            ),
-        }
-    }
-    // 2. Exa
-    if std::env::var("EXA_API_KEY").is_ok() {
-        match exa::fetch_with_exa(url).await {
-            Ok(r) => return Ok(r),
-            Err(e) => warn!(
-                "web_extract: Exa failed for {}: {}; trying Tavily",
-                url_for_log, e
-            ),
-        }
-    }
-    // 3. Tavily
-    if std::env::var("TAVILY_API_KEY").is_ok() {
-        match tavily::fetch_with_tavily(url).await {
-            Ok(r) => return Ok(r),
-            Err(e) => warn!(
-                "web_extract: Tavily failed for {}: {}; trying Local",
-                url_for_log, e
-            ),
-        }
-    }
-    // 4. Local — also handles D-03 mid-fetch PDF reroute via LocalFetchOutcome.
-    match local::fetch_local_content(url, &cfg.web).await {
-        Ok(outcome) => {
-            // D-03 mid-fetch reroute: if Content-Type was application/pdf, hand bytes to PDF handler.
-            if outcome.content_type.as_deref().is_some_and(reroute_for_pdf)
-                && let Some(bytes) = outcome.raw_bytes.clone()
-            {
-                return extract_pdf_bytes(url, bytes).await;
+    let chain = &cfg.tools.web_extract.chain;
+    let mut last_err: Option<anyhow::Error> = None;
+
+    for (idx, entry) in chain.iter().enumerate() {
+        let next_hint = chain
+            .get(idx + 1)
+            .map(|s| s.as_str())
+            .unwrap_or("nothing (chain exhausted)");
+
+        match entry.as_str() {
+            "firecrawl" => {
+                if std::env::var("FIRECRAWL_API_KEY").is_err() {
+                    debug!("web_extract: skipping firecrawl in chain — FIRECRAWL_API_KEY not set");
+                    continue;
+                }
+                match firecrawl::fetch_with_firecrawl(url).await {
+                    Ok(r) => return Ok(r),
+                    Err(e) => {
+                        warn!(
+                            "web_extract: Firecrawl failed for {}: {}; trying {}",
+                            url_for_log, e, next_hint
+                        );
+                        last_err = Some(e);
+                    }
+                }
             }
-            // HTML path: if format=html, return raw HTML in content (per CONTEXT <specifics>).
-            if format == "html"
-                && let Some(bytes) = outcome.raw_bytes
-            {
-                let html = String::from_utf8_lossy(&bytes).into_owned();
-                return Ok(ExtractionResult {
-                    url: outcome.result.url,
-                    title: outcome.result.title,
-                    content: html,
-                    error: None,
-                });
+            "exa" => {
+                if std::env::var("EXA_API_KEY").is_err() {
+                    debug!("web_extract: skipping exa in chain — EXA_API_KEY not set");
+                    continue;
+                }
+                match exa::fetch_with_exa(url).await {
+                    Ok(r) => return Ok(r),
+                    Err(e) => {
+                        warn!(
+                            "web_extract: Exa failed for {}: {}; trying {}",
+                            url_for_log, e, next_hint
+                        );
+                        last_err = Some(e);
+                    }
+                }
             }
-            Ok(outcome.result)
-        }
-        Err(e) => {
-            warn!(
-                "web_extract: all backends failed for {}: {}",
-                url_for_log, e
-            );
-            Err(anyhow::anyhow!("backend_chain_exhausted: {}", e))
+            "tavily" => {
+                if std::env::var("TAVILY_API_KEY").is_err() {
+                    debug!("web_extract: skipping tavily in chain — TAVILY_API_KEY not set");
+                    continue;
+                }
+                match tavily::fetch_with_tavily(url).await {
+                    Ok(r) => return Ok(r),
+                    Err(e) => {
+                        warn!(
+                            "web_extract: Tavily failed for {}: {}; trying {}",
+                            url_for_log, e, next_hint
+                        );
+                        last_err = Some(e);
+                    }
+                }
+            }
+            "local" => {
+                // D-03 mid-fetch reroute + D-07 HTML/Markdown contract preserved
+                // exactly, regardless of where `local` sits in the configured chain.
+                match local::fetch_local_content(url, &cfg.web).await {
+                    Ok(outcome) => {
+                        if outcome.content_type.as_deref().is_some_and(reroute_for_pdf)
+                            && let Some(bytes) = outcome.raw_bytes.clone()
+                        {
+                            return extract_pdf_bytes(url, bytes).await;
+                        }
+                        if format == "html"
+                            && let Some(bytes) = outcome.raw_bytes
+                        {
+                            let html = String::from_utf8_lossy(&bytes).into_owned();
+                            return Ok(ExtractionResult {
+                                url: outcome.result.url,
+                                title: outcome.result.title,
+                                content: html,
+                                error: None,
+                            });
+                        }
+                        return Ok(outcome.result);
+                    }
+                    Err(e) => {
+                        warn!(
+                            "web_extract: Local failed for {}: {}; trying {}",
+                            url_for_log, e, next_hint
+                        );
+                        last_err = Some(e);
+                    }
+                }
+            }
+            unknown => {
+                // A chain entry that slipped past ToolsConfig::validate_chains()
+                // (e.g. a config file edited after validation, or validation not
+                // wired into the caller's load path). Degrade visibly rather than
+                // panicking — warn once and move on to the next configured entry.
+                warn!(
+                    "web_extract: unknown provider '{}' in tools.web_extract.chain — skipping",
+                    unknown
+                );
+            }
         }
     }
+
+    let reason = last_err
+        .map(|e| e.to_string())
+        .unwrap_or_else(|| "no backend in tools.web_extract.chain succeeded".to_string());
+    warn!(
+        "web_extract: all backends failed for {}: {}",
+        url_for_log, reason
+    );
+    Err(anyhow::anyhow!("backend_chain_exhausted: {}", reason))
 }
 
 #[cfg(test)]

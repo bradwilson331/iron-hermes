@@ -57,6 +57,12 @@ agent:
   # Compression threshold as fraction of context_length (default: 0.5)
   # compression_threshold: 0.5
 
+  # Phase 36.3.8 (D-06): maximum seconds a suspended `clarify` tool waits for a
+  # human button response before returning a timeout sentinel
+  # ({"answered":false,"reason":"timeout"}). Bounds how long an unanswered
+  # clarify can pin a turn slot. Default: 120 (2 minutes).
+  # clarify_timeout_secs: 120
+
   # Optional system message injected into prompt (empty = omitted)
   # system_message: ""
 
@@ -66,7 +72,10 @@ agent:
 
 # --- Terminal / Sandbox ---
 terminal:
-  # Sandbox backend: "local" (default) or "docker" (future)
+  # Exec backend for the `terminal` and `execute_code` tools.
+  # "local" (default) | "docker" | "ssh". Config-only (D-06) — no LLM/tool
+  # argument can change it. An unavailable/misconfigured backend HARD-ERRORS
+  # rather than silently falling back to local (D-05).
   # backend: "local"
 
   # Default working directory for agent tool operations
@@ -75,6 +84,47 @@ terminal:
 
   # Command execution timeout in seconds (default: 30)
   # timeout: 30
+
+  # Env var names passed through to the LOCAL terminal subprocess, on top of
+  # the base safe-env set (Phase 42 D-05). Local-only; distinct from forward_env.
+  # terminal_env_allowlist: []
+  # terminal_env_allowlist: [KUBECONFIG, AWS_PROFILE]
+
+  # --- docker backend (only consulted when backend: docker) ---
+  # Container CLI to shell out to. Explicit, never auto-detected by probing
+  # PATH (D-07). "docker" (default) | "podman".
+  # container_runtime: "docker"
+
+  # Base image for the docker backend's persistent container.
+  # image: "debian:stable-slim"
+
+  # Orphan-reaper "lifetime" (seconds): the boot-time reaper GCs labeled
+  # containers idle longer than 2x this value (D-02). Default 86400 (24h).
+  # container_reap_after_secs: 86400
+
+  # docker backend resource limits / persistence / networking.
+  # container:
+  #   cpu: 1.0            # fractional cores
+  #   memory_mib: 5120    # 5 GiB
+  #   disk_mib: 51200     # 50 GiB (workspace bind-mount/tmpfs cap)
+  #   pids_limit: 256
+  #   persistent: true    # bind-mount /workspace (survives recreation) vs tmpfs
+  #   network: false      # false -> --network=none (security-hardened default)
+
+  # --- shared docker/ssh boundary ---
+  # Credential/env allowlist forwarded ACROSS the docker/ssh backend boundary
+  # (D-09). Empty = nothing secret crosses unless opted in by name.
+  # forward_env: []
+  # forward_env: [KUBECONFIG, AWS_PROFILE]
+
+  # --- ssh backend (only consulted when backend: ssh) ---
+  # No meaningful defaults for host/user — the ssh backend cannot be
+  # constructed without them (else create_environment hard-errors per D-05).
+  # ssh:
+  #   host: "example.internal"
+  #   user: "deploy"
+  #   port: 22
+  #   key_path: null      # null uses the ssh CLI's default identity resolution
 
 # --- Web Tools ---
 web:
@@ -134,6 +184,16 @@ gateway:
   #     # Allowed Telegram chat IDs (Vec<i64>). Empty list = deny all.
   #     # Get your chat ID by messaging @userinfobot on Telegram.
   #     whitelist: [123456789]
+  #
+  #     # Phase 36.3.8 (D-01): explicit home channel the agent `send_message`
+  #     # tool delivers to when given the bare `telegram` target. Quoted string
+  #     # (Option<String>), numeric chat ID only. When omitted (null) and the
+  #     # whitelist has exactly ONE entry, that entry is used automatically;
+  #     # when omitted and the whitelist has 0 or 2+ entries, send_message
+  #     # returns an "ambiguous home channel" error. The resolved channel is
+  #     # ALSO validated against this whitelist before dispatch (code-review
+  #     # CR-02 fix), so home_channel_id MUST be a whitelist member.
+  #     # home_channel_id: "123456789"
   #
   #     # Session inactivity timeout in hours (default: 24)
   #     # session_timeout_hours: 24
@@ -385,8 +445,19 @@ providers:
 #   anthropic:
 #     api_key_env: ANTHROPIC_API_KEY
 #     api_mode: anthropic_messages
+#
+#   # --- OpenAI ---
+#   # Required for the realtime open-mic voice path (voice.barge_in_mode: open_mic,
+#   # Phase 36.17.12). The realtime token endpoint (issue_realtime_token) resolves
+#   # the key env-var NAME from providers.openai.api_key_env, defaulting to
+#   # OPENAI_API_KEY, then reads the secret from ~/.ironhermes/.env. Without a
+#   # resolvable key, realtime is unavailable and voice gracefully falls back to
+#   # the turn-based path (D-07). NOTE: this is a SEPARATE key resolution from STT
+#   # (stt.openai), which prefers VOICE_TOOLS_OPENAI_KEY then OPENAI_API_KEY. To
+#   # reuse a single OpenAI key for both, set api_key_env to the same var name you
+#   # put in .env (e.g. OPENAI_API_KEY) and define it once there.
 #   openai:
-#     api_key_env: OPENAI_API_KEY
+#     api_key_env: OPENAI_API_KEY     # secret (sk-...) lives in ~/.ironhermes/.env
 #     api_mode: chat_completions
 #
 #   # --- vLLM (local) with top_k / top_p ---
@@ -476,6 +547,10 @@ tools:
   #     enabled: true
   #   skills:
   #     enabled: true
+  #   messaging:
+  #     enabled: true   # Phase 36.3.8 — send_message + clarify (default on;
+  #                     # send is whitelist-gated). Set false to remove both
+  #                     # tools from the LLM tool list across all surfaces.
   #   robotics:
   #     enabled: true   # gates further on HEXAPOD_IP env var
   #   learning:
@@ -486,6 +561,47 @@ tools:
   #     enabled: false   # opt-in required
   #   browser:
   #     enabled: false   # opt-in required
+
+  # --- Tool execution timeout (Phase 41.3 D-04/D-05/D-06/D-15) ---
+  # Precedence, highest first: timeout_overrides[<tool>] > the tool's own
+  # declared budget (code) > timeout_secs (below) > the 60s trait-default
+  # constant. A configured value <= 0 DISABLES the bound for that tool — this
+  # applies to both timeout_overrides entries and timeout_secs itself, and an
+  # override wins even over a tool's own code-level opt-out (so a wedged
+  # opted-out tool can still be capped from here, no rebuild needed). See
+  # docs/CONFIGURATION.md for the full chain.
+  # timeout_secs: 60
+  # timeout_overrides:
+  #   web_extract: 120   # example: give a slow multi-URL batch more room
+  #   # some_tool: 0     # example: disable the bound for some_tool entirely
+
+  # --- Web-tool provider chains (Phase 41.3 D-08) ---
+  # Each tool tries its configured providers in order; an entry whose
+  # credential is absent is skipped, a failing entry falls through to the
+  # next, and an unknown provider name is a validation error `hermes doctor`
+  # reports. Every chain below shows its shipped default order — uncomment
+  # and reorder to change it, e.g. to promote a provider ahead of another or
+  # demote a scraping-only fallback. Legal values are per-tool (see
+  # docs/CONFIGURATION.md); DuckDuckGo ("ddg"/"local") always terminates each
+  # chain so no key is ever required to use these tools.
+  # web_search:
+  #   chain: ["exa", "brave", "tavily", "ddg"]
+  # web_answer:
+  #   chain: ["perplexity", "exa", "brave", "ddg"]
+  # web_extract:
+  #   chain: ["firecrawl", "exa", "tavily", "local"]
+
+  # --- Tool credentials — the CONFIG tier (Phase 41.3 D-18/D-19) ---
+  # The middle tier of the env -> config -> vault credential precedence
+  # chain, keyed by the CANONICAL env-var name (e.g. EXA_API_KEY — never a
+  # `tools.`-prefixed variant). Consulted only when the matching process env
+  # var is absent, and consulted before the vault. THIS STORES THE SECRET IN
+  # PLAINTEXT ON DISK in this file — the process environment or the vault
+  # (vault.enabled: true) is the preferred home for a real credential; this
+  # map exists for operators who cannot use either. Ships empty. See
+  # docs/CONFIGURATION.md for all three tiers and their precedence.
+  # credentials: {}
+  #   # EXA_API_KEY: "your-key-here"   # example only — do not commit a real key
 
 # --- Auxiliary Model Routing ---
 # Optional per-role model assignments. Absent = all helper tasks use the main provider.
@@ -521,6 +637,29 @@ mcp_servers: {}
 #     args: ["-y", "@my-org/my-mcp-server"]
 #     env:
 #       MY_API_KEY_ENV: MY_API_KEY
+#
+#   # --- Cloudflare control-plane servers (Phase 46, CFL-02/D-04/D-05) ---
+#   # Each server is its own OAuth resource (own PRM/DCR/PKCE); connect one at a
+#   # time via `hermes mcp connect <name>`. No bulk-connect flow exists (D-05).
+#   # The `docs` server (docs.mcp.cloudflare.com) is public/no-OAuth and is
+#   # intentionally NOT wired here (Pitfall 5).
+#   cloudflare_api:
+#     # ROOT domain — this is Cloudflare's "Cloudflare API" server. It is NOT
+#     # api.mcp.cloudflare.com, which does not resolve (RESEARCH Pitfall 4).
+#     url: "https://mcp.cloudflare.com/mcp"
+#     oauth_provider: "cloudflare_api"
+#   cloudflare_bindings:
+#     # Verified live 2026-06-30 (23 tools).
+#     url: "https://bindings.mcp.cloudflare.com/mcp"
+#     oauth_provider: "cloudflare_bindings"
+#   cloudflare_observability:
+#     url: "https://observability.mcp.cloudflare.com/mcp"
+#     oauth_provider: "cloudflare_observability"
+#   cloudflare_builds:
+#     # Connect live-verified in Phase 46 UAT; upstream server self-describes
+#     # as work-in-progress.
+#     url: "https://builds.mcp.cloudflare.com/mcp"
+#     oauth_provider: "cloudflare_builds"
 
 # --- Autonomous Mode ---
 # Controls yolo (auto-approve dangerous commands) behavior. D-11/D-12/D-14.
@@ -573,6 +712,126 @@ extract:
 
   # URL patterns to redact from extracted content (regex list). Default: [].
   # redact_url_patterns: []
+
+  # Phase 41.3 D-16: per-URL deadline (seconds) inside a multi-URL
+  # web_extract batch. A URL that exceeds this budget surfaces as an
+  # in-array error entry at its own index instead of sinking the whole
+  # batch — the direct fix for one bot-walled homepage hanging a 6-URL
+  # call indefinitely. Default: 60.
+  # per_url_timeout_secs: 60
+
+# --- Image & Video Generation (Phase 47: multi-provider) ---
+# The generation tools — image_gen (text->image), video_generate (t2v),
+# video_animate (i2v), and the net-new video_to_video (v2v) — are provider- AND
+# model-configurable PER MODE. Two backends ship: venice.ai (the default) and
+# fal.ai. For a tool to appear to the LLM, BOTH must hold:
+#   1. The RESOLVED backend's API key is set in ~/.ironhermes/.env:
+#        venice modes -> VENICE_API_KEY   |   fal modes -> FAL_KEY
+#      When the key for a mode's resolved backend is unset, that tool is hidden
+#      and no client is built (zero startup cost). Keys are read lazily, never logged.
+#   2. The surface is enabled: for chat, the `web` toolset must be on
+#      (tools.toolsets.web.enabled: true) — the generation tools live in `web`.
+#      For kanban/delegate, see generation.guardrails.surfaces below.
+#
+# Per-mode `provider`: "venice" | "fal" | null. null INFERS the backend from the
+# model id prefix (fal-ai/* -> fal, else venice; D-02). The legacy flat keys
+# (default_model / default_t2v_model / default_i2v_model) are kept for back-compat:
+# set one AWAY from its shipped fal default and it maps into that mode's `model`
+# with provider forced to prefix-inference; leave it at the fal default and the
+# venice per-mode default below wins. The whole block is optional (serde defaults).
+image_gen:
+  # Legacy flat fal model id (back-compat). Default: "fal-ai/flux/schnell".
+  # default_model: "fal-ai/flux/schnell"
+
+  # Per-chat-session hard cap on DIRECT chat generations (abuse guard). At the
+  # cap, image_gen returns a non-retried message and never calls the provider.
+  # Config-only — NOT LLM-overridable. Default: 20. (Chat only; delegate/kanban
+  # descendants use generation.guardrails instead — D-08.)
+  # session_cap: 20
+
+  # Provider poll timeout (seconds) for a single queue job. Default: 120.
+  # timeout_secs: 120
+
+  # Venice diffusion sampling-step count. REQUIRED for a finished image: Venice
+  # does NOT apply the model's own constraints.steps.default when this is omitted,
+  # so too low a value returns an under-denoised "blob". 20 is the flux-2-pro /
+  # krea-2-turbo default; raise toward the model max (50) for more detail. `0`
+  # omits the field (Venice server-side fallback). Ignored by fal models.
+  # Config-only — NOT LLM-overridable. Default: 20.
+  # steps: 20
+
+  # Venice safe_mode: true blurs adult-flagged output; false disables the blur
+  # (sensible for a single-user host). Venice-only (fal ignores it). Default: false.
+  # safe_mode: false
+
+  # Phase 47 per-mode {provider, model} for text-to-image. Default: venice / flux-2-pro.
+  # t2i:
+  #   provider: "venice"        # "venice" | "fal" | null(=infer from model prefix)
+  #   model: "flux-2-pro"
+
+# --- Video Generation (Phase 47) ---
+# text-to-video (t2v), image-to-video (i2v), net-new video-to-video (v2v).
+# Venice video is an async submit+poll job API.
+video_gen:
+  # Legacy flat fal model ids (back-compat). Defaults shown.
+  # default_t2v_model: "fal-ai/ltx-2.3/text-to-video"
+  # default_i2v_model: "fal-ai/ltx-2.3/image-to-video"
+
+  # Per-session cap on DIRECT chat video generations (paid; lower than image).
+  # Config-only — NOT LLM-overridable. Default: 5.
+  # session_cap: 5
+
+  # Provider poll timeout (seconds) — video is slower than image. Default: 300.
+  # timeout_secs: 300
+
+  # Maximum inline delivery size in bytes (Telegram sendVideo cap). Default: 52428800 (50 MiB).
+  # max_inline_bytes: 52428800
+
+  # Default clip duration in seconds. Default: 6.
+  # default_duration_secs: 6
+
+  # Phase 47 per-mode {provider, model}. Defaults: venice / wan-2-7-*.
+  # t2v:
+  #   provider: "venice"
+  #   model: "wan-2-7-text-to-video"
+  # i2v:
+  #   provider: "venice"
+  #   model: "wan-2-7-image-to-video"
+  # v2v:                                  # net-new mode (no legacy flat key)
+  #   provider: "venice"
+  #   model: "wan-2-7-video-to-video"
+
+  # Fixed-from-config resolution / aspect ratio (D-12). Defaults: "720p" / "16:9".
+  # resolution: "720p"
+  # aspect_ratio: "16:9"
+
+  # Periodic "Still working on your video…" ping cadence (seconds) during the
+  # async poll. 0 / absent = off (single-ack). Default: 30.
+  # progress_ping_secs: 30
+
+# --- Generation Guardrails (Phase 47 D-07/D-08) ---
+# Cross-surface spend policy for the generation tools. IMPORTANT (D-08):
+# session_pool + per_child_cap apply ONLY to delegate/kanban DESCENDANTS — NOT to
+# direct chat, which stays governed by image_gen.session_cap / video_gen.session_cap
+# above. A descendant generation decrements BOTH its per_child_cap allowance AND the
+# shared session_pool. Cross-process safe: in-process delegate children share the
+# parent's counter; kanban swarms account via kanban.db keyed by the root task id.
+generation:
+  guardrails:
+    # Shared aggregate cap across ALL delegate/kanban descendants of a root.
+    # 0 = block descendant generations immediately. Default: 20.
+    # session_pool: 20
+
+    # Per-child sub-cap so one descendant can't drain the whole pool. 0 = block. Default: 3.
+    # per_child_cap: 3
+
+    # Per-surface enable map — a false surface never registers its generation
+    # tools (the wall is at registration time, not just call time).
+    # surfaces:
+    #   chat: true               # direct chat (never subject to per_child_cap)
+    #   kanban: true             # regular kanban worker generation
+    #   kanban_goal_mode: false  # kanban goal-mode workers (opt-in)
+    #   delegate: false          # delegate_task children ("generation" group, opt-in)
 
 # --- Prompt Caching ---
 # Phase 36.2 D-CACHE-02: Anthropic cache_control breakpoint configuration.
@@ -649,10 +908,121 @@ dashboard:
   #   # Tail consumer polling interval in milliseconds. Default: 250 ms.
   #   tail_interval_ms: 250
 
+# --- Voice (recording + silence detection + wake word) ---
+# Voice-mode recording, voice-activity detection (VAD), and wake-word config.
+# Consumed by the CLI/TUI voice loop and the web voice mode.
+voice:
+  # Key binding to start/stop recording in CLI/TUI voice mode. Default: "ctrl+b".
+  # record_key: "ctrl+b"
+
+  # RMS energy threshold below which audio counts as silence. Default: 200.
+  # silence_threshold: 200
+
+  # Seconds of continuous silence that ends a recording. Default: 3.0.
+  # Lower this if end-of-speech detection feels too slow.
+  # silence_duration: 3.0
+
+  # Automatically speak agent responses via TTS after a voice turn.
+  # NOTE: honored by the CLI/TUI today; web-UI auto-speak wiring is a follow-up.
+  # Default: false.
+  # auto_tts: false
+
+  # Play an audio beep when recording starts/stops (CLI/TUI). Default: true.
+  # beep_enabled: true
+
+  # Maximum allowed recording length in seconds. Default: 120.
+  # max_recording_seconds: 120
+
+  # Barge-in behavior during agent TTS playback. Supported:
+  #   "push_to_interrupt" — turn-based; user presses the record key to interrupt
+  #                         (CLI/TUI + web). The default and only mode for CLI/TUI.
+  #   "open_mic"          — Mode C full-duplex realtime voice over OpenAI Realtime
+  #                         API + WebRTC (web/orb only, Phase 36.17.12). Requires an
+  #                         OpenAI key resolvable via providers.openai.api_key_env
+  #                         (default OPENAI_API_KEY in ~/.ironhermes/.env). When the
+  #                         key/realtime is unavailable it gracefully degrades to the
+  #                         turn-based path (D-07). CLI/TUI stays turn-based (D-11).
+  #   "half_duplex"       — deferred (not wired).
+  # Default: "push_to_interrupt".
+  # barge_in_mode: "push_to_interrupt"
+
+  # Wake-word activation (case-insensitive "contains" match). Default: disabled.
+  # wake_word:
+  #   enabled: false
+  #   phrase: "hey hermes"
+
+  # OpenAI Realtime API model for the open-mic WebRTC voice path
+  # (voice.barge_in_mode: open_mic, Phase 36.17.12). The server resolves this
+  # from config and validates against a whitelist before any network call.
+  # Changing to an unlisted model triggers the D-07 graceful fallback to
+  # turn-based voice. Current GA model (2026): "gpt-realtime".
+  # Default: "gpt-realtime".
+  # realtime_model: "gpt-realtime"
+
+  # OpenAI Realtime agent voice (open-mic WebRTC path). Server-resolved and
+  # whitelist-validated; an unlisted value triggers the D-07 fallback. One of:
+  # alloy, shimmer, echo, verse, ash, ballad, coral, sage. Default: "shimmer".
+  # realtime_voice: "shimmer"
+
+  # Input-audio transcription model for the realtime path. When set, the provider
+  # transcribes YOUR speech and the web UI shows it in the transcript card.
+  # Server-resolved + whitelist-validated. One of "gpt-4o-mini-transcribe"
+  # (default), "gpt-4o-transcribe", "whisper-1", or "off" to disable.
+  # realtime_transcription_model: "gpt-4o-mini-transcribe"
+
+  # Realtime input tuning (Phase 36.17.12 BUG 5 fix). These shape the GA
+  # session.update (session.audio.input) the browser sends on connect, and are
+  # the main levers against background-noise false triggers / misheard speech.
+  #
+  # noise_reduction filters mic audio BEFORE VAD + the model:
+  #   "far_field"  — laptop / built-in / conference mic (default; most aggressive)
+  #   "near_field" — headset / earbuds (close-talking)
+  #   "off"        — disable (sent as null)
+  # realtime_noise_reduction: "far_field"
+  #
+  # vad_mode — how end-of-turn is detected:
+  #   "semantic_vad" — model-based; best at ignoring noise/humming/filler (default)
+  #   "server_vad"   — energy-based; lowest latency; uses the values below
+  # realtime_vad_mode: "semantic_vad"
+  #
+  # The following apply ONLY when vad_mode == "server_vad":
+  #   threshold (0.0–1.0; higher = less sensitive), and turn timing in ms.
+  # realtime_vad_threshold: 0.5
+  # realtime_vad_silence_ms: 500
+  # realtime_vad_prefix_ms: 300
+
+  # Web Audio (browser) RMS silence threshold. DISTINCT from silence_threshold
+  # (native PCM scale). Web VAD path only. Default: 5.0. Lower if the browser never
+  # detects end-of-speech; raise if it cuts off too early.
+  # web_silence_threshold_rms: 5.0
+
+# --- STT (Speech-to-Text) ---
+# STT provider configuration used to transcribe microphone audio (web voice
+# mode + CLI). Requires a provider API key in ~/.ironhermes/.env:
+#   - groq   → GROQ_API_KEY
+#   - openai → VOICE_TOOLS_OPENAI_KEY (preferred) or OPENAI_API_KEY
+stt:
+  # Active STT provider. Supported: "auto", "groq", "openai". Default: "auto".
+  # "auto" selects the first provider whose API key is present at runtime.
+  # provider: "auto"
+
+  # Groq STT settings
+  # groq:
+  #   # Groq Whisper model. Default: "whisper-large-v3-turbo".
+  #   model: "whisper-large-v3-turbo"
+
+  # OpenAI STT settings
+  # openai:
+  #   # OpenAI Whisper model. Default: "whisper-1".
+  #   model: "whisper-1"
+
 # --- TTS (Text-to-Speech) ---
 # Phase 36.17.5 D-12: TTS provider configuration.
 tts:
-  # Active TTS provider. Supported: "edge" (Microsoft Edge TTS), "elevenlabs". Default: "edge".
+  # Active TTS provider. Supported: "edge" (Microsoft Edge TTS — keyless),
+  # "elevenlabs" (requires ELEVENLABS_API_KEY), "openai" (requires OPENAI_API_KEY).
+  # Default: "edge". This is the GLOBAL fallback; per-avatar overrides under
+  # `identities:` win over it (Phase 40.5). See docs/VOICE-TO-VOICE.md.
   # provider: "edge"
 
   # Optional path to ffmpeg binary for MP3→Opus conversion. null = auto-detect. Default: null.
@@ -674,6 +1044,63 @@ tts:
   #   # Audio output format. Default: "mp3".
   #   output_format: "mp3"
 
+  # OpenAI TTS provider settings (Phase 40.5; requires OPENAI_API_KEY in .env).
+  # openai:
+  #   # OpenAI TTS model. Default: "tts-1".
+  #   model: "tts-1"
+  #   # OpenAI TTS voice. Default: "alloy". One of: alloy, echo, fable, onyx, nova, shimmer.
+  #   voice: "alloy"
+  #   # Audio output format. Default: "mp3".
+  #   format: "mp3"
+
+# --- Identities (Phase 40.5: per-avatar voice + orb appearance) ---
+# Each orb/avatar identity can carry its OWN free-mode TTS voice/provider and its
+# OWN realtime voice, overriding the global `tts:` / `voice:` settings above. The
+# LLM and STT stay global (D-08 scope fence — an identity is a voice, not a separate
+# agent). Records live here in config.yaml; the *active* identity pointer lives in
+# the browser (AvatarPrefs.active_identity in localStorage) and is selected via the
+# orb/avatar picker + the Voice Settings "Applies to" selector.
+#
+# Resolution (Config::effective_tts_config_for_identity): the active identity's
+# non-null fields override the global config; null/absent fields inherit it.
+#   free_mode_tts_voice flows into the matching provider's voice slot:
+#     elevenlabs -> elevenlabs.voice_id | openai -> openai.voice | edge -> edge.voice
+# IMPORTANT: ElevenLabs voices are only heard in FREE mode (voice.barge_in_mode:
+# push_to_interrupt). In open_mic/realtime, only OpenAI `realtime_voice` is used.
+# Full guide: docs/VOICE-TO-VOICE.md
+#
+# This section is SEEDED automatically on first run (default_seed_identities) and
+# missing shipped personas are back-filled, so you normally don't hand-write it.
+# Shown here for reference / customization:
+# identities:
+#   orb_bloom:
+#     display_name: "Bloom"
+#     appearance:                 # orb visual knobs (null for head avatars)
+#       style: "bloom"            # classic | bloom | ascii | network
+#       base_hue: 280             # 0-360; listening/thinking/speaking shift relative to it
+#       size: 1.0                 # 0.5-2.0 scale
+#       glow: 0.8                 # 0.0-1.0 intensity
+#     voice:
+#       free_mode_tts_provider: "elevenlabs"   # edge | openai | elevenlabs | null(=inherit)
+#       free_mode_tts_voice: "pNInz6obpgDQGcFmaJgB"  # Adam; for elevenlabs this is a voice_id
+#       realtime_voice: "shimmer"              # OpenAI realtime voice (open_mic only)
+#   orb_classic:
+#     display_name: "Classic"
+#     appearance: { style: "classic", base_hue: 186, size: 1.0, glow: 0.5 }
+#     voice:                      # all-null -> inherits the global tts:/voice: config
+#       free_mode_tts_provider: null
+#       free_mode_tts_voice: null
+#       realtime_voice: null
+
+# --- Concurrency (Phase 39.1 async multi-turn) ---
+# Per-session and process-wide caps for concurrent in-flight agent turns.
+# Pre-39.1 configs parse cleanly via #[serde(default)].
+concurrency:
+  # Maximum concurrent in-flight turns per session (default: 3). Overflow queues FIFO.
+  # session_turn_cap: 3
+  # Process-wide maximum across all sessions and surfaces (default: 32).
+  # global_turn_ceiling: 32
+
 # --- Audio Cache ---
 # Phase 36.17.7 D-02-d: audio cache lifecycle policy for ~/.ironhermes/audio_cache/.
 audio_cache:
@@ -682,3 +1109,51 @@ audio_cache:
 
   # Periodic GC sweep interval in seconds. Default: 86400 (daily).
   # sweep_interval_secs: 86400
+
+# --- Auth (Phase 43 — OAuth token acquisition) ---
+# Provider OAuth flows. Each key under auth.providers is the namespace used in auth.json
+# tokens.<name> and is the --provider argument to `hermes auth login`.
+# All flow fields (authorization_url, token_url, client_id, scopes) are required for the
+# relevant flow. device_authorization_url is required only for device-code flow.
+# display_name is optional (the key is used if absent).
+# No endpoint table ships in code — endpoints come only from operator config (D-02).
+# auth:
+#   providers:
+#     xai:
+#       display_name: "xAI Grok"
+#       authorization_url: "https://accounts.x.ai/oauth/authorize"
+#       token_url: "https://accounts.x.ai/oauth/token"
+#       device_authorization_url: "https://accounts.x.ai/oauth/device/code"
+#       client_id: "<your-registered-client-id>"
+#       scopes: ["read", "write"]
+#     minimax:
+#       display_name: "MiniMax"
+#       authorization_url: "https://api.minimax.chat/oauth/authorize"
+#       token_url: "https://api.minimax.chat/oauth/token"
+#       device_authorization_url: "https://api.minimax.chat/oauth/device/code"
+#       client_id: "<your-registered-client-id>"
+#       scopes: ["default"]
+
+# --- Display (HermesApp footer clocks) ---
+# Controls the web UI footer wall-clock(s). All fields are optional and the whole
+# `display:` block can be omitted — pre-existing config.yaml files parse unchanged
+# via serde defaults.
+# display:
+#   # Primary IANA zone name for the footer clock (e.g. "America/New_York").
+#   # Resolution order when null: falls back to agent.timezone, then to the
+#   # browser's host-local zone (Phase 46.9 Plan 11, GAP-4). Default: null.
+#   timezone: null
+#
+#   # Additional IANA zones rendered as labeled clocks alongside the primary.
+#   # Server-side capped at 4 (MAX_EXTRA_TIMEZONES) — an oversized list is
+#   # truncated, not rejected (T-46.9-27 DoS mitigation). Default: [].
+#   extra_timezones: []
+#   # extra_timezones: ["America/Los_Angeles", "America/Denver", "Etc/GMT"]
+#
+#   # Footer clock time format (quick task 260718-qdg).
+#   #   null / omitted -> 24-hour (default, e.g. 15:30:00) — unchanged behavior
+#   #   true           -> 12-hour with AM/PM (e.g. 03:30:00 PM)
+#   #   false          -> explicit 24-hour
+#   # The None -> 24h default is resolved once server-side; the footer never
+#   # re-derives it. Default: null.
+#   hour12: null

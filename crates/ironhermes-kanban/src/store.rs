@@ -21,8 +21,8 @@ use crate::events::KanbanEventKind;
 use crate::paths::validate_dir_workspace;
 use crate::schema::{SCHEMA_SQL, SCHEMA_VERSION, run_migrations};
 use crate::types::{
-    KanbanStatus, KanbanWorkerSpec, Subscription, SwarmGraphIds, SwarmGraphSpec, Task, TaskComment,
-    TaskRun,
+    AttachmentMeta, KanbanStatus, KanbanWorkerSpec, Subscription, SwarmGraphIds, SwarmGraphSpec,
+    Task, TaskComment, TaskRun,
 };
 
 // ---------------------------------------------------------------------------
@@ -154,6 +154,19 @@ pub struct MentionChildIds {
     pub mention_index: usize,
 }
 
+/// Outcome of [`KanbanStore::try_reserve_generation_slot`] (Phase 47 Plan 03,
+/// GEN-05 / D-04 / D-08).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenReserveOutcome {
+    /// The reservation was granted; `count` is the post-increment running
+    /// total for the ledger key.
+    Granted { count: u32 },
+    /// The reservation was blocked because `count >= pool`; `count` is the
+    /// current (unchanged) running total — a blocked attempt never
+    /// increments the ledger.
+    PoolExhausted { count: u32 },
+}
+
 // ---------------------------------------------------------------------------
 // KanbanStore
 // ---------------------------------------------------------------------------
@@ -237,20 +250,20 @@ impl KanbanStore {
         Self::open_labeled(path, slug)
     }
 
-    /// Phase 36.3.7.13 D-A1: read `HERMES_KANBAN_DB` first, fall back to
+    /// Phase 36.3.7.13 D-A1: read `IRONHERMES_KANBAN_DB` first (legacy `HERMES_KANBAN_DB` also accepted), fall back to
     /// `kanban_db_path()`. Single source of truth for env-bridged opens.
     ///
-    /// Dispatcher → worker bridge: workers ALWAYS call this; `HERMES_KANBAN_DB`
+    /// Dispatcher → worker bridge: workers ALWAYS call this; `IRONHERMES_KANBAN_DB`
     /// is set by `build_kanban_worker_env` (`worker_spawn.rs:112-115`).
     ///
     /// Emits a `tracing::info!` on every env-override open (D-H1). Operators
     /// can silence via `RUST_LOG=kanban.db=warn`.
     pub fn open_from_env() -> Result<Self> {
-        if let Ok(path) = std::env::var("HERMES_KANBAN_DB") {
+        if let Some(path) = crate::kanban_env("DB") {
             tracing::info!(
                 target: "kanban.db",
                 path = %path,
-                "kanban store: using HERMES_KANBAN_DB override"
+                "kanban store: using IRONHERMES_KANBAN_DB override (dual-read)"
             );
             Self::open(std::path::PathBuf::from(path))
         } else {
@@ -263,17 +276,17 @@ impl KanbanStore {
     /// Collapses the `Some(slug) => open_for_board(slug) / None => open_default()`
     /// pattern present at all 8 dashboard handlers into a single call.
     ///
-    /// Priority: `HERMES_KANBAN_DB` env > slug > `kanban_db_path()` default.
+    /// Priority: `IRONHERMES_KANBAN_DB` env > slug > `kanban_db_path()` default.
     ///
     /// Emits a `tracing::info!` on every env-override open (D-H1). Operators
     /// can silence via `RUST_LOG=kanban.db=warn`.
     pub fn open_from_env_or_board(slug: Option<&str>) -> Result<Self> {
-        if let Ok(path) = std::env::var("HERMES_KANBAN_DB") {
+        if let Some(path) = crate::kanban_env("DB") {
             tracing::info!(
                 target: "kanban.db",
                 path = %path,
                 slug = ?slug,
-                "kanban store: using HERMES_KANBAN_DB override; slug ignored"
+                "kanban store: using IRONHERMES_KANBAN_DB override (dual-read); slug ignored"
             );
             Self::open(std::path::PathBuf::from(path))
         } else if let Some(s) = slug {
@@ -410,11 +423,13 @@ impl KanbanStore {
         // Phase 36.3.7.12: SELECT order must end with
         // (..., goal_mode, goal_max_turns, goal_turns_used).
         // Phase 36.3.7.13: column index 26 = goal_toolset TEXT NULL.
+        // Phase 46.4: column index 27 = output_path TEXT NULL (D-10).
         // SQLite stores goal_mode as INTEGER 0/1; map to bool via `!= 0`.
         let goal_mode_int: i64 = row.get(23)?;
         let goal_max_turns_i: i64 = row.get(24)?;
         let goal_turns_used_i: i64 = row.get(25)?;
         let goal_toolset: Option<String> = row.get(26)?;
+        let output_path: Option<String> = row.get(27)?;
         Ok(Task {
             id: row.get(0)?,
             title: row.get(1)?,
@@ -443,6 +458,7 @@ impl KanbanStore {
             goal_max_turns: goal_max_turns_i.max(0) as u32,
             goal_turns_used: goal_turns_used_i.max(0) as u32,
             goal_toolset,
+            output_path,
         })
     }
 
@@ -581,7 +597,7 @@ impl KanbanStore {
                  idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
                  max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
                  current_step_key, created_by, created_at, started_at, ended_at, \
-                 goal_mode, goal_max_turns, goal_turns_used, goal_toolset \
+                 goal_mode, goal_max_turns, goal_turns_used, goal_toolset, output_path \
                  FROM tasks WHERE id = ?1",
                 params![id],
                 Self::row_to_task,
@@ -599,7 +615,7 @@ impl KanbanStore {
              idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
              max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
              current_step_key, created_by, created_at, started_at, ended_at, \
-             goal_mode, goal_max_turns, goal_turns_used, goal_toolset \
+             goal_mode, goal_max_turns, goal_turns_used, goal_toolset, output_path \
              FROM tasks WHERE 1=1",
         );
         let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
@@ -691,6 +707,124 @@ impl KanbanStore {
             body: body.to_string(),
             created_at: now,
         })
+    }
+
+    /// Write an uploaded file's bytes to disk and record its metadata
+    /// (D-05, single shared writer per D-04 convergence).
+    ///
+    /// # Security (T-46.4-03)
+    ///
+    /// The client-supplied `filename` is rejected — BEFORE any filesystem
+    /// operation — when it is empty, contains `".."`, or contains a path
+    /// separator (`'/'` or `'\\'`). The DB-generated attachment `id` is the
+    /// confinement boundary: bytes are written to
+    /// `kanban_attachments_dir(task_id)/<id>/<filename>` — a per-attachment
+    /// directory named by the opaque id, with the ORIGINAL (already
+    /// validated separator-free) client filename as the leaf. Because
+    /// `filename` cannot contain a separator, it is always a safe leaf and
+    /// can never escape the `<id>` directory. This keeps the stored file
+    /// openable (correct name + extension) while preserving the same
+    /// traversal defense as a flat id-named file.
+    ///
+    /// # Empty uploads (UAT gap fix)
+    ///
+    /// `bytes.is_empty()` is rejected BEFORE any directory/file is created,
+    /// so a failed or empty client-side read can never persist a 0-byte
+    /// artifact.
+    ///
+    /// Bytes are written via `std::fs::write` as a loose file — never as a
+    /// SQLite BLOB (D-05).
+    pub fn add_attachment(
+        &mut self,
+        task_id: &str,
+        filename: &str,
+        bytes: &[u8],
+        content_type: Option<&str>,
+        uploaded_by: Option<&str>,
+    ) -> Result<AttachmentMeta> {
+        // Verify task exists.
+        self.get_task(task_id)?;
+
+        // T-46.4-03: reject before any filesystem op.
+        if filename.is_empty() || filename.contains("..") || filename.contains(['/', '\\']) {
+            return Err(KanbanError::Other(anyhow::anyhow!(
+                "invalid attachment filename: {filename:?}"
+            )));
+        }
+
+        // UAT gap fix: reject empty payloads before any filesystem op so a
+        // failed/empty read never persists a 0-byte artifact.
+        if bytes.is_empty() {
+            return Err(KanbanError::Other(anyhow::anyhow!(
+                "empty attachment: {filename:?} has no bytes to store"
+            )));
+        }
+
+        let id = Self::new_id("a");
+        let now = Self::now();
+
+        // Per-attachment directory keyed by the opaque id (confinement
+        // boundary) so the original filename can be used as the leaf name.
+        let att_dir = crate::paths::kanban_attachments_dir(task_id).join(&id);
+        std::fs::create_dir_all(&att_dir)
+            .with_context(|| format!("create_dir_all({})", att_dir.display()))?;
+        let stored_path = att_dir.join(filename);
+        std::fs::write(&stored_path, bytes)
+            .with_context(|| format!("write attachment bytes to {}", stored_path.display()))?;
+
+        let size_bytes = bytes.len() as i64;
+        let stored_path_str = stored_path.to_string_lossy().into_owned();
+
+        self.conn.execute(
+            "INSERT INTO task_attachments \
+             (id, task_id, filename, size_bytes, content_type, stored_path, uploaded_by, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id,
+                task_id,
+                filename,
+                size_bytes,
+                content_type,
+                stored_path_str,
+                uploaded_by,
+                now,
+            ],
+        )?;
+
+        Ok(AttachmentMeta {
+            id,
+            task_id: task_id.to_string(),
+            filename: filename.to_string(),
+            size_bytes,
+            content_type: content_type.map(String::from),
+            stored_path: stored_path_str,
+            uploaded_by: uploaded_by.map(String::from),
+            created_at: now,
+        })
+    }
+
+    /// List attachment metadata for a task, ordered by `created_at` ascending
+    /// (D-05; read-side for the web attachment-chip UI, Plan 06).
+    pub fn list_attachments(&self, task_id: &str) -> Result<Vec<AttachmentMeta>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, task_id, filename, size_bytes, content_type, stored_path, uploaded_by, created_at \
+             FROM task_attachments WHERE task_id = ?1 ORDER BY created_at ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![task_id], |row| {
+                Ok(AttachmentMeta {
+                    id: row.get(0)?,
+                    task_id: row.get(1)?,
+                    filename: row.get(2)?,
+                    size_bytes: row.get(3)?,
+                    content_type: row.get(4)?,
+                    stored_path: row.get(5)?,
+                    uploaded_by: row.get(6)?,
+                    created_at: row.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
     }
 
     /// Insert a parent→child dependency link (D-39 tenant check).
@@ -963,7 +1097,7 @@ impl KanbanStore {
                      idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
                      max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
                      current_step_key, created_by, created_at, started_at, ended_at, \
-                     goal_mode, goal_max_turns, goal_turns_used, goal_toolset \
+                     goal_mode, goal_max_turns, goal_turns_used, goal_toolset, output_path \
                      FROM tasks WHERE idempotency_key = ?1",
                     params![kr],
                     Self::row_to_task,
@@ -1307,6 +1441,133 @@ impl KanbanStore {
             synthesizer_id,
             blackboard_event_id,
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 47 Plan 03 — cross-process generation spend-guardrail ledger
+    // (GEN-05 / D-04 / D-08, CONTEXT.md)
+    // -----------------------------------------------------------------------
+
+    /// Atomically check-and-increment the cross-process generation ledger for
+    /// `ledger_key` against `pool`.
+    ///
+    /// `ledger_key` is caller-supplied and this method is agnostic to its
+    /// origin: Plan 08 passes the swarm root task id for a kanban swarm, or a
+    /// solitary (non-swarm) task's OWN id so its pool is scoped to just
+    /// itself (WARNING 3 fix) — two different keys keep fully independent
+    /// counts.
+    ///
+    /// Runs the read-check-increment inside a single `BEGIN IMMEDIATE`
+    /// transaction (mirrors `create_swarm`'s atomic-transaction idiom, same
+    /// shape, no new IPC mechanism) so two `KanbanStore` handles racing this
+    /// method on the same sqlite file against a shared `pool` can never
+    /// together grant more than `pool` slots.
+    ///
+    /// `per_child_cap` is carried for signature symmetry with the Plan 05
+    /// `GenerationLedger` trait this method fulfills the cross-process arm
+    /// of — the per-child tier is enforced in-process by Plan 05; this
+    /// method's pool check is the sole authority here (RESEARCH Pitfall 5 /
+    /// Assumption A4). `model` + `mode` are recorded per successfully
+    /// reserved generation in `generation_ledger_log` (D-04 $-ready).
+    ///
+    /// Returns [`GenReserveOutcome::Granted`] with the post-increment count
+    /// on success, or [`GenReserveOutcome::PoolExhausted`] with the current
+    /// (unchanged) count when `count >= pool` — a blocked attempt never
+    /// increments the ledger.
+    pub fn try_reserve_generation_slot(
+        &mut self,
+        ledger_key: &str,
+        pool: u32,
+        per_child_cap: u32,
+        model: &str,
+        mode: &str,
+    ) -> Result<GenReserveOutcome> {
+        use rusqlite::TransactionBehavior;
+
+        // `per_child_cap` is not enforced by this method (see doc comment) —
+        // carried for symmetry with the Plan 05 trait signature only.
+        let _ = per_child_cap;
+
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+
+        let current: i64 = tx
+            .query_row(
+                "SELECT count FROM generation_ledger WHERE root_task_id = ?1",
+                params![ledger_key],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+
+        if current >= i64::from(pool) {
+            // Blocked: no write, nothing to commit — the transaction rolls
+            // back on drop (no rows were touched either way).
+            return Ok(GenReserveOutcome::PoolExhausted {
+                count: current.max(0) as u32,
+            });
+        }
+
+        let new_count = current + 1;
+        let now = Self::now();
+
+        tx.execute(
+            "INSERT INTO generation_ledger (root_task_id, count) VALUES (?1, ?2) \
+             ON CONFLICT(root_task_id) DO UPDATE SET count = excluded.count",
+            params![ledger_key, new_count],
+        )?;
+        tx.execute(
+            "INSERT INTO generation_ledger_log (root_task_id, model, mode, created_at) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![ledger_key, model, mode, now],
+        )?;
+
+        tx.commit()?;
+
+        Ok(GenReserveOutcome::Granted {
+            count: new_count as u32,
+        })
+    }
+
+    /// Resolve the swarm-root ledger key for [`KanbanStore::try_reserve_generation_slot`]
+    /// (Phase 47 Plan 08, D-08 / RESEARCH A4 / Open Question 2).
+    ///
+    /// Walks `task_links` PARENT edges up from `task_id`, one hop per
+    /// iteration, until a task with no parent is reached — that topmost
+    /// ancestor is the ledger key. A SOLITARY (non-swarm) task has no parent
+    /// row at all, so this returns `task_id` itself on the very first
+    /// iteration — exactly the WARNING 3 fallback ("key on the worker's OWN
+    /// task id so its pool is well-defined and scoped to just itself") without
+    /// needing a separate "is this a swarm" branch: the same walk produces
+    /// the correct answer for both cases.
+    ///
+    /// Bounded by [`Self::MAX_MENTION_CHAIN_DEPTH`]-derived depth (reused as a
+    /// generic "ancestor walk" ceiling, not mention-specific) as a defensive
+    /// cap against a malformed/cyclic `task_links` graph — the loop already
+    /// terminates naturally once a parent stops changing, so this bound is
+    /// belt-and-suspenders, never expected to trigger in practice.
+    pub fn find_root_task_id(&self, task_id: &str) -> Result<String> {
+        let mut current = task_id.to_string();
+        for _ in 0..64 {
+            let parent: Option<String> = self
+                .conn
+                .query_row(
+                    // ORDER BY parent_id: a multi-parent task must resolve to a
+                    // stable root across calls, else its cross-process spend
+                    // ledger key splits/doubles (WR-03). Single-parent (normal
+                    // delegation) is unaffected.
+                    "SELECT parent_id FROM task_links WHERE child_id = ?1 ORDER BY parent_id LIMIT 1",
+                    params![&current],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match parent {
+                Some(p) if p != current => current = p,
+                _ => break,
+            }
+        }
+        Ok(current)
     }
 
     // -----------------------------------------------------------------------
@@ -1918,7 +2179,7 @@ impl KanbanStore {
                  idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
                  max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
                  current_step_key, created_by, created_at, started_at, ended_at, \
-                 goal_mode, goal_max_turns, goal_turns_used, goal_toolset \
+                 goal_mode, goal_max_turns, goal_turns_used, goal_toolset, output_path \
                  FROM tasks WHERE idempotency_key = ?1",
                 params![key],
                 Self::row_to_task,
@@ -1945,6 +2206,7 @@ impl KanbanStore {
         expected_run_id: Option<&str>,
         created_cards: Option<&[String]>,
         current_profile: &str,
+        output_path: Option<&str>,
     ) -> Result<()> {
         use rusqlite::TransactionBehavior;
 
@@ -1960,7 +2222,7 @@ impl KanbanStore {
                  idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
                  max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
                  current_step_key, created_by, created_at, started_at, ended_at, \
-                 goal_mode, goal_max_turns, goal_turns_used, goal_toolset \
+                 goal_mode, goal_max_turns, goal_turns_used, goal_toolset, output_path \
                  FROM tasks WHERE id = ?1",
                 params![task_id],
                 Self::row_to_task,
@@ -2049,6 +2311,16 @@ impl KanbanStore {
             params![now, task_id],
         )?;
 
+        // (e2) D-10: persist output_path when provided. COALESCE-preserve —
+        // a `None` completion (e.g. CLI/web arms that don't set it yet, or a
+        // second complete call) must never clear a previously-set value.
+        if let Some(op) = output_path {
+            tx.execute(
+                "UPDATE tasks SET output_path=?1 WHERE id=?2",
+                params![op, task_id],
+            )?;
+        }
+
         // (f) Close current run row.
         let metadata_str = metadata.map(|v| v.to_string());
         if let Some(ref run_id) = task.current_run_id {
@@ -2124,7 +2396,7 @@ impl KanbanStore {
                  idempotency_key, claim_lock, claim_expires, current_run_id, consecutive_failures, \
                  max_retries, max_runtime_seconds, scheduled_at, workflow_template_id, \
                  current_step_key, created_by, created_at, started_at, ended_at, \
-                 goal_mode, goal_max_turns, goal_turns_used, goal_toolset \
+                 goal_mode, goal_max_turns, goal_turns_used, goal_toolset, output_path \
                  FROM tasks WHERE id = ?1",
                 params![task_id],
                 Self::row_to_task,
@@ -2752,5 +3024,279 @@ mod list_all_events_after_tests {
         let store = KanbanStore::open(dir.path().join("test.db")).unwrap();
         let events = store.list_all_events_after(0).unwrap();
         assert!(events.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 47 Plan 03 — try_reserve_generation_slot tests (GEN-05 / D-04 / D-08)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod generation_ledger_tests {
+    use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+    use tempfile::TempDir;
+
+    /// pool=3 grants exactly 3 reservations for the same key, then the 4th
+    /// blocks (boundary N vs N+1).
+    #[test]
+    fn pool_boundary_n_vs_n_plus_1() {
+        let dir = TempDir::new().unwrap();
+        let mut store = KanbanStore::open(dir.path().join("test.db")).unwrap();
+
+        for i in 1..=3u32 {
+            let outcome = store
+                .try_reserve_generation_slot("root_a", 3, 1, "flux-2-pro", "t2i")
+                .unwrap();
+            assert_eq!(
+                outcome,
+                GenReserveOutcome::Granted { count: i },
+                "reservation {i} of 3 must be granted"
+            );
+        }
+
+        let blocked = store
+            .try_reserve_generation_slot("root_a", 3, 1, "flux-2-pro", "t2i")
+            .unwrap();
+        assert_eq!(
+            blocked,
+            GenReserveOutcome::PoolExhausted { count: 3 },
+            "4th reservation against pool=3 must be blocked"
+        );
+    }
+
+    /// session_pool = 0 blocks the very first reservation.
+    #[test]
+    fn pool_zero_blocks_first_reservation() {
+        let dir = TempDir::new().unwrap();
+        let mut store = KanbanStore::open(dir.path().join("test.db")).unwrap();
+
+        let outcome = store
+            .try_reserve_generation_slot("root_b", 0, 1, "flux-2-pro", "t2i")
+            .unwrap();
+        assert_eq!(outcome, GenReserveOutcome::PoolExhausted { count: 0 });
+    }
+
+    /// A blocked attempt must not increment the ledger — the count stays
+    /// pinned at `pool` across repeated blocked calls.
+    #[test]
+    fn blocked_attempt_does_not_increment() {
+        let dir = TempDir::new().unwrap();
+        let mut store = KanbanStore::open(dir.path().join("test.db")).unwrap();
+
+        store
+            .try_reserve_generation_slot("root_c", 1, 1, "flux-2-pro", "t2i")
+            .unwrap();
+
+        for _ in 0..5 {
+            let outcome = store
+                .try_reserve_generation_slot("root_c", 1, 1, "flux-2-pro", "t2i")
+                .unwrap();
+            assert_eq!(
+                outcome,
+                GenReserveOutcome::PoolExhausted { count: 1 },
+                "repeated blocked attempts must never increment past pool"
+            );
+        }
+    }
+
+    /// A solitary task's own id is a fully independent key from a swarm
+    /// root's id — two distinct keys keep separate counts (WARNING 3 fix).
+    #[test]
+    fn solitary_key_isolation() {
+        let dir = TempDir::new().unwrap();
+        let mut store = KanbanStore::open(dir.path().join("test.db")).unwrap();
+
+        // Exhaust the swarm root key's pool of 1.
+        let swarm_outcome = store
+            .try_reserve_generation_slot("swarm_root_1", 1, 1, "flux-2-pro", "t2i")
+            .unwrap();
+        assert_eq!(swarm_outcome, GenReserveOutcome::Granted { count: 1 });
+
+        // A solitary task's OWN id, keyed separately, must still be able to
+        // reserve — its pool is untouched by the swarm root's exhaustion.
+        let solitary_outcome = store
+            .try_reserve_generation_slot("solitary_task_9", 1, 1, "flux-2-pro", "t2i")
+            .unwrap();
+        assert_eq!(
+            solitary_outcome,
+            GenReserveOutcome::Granted { count: 1 },
+            "a solitary task's own-id key must be scoped independently of other keys"
+        );
+
+        // The swarm root key remains independently exhausted.
+        let swarm_blocked = store
+            .try_reserve_generation_slot("swarm_root_1", 1, 1, "flux-2-pro", "t2i")
+            .unwrap();
+        assert_eq!(swarm_blocked, GenReserveOutcome::PoolExhausted { count: 1 });
+    }
+
+    /// A solitary task (no `task_links` parent row at all) resolves to its
+    /// OWN id — the WARNING 3 fallback, exercised via the same walk that
+    /// resolves swarm children to their root (no separate branch needed).
+    #[test]
+    fn find_root_task_id_solitary_task_resolves_to_own_id() {
+        let dir = TempDir::new().unwrap();
+        let mut store = KanbanStore::open(dir.path().join("test.db")).unwrap();
+        let solo = store
+            .create_task("solo task", "op", CreateTaskOptions::default())
+            .unwrap();
+        assert_eq!(store.find_root_task_id(&solo.id).unwrap(), solo.id);
+    }
+
+    /// A swarm child (one `task_links` hop) resolves to its parent's id.
+    #[test]
+    fn find_root_task_id_single_hop_resolves_to_parent() {
+        let dir = TempDir::new().unwrap();
+        let mut store = KanbanStore::open(dir.path().join("test.db")).unwrap();
+        let root = store
+            .create_task("swarm root", "op", CreateTaskOptions::default())
+            .unwrap();
+        let child = store
+            .create_task(
+                "swarm child",
+                "op",
+                CreateTaskOptions {
+                    parents: vec![root.id.clone()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(store.find_root_task_id(&child.id).unwrap(), root.id);
+    }
+
+    /// A multi-hop chain (grandchild -> child -> root) walks all the way to
+    /// the topmost ancestor, not just the immediate parent.
+    #[test]
+    fn find_root_task_id_multi_hop_walks_to_topmost_ancestor() {
+        let dir = TempDir::new().unwrap();
+        let mut store = KanbanStore::open(dir.path().join("test.db")).unwrap();
+        let root = store
+            .create_task("root", "op", CreateTaskOptions::default())
+            .unwrap();
+        let mid = store
+            .create_task(
+                "mid",
+                "op",
+                CreateTaskOptions {
+                    parents: vec![root.id.clone()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let leaf = store
+            .create_task(
+                "leaf",
+                "op",
+                CreateTaskOptions {
+                    parents: vec![mid.id.clone()],
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(store.find_root_task_id(&leaf.id).unwrap(), root.id);
+        // The intermediate node itself still resolves to the same root.
+        assert_eq!(store.find_root_task_id(&mid.id).unwrap(), root.id);
+    }
+
+    /// Records model + mode per reserved generation (D-04 $-ready).
+    #[test]
+    fn records_model_and_mode_per_generation() {
+        let dir = TempDir::new().unwrap();
+        let mut store = KanbanStore::open(dir.path().join("test.db")).unwrap();
+
+        store
+            .try_reserve_generation_slot("root_d", 2, 1, "flux-2-pro", "t2i")
+            .unwrap();
+        store
+            .try_reserve_generation_slot("root_d", 2, 1, "veo-3", "t2v")
+            .unwrap();
+
+        let mut stmt = store
+            .conn
+            .prepare(
+                "SELECT model, mode FROM generation_ledger_log \
+                 WHERE root_task_id = ?1 ORDER BY id ASC",
+            )
+            .unwrap();
+        let rows: Vec<(String, String)> = stmt
+            .query_map(params!["root_d"], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+
+        assert_eq!(
+            rows,
+            vec![
+                ("flux-2-pro".to_string(), "t2i".to_string()),
+                ("veo-3".to_string(), "t2v".to_string()),
+            ]
+        );
+    }
+
+    /// Two `KanbanStore` handles opened on the same sqlite file, hammering
+    /// `try_reserve_generation_slot` from separate OS threads against a
+    /// shared `pool` under the SAME key, must together grant EXACTLY `pool`
+    /// reservations — never more (the concurrent-worker invariant this
+    /// method exists to guarantee, GEN-05).
+    #[test]
+    fn generation_ledger_concurrent_two_handles_never_exceed_pool() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.db");
+
+        // Ensure the DB + ledger tables exist before spawning concurrent
+        // handles (avoids a schema-creation race between the two threads).
+        {
+            let _seed = KanbanStore::open(&path).unwrap();
+        }
+
+        const POOL: u32 = 10;
+        const ATTEMPTS_PER_THREAD: u32 = 25; // > POOL so blocking is exercised
+
+        let barrier = Arc::new(Barrier::new(2));
+        let path_a = path.clone();
+        let path_b = path.clone();
+        let barrier_a = Arc::clone(&barrier);
+        let barrier_b = Arc::clone(&barrier);
+
+        let worker = move |path: std::path::PathBuf, barrier: Arc<Barrier>| -> u32 {
+            let mut store = KanbanStore::open(&path).unwrap();
+            barrier.wait();
+            let mut granted = 0u32;
+            for _ in 0..ATTEMPTS_PER_THREAD {
+                let outcome = store
+                    .try_reserve_generation_slot("shared_swarm_root", POOL, 1, "flux-2-pro", "t2i")
+                    .unwrap();
+                if matches!(outcome, GenReserveOutcome::Granted { .. }) {
+                    granted += 1;
+                }
+            }
+            granted
+        };
+
+        let h1 = thread::spawn(move || worker(path_a, barrier_a));
+        let h2 = thread::spawn(move || worker(path_b, barrier_b));
+
+        let granted_a = h1.join().unwrap();
+        let granted_b = h2.join().unwrap();
+
+        assert_eq!(
+            granted_a + granted_b,
+            POOL,
+            "two concurrent handles must together grant exactly POOL reservations, never more"
+        );
+
+        // Cross-check against the durable ledger row itself.
+        let store = KanbanStore::open(&path).unwrap();
+        let final_count: i64 = store
+            .conn
+            .query_row(
+                "SELECT count FROM generation_ledger WHERE root_task_id = ?1",
+                params!["shared_swarm_root"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(final_count, i64::from(POOL));
     }
 }

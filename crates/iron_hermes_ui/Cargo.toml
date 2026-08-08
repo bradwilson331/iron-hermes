@@ -1,6 +1,6 @@
 [package]
 name = "iron_hermes_ui"
-version = "0.2.1"
+version.workspace = true
 authors = ["Brad Wilson <bradwilson331@users.noreply.github.com>"]
 edition = "2021"
 
@@ -10,6 +10,11 @@ edition = "2021"
 dioxus = { version = "=0.7.1", features = ["fullstack"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Phase 39.1 Plan 02 (R39.1-08): uuid is used in protocol.rs (ChatStreamEvent fields)
+# which is compiled on BOTH native and wasm32. The workspace dep only covers
+# cfg(not(wasm32)); this direct dep adds the `js` feature required for wasm32
+# randomness (uuid::Uuid::new_v4 on wasm32 needs js-sys for entropy).
+uuid = { version = "1", features = ["v4", "serde", "js"] }
 
 # Minimal tokio for platform/timer.rs (native sleep); `server` feature adds `full`.
 tokio = { version = "1", features = ["time"], default-features = false }
@@ -46,6 +51,69 @@ web-sys = { version = "0.3", features = [
     "BlobPropertyBag",
     "Url",
     "HtmlAudioElement",
+    # Phase 36.17.8 Plan 06 (D-13/D-14): mic capture for MicButton.
+    # MediaDevices::get_user_media → MediaStream → MediaRecorder → Blob
+    # → Vec<u8> → AudioInFrame binary WS frame.
+    "MediaDevices",
+    "MediaStream",
+    "MediaRecorder",
+    "MediaRecorderOptions",
+    "BlobEvent",
+    "MediaStreamConstraints",
+    # Phase 36.17.9 Plan 05 (D-03/D-07/D-09): hands-free voice loop + audio-reactive orb.
+    # AudioContext.createMediaStreamSource → AnalyserNode (FFT) graph; MediaStreamTrack
+    # for teardown; HtmlCanvasElement for the WebGL orb. Parent classes (BaseAudioContext,
+    # AudioNode) are listed explicitly so create_analyser / create_media_stream_source /
+    # connect_with_audio_node / resume / close resolve regardless of feature-dep ordering.
+    "AudioContext",
+    "BaseAudioContext",
+    # Phase 36.17.10 (UAT wake-word fix): read audio_ctx.state() to detect/repair a
+    # context that re-suspended after the wake-word round-trip (silent AnalyserNode).
+    "AudioContextState",
+    "AudioNode",
+    "AnalyserNode",
+    "MediaStreamAudioSourceNode",
+    "MediaStreamTrack",
+    "HtmlCanvasElement",
+    # tap_speaking_analyser (D-02): route the speaking <audio> element through the
+    # analyser so the orb reacts to TTS playback. createMediaElementSource →
+    # MediaElementAudioSourceNode; ctx.destination() → AudioDestinationNode.
+    "MediaElementAudioSourceNode",
+    "AudioDestinationNode",
+    # Phase 36.17.12 Plan 02: WebRTC feature flags for browser-direct realtime session
+    # (D-04/D-05). These are wasm32-only bindings compiled into the web client.
+    # The permanent OPENAI_API_KEY never reaches the browser — only the ephemeral
+    # token (issued server-side by issue_realtime_token) is used here.
+    # Phase 36.17.12 BUG 2 fix: HtmlMediaElement provides set_src_object /
+    # set_autoplay / play() which HtmlAudioElement inherits (wasm-bindgen
+    # extends chain). Without this feature, those methods are absent even
+    # though HtmlAudioElement is enabled.
+    "HtmlMediaElement",
+    "RtcPeerConnection",
+    "RtcConfiguration",
+    "RtcSessionDescriptionInit",
+    "RtcSdpType",
+    "RtcRtpSender",
+    "RtcRtpReceiver",
+    "RtcTrackEvent",
+    "RtcDataChannel",
+    "RtcDataChannelInit",
+    "RtcDataChannelEvent",
+    "RtcIceCandidate",
+    "RtcIceCandidateInit",
+    "RtcPeerConnectionIceEvent",
+    "RtcSignalingState",
+    "MediaStreamTrackState",
+    # Phase 46.7 Plan 05 (D-05): paste-from-clipboard image attachment support.
+    # dioxus-web's drag-drop FileEngine already uses File/FileList/FileReader
+    # internally (feature-unified into this same web-sys build), but the
+    # composer's raw ClipboardEvent -> DataTransfer.files() read is done
+    # directly in chat.rs, so ClipboardEvent must be requested explicitly here
+    # (dioxus-web's own clipboard.rs only downcasts to the generic web_sys::Event).
+    "ClipboardEvent",
+    "File",
+    "FileList",
+    "FileReader",
 ] }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
@@ -53,6 +121,12 @@ js-sys = "0.3"
 # spawn the 200ms debounce timer on WASM for the per-task event counter
 # refresh (UI-SPEC §8.4).
 wasm-bindgen-futures = "0.4"
+# Phase 46.4 Plan 06 (D-03/D-04): base64-in-JSON transport for the web
+# attach_file #[server] fn — encode on the wasm client, decode on the
+# server. Shared dep (both targets need it, unlike the native-only deps
+# below). Pre-pinned workspace dep (root Cargo.toml:111), already used by
+# three other crates.
+base64 = { workspace = true }
 
 # Server-only deps — optional, activated by `server` feature
 axum = { version = "=0.8.4", optional = true }
@@ -60,11 +134,22 @@ axum = { version = "=0.8.4", optional = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Server-only deps — behind cfg gate so WASM client never compiles them
 ironhermes-core = { path = "../ironhermes-core" }
+# Phase 47.4 Plan 02 (D-09/D-14): the profile VERIFY probe reaches
+# build_runtime_judge_fn_with_env_overrides, which lives in the CLI crate
+# per the locked ironhermes-kanban crate-isolation fence (judge.rs's module
+# doc forbids LLM-wiring logic in that crate). Native-only (cfg-gated), same
+# grouping as ironhermes-kanban/ironhermes-vault below — the wasm client
+# bundle never compiles it.
+ironhermes-cli = { path = "../ironhermes-cli" }
 ironhermes-agent = { path = "../ironhermes-agent" }
 ironhermes-exec = { path = "../ironhermes-exec" }
 ironhermes-hooks = { path = "../ironhermes-hooks" }
 ironhermes-state = { path = "../ironhermes-state" }
 ironhermes-tools = { path = "../ironhermes-tools" }
+# Phase 39.3 Plan 03 (D-04 / OQ#3): trajectory logging for realtime tool calls.
+# Provides TrajectoryEntry (for building JSONL records) and TrajectoryWriterHandleImpl
+# (the concrete AppState.realtime_trajectory_writer impl, opt-in / config-gated).
+ironhermes-trajectory = { path = "../ironhermes-trajectory" }
 # Phase 36.17.4 Plan 03 (D-01): need SessionQueue from gateway — the concrete
 # MessageQueue<SessionKey> implementor instantiated in AppState::init.
 ironhermes-gateway = { path = "../ironhermes-gateway" }
@@ -82,6 +167,8 @@ tokio-util = { workspace = true }
 rusqlite = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
+# Phase 39.1 Plan 02 (R39.1-01): StreamMap for concurrent in-flight turn drain.
+tokio-stream = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing-appender = { workspace = true }
@@ -91,6 +178,60 @@ dotenvy = { workspace = true }
 # which uses #[async_trait] on its methods. The impl in server/web_audio_dispatcher.rs
 # requires async-trait for the impl-side macro.
 async-trait = { workspace = true }
+# Phase 36.17.12: ephemeral realtime-token issuance (server-side OpenAI key exchange).
+# Used by issue_realtime_token #[server] fn to POST to /v1/realtime/client_secrets.
+# Workspace pin preferred (same version as ironhermes-tools/agent/gateway).
+reqwest = { workspace = true }
+# Phase 39.2 Plan 03: black-box recorder for realtime_tool_call instrumentation.
+# Server-side only (tokio fs, daily-rotating BufWriter); never compiled to WASM.
+ironhermes-blackbox = { path = "../ironhermes-blackbox" }
+# Phase 39.2 Plan 03: SHA-256 result_hash in realtime_tool_call tool_completed event.
+sha2 = { workspace = true }
+# Phase 46.3 Plan 01 (D-02): load_kanban_config parses main_config.kanban
+# (a serde_yaml::Value) into KanbanConfig — ported from the CLI's
+# load_kanban_config, which uses the workspace serde_yaml dep directly.
+serde_yaml = { workspace = true }
+# Phase 46.6 Plan 03 (D-02/D-03): per-profile artifacts.db store — the
+# sandboxed-serving route reads rendered HTML via ArtifactStore::load_latest_html.
+# Native-only (cfg-gated), same grouping as ironhermes-state above — iron_hermes_ui
+# is blind to this dep on wasm32.
+ironhermes-artifacts = { path = "../ironhermes-artifacts" }
+# Phase 46.8 Plan 07 (D-07): AppState::init calls apply_vault_fallback to top up
+# provider keys from the vault when config.vault.enabled. Native-only (cfg-gated),
+# same grouping as ironhermes-core above — vault store code never compiles to wasm32.
+ironhermes-vault = { path = "../ironhermes-vault" }
+# Phase 46.9 Plan 04 (D-06): schedules_api.rs CRUD server fns mutate the
+# JobStore directly (jobs.json) — never shells out to the CLI. Native-only
+# (cfg-gated), same grouping as ironhermes-kanban above.
+ironhermes-cron = { path = "../ironhermes-cron" }
+# Phase 46.9 Plan 09 (GAP-4): schedules_api.rs renders last_run_at in the
+# operator's configured display timezone (config.agent.timezone), mirroring
+# ironhermes-agent/src/prompt_builder.rs's chrono_tz::Tz resolution.
+# Native-only (cfg-gated) — the render runs server-side only, same grouping
+# as ironhermes-cron above. `chrono` itself is named directly (chrono::Local,
+# chrono::DateTime) rather than only relied on transitively through
+# ironhermes-cron's re-exported types, so it must be a direct dep too.
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+# Phase 46.9 Plan 06 (D-03): provider_secrets_api.rs wraps the raw API key
+# in secrecy::SecretString before it ever touches a Debug/Display path.
+# Same version pin as ironhermes-vault's own Cargo.toml (already resolved
+# in the workspace lockfile via that crate — this only adds a direct-dep
+# entry, not a new crate to the graph). Native-only (cfg-gated).
+secrecy = { version = "0.10.3", features = ["serde"] }
+# Phase 47.3 Plan 01 (D-06/D-08): argon2id password hashing for the operator
+# login boundary. Pin "0.5" deliberately — the unscoped latest resolves to a
+# 0.6.0-rc pre-release (RESEARCH.md Standard Stack). Native-only (cfg-gated):
+# the WASM client never verifies passwords.
+argon2 = "0.5"
+# Phase 47.3 Plan 01: 32-byte OsRng session tokens (auth.rs::mint_session).
+# Already resolved transitively at 0.8.5 (argon2/password-hash's rand_core
+# line) — this only adds a direct-dep entry, not a new major version.
+rand = "0.8"
+# Phase 47.3 Plan 01: RwLock for AuthState's session/rate-limit maps. Already
+# resolved transitively at 0.12.5 (tokio-util and others) — this adds a
+# direct-dep entry at the same version, not a new crate to the graph.
+parking_lot = "0.12"
 
 [dev-dependencies]
 # Test-only features for `#[tokio::test]` (macros + rt).
@@ -99,15 +240,39 @@ tokio = { version = "1", features = ["macros", "rt", "time"], default-features =
 tokio-util = { workspace = true }
 # Phase 34-02: behavioral test for list_sessions Platform::Web filter.
 tempfile = "3"
+# Phase 47.3 Plan 01: tower::ServiceExt::oneshot for the full-router auth
+# integration-test harness (login_page.rs's `#[cfg(test)] mod tests`) — no
+# precedent elsewhere in this crate (PATTERNS.md "No Analog Found"). Already
+# resolved transitively at 0.5.3 (axum's own dep tree).
+tower = { version = "0.5", features = ["util"] }
 
 [features]
 default = ["web"]
 web = ["dioxus/web"]
 desktop = ["dioxus/desktop"]
 mobile = ["dioxus/mobile"]
-server = ["dioxus/server", "dep:axum", "tokio/full"]
+# The two compression features are attached HERE rather than to the `tower-http`
+# dependency line so brotli/flate2 never enter the wasm dependency graph — that
+# dep is unconditional (the `trace` feature is needed on both sides), and this
+# crate's client build is a wasm bundle whose size is the whole point of
+# compressing responses in the first place.
+server = [
+    "dioxus/server",
+    "dep:axum",
+    "tokio/full",
+    "tower-http/compression-gzip",
+    "tower-http/compression-br",
+]
 demo = []
 # Phase 26.2.1: Gate the legacy Warp-style shell behind an opt-in feature.
 # Default builds mount the new wheel-driven `HermesApp`; enable `legacy-shell`
 # to mount `WarpHermes` instead (kept compiling as a UAT fallback).
 legacy-shell = []
+# Phase 01 (Three.js Viseme Avatar Core) Plan 04 (D-10): throwaway dev flag.
+# When ON, orb_canvas.rs mounts the talking-head avatar (window.ironHermesAvatar)
+# instead of the orb; default builds leave the orb path byte-for-byte unchanged.
+avatar = []
+# Phase 46.8 Plan 07 (D-07): threads the RustyVault backend into the vault
+# fallback consulted by AppState::init. Off by default — env-var backend
+# (always-on, no cargo feature required) remains the default.
+rusty-vault = ["ironhermes-vault/rusty-vault"]

@@ -1,10 +1,12 @@
 //! `ironhermes-exec` — sandbox runtime for executing Python scripts with
 //! tool access via JSON-RPC over Unix domain sockets.
 
+pub mod backend;
 pub mod process_registry;
 pub mod rpc_server;
 pub mod sandbox;
 
+pub use backend::{Environment, ExecResult, RunOpts, Session};
 pub use rpc_server::RpcServer;
 pub use sandbox::{Sandbox, SandboxResult};
 

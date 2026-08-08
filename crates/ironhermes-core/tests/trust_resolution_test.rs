@@ -3,7 +3,7 @@
 //! These tests exercise the full `SkillRegistry::load_with_config` pipeline:
 //!   filesystem layout → manifest parse → resolve_source → D-15 scan enforcement
 //!
-//! Tests use `extra_paths` to inject a controlled skills root, so HERMES_HOME is
+//! Tests use `extra_paths` to inject a controlled skills root, so IRONHERMES_HOME is
 //! never mutated — no env serialization lock required.
 
 use ironhermes_core::{HubConfig, SkillRegistry, SkillSource, SkillsConfig};
@@ -54,7 +54,7 @@ fn write_manifest(skills_root: &Path, entries: &[(&str, &str, &str, &Path)]) {
 
 /// Build a `SkillsConfig` that points `extra_paths` at the given skills root,
 /// disabling the three hardcoded default paths (cwd/.ironhermes/skills,
-/// HERMES_HOME/skills, ~/.agents/skills) by using a cwd that has none of them.
+/// IRONHERMES_HOME/skills, ~/.agents/skills) by using a cwd that has none of them.
 ///
 /// The only path scanned is `skills_root` itself — the hub dir lives under it.
 fn config_with_path(skills_root: &Path, trusted_repos: Vec<String>) -> (SkillsConfig, TempDir) {

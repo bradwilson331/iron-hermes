@@ -1,6 +1,6 @@
 {
   "version": "1.0.0",
-  "lastScanned": 1778242254448,
+  "lastScanned": 1785593918827,
   "projectRoot": "/Users/you/code/ironhermes/crates/iron_hermes_ui",
   "techStack": {
     "languages": [
@@ -54,21 +54,30 @@
     "assets": {
       "path": "assets",
       "purpose": "Static assets",
-      "fileCount": 9,
-      "lastAccessed": 1778242254439,
+      "fileCount": 45,
+      "lastAccessed": 1785593918810,
       "keyFiles": [
-        "design-tokens.css",
-        "favicon.ico",
-        "ih-shield.png",
-        "main.css",
-        "scanner-anim.css"
+        "AsciiEffect.js",
+        "CopyShader.js",
+        "EffectComposer.js",
+        "GLTFLoader.js",
+        "LuminosityHighPassShader.js"
+      ]
+    },
+    "filestoimport": {
+      "path": "filestoimport",
+      "purpose": null,
+      "fileCount": 2,
+      "lastAccessed": 1785593918810,
+      "keyFiles": [
+        "IronHermes Design System-handoff (1).zip"
       ]
     },
     "src": {
       "path": "src",
       "purpose": "Source code",
-      "fileCount": 5,
-      "lastAccessed": 1778242254440,
+      "fileCount": 7,
+      "lastAccessed": 1785593918811,
       "keyFiles": [
         "app.rs",
         "fonts.rs",
@@ -77,39 +86,24 @@
         "state.rs"
       ]
     },
-    "target": {
-      "path": "target",
-      "purpose": null,
-      "fileCount": 2,
-      "lastAccessed": 1778242254440,
-      "keyFiles": [
-        "CACHEDIR.TAG"
-      ]
-    },
     "tests": {
       "path": "tests",
       "purpose": "Test files",
-      "fileCount": 2,
-      "lastAccessed": 1778242254440,
+      "fileCount": 31,
+      "lastAccessed": 1785593918811,
       "keyFiles": [
-        "server_runtime_parity.rs",
-        "websocket_lifecycle_parity.rs"
-      ]
-    },
-    "warp2ironhermes": {
-      "path": "warp2ironhermes",
-      "purpose": null,
-      "fileCount": 2,
-      "lastAccessed": 1778242254440,
-      "keyFiles": [
-        "README.md"
+        "audio_gc.rs",
+        "audio_in_protocol.rs",
+        "audio_out_protocol.rs",
+        "audio_route.rs",
+        "kanban_board_read.rs"
       ]
     },
     "src/components": {
       "path": "src/components",
       "purpose": "UI components",
-      "fileCount": 2,
-      "lastAccessed": 1778242254440,
+      "fileCount": 3,
+      "lastAccessed": 1785593918812,
       "keyFiles": [
         "mod.rs",
         "warp_hermes.rs"
@@ -118,8 +112,8 @@
     "src/mocks": {
       "path": "src/mocks",
       "purpose": "Mock data",
-      "fileCount": 4,
-      "lastAccessed": 1778242254441,
+      "fileCount": 5,
+      "lastAccessed": 1785593918812,
       "keyFiles": [
         "agent_steps.rs",
         "mod.rs",
@@ -148,8 +142,8 @@
     },
     {
       "path": "src/main.rs",
-      "accessCount": 22,
-      "lastAccessed": 1779329618683,
+      "accessCount": 26,
+      "lastAccessed": 1785594820596,
       "type": "file"
     },
     {
@@ -160,8 +154,8 @@
     },
     {
       "path": "Cargo.toml",
-      "accessCount": 18,
-      "lastAccessed": 1777823459516,
+      "accessCount": 20,
+      "lastAccessed": 1785594803245,
       "type": "file"
     },
     {

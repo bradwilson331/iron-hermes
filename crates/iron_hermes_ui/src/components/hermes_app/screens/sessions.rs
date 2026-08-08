@@ -122,6 +122,15 @@ pub fn ScreenSessions(is_active: bool) -> Element {
                 }
                 div { class: "screen-actions",
                     button { class: "btn btn--ghost btn--sm", "⊞ FILTER" }
+                    // Phase 46.6 Plan 05 (D-07): artifacts affordance — DOM
+                    // order FILTER → ARTIFACTS → + NEW SESSION per UI-SPEC §1.
+                    // Solid (non-ghost) `.btn` at default weight, same visual
+                    // weight as `+ NEW SESSION`, per the Copywriting Contract.
+                    button {
+                        class: "btn btn--sm",
+                        onclick: move |_| active_screen.set(crate::state::Screen::Artifacts),
+                        "▤ ARTIFACTS"
+                    }
                     button { class: "btn btn--sm", "+ NEW SESSION" }
                 }
             }

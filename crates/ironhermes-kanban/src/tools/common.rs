@@ -127,6 +127,26 @@ pub fn reject_value_with_board(
 }
 
 // ---------------------------------------------------------------------------
+// Run-id resolution
+// ---------------------------------------------------------------------------
+
+/// Resolve the `expected_run_id` for a terminating tool (`kanban_complete` / `kanban_block`).
+///
+/// The trusted per-run env `IRONHERMES_KANBAN_RUN_ID` (set by the dispatcher via
+/// [`crate::kanban_env`]) is AUTHORITATIVE and always wins when present — a worker's own run id
+/// is never something the model should be able to override. The model-supplied `arg` is consulted
+/// ONLY when no worker env exists (manual / orchestrator completion).
+///
+/// This inverts the earlier "arg-first, env-fallback" order, which let a model that passed a wrong
+/// `expected_run_id` (the literal `$IRONHERMES_KANBAN_RUN_ID` token, or a hallucinated id)
+/// false-trip the stale-run gate: the terminator was rejected as `stale_run_id`, the worker exited
+/// clean, was mislabeled "crashed", and the task blocked once the retry budget drained. A genuine
+/// supersession still rejects correctly (env run id ≠ current_run_id).
+pub fn resolve_expected_run_id(arg: Option<&str>) -> Option<String> {
+    crate::kanban_env("RUN_ID").or_else(|| arg.map(String::from))
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -237,7 +257,7 @@ mod tests {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Ensure env does not interfere.
         unsafe {
-            std::env::remove_var("HERMES_KANBAN_BOARD");
+            std::env::remove_var("IRONHERMES_KANBAN_BOARD");
         }
 
         let args = json!({ "board": "myproject" });
@@ -253,7 +273,7 @@ mod tests {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Clear env and use a tempdir as IRONHERMES_HOME so no current file exists.
         unsafe {
-            std::env::remove_var("HERMES_KANBAN_BOARD");
+            std::env::remove_var("IRONHERMES_KANBAN_BOARD");
         }
         let dir = tempfile::tempdir().unwrap();
         unsafe {
@@ -276,7 +296,7 @@ mod tests {
     fn resolve_from_args_with_invalid_slug_returns_err_and_default_ctx() {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
-            std::env::remove_var("HERMES_KANBAN_BOARD");
+            std::env::remove_var("IRONHERMES_KANBAN_BOARD");
         }
 
         // Path traversal slug must fail validation.
@@ -299,5 +319,45 @@ mod tests {
         assert_eq!(parsed["board"], "epsilon");
         assert_eq!(parsed["board_source"], "env");
         assert_eq!(parsed["status"], "ok");
+    }
+
+    // ── resolve_expected_run_id ─────────────────────────────────────────────
+
+    /// The trusted env run id is authoritative: a wrong model-supplied arg must NOT win.
+    /// This is the fix for the false `stale_run_id` rejection that blocked completed tasks.
+    #[test]
+    fn resolve_expected_run_id_env_wins_over_model_arg() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::remove_var("IRONHERMES_KANBAN_RUN_ID");
+            std::env::remove_var("HERMES_KANBAN_RUN_ID");
+        }
+
+        // No worker env → the arg is used (manual / orchestrator completion).
+        assert_eq!(
+            resolve_expected_run_id(Some("r_arg")),
+            Some("r_arg".to_string())
+        );
+        assert_eq!(resolve_expected_run_id(None), None);
+
+        // Worker env present → env wins even when the model passes a WRONG expected_run_id.
+        unsafe {
+            std::env::set_var("IRONHERMES_KANBAN_RUN_ID", "r_env");
+        }
+        assert_eq!(
+            resolve_expected_run_id(Some("r_WRONG_HALLUCINATED")),
+            Some("r_env".to_string()),
+            "trusted env run id must override a model-supplied expected_run_id"
+        );
+        assert_eq!(
+            resolve_expected_run_id(Some("$IRONHERMES_KANBAN_RUN_ID")),
+            Some("r_env".to_string()),
+            "the literal token the model was previously told to pass must not trip the stale gate"
+        );
+        assert_eq!(resolve_expected_run_id(None), Some("r_env".to_string()));
+
+        unsafe {
+            std::env::remove_var("IRONHERMES_KANBAN_RUN_ID");
+        }
     }
 }

@@ -1,5 +1,11 @@
+pub mod approval_gate;
+pub mod approvals;
+pub mod async_bridge; // Phase 41.3 UAT gap: LocalSet-safe async→sync bridge
+pub mod audit;
+pub mod auth;
 pub mod browser_profile;
 pub mod commands;
+pub mod concurrency;
 pub mod config;
 pub mod config_extras;
 pub mod config_schema;
@@ -7,6 +13,9 @@ pub mod config_setter;
 pub mod config_validate;
 pub mod constants;
 pub mod context_scanner;
+pub mod dispatch_gate; // Phase 47.4 GAP-1: shared pre-spawn dispatch predicate
+pub mod dotenv_write; // Phase 47.6 Plan 04 (D-06): single shared .env writer
+pub mod env_sanitize;
 pub mod error;
 pub mod memory_provider;
 pub mod memory_store;
@@ -20,22 +29,31 @@ pub mod queue;
 pub mod session;
 pub mod skills;
 pub mod ssrf;
+pub mod stt; // Phase 36.17.8
 pub mod token_estimator;
 pub mod tts; // Phase 36.17.5
 pub mod types;
+pub mod vault; // Phase 46.8 UAT gap G-46.8-1
 pub mod wizard;
 pub mod workspace;
 
+pub use approval_gate::{ApprovalGate, ApprovalOutcome};
+pub use approvals::{ApprovalsState, ApprovalsStore, KeyKind};
+pub use audit::{AuditConfig, AuditEntry, AuditLog};
+pub use auth::{AuthStore, DcrEntry, TokenEntry};
 pub use browser_profile::{SingletonOutcome, reconcile_singleton_lock};
 pub use commands::context::CommandContext;
-pub use commands::running_agent::{AGENT_RUNNING_REJECT_MSG, RunningAgentGuard, is_bypass};
 pub use commands::{
-    CommandCategory, CommandDef, CommandResult as SlashCommandResult, CommandRouter,
-    PlatformFilter, ResolveResult,
+    ApprovalNeed, CommandCategory, CommandDef, CommandResult as SlashCommandResult, CommandRouter,
+    PlatformFilter, QuickCommandDef, QuickCommandPlan, QuickCommandRegistry, ResolveResult,
+    prepare_quick_command,
 };
+pub use concurrency::{ConcurrencyLayer, Surface, TurnEntry, TurnId, TurnRegistry, TurnSummary};
 pub use config::{
-    ApiMode, BatchConfig, Config, CustomProviderConfig, ExecConfig, ExtraTap, ExtractConfig,
-    HubConfig, MemoryConfig, ModelRoleConfig, ProviderConfig, SkillsConfig, SubagentConfig,
+    ApiMode, ApprovalsGatewayConfig, AuthConfig, AuthProviderConfig, BatchConfig,
+    ChannelTrust, ConcurrencyConfig, Config, CustomProviderConfig, DangerousCommandsConfig,
+    ExecConfig, ExtraTap, ExtractConfig, HubConfig, McpMutationGuardrailConfig, MemoryConfig,
+    ModelRoleConfig, PlatformGatewayConfig, ProviderConfig, SkillsConfig, SubagentConfig,
     ToolsConfig, ToolsetEntry,
 };
 pub use config_schema::{ConfigField, MemoryAction, schema as config_schema};
@@ -43,6 +61,7 @@ pub use constants::*;
 pub use context_scanner::{
     CONTEXT_FILE_MAX_CHARS, scan_context_content, truncate_content, truncate_on_char_boundary,
 };
+pub use env_sanitize::build_terminal_safe_env;
 pub use error::{HermesError, Result};
 pub use memory_provider::{MemoryEntries, MemoryProvider};
 pub use memory_store::{MemoryStore, MemoryTarget};
@@ -63,12 +82,17 @@ pub use skills::{
     SkillSource,
 };
 pub use ssrf::is_safe_url;
+pub use stt::{BUILTIN_STT_NAMES, SttProvider, SttRegistry}; // Phase 36.17.8
 pub use token_estimator::{
     TiktokenEncoding, TokenEstimator, global_estimate_tokens, init_global_estimator,
     warm_tiktoken_singletons,
 };
 pub use tts::{BUILTIN_TTS_NAMES, TtsProvider, TtsRegistry}; // Phase 36.17.5
 pub use types::*;
+// Phase 46.8 UAT gap G-46.8-1: shared `data_dir` sentinel resolver — every runtime
+// `open_store`/`RustyVaultStore::open` call site (server, cron-runner, CLI) routes
+// through this so they all agree on the same on-disk vault location as `vault init`.
+pub use vault::{resolve_vault_config, resolve_vault_config_with_home};
 
 // Phase 25.3 D-W-1 — Workspace newtype + cwd walk-up resolution helper.
 // Re-export name is `resolve_workspace_from_cwd` (aliased) to avoid collision with

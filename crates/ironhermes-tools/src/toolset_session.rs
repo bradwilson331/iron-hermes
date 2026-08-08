@@ -47,7 +47,8 @@ impl RegistryToolsetSession {
     /// subcommand's `toolset_members_map()` (see crates/ironhermes-cli/src/toolset_cmd.rs:239)
     /// so this crate stays leaf w.r.t. the CLI crate. Keep these two in sync —
     /// Plan 15 Task 3 simultaneously updates the CLI map to add web_extract.
-    fn members_map() -> std::collections::HashMap<&'static str, &'static [&'static str]> {
+    pub(crate) fn members_map() -> std::collections::HashMap<&'static str, &'static [&'static str]>
+    {
         let mut m: std::collections::HashMap<&'static str, &'static [&'static str]> =
             std::collections::HashMap::new();
         m.insert("web", &["web_search", "web_read", "web_extract"]);
@@ -130,16 +131,17 @@ impl RegistryToolsetSession {
     }
 
     /// Push the current config into the registry so the next `get_definitions()`
-    /// call reflects the mutation. Async work is bridged via `block_in_place +
-    /// block_on` because the slash handler is sync.
+    /// call reflects the mutation. Async work is bridged via
+    /// [`ironhermes_core::async_bridge::block_on_sync`] because the slash
+    /// handler is sync; that bridge is `LocalSet`-safe, which matters because
+    /// the Dioxus web server dispatches slash commands from inside a
+    /// per-connection `LocalSet` (Phase 41.3 UAT).
     fn push_config_to_registry(&self) {
         let cfg_snapshot = self.config.lock().unwrap().clone();
         let registry = self.registry.clone();
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async move {
-                let mut guard = registry.write().await;
-                guard.set_toolset_config(Some(cfg_snapshot));
-            });
+        ironhermes_core::async_bridge::block_on_sync(async move {
+            let mut guard = registry.write().await;
+            guard.set_toolset_config(Some(cfg_snapshot));
         });
     }
 
@@ -157,12 +159,11 @@ impl RegistryToolsetSession {
     fn build_rows(&self) -> Vec<ToolsetRow> {
         let cfg = self.config.lock().unwrap().clone();
         let registry = self.registry.clone();
-        let (unavailable_list, tts_status) = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async move {
+        let (unavailable_list, tts_status) =
+            ironhermes_core::async_bridge::block_on_sync(async move {
                 let guard = registry.read().await;
                 (guard.list_unavailable(), guard.tts_registration_status())
-            })
-        });
+            });
         let unavailable_names: std::collections::HashSet<String> = unavailable_list
             .iter()
             .map(|(name, _)| name.clone())
@@ -258,12 +259,11 @@ impl ToolsetSessionHandle for RegistryToolsetSession {
         // Phase 36.17.7 D-06 (REVISION BLOCKER 2 — Path B): batch the
         // registry reads under one async block so the render_show output also
         // surfaces the Registered state for the `voice` toolset.
-        let (unavailable_list, tts_status) = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async move {
+        let (unavailable_list, tts_status) =
+            ironhermes_core::async_bridge::block_on_sync(async move {
                 let guard = registry.read().await;
                 (guard.list_unavailable(), guard.tts_registration_status())
-            })
-        });
+            });
         let unavailable_names: std::collections::HashSet<String> = unavailable_list
             .iter()
             .map(|(name, _)| name.clone())
@@ -324,6 +324,45 @@ impl ToolsetSessionHandle for RegistryToolsetSession {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Canonical built-in tool-name set
+// ---------------------------------------------------------------------------
+
+/// All built-in tool names known to the toolset system, flattened from the
+/// toolset → members map (single source of truth: `members_map`).
+///
+/// Sorted and de-duplicated. Used to detect when a tool name has been
+/// mistakenly placed in a cron job's `skills[]`: a tool (e.g. `web_search`) is
+/// not a skill — it is enabled via toolsets, not loaded as skill content — so
+/// such an entry resolves to nothing at tick time and (pre-fix) injected a
+/// misleading "skill was skipped" banner into the prompt.
+///
+/// Note: this reflects tools that belong to a named toolset. Tools registered
+/// outside the membership map are not included; the set is authoritative for
+/// the common cases (notably the `web` toolset) and intentionally cheap (no
+/// registry instantiation required).
+pub fn known_tool_names() -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = RegistryToolsetSession::members_map()
+        .values()
+        .flat_map(|members| members.iter().copied())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    names
+}
+
+/// Returns the subset of `skills` whose names are actually built-in tools.
+/// Empty when every entry is a genuine skill name (the happy path).
+pub fn tool_names_among<S: AsRef<str>>(skills: &[S]) -> Vec<String> {
+    let known: std::collections::HashSet<&str> = known_tool_names().into_iter().collect();
+    skills
+        .iter()
+        .map(|s| s.as_ref())
+        .filter(|s| known.contains(s))
+        .map(|s| s.to_string())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,6 +371,35 @@ mod tests {
         let registry = Arc::new(TokioRwLock::new(ToolRegistry::new()));
         let cfg = ToolsConfig::default();
         RegistryToolsetSession::new(registry, cfg)
+    }
+
+    #[test]
+    fn known_tool_names_includes_web_search_and_is_sorted_unique() {
+        let names = known_tool_names();
+        assert!(names.contains(&"web_search"), "web_search must be a tool");
+        assert!(names.contains(&"delegate_task"));
+        // sorted + de-duplicated
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(names, sorted, "known_tool_names must be sorted and unique");
+    }
+
+    #[test]
+    fn tool_names_among_flags_tools_not_skills() {
+        let skills = vec![
+            "web_search".to_string(),         // tool — should be flagged
+            "hacker-news-digest".to_string(), // genuine skill — must NOT be flagged
+            "focus".to_string(),              // genuine skill — must NOT be flagged
+        ];
+        let flagged = tool_names_among(&skills);
+        assert_eq!(flagged, vec!["web_search".to_string()]);
+    }
+
+    #[test]
+    fn tool_names_among_empty_for_genuine_skills() {
+        let skills = vec!["writing".to_string(), "hacker-news-digest".to_string()];
+        assert!(tool_names_among(&skills).is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]

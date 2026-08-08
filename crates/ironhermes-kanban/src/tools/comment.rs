@@ -1,6 +1,6 @@
 //! `kanban_comment` — append a comment to a task (D-25).
 //!
-//! In worker mode (HERMES_KANBAN_CLAIM_LOCK set), the comment INSERT is wrapped
+//! In worker mode (IRONHERMES_KANBAN_CLAIM_LOCK set), the comment INSERT is wrapped
 //! in `worker_write_gated` to honor D-41 stale-claim no-op: if the worker's
 //! claim has been superseded, the write is a no-op and a `claim_expired`
 //! advisory event is emitted instead.
@@ -65,8 +65,8 @@ impl Tool for KanbanCommentTool {
     }
 
     fn description(&self) -> &str {
-        "Append a comment to a Kanban task. Defaults task_id to $HERMES_KANBAN_TASK in worker \
-         mode. In worker mode with HERMES_KANBAN_CLAIM_LOCK set, the write is gated on claim \
+        "Append a comment to a Kanban task. Defaults task_id to $IRONHERMES_KANBAN_TASK in worker \
+         mode. In worker mode with IRONHERMES_KANBAN_CLAIM_LOCK set, the write is gated on claim \
          validity (D-41)."
     }
 
@@ -79,7 +79,7 @@ impl Tool for KanbanCommentTool {
                 "properties": {
                     "task_id": {
                         "type": "string",
-                        "description": "Task ID to comment on. Omit to use $HERMES_KANBAN_TASK."
+                        "description": "Task ID to comment on. Omit to use $IRONHERMES_KANBAN_TASK."
                     },
                     "body": {
                         "type": "string",
@@ -87,7 +87,7 @@ impl Tool for KanbanCommentTool {
                     },
                     "board": {
                         "type": "string",
-                        "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
+                        "description": "Board slug to target. Omit to use IRONHERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
                     }
                 },
                 "required": ["body"]
@@ -96,7 +96,7 @@ impl Tool for KanbanCommentTool {
     }
 
     fn is_available(&self) -> bool {
-        std::env::var("HERMES_KANBAN_TASK").is_ok() || self.explicit_enable
+        crate::kanban_env("TASK").is_some() || self.explicit_enable
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<String> {
@@ -110,18 +110,18 @@ impl Tool for KanbanCommentTool {
             ));
         }
 
-        // Resolve task_id.
+        // Resolve task_id via dual-read (IRONIRONHERMES_KANBAN_TASK first, legacy fallback).
         let task_id = match args
             .get("task_id")
             .and_then(|v| v.as_str())
             .map(String::from)
-            .or_else(|| std::env::var("HERMES_KANBAN_TASK").ok())
+            .or_else(|| crate::kanban_env("TASK"))
         {
             Some(t) => t,
             None => {
                 return Ok(crate::tools::common::reject_with_board(
                     "missing_task_id",
-                    "task_id is required when $HERMES_KANBAN_TASK is not set",
+                    "task_id is required when $IRONHERMES_KANBAN_TASK is not set",
                     Some(&board_ctx),
                 ));
             }
@@ -140,8 +140,8 @@ impl Tool for KanbanCommentTool {
 
         let author = std::env::var("HERMES_PROFILE").unwrap_or_else(|_| "unknown".into());
 
-        // Check for worker-mode claim lock (D-41).
-        let claim_lock_env = std::env::var("HERMES_KANBAN_CLAIM_LOCK").ok();
+        // Check for worker-mode claim lock (D-41). Dual-read via kanban_env.
+        let claim_lock_env = crate::kanban_env("CLAIM_LOCK");
 
         if let Some(claim_lock) = claim_lock_env {
             // Worker mode — gate the write on claim validity (D-41).
@@ -221,19 +221,19 @@ mod tests {
     fn is_available_respects_env() {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
-            std::env::remove_var("HERMES_KANBAN_TASK");
+            std::env::remove_var("IRONHERMES_KANBAN_TASK");
         }
         let store = make_store();
         let tool = KanbanCommentTool::new(store.clone(), false);
         assert!(!tool.is_available());
 
         unsafe {
-            std::env::set_var("HERMES_KANBAN_TASK", "t_test");
+            std::env::set_var("IRONHERMES_KANBAN_TASK", "t_test");
         }
         let tool2 = KanbanCommentTool::new(store.clone(), false);
         assert!(tool2.is_available());
         unsafe {
-            std::env::remove_var("HERMES_KANBAN_TASK");
+            std::env::remove_var("IRONHERMES_KANBAN_TASK");
         }
 
         let tool3 = KanbanCommentTool::new(store, true);

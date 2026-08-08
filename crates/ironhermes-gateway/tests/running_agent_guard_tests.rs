@@ -167,8 +167,11 @@ pub mod helpers {
         }
     }
 
-    /// The locked D-02 error message. Production emitted string MUST equal this
-    /// byte-for-byte; all rejection assertions reference this helper.
+    /// The D-02 error message — HISTORICAL (Phase 39.1 Plan 06).
+    ///
+    /// `running_agent.rs` is deleted in Plan 06. This helper is retained for
+    /// backward-compat with assertions in this file that check the message
+    /// is NOT sent (negative assertions remain valid — D-02 must never appear).
     pub fn d02_error_message() -> &'static str {
         "Agent is running. Use /stop to interrupt or /queue to send after this turn."
     }
@@ -180,12 +183,11 @@ pub mod helpers {
 
 use std::sync::atomic::Ordering;
 
-/// GW-05-1: Per-session isolation.
+/// GW-05-1: Per-session isolation (Phase 39.1 updated).
 ///
-/// Session A is set to Running (`running` flag = true). Session B remains Idle.
-/// Dispatching `/model claude` to session B must succeed (not be rejected with D-02).
-///
-/// Verifies that the guard uses per-session state, not a global flag (codex HIGH-2).
+/// Phase 39.1 removes all agent_running gate sites (R39.1-06). Neither session A
+/// nor session B receives a D-02 rejection — commands always dispatch regardless
+/// of whether a turn is in flight. This test verifies the gate is gone.
 #[tokio::test]
 async fn test_session_isolation() {
     use ironhermes_gateway::adapter::MessageHandler;
@@ -198,7 +200,6 @@ async fn test_session_isolation() {
     let key_a = helpers::test_session_key("chat-A");
     let key_b = helpers::test_session_key("chat-B");
 
-    // Get-or-create both sessions so the store has entries with real running flags.
     {
         let mut s = store.write().await;
         s.get_or_create(key_a.clone(), "model", "test");
@@ -212,22 +213,21 @@ async fn test_session_isolation() {
     }
 
     // Dispatch /model to session B — must NOT receive D-02 rejection.
-    // The command may fail with "model not found" etc., but must not be the D-02 guard string.
     let event_b = helpers::make_event("chat-B", "/model claude");
     handler
         .handle(&event_b, adapter.clone(), CancellationToken::new())
         .await
-        .ok(); // ignore result — we care about what was sent, not whether it errored
+        .ok();
 
     let msgs = adapter.messages().await;
     let sent_texts: Vec<&str> = msgs.iter().map(|(_, t)| t.as_str()).collect();
     assert!(
         !sent_texts.contains(&helpers::d02_error_message()),
-        "Session B must NOT be rejected with D-02 when only session A is running. Got: {:?}",
+        "Session B must NOT be rejected with D-02. Got: {:?}",
         sent_texts
     );
 
-    // Dispatch /model to session A — MUST receive D-02 rejection.
+    // Phase 39.1 (R39.1-06): session A also must NOT receive D-02 — gate is removed.
     let adapter_a = helpers::RecordingPlatformAdapter::new();
     let event_a = helpers::make_event("chat-A", "/model claude");
     handler
@@ -238,16 +238,16 @@ async fn test_session_isolation() {
     let msgs_a = adapter_a.messages().await;
     let sent_a: Vec<&str> = msgs_a.iter().map(|(_, t)| t.as_str()).collect();
     assert!(
-        sent_a.contains(&helpers::d02_error_message()),
-        "Session A MUST be rejected with D-02 when running. Got: {:?}",
+        !sent_a.contains(&helpers::d02_error_message()),
+        "Session A must NOT be rejected with D-02 — all gates removed (R39.1-06). Got: {:?}",
         sent_a
     );
 }
 
-/// GW-05-2: `/model` rejected when agent is running.
+/// GW-05-2: `/model` dispatches when agent is running (Phase 39.1 updated).
 ///
-/// Session flag is `true`. Sending `/model gpt-4` must trigger the D-02 rejection.
-/// D-04: `/model` during active turn is rejected. Closes codex HIGH-2 TOCTOU.
+/// Phase 39.1 removes the D-04 gate (R39.1-06). `/model` during an active turn
+/// must NOT receive D-02 — the command always dispatches.
 #[tokio::test]
 async fn test_model_rejected_when_running() {
     use ironhermes_gateway::adapter::MessageHandler;
@@ -273,19 +273,14 @@ async fn test_model_rejected_when_running() {
     handler
         .handle(&event, adapter.clone(), CancellationToken::new())
         .await
-        .unwrap();
+        .ok();
 
     let msgs = adapter.messages().await;
-    assert_eq!(
-        msgs.len(),
-        1,
-        "Expected exactly 1 message (D-02 reject). Got: {:?}",
-        msgs
-    );
-    assert_eq!(
-        msgs[0].1,
-        helpers::d02_error_message(),
-        "/model must be rejected with D-02 verbatim string when running"
+    let sent: Vec<&str> = msgs.iter().map(|(_, t)| t.as_str()).collect();
+    assert!(
+        !sent.contains(&helpers::d02_error_message()),
+        "/model must NOT be rejected with D-02 — gate removed (R39.1-06). Got: {:?}",
+        sent
     );
 }
 
@@ -431,61 +426,17 @@ async fn test_queue_bypasses_guard() {
     );
 }
 
-/// GW-05-7: Running flag clears on agent success.
-///
-/// `RunningAgentGuard` (D-06) sets flag=true on new(), clears to false on Drop.
-/// After the guard goes out of scope (Ok path), flag must be false.
-#[tokio::test]
-async fn test_guard_clears_on_success() {
-    use ironhermes_gateway::RunningAgentGuard;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
+// GW-05-7: REMOVED in Phase 39.1 Plan 06.
+//
+// `RunningAgentGuard` and the `agent_running` AtomicBool are deleted as part of
+// Plan 06 (R39.1-06 / D-06). The guard tests are no longer applicable.
+// The TurnRegistry (Plan 01) owns turn-lifecycle tracking going forward.
+// Structural equivalent: `test_deregister_clears_entry_on_turn_end` in
+// `running_agent_guard_tui_tests.rs` (Plan 04).
 
-    let flag = Arc::new(AtomicBool::new(false));
-
-    {
-        let _guard = RunningAgentGuard::new(flag.clone());
-        assert!(
-            flag.load(Ordering::SeqCst),
-            "Flag must be true while guard is alive"
-        );
-        // Guard drops here (end of scope = success path)
-    }
-
-    assert!(
-        !flag.load(Ordering::SeqCst),
-        "Drop must clear flag to false on success exit (D-06)"
-    );
-}
-
-/// GW-05-8: Running flag clears on agent error.
-///
-/// `RunningAgentGuard` must fire `Drop` even when the scope exits via an error.
-/// After the error path, the flag must be `false`.
-#[tokio::test]
-async fn test_guard_clears_on_error() {
-    use ironhermes_gateway::RunningAgentGuard;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
-
-    let flag = Arc::new(AtomicBool::new(false));
-
-    let result: anyhow::Result<()> = {
-        let _guard = RunningAgentGuard::new(flag.clone());
-        assert!(
-            flag.load(Ordering::SeqCst),
-            "Flag must be true inside guard"
-        );
-        // Simulate error propagation via ?
-        Err(anyhow::anyhow!("simulated run_agent error"))
-    };
-
-    assert!(result.is_err(), "Result must be Err (sanity check)");
-    assert!(
-        !flag.load(Ordering::SeqCst),
-        "Drop must clear flag to false on Err/? exit (D-06)"
-    );
-}
+// GW-05-8: REMOVED in Phase 39.1 Plan 06.
+//
+// `RunningAgentGuard` deleted — see GW-05-7 note above.
 
 /// GW-05-9: Alias `/reset` (resolves to canonical `"new"`) bypasses the guard.
 ///
@@ -530,11 +481,12 @@ async fn test_alias_bypasses_guard() {
     );
 }
 
-/// GW-05-10: Non-slash free-text message rejected when agent is running.
+/// GW-05-10: Non-slash free-text message dispatches when agent is running (Phase 39.1 updated).
 ///
-/// A plain-text (non-`/`) message dispatches through `MessageHandler::handle`
-/// to `run_agent` directly. This path must ALSO check the session flag and reject
-/// with the D-02 message when running (Pitfall 1 mitigation).
+/// Phase 39.1 removes the free-text gate (R39.1-06). A plain-text message during an
+/// active turn must NOT be rejected with D-02 — concurrent turns are now supported.
+/// The message attempts to run the agent (which requires AgentRuntime; without it
+/// the handler returns an error, but D-02 must never be sent).
 #[tokio::test]
 async fn test_freetext_rejected_when_running() {
     use ironhermes_gateway::adapter::MessageHandler;
@@ -554,24 +506,19 @@ async fn test_freetext_rejected_when_running() {
         s.get(&key).unwrap().running.store(true, Ordering::SeqCst);
     }
 
-    // Plain (non-slash) message — goes through non-slash guard path.
+    // Plain (non-slash) message — gate is removed, proceeds to run_agent.
     let event = helpers::make_event("chat-1", "hello world");
     handler
         .handle(&event, adapter.clone(), CancellationToken::new())
         .await
-        .unwrap();
+        .ok(); // AgentRuntime not wired — may error, but D-02 must not be sent.
 
     let msgs = adapter.messages().await;
-    assert_eq!(
-        msgs.len(),
-        1,
-        "Expected exactly 1 message (D-02 reject). Got: {:?}",
-        msgs
-    );
-    assert_eq!(
-        msgs[0].1,
-        helpers::d02_error_message(),
-        "Free-text during active turn must be rejected with D-02 verbatim (Pitfall 1 guard)"
+    let sent: Vec<&str> = msgs.iter().map(|(_, t)| t.as_str()).collect();
+    assert!(
+        !sent.contains(&helpers::d02_error_message()),
+        "Free-text during active turn must NOT receive D-02 — gate removed (R39.1-06). Got: {:?}",
+        sent
     );
 }
 

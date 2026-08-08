@@ -29,9 +29,25 @@ fn server_ws_runs_turn_in_spawned_task_and_streams_concurrently() {
         ws.contains("tokio::spawn"),
         "ws_chat must spawn the turn execution task"
     );
+    // Phase 39.1 Plan 02 (R39.1-01/R39.1-06) replaced the single-turn
+    // `Option<InFlightTurn>` + `maybe_event = async { turn.rx.recv().await }`
+    // select arm with a `HashMap<TurnId, InFlightTurn>` drained concurrently
+    // via a `StreamMap` — multiple turns per session can stream at once, up
+    // to `concurrency.session_turn_cap`. Lock the StreamMap plumbing that
+    // replaced it: the map is constructed once, each spawned turn's receiver
+    // is inserted keyed by its `TurnId`, and the select loop drains all of
+    // them concurrently via `stream_map.next()`.
     assert!(
-        ws.contains("maybe_event = async") && ws.contains("turn.rx.recv().await"),
-        "ws_chat must forward events while the turn is in flight"
+        ws.contains("StreamMap::new()"),
+        "ws_chat must construct a StreamMap to drain multiple in-flight turns concurrently"
+    );
+    assert!(
+        ws.contains("stream_map.insert("),
+        "ws_chat must register each spawned turn's receiver into the StreamMap, keyed by TurnId"
+    );
+    assert!(
+        ws.contains("stream_map.next()"),
+        "ws_chat must forward events by draining the StreamMap in the select! loop"
     );
 }
 
@@ -65,9 +81,14 @@ fn malformed_request_path_is_recoverable_and_send_failures_abort_turn() {
         ws.contains("turn.handle.abort();"),
         "ws_chat must call `turn.handle.abort();` on socket send failure"
     );
+    // Phase 39.1 Plan 02 (R39.1-01/R39.1-06): the singular `Option<InFlightTurn>`
+    // became a `HashMap<TurnId, InFlightTurn>` (multiple concurrent turns per
+    // session), so the send-failure log message pluralized from "aborting
+    // in-flight turn" to "aborting all in-flight turns" (it now drains every
+    // entry in the map, not a single Option).
     assert!(
-        ws.contains("aborting in-flight turn"),
-        "ws_chat must log `aborting in-flight turn` near the abort call site"
+        ws.contains("websocket send failed; aborting all in-flight turns"),
+        "ws_chat must log the send-failure abort message near the abort call site"
     );
 }
 
@@ -88,9 +109,12 @@ fn server_ws_disconnect_teardown_distinguishes_clean_recv_from_broken_send() {
         "recv error path should remain explicitly classified"
     );
 
+    // Phase 39.1 Plan 02: pluralized from "aborting in-flight turn" to
+    // "aborting all in-flight turns" when the singular Option<InFlightTurn>
+    // became a HashMap<TurnId, InFlightTurn> drained on send failure.
     assert!(
-        ws.contains("websocket send failed; aborting in-flight turn"),
-        "send failure path must stay classified as transport-broken and abort in-flight turn"
+        ws.contains("websocket send failed; aborting all in-flight turns"),
+        "send failure path must stay classified as transport-broken and abort in-flight turns"
     );
 
     assert!(
@@ -271,29 +295,67 @@ fn server_ws_emits_application_level_keepalive_ping() {
 #[test]
 fn busy_gate_opportunistically_clears_finished_turn() {
     let ws = read("src/server/ws.rs");
-    let finished_pos = ws
-        .find("turn.handle.is_finished()")
-        .expect("ws_chat must check turn.handle.is_finished() to opportunistically clear finished turns (WR-02)");
-    // Phase 36.17.4 D-01: the busy-gate evolved from the original Phase 36.1
-    // hard-reject `if in_flight_turn.is_some() {` shape into the FIFO-push
-    // guard `if in_flight_turn.is_some() && !message.starts_with('/') {`
-    // (free-text enqueues; slash commands fall through to the slash
-    // interception block). Either form satisfies WR-02 — what matters is
-    // that the busy-gate (whatever its body) appears AFTER the
-    // opportunistic finished-handle clear.
-    let busy_pos = ws
-        .find("if in_flight_turn.is_some() && !message.starts_with('/')")
-        .or_else(|| ws.find("if in_flight_turn.is_some() {"))
-        .expect(
-            "ws_chat must keep an `if in_flight_turn.is_some()` busy-gate check (Phase 36.1 WR-02 / Phase 36.17.4 D-01)",
-        );
+
+    // Phase 39.1 Plan 02 (R39.1-01/R39.1-03/R39.1-09) replaced the WR-02
+    // mechanism wholesale: the Phase 36.1 singular `Option<InFlightTurn>`
+    // busy flag (which needed an explicit "opportunistic clear" step run
+    // BEFORE the busy check, or a finished turn would wrongly read as still
+    // busy) is gone. Concurrency is now gated by a semaphore
+    // (`ConcurrencyLayer::try_acquire`), and each turn's permits are moved
+    // into its own spawned task and held there for the task's full lifetime
+    // (RAII) — so capacity is restored automatically the instant a turn's
+    // task completes. There is no longer a manual "clear the flag" step to
+    // order against the busy check; the old ordering invariant is replaced
+    // by a structural one (permits can only ever release via task-drop).
+    // Confirm the old singular flag is fully gone.
     assert!(
-        finished_pos < busy_pos,
-        "WR-02: turn.handle.is_finished() opportunistic clear must appear BEFORE the in_flight_turn.is_some() busy-gate (file offsets: finished={finished_pos}, busy={busy_pos})"
+        !ws.contains("in_flight_turn.is_some()"),
+        "WR-02 evolved (Phase 39.1 Plan 02): ws.rs must NOT reference the old singular \
+         `in_flight_turn.is_some()` busy flag — it was replaced by the concurrency semaphore"
     );
     assert!(
-        ws.contains("in_flight_turn = None;"),
-        "WR-02: opportunistic clear must reset in_flight_turn to None when handle is finished"
+        !ws.contains("in_flight_turn = None;"),
+        "WR-02 evolved (Phase 39.1 Plan 02): ws.rs must NOT manually clear a singular \
+         `in_flight_turn` flag — permit release is now RAII-driven, not manual"
+    );
+
+    // New busy-gate: non-slash messages are queued instead of rejected once
+    // the semaphore has no capacity.
+    assert!(
+        ws.contains(
+            "app_state.concurrency.try_acquire().is_none() && !message.starts_with('/')"
+        ),
+        "ws_chat must gate new turns on the concurrency semaphore (Phase 39.1 replacement \
+         for the Phase 36.1 `in_flight_turn.is_some()` busy-gate)"
+    );
+
+    // New "opportunistic clear" equivalent: every turn-spawning call site
+    // (primary message turn, STT-transcript turn, queue-drain turn) moves
+    // its permits into the spawned task with `let _per = ...; let _global =
+    // ...;` so they can only be released when that task finishes — the
+    // structural replacement for the old manual clear-before-check.
+    let raii_permit_sites = ws.matches("let _per = ").count();
+    assert!(
+        raii_permit_sites >= 3,
+        "WR-02 replacement: every turn-spawning call site (primary, STT, queue-drain) must \
+         hold its semaphore permits for the spawned task's lifetime via RAII, not a manually \
+         cleared flag; found {raii_permit_sites} site(s), expected >= 3"
+    );
+
+    // The in_flight_turns HashMap bookkeeping (TurnEnded emission + queue
+    // drain trigger) still opportunistically removes a turn's entry once its
+    // JoinHandle reports finished — this is the direct descendant of the
+    // original "opportunistically clears finished turn" behavior, now scoped
+    // to telemetry/bookkeeping rather than concurrency gating.
+    let finished_pos = ws
+        .find("turn.handle.is_finished()")
+        .expect("ws_chat must check turn.handle.is_finished() to opportunistically clear finished turn entries from in_flight_turns (bookkeeping descendant of WR-02)");
+    let remove_pos = ws
+        .find("in_flight_turns.remove(&done_turn_id)")
+        .expect("ws_chat must remove the finished turn's entry from in_flight_turns once its handle reports finished");
+    assert!(
+        finished_pos < remove_pos,
+        "the is_finished() check ({finished_pos}) must precede removing the entry ({remove_pos})"
     );
 }
 

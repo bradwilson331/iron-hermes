@@ -30,7 +30,7 @@
 //!
 //! | Path                  | Trigger                                     | Outcome              |
 //! |-----------------------|---------------------------------------------|----------------------|
-//! | Non-goal passthrough  | `HERMES_KANBAN_GOAL_MODE` unset             | 1 turn, no events    |
+//! | Non-goal passthrough  | `IRONHERMES_KANBAN_GOAL_MODE` unset             | 1 turn, no events    |
 //! | Judge-met             | judge returns Met                           | clean Ok(()) exit    |
 //! | Self-termination      | task.status ∈ {done, blocked} after a turn  | clean Ok(()) exit    |
 //! | Budget exhaustion     | turn counter hits max_turns                 | synthetic block + Ok |
@@ -165,14 +165,14 @@ fn status_is_terminal(status: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// Wrap `AgentLoop::run()` (via the supplied `TurnRunner`) in a
-/// budget-bounded goal loop when `HERMES_KANBAN_GOAL_MODE` is set in env.
+/// budget-bounded goal loop when `IRONHERMES_KANBAN_GOAL_MODE` is set in env.
 ///
 /// Returns Ok(()) for ALL five behavioral paths. Errors that bubble up are
 /// limited to non-recoverable store failures during the happy-path
 /// emit-and-bump sequence; the synthetic-block paths swallow Errs into
 /// tracing logs to honor the "always exit cleanly when done" contract.
 ///
-/// The wrapper enters the loop only when `HERMES_KANBAN_GOAL_MODE` is set
+/// The wrapper enters the loop only when `IRONHERMES_KANBAN_GOAL_MODE` is set
 /// in env at call time. When unset, it calls `turn_runner` ONCE with the
 /// initial messages and returns its Result mapped to `Result<()>`. This
 /// preserves the non-goal `chat -q` worker path byte-for-byte equivalent
@@ -186,7 +186,7 @@ pub async fn run_goal_loop_if_enabled(
     judge_fn: &JudgeFn,
     store: Arc<TokioMutex<KanbanStore>>,
 ) -> anyhow::Result<()> {
-    if std::env::var("HERMES_KANBAN_GOAL_MODE").is_err() {
+    if ironhermes_kanban::kanban_env("GOAL_MODE").is_none() {
         // Non-goal passthrough: existing manual worker path preserved
         // byte-for-byte. No event emission, no budget tracking, no
         // counter bump.
@@ -194,8 +194,7 @@ pub async fn run_goal_loop_if_enabled(
         return Ok(());
     }
 
-    let max_turns: u32 = std::env::var("HERMES_KANBAN_GOAL_MAX_TURNS")
-        .ok()
+    let max_turns: u32 = ironhermes_kanban::kanban_env("GOAL_MAX_TURNS")
         .and_then(|s| s.parse().ok())
         .filter(|n| *n > 0)
         .unwrap_or(20);

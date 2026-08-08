@@ -10,7 +10,7 @@ use ironhermes_core::commands::handlers::dispatch;
 use ironhermes_core::commands::registry::build_registry;
 use ironhermes_core::commands::{CommandResult, CommandRouter};
 use ironhermes_core::types::Platform;
-use std::sync::{Arc, atomic::AtomicBool};
+use std::sync::Arc;
 
 // =============================================================================
 // Fake PersonalityHandle implementation (PATTERNS.md Cat-5B)
@@ -52,20 +52,12 @@ impl PersonalityHandle for FakePersonalityRegistry {
 
 fn make_test_ctx_with_personality() -> CommandContext {
     let registry: Arc<dyn PersonalityHandle> = Arc::new(FakePersonalityRegistry::new());
-    CommandContext::new(
-        Platform::Local,
-        "test-session".to_string(),
-        Arc::new(AtomicBool::new(false)),
-    )
-    .with_personality_overlay(registry)
+    CommandContext::new(Platform::Local, "test-session".to_string())
+        .with_personality_overlay(registry)
 }
 
 fn make_ctx_no_personality() -> CommandContext {
-    CommandContext::new(
-        Platform::Local,
-        "test-session".to_string(),
-        Arc::new(AtomicBool::new(false)),
-    )
+    CommandContext::new(Platform::Local, "test-session".to_string())
 }
 
 fn make_router() -> CommandRouter {

@@ -116,14 +116,22 @@ fn ws_rs_contains_drain_mechanism() {
 /// so the client pill updates before the new turn's tokens start streaming.
 ///
 /// Mechanism: locate the LAST occurrence of `queue.pop` (drain branch lives
-/// deep in arm 2's `None =>` near end of file), then verify that within the
-/// 2000-byte window after it, `QueueUpdated` precedes `tokio::spawn`.
+/// inside the StreamMap-drain select arm's opportunistic-finish handling),
+/// then verify that within the byte window after it, `QueueUpdated` precedes
+/// `tokio::spawn`.
+///
+/// Window sizing: Phase 39.1 Plan 02 (R39.1-01/R39.1-09) inserted
+/// register-before-spawn turn_registry bookkeeping (TurnId::new_v4,
+/// CancellationToken::new, turn_registry.register(...).await, the
+/// TurnStarted event serialize+send) between `QueueUpdated` and
+/// `tokio::spawn`, pushing `tokio::spawn` out to ~+3000 bytes (measured on
+/// develop at 46.9) — past the old 2000-byte window. 3500 leaves headroom.
 #[test]
 fn ws_rs_drain_emits_queue_updated_before_spawn() {
     let pop_idx = WS_SOURCE
         .rfind("queue.pop")
         .expect("D-02: ws.rs must contain `queue.pop` for the drain branch");
-    let window_end = (pop_idx + 2000).min(WS_SOURCE.len());
+    let window_end = (pop_idx + 3500).min(WS_SOURCE.len());
     let window = &WS_SOURCE[pop_idx..window_end];
 
     let qu_rel = window

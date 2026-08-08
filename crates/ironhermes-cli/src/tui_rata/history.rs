@@ -1,7 +1,7 @@
 //! REPL history persistence for the tui_rata backend (Phase 22.4 D-06/D-07/D-08).
 //!
 //! Implements the Phase 22.3 D-08 contract:
-//! - File path: `$HERMES_HOME/repl_history`
+//! - File path: `$IRONHERMES_HOME/repl_history`
 //! - Format: rustyline plain-text, one entry per LF-delimited line
 //! - Cap: 1000 entries (D-07)
 //! - Dedupe: consecutive duplicates collapsed on push (HistoryDuplicates::Prev semantics)

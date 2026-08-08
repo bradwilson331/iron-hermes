@@ -20,10 +20,10 @@ use std::sync::atomic::Ordering;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use ironhermes_core::commands::context::{
-    AgentLoopHandle, CommandContext, ContextCompressorHandle, McpManagerHandle,
-    MemoryManagerHandle, PersonalityHandle, ProviderResolverHandle, StateStoreHandle,
+    AgentLoopHandle, CommandContext, ContextCompressorHandle, CoreContextHandles, McpManagerHandle,
+    McpReloader, MemoryManagerHandle, PersonalityHandle, ProcessRegistrySnapshotHandle,
+    ProviderResolverHandle, StateStoreHandle, SubagentListSnapshot, build_core_context,
 };
-use ironhermes_core::commands::running_agent::{AGENT_RUNNING_REJECT_MSG, is_bypass};
 use ironhermes_core::commands::typo::suggest_typo;
 use ironhermes_core::commands::{CommandCategory, CommandResult, CommandRouter, ResolveResult};
 use ironhermes_core::queue::QueueError;
@@ -45,56 +45,10 @@ impl McpManagerHandle for McpManagerAdapter {
     }
 }
 
-/// Adapter: ProviderResolver → ProviderResolverHandle for `/model` `/provider`.
-struct ProviderResolverAdapter(ironhermes_core::ProviderResolver);
-impl ProviderResolverHandle for ProviderResolverAdapter {
-    fn main_provider(&self) -> String {
-        self.0.main_provider().to_string()
-    }
-    fn main_model(&self) -> String {
-        self.0.resolve_for_main().default_model.clone()
-    }
-    fn status_text(&self) -> String {
-        let ep = self.0.resolve_for_main();
-        format!(
-            "Provider: {} | Model: {}",
-            self.0.main_provider(),
-            ep.default_model
-        )
-    }
-    fn validate_model(&self, model: &str) -> Result<String, String> {
-        // Accept any non-empty model string; Plans 01-04 will add real validation.
-        if model.trim().is_empty() {
-            Err("Model name cannot be empty.".to_string())
-        } else {
-            Ok(model.trim().to_string())
-        }
-    }
-    fn model_list_text(&self) -> String {
-        let registry = self.0.model_registry();
-        let models = registry.all_models();
-        if models.is_empty() {
-            "No models available. Run /reload-mcp to refresh.".to_string()
-        } else {
-            let lines: Vec<String> = models
-                .iter()
-                .take(20)
-                .map(|(id, meta)| format!("  - {} (ctx: {})", id, meta.context_length))
-                .collect();
-            let header = "Available models:".to_string();
-            let mut out = format!("{header}\n{}", lines.join("\n"));
-            if models.len() > 20 {
-                out.push_str("\n  ... (use /models for full list)");
-            }
-            out
-        }
-    }
-    fn fast_role_model(&self) -> Option<String> {
-        self.0
-            .resolve_role("fast")
-            .map(|ep| ep.default_model.clone())
-    }
-}
+// `ProviderResolverAdapter` (`/model` `/provider` `/fast`) now lives in
+// `ironhermes_core::commands::context` so every surface shares one impl — see
+// the Phase 41.3 UAT finding F-1: this adapter being private to the TUI is why
+// Web answered "Provider resolver not configured." despite owning a resolver.
 
 /// Adapter: PersonalityRegistry → PersonalityHandle for `/personality`.
 struct PersonalityAdapter(Arc<ironhermes_agent::personality::PersonalityRegistry>);
@@ -327,12 +281,31 @@ pub enum SlashOutcome {
     /// Skills registry reloaded; string is the diff/summary message.
     SkillsReload(String),
     /// A skill was activated via SKILL-13 fallback; inject into next turn.
-    SkillActivated { name: String, body: String },
+    ///
+    /// Phase 41.1 (D-02): `args` holds the verbatim trailing text of an argued
+    /// invoke (`/<skill> <text>`), or `None` for a bare `/<skill>`. This plan
+    /// only threads the field; the one-shot activate+run consumer lands in the
+    /// TUI surface plan.
+    SkillActivated {
+        name: String,
+        body: String,
+        args: Option<String>,
+    },
     /// Input started with `/` but matched no command. `hint` may contain a
     /// "Did you mean `/X`?" suggestion from `suggest_typo`.
     Unknown { input: String, hint: String },
     /// Dispatch itself failed (e.g. command handler returned Err).
     Error(String),
+    /// Phase 36.6.3 Plan 03 (TUI-INPUT-02, D-06): bare `/model` — open the
+    /// two-step provider->model picker. `App::apply_slash_outcome` sets
+    /// `active_overlay = Some(OverlayKind::ModelPicker { step: PickerStep::Provider,
+    /// selected_provider: None })`.
+    OpenModelPicker,
+    /// Phase 36.6.3 Plan 03 (TUI-INPUT-02, D-06): bare `/provider` — open the
+    /// single-step provider picker. `App::apply_slash_outcome` sets
+    /// `active_overlay = Some(OverlayKind::ModelPicker { step: PickerStep::ProviderOnly,
+    /// selected_provider: None })`.
+    OpenProviderPicker,
 }
 
 // ── dispatch_slash ────────────────────────────────────────────────────────────
@@ -365,12 +338,10 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
                 args_str.split_whitespace().collect()
             };
             let ctx = build_command_context(app);
-            // Phase 36.1 (D-10, Pitfall 4): bypass check on POST-resolution canonical def.name —
-            // never raw user input. /reset resolves to "new" via the CommandRouter and correctly
-            // bypasses. Reject non-bypass commands when a turn is in flight.
-            if app.agent_running.load(Ordering::SeqCst) && !is_bypass(def.name) {
-                return SlashOutcome::Handled(AGENT_RUNNING_REJECT_MSG.to_string());
-            }
+            // Phase 39.1 Plan 04 (R39.1-06 / D-06): gate REMOVED — all slash commands
+            // dispatch mid-turn. The old AtomicBool running-gate check has been deleted
+            // entirely. The D-09 bypass list is retained in ironhermes_core for other
+            // surfaces; it is not consulted here.
             match invoke_handler(def.name, &ctx, &app.command_router, &args_vec).await {
                 Ok(result) => {
                     // D-02 post-router App-side hook (Plan 03: FULL multi-name expansion).
@@ -378,6 +349,19 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
                     match def.name {
                         // Mouse: existing handler (crossterm + AtomicBool)
                         "mouse" => handle_mouse_slash(app, args_str),
+                        // Phase 46.7 Plan 06 (D-18): `/attach <path>` needs
+                        // App-side state (pending-attachment queue,
+                        // StateStore, session_id) that CommandContext
+                        // doesn't carry — same App-side-handler pattern as
+                        // `/mouse` above. The core dispatch table has no
+                        // "attach" arm (falls through to `todo_stub`,
+                        // whose result is discarded here).
+                        "attach" => handle_attach_slash(app, args_str),
+                        // Phase 36.17.8 (D-08/D-11): `/voice` runtime state (enabled /
+                        // recording / auto_tts) lives in `App::voice` AtomicBools, so the
+                        // toggle + status must be driven App-side, not from the core
+                        // handler's canned strings or stale on-disk config.
+                        "voice" => handle_voice(app, &args_vec, result),
                         // Toggles: yolo/verbose/statusbar/debug/skin (NOT fast — owned by subsystem_mutator)
                         "yolo" | "verbose" | "statusbar" | "debug" | "skin" => {
                             handle_toggle(app, def.name, args_str)
@@ -386,8 +370,10 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
                         "memory" | "mcp" => {
                             handle_app_inspector(app, def.name, &args_vec, &result).await
                         }
-                        // Tier D session control: stub for Plan 04 to replace
-                        "stop" | "retry" | "undo" | "rollback" | "background" | "btw" | "queue" => {
+                        // Tier D session control. Phase 39.1 Plan 04: "cancel" added for
+                        // per-turn cancel via /cancel <turn-id> (R39.1-05).
+                        "stop" | "retry" | "undo" | "rollback" | "background" | "btw" | "queue"
+                        | "cancel" => {
                             handle_session_control(app, def.name, &args_vec, &result).await
                         }
                         // Phase 36.17.3 (D-06 amended): `/pause` toggles queue
@@ -448,9 +434,22 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
                 && let Some(record) = registry.find(cmd_token)
                 && let Some(body) = registry.read_content(&record.name)
             {
+                // Phase 41.1 (D-02): capture the verbatim trailing text after
+                // `/<skill-name>` for the argued-invoke form (mirrors the
+                // registered-command `args_str` extraction at ~:370-373).
+                let args_str = input
+                    .strip_prefix(&format!("/{}", record.name))
+                    .unwrap_or("")
+                    .trim();
+                let args = if args_str.is_empty() {
+                    None
+                } else {
+                    Some(args_str.to_string())
+                };
                 return SlashOutcome::SkillActivated {
                     name: record.name.clone(),
                     body,
+                    args,
                 };
             }
             // D-18 item 8 — typo suggester integration point.
@@ -514,6 +513,36 @@ fn handle_mouse_slash(app: &mut App, arg: &str) -> SlashOutcome {
             input: format!("/mouse {other}"),
             hint: "Usage: /mouse on  |  /mouse off  |  /mouse (status)".to_string(),
         },
+    }
+}
+
+// ── Phase 46.7 Plan 06: /attach <path> (D-18/D-20) ───────────────────────────
+
+/// `/attach <path>` — resolves `path` against the operator's real CWD (D-22
+/// applies to the post-turn capture; attach resolution just uses the natural
+/// CWD-relative affordance either way), copies it into the session
+/// attachment store (D-20), and queues it for the NEXT submitted message.
+/// Feedback copy is UI-SPEC-exact so `/attach` and inline `@path` (Task 2)
+/// share identical wording.
+fn handle_attach_slash(app: &mut App, arg: &str) -> SlashOutcome {
+    let path = arg.trim();
+    if path.is_empty() {
+        return SlashOutcome::Unknown {
+            input: "/attach".to_string(),
+            hint: "Usage: /attach <path>".to_string(),
+        };
+    }
+    match app.copy_local_path_into_store(path) {
+        Ok(pending) => {
+            let filename = pending.filename.clone();
+            app.pending_attachments.push(pending);
+            SlashOutcome::Handled(format!(
+                "Attached {filename} — will send with your next message"
+            ))
+        }
+        Err((display_name, reason)) => {
+            SlashOutcome::Handled(format!("Could not attach {display_name}: {reason}"))
+        }
     }
 }
 
@@ -600,12 +629,46 @@ impl CronJobReader for CronJobReaderImpl {
 /// pattern: each field is Option so handlers gracefully return "not configured"
 /// when the handle is None).
 fn build_command_context(app: &App) -> CommandContext {
-    // Phase 36.1 (D-08, Pitfall 4): live handle replaces the pending_rx.is_some() snapshot.
-    let agent_running = app.agent_running.clone();
-    let mut ctx = CommandContext::new(Platform::Local, app.session_id.clone(), agent_running);
+    // Phase 39.1 (R39.1-06 / D-06): agent_running removed from CommandContext.
+    // Turn tracking now uses app.turn_registry (TurnRegistry) instead.
+    //
+    // Phase 41.3 Plan 04 (D-11/D-12): the nine core handles are collected into
+    // CoreContextHandles and built via build_core_context — the TUI already
+    // wired all nine before this refactor, so this is a pure migration with no
+    // behavior change. Surface-specific extras (mcp_manager D-04 handle,
+    // memory_manager, provider_resolver, context_compressor, personality_overlay,
+    // history, agent_loop, cron_store) stay outside CoreContextHandles and are
+    // chained on afterward exactly as before.
+    let core_handles = CoreContextHandles {
+        subagent_registry: Some(Arc::new(
+            ironhermes_agent::subagent_registry::SubagentRegistryHandle::new(
+                app.subagent_registry.clone(),
+            ),
+        ) as Arc<dyn SubagentListSnapshot>),
+        process_registry: Some(Arc::new(
+            ironhermes_exec::process_registry::ProcessRegistryHandle::new(
+                app.process_registry.clone(),
+            ),
+        ) as Arc<dyn ProcessRegistrySnapshotHandle>),
+        skill_registry: app.skill_registry.clone(),
+        state_store: app
+            .state_store
+            .as_ref()
+            .map(|store| Arc::new(StateStoreAdapter(store.clone())) as Arc<dyn StateStoreHandle>),
+        toolset_session: app.toolset_session.clone(),
+        turn_registry: Some(app.turn_registry.clone()),
+        workspace: app.workspace.clone(),
+        mcp_reloader: app
+            .mcp_manager
+            .as_ref()
+            .map(|mgr| mgr.clone() as Arc<dyn McpReloader>),
+        trajectory_writer: app.trajectory_writer.clone(),
+    };
+    let mut ctx = build_core_context(Platform::Local, app.session_id.clone(), core_handles);
+
     if let Some(mgr) = &app.mcp_manager {
-        ctx = ctx.with_mcp_reloader(mgr.clone());
         // Also wire the McpManagerHandle for `/mcp` full enumeration (D-04).
+        // Distinct from mcp_reloader (wired above via CoreContextHandles).
         let handle: Arc<dyn McpManagerHandle> = Arc::new(McpManagerAdapter(mgr.clone()));
         ctx = ctx.with_mcp_manager(handle);
     }
@@ -613,13 +676,12 @@ fn build_command_context(app: &App) -> CommandContext {
         let handle: Arc<dyn MemoryManagerHandle> = Arc::new(MemoryManagerAdapter(mem.clone()));
         ctx = ctx.with_memory_manager(handle);
     }
-    if let Some(store) = &app.state_store {
-        let handle: Arc<dyn StateStoreHandle> = Arc::new(StateStoreAdapter(store.clone()));
-        ctx = ctx.with_state_store(handle);
-    }
     {
-        let handle: Arc<dyn ProviderResolverHandle> =
-            Arc::new(ProviderResolverAdapter(app.resolver.clone()));
+        let handle: Arc<dyn ProviderResolverHandle> = Arc::new(
+            ironhermes_core::commands::context::ProviderResolverAdapter::new(Arc::new(
+                app.resolver.clone(),
+            )),
+        );
         ctx = ctx.with_provider_resolver(handle);
     }
     if let Some(engine) = &app.context_compressor {
@@ -631,28 +693,6 @@ fn build_command_context(app: &App) -> CommandContext {
         let handle: Arc<dyn PersonalityHandle> =
             Arc::new(PersonalityAdapter(app.personality_overlay.clone()));
         ctx = ctx.with_personality_overlay(handle);
-    }
-    // ProcessRegistry for /stop (Plan 04: thread into build_command_context).
-    // ProcessRegistryHandle is the newtype in ironhermes-exec that implements
-    // ProcessRegistrySnapshotHandle for Arc<RwLock<ProcessRegistry>>.
-    {
-        use ironhermes_core::commands::context::ProcessRegistrySnapshotHandle;
-        let handle: Arc<dyn ProcessRegistrySnapshotHandle> = Arc::new(
-            ironhermes_exec::process_registry::ProcessRegistryHandle::new(
-                app.process_registry.clone(),
-            ),
-        );
-        ctx = ctx.with_process_registry(handle);
-    }
-    // SubagentRegistry for /agents (already wired via cmd_agents in core).
-    {
-        use ironhermes_core::commands::context::SubagentListSnapshot;
-        let handle: Arc<dyn SubagentListSnapshot> = Arc::new(
-            ironhermes_agent::subagent_registry::SubagentRegistryHandle::new(
-                app.subagent_registry.clone(),
-            ),
-        );
-        ctx = ctx.with_subagent_registry(handle);
     }
     // History snapshot: clone current history for read-only handlers.
     // Mutations (/retry, /undo, /rollback) apply in the post-router hook.
@@ -666,31 +706,10 @@ fn build_command_context(app: &App) -> CommandContext {
             Arc::new(AgentRuntimeAdapter(app.agent_runtime.clone()));
         ctx = ctx.with_agent_loop(handle);
     }
-    // Phase 22.4.2.1 Plan 01: wire CronJobReader as 11th with_* call.
+    // Phase 22.4.2.1 Plan 01: wire CronJobReader.
     if let Some(cron) = &app.cron_store {
         let handle: Arc<dyn CronJobReader> = Arc::new(CronJobReaderImpl(cron.clone()));
         ctx = ctx.with_cron_store(handle);
-    }
-    // Phase 25.2 Plan 15 follow-up (UAT Issue 2 / Symptom 1): attach the
-    // production `ToolsetSessionHandle` so /toolset list/show/enable/disable
-    // works in the ratatui REPL. Without this attach, cmd_toolset short-
-    // circuits on `None` at handlers.rs:782 with the documented fallback
-    // string. Plan 15 wired this for run_chat/run_single/run_gateway but
-    // missed run_chat_ratatui (the default `hermes chat` since Phase 22.4).
-    if let Some(handle) = &app.toolset_session {
-        ctx = ctx.with_toolset_session(handle.clone());
-    }
-    // Phase 25.3 D-W-2: attach Workspace for /sessions --workspace + trajectory scoping.
-    if let Some(ws) = &app.workspace {
-        ctx = ctx.with_workspace(ws.clone());
-    }
-    // Phase 25.3 D-T-3: attach TrajectoryWriter for slash-dispatch context.
-    if let Some(tw) = &app.trajectory_writer {
-        ctx = ctx.with_trajectory_writer(tw.clone());
-    }
-    // Phase 21.8.2: wire skill_registry so /skills and SKILL-13 fallback work in TUI.
-    if let Some(sr) = &app.skill_registry {
-        ctx = ctx.with_skill_registry(sr.clone());
     }
     ctx
 }
@@ -771,6 +790,53 @@ fn render_help_router(router: &CommandRouter, platform: &Platform) -> String {
 ///
 /// Plan 03 D-09: fetch_xor(true, Ordering::SeqCst) is the canonical toggle pattern for AtomicBool.
 /// T-22.4.2-03-07: skin uses `.write().unwrap_or_else(|p| p.into_inner())` for poison recovery.
+/// Phase 36.17.8 (D-08/D-10/D-11): App-side `/voice` handler.
+///
+/// Voice mode is a TUI-runtime feature — its live state lives in `App::voice`
+/// (`enabled` / `recording` / `auto_tts` AtomicBools + the capture task). The
+/// core `cmd_voice` handler only provides the command surface (help/headless);
+/// here we drive the actual runtime state so `status` reflects reality and `tts`
+/// toggles a real flag (rather than the previous canned string + on-disk read,
+/// which made `/voice tts` appear to do nothing).
+///
+/// This toggles/reports the three voice states; the flags are consumed in
+/// `event_loop::spawn_turn`, which speaks the reply via
+/// `voice_reply::speak_reply` when `should_speak` returns true (`/voice tts`
+/// speaks every reply; `/voice on` speaks only voice-input turns).
+fn handle_voice(app: &mut App, args: &[&str], core_result: CommandResult) -> SlashOutcome {
+    let msg = match args.first().copied() {
+        Some("on") => {
+            app.voice.enabled.store(true, Ordering::Relaxed);
+            "Voice mode enabled. Press Ctrl+B to start/stop recording.".to_string()
+        }
+        Some("off") => {
+            // Cancel any in-flight capture loop, then disable.
+            app.voice.stop();
+            app.voice.enabled.store(false, Ordering::Relaxed);
+            "Voice mode disabled.".to_string()
+        }
+        Some("tts") => {
+            let now = app.voice.toggle_auto_tts();
+            format!("Voice auto-TTS: {}.", if now { "on" } else { "off" })
+        }
+        None | Some("status") => {
+            let config = ironhermes_core::Config::load().unwrap_or_default();
+            let provider = ironhermes_tools::stt::select_stt_provider(&config.stt)
+                .unwrap_or_else(|| "none (no API key configured)".to_string());
+            format!(
+                "Voice mode status:\n  enabled: {}\n  provider: {}\n  record_key: {}\n  auto_tts: {}",
+                app.voice.is_enabled(),
+                provider,
+                config.voice.record_key,
+                app.voice.auto_tts.load(Ordering::Relaxed),
+            )
+        }
+        // Unknown subcommand — defer to the core handler's "Unknown ..." message.
+        Some(_) => return map_core_to_slash_outcome(core_result),
+    };
+    SlashOutcome::Handled(msg)
+}
+
 fn handle_toggle(app: &mut App, name: &str, arg: &str) -> SlashOutcome {
     match name {
         "yolo" => {
@@ -872,6 +938,9 @@ async fn handle_session_control(
             if let Some(tok) = app.cancel_child.take() {
                 tok.cancel();
             }
+            // Phase 39.1 Plan 04 (R39.1-05): cancel all session turns in the TurnRegistry.
+            // This reaches Surface::Cli turns registered by spawn_turn.
+            let _cancelled = app.turn_registry.cancel_session(&app.session_id).await;
             // /stop: ProcessRegistry is now threaded into ctx via build_command_context.
             // Core cmd_stop handles the drain-and-kill; trust core result.
             map_core_to_slash_outcome(core_result.clone())
@@ -1093,6 +1162,30 @@ async fn handle_session_control(
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             map_core_to_slash_outcome(core_result.clone())
         }
+        // Phase 39.1 Plan 04 (R39.1-05 / T-39.1-04): /cancel <turn-id> cancels a
+        // specific in-flight turn by UUID. Validates the UUID before calling cancel_one
+        // (T-39.1-04 mitigation: invalid UUID → user-facing error, no panic).
+        "cancel" => match args.first() {
+            None => SlashOutcome::Handled(
+                "Usage: /cancel <turn-id> — cancel a specific in-flight turn.".to_string(),
+            ),
+            Some(id_str) => match uuid::Uuid::parse_str(id_str) {
+                Err(_) => SlashOutcome::Handled(format!(
+                    "Invalid turn ID '{}' — must be a UUID (e.g. /agents to list active turns).",
+                    id_str
+                )),
+                Ok(turn_id) => {
+                    if app.turn_registry.cancel_one(turn_id).await {
+                        SlashOutcome::Handled(format!("Turn {} cancelled.", turn_id))
+                    } else {
+                        SlashOutcome::Handled(format!(
+                            "Turn {} not found — it may have already completed.",
+                            turn_id
+                        ))
+                    }
+                }
+            },
+        },
         _ => map_core_to_slash_outcome(core_result.clone()),
     }
 }
@@ -1212,7 +1305,9 @@ fn map_core_to_slash_outcome(result: CommandResult) -> SlashOutcome {
         },
         CommandResult::McpReload => SlashOutcome::McpReload,
         CommandResult::SkillsReload => SlashOutcome::SkillsReload("Skills reloaded.".to_string()),
-        CommandResult::SkillActivated { name, body } => SlashOutcome::SkillActivated { name, body },
+        CommandResult::SkillActivated { name, body, args } => {
+            SlashOutcome::SkillActivated { name, body, args }
+        }
         CommandResult::PersonalityApplied(text) => SlashOutcome::Handled(text),
         // Phase 36.17.3: closed via handle_session_control's "queue" arm above;
         // this fallback remains for non-TUI consumers (gateway adapters, the
@@ -1226,5 +1321,120 @@ fn map_core_to_slash_outcome(result: CommandResult) -> SlashOutcome {
         // mapper, or future surfaces without a queue-paused AtomicBool).
         CommandResult::PauseQueue => SlashOutcome::Silent,
         CommandResult::UnpauseQueue => SlashOutcome::Silent,
+        // Phase 39.1 (R39.1-09): Plan 39.1-01 added the AgentsList variant in
+        // core. Render the active TurnRegistry entries as handled output so the
+        // mapper stays exhaustive; richer `/agents` TUI wiring lands in Plan 04.
+        CommandResult::AgentsList(turns) => {
+            let text = if turns.is_empty() {
+                "No active turns.".to_string()
+            } else {
+                let mut out = format!("Active turns ({}):\n", turns.len());
+                for t in &turns {
+                    out.push_str(&format!(
+                        "• {} — {} — session {} — {}ms\n",
+                        t.turn_id, t.surface, t.session_id, t.elapsed_ms
+                    ));
+                }
+                out
+            };
+            SlashOutcome::Handled(text)
+        }
+        // Phase 36.6.3 Plan 03 (D-06): TUI opens the picker; `fallback_text`
+        // (today's model_list_text()/status_text() output) is intentionally
+        // dropped here — it exists for non-TUI/gateway surfaces that map
+        // these variants straight to `Output(fallback_text)` instead.
+        CommandResult::OpenModelPicker { .. } => SlashOutcome::OpenModelPicker,
+        CommandResult::OpenProviderPicker { .. } => SlashOutcome::OpenProviderPicker,
+    }
+}
+
+// ── Phase 46.7 Plan 06 tests: /attach <path> (D-18) ──────────────────────────
+
+#[cfg(all(test, feature = "test-support"))]
+mod attach_command_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+
+    static ENV_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+
+    /// SAFETY: mirrors the lock convention in `app.rs::tui_attach_at_path` —
+    /// see that module's doc comment for the nextest-process-isolation note.
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.get_or_init(|| StdMutex::new(())).lock().unwrap()
+    }
+
+    fn app_with_store() -> (App, tempfile::TempDir) {
+        let home_dir = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", home_dir.path());
+        }
+        let db_path = home_dir.path().join("state.db");
+        let store = ironhermes_state::StateStore::new(&db_path).unwrap();
+        let mut app = App::new_test_empty();
+        app.state_store = Some(Arc::new(std::sync::Mutex::new(store)));
+        (app, home_dir)
+    }
+
+    #[tokio::test]
+    async fn attach_command_queues_file_and_reports_ui_spec_feedback() {
+        // clippy::await_holding_lock: scope the guard to setup only — the
+        // env-var mutation happens synchronously inside `app_with_store()`;
+        // it must not be held across the `.await` below.
+        let (mut app, _home_dir) = {
+            let _g = lock();
+            app_with_store()
+        };
+        let src_dir = tempfile::tempdir().unwrap();
+        let src_path = src_dir.path().join("plan.md");
+        std::fs::write(&src_path, b"# plan").unwrap();
+
+        let input = format!("/attach {}", src_path.to_string_lossy());
+        let outcome = dispatch_slash(&mut app, &input).await;
+        match outcome {
+            SlashOutcome::Handled(text) => {
+                assert!(text.contains("Attached plan.md"), "got: {text}");
+                assert!(
+                    text.contains("will send with your next message"),
+                    "got: {text}"
+                );
+            }
+            other => panic!("expected Handled, got {other:?}"),
+        }
+        assert_eq!(app.pending_attachments.len(), 1);
+        assert_eq!(app.pending_attachments[0].filename, "plan.md");
+    }
+
+    #[tokio::test]
+    async fn attach_command_reports_error_for_missing_file() {
+        let (mut app, _home_dir) = {
+            let _g = lock();
+            app_with_store()
+        };
+        let outcome = dispatch_slash(&mut app, "/attach /nope/does-not-exist-46-7.md").await;
+        match outcome {
+            SlashOutcome::Handled(text) => {
+                assert!(text.starts_with("Could not attach"), "got: {text}");
+            }
+            other => panic!("expected Handled, got {other:?}"),
+        }
+        assert!(app.pending_attachments.is_empty());
+    }
+
+    /// D-18: `/attach` never panics `CommandRouter::new` (no duplicate
+    /// name/alias) and resolves via the router on the CLI/Local platform.
+    #[tokio::test]
+    async fn attach_command_resolves_via_router() {
+        let (mut app, _home_dir) = {
+            let _g = lock();
+            app_with_store()
+        };
+        // No path arg — usage hint, not a panic or Unknown-command fallthrough.
+        let outcome = dispatch_slash(&mut app, "/attach").await;
+        match outcome {
+            SlashOutcome::Unknown { hint, .. } => {
+                assert!(hint.contains("Usage: /attach"), "got: {hint}");
+            }
+            other => panic!("expected Unknown usage hint, got {other:?}"),
+        }
     }
 }

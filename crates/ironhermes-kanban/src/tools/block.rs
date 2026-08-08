@@ -65,7 +65,7 @@ impl Tool for KanbanBlockTool {
                 "properties": {
                     "task_id": {
                         "type": "string",
-                        "description": "Task ID to block. Omit to use $HERMES_KANBAN_TASK."
+                        "description": "Task ID to block. Omit to use $IRONHERMES_KANBAN_TASK."
                     },
                     "reason": {
                         "type": "string",
@@ -74,11 +74,11 @@ impl Tool for KanbanBlockTool {
                     },
                     "expected_run_id": {
                         "type": "string",
-                        "description": "Run ID that must still be the active run. Defaults to $HERMES_KANBAN_RUN_ID."
+                        "description": "Run ID that must still be the active run. Defaults to $IRONHERMES_KANBAN_RUN_ID."
                     },
                     "board": {
                         "type": "string",
-                        "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
+                        "description": "Board slug to target. Omit to use IRONHERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
                     }
                 },
                 "required": ["reason"]
@@ -87,7 +87,7 @@ impl Tool for KanbanBlockTool {
     }
 
     fn is_available(&self) -> bool {
-        std::env::var("HERMES_KANBAN_TASK").is_ok() || self.explicit_enable
+        crate::kanban_env("TASK").is_some() || self.explicit_enable
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<String> {
@@ -101,14 +101,14 @@ impl Tool for KanbanBlockTool {
             ));
         }
 
-        // Resolve task_id.
+        // Resolve task_id via dual-read (IRONIRONHERMES_KANBAN_TASK first, legacy fallback).
         let task_id = args
             .get("task_id")
             .and_then(|v| v.as_str())
             .map(String::from)
-            .or_else(|| std::env::var("HERMES_KANBAN_TASK").ok())
+            .or_else(|| crate::kanban_env("TASK"))
             .ok_or_else(|| {
-                anyhow::anyhow!("task_id required when HERMES_KANBAN_TASK is not set")
+                anyhow::anyhow!("task_id required when IRONHERMES_KANBAN_TASK is not set")
             })?;
 
         let reason = args
@@ -117,12 +117,12 @@ impl Tool for KanbanBlockTool {
             .ok_or_else(|| anyhow::anyhow!("reason is required"))?
             .to_string();
 
-        // expected_run_id: from arg, then from env (D-22 defense-in-depth).
-        let expected_run_id = args
-            .get("expected_run_id")
-            .and_then(|v| v.as_str())
-            .map(String::from)
-            .or_else(|| std::env::var("HERMES_KANBAN_RUN_ID").ok());
+        // expected_run_id: the trusted env `IRONHERMES_KANBAN_RUN_ID` is AUTHORITATIVE over any
+        // model-supplied arg — see `resolve_expected_run_id` (D-22 defense-in-depth). Mirrors
+        // kanban_complete.
+        let expected_run_id = crate::tools::common::resolve_expected_run_id(
+            args.get("expected_run_id").and_then(|v| v.as_str()),
+        );
 
         // D-23: advisory log for review-required: prefix.
         if reason.starts_with("review-required:") {
@@ -180,19 +180,19 @@ mod tests {
     fn is_available_respects_env() {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
-            std::env::remove_var("HERMES_KANBAN_TASK");
+            std::env::remove_var("IRONHERMES_KANBAN_TASK");
         }
         let store = make_store();
         let tool = KanbanBlockTool::new(store.clone(), false);
         assert!(!tool.is_available());
 
         unsafe {
-            std::env::set_var("HERMES_KANBAN_TASK", "t_test");
+            std::env::set_var("IRONHERMES_KANBAN_TASK", "t_test");
         }
         let tool2 = KanbanBlockTool::new(store.clone(), false);
         assert!(tool2.is_available());
         unsafe {
-            std::env::remove_var("HERMES_KANBAN_TASK");
+            std::env::remove_var("IRONHERMES_KANBAN_TASK");
         }
 
         let tool3 = KanbanBlockTool::new(store, true);

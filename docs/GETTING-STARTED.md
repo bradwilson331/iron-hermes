@@ -31,7 +31,7 @@ Downloads a prebuilt binary for your OS and architecture, scaffolds
 `~/.local/bin`. Falls back to `cargo install` if no prebuilt is available.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/bradwilson331/ironhermes/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/bradwilson331/iron-hermes/main/install.sh | bash
 ```
 
 Restart your shell (or run `source ~/.bashrc` / `source ~/.zshrc`) so that
@@ -40,8 +40,8 @@ Restart your shell (or run `source ~/.bashrc` / `source ~/.zshrc`) so that
 ### Option 2 — Build from source
 
 ```bash
-git clone https://github.com/bradwilson331/ironhermes
-cd ironhermes
+git clone https://github.com/bradwilson331/iron-hermes
+cd iron-hermes
 cargo build --release
 # Binary lands at target/release/ironhermes
 # Add it to PATH or invoke it with the full path
@@ -56,7 +56,7 @@ cargo build --release
 The recommended approach is the interactive setup wizard:
 
 ```bash
-hermes setup
+ironhermes setup
 ```
 
 The wizard asks whether you want a quick setup (provider + model only) or a full
@@ -83,6 +83,11 @@ echo 'ANTHROPIC_API_KEY=sk-ant-your-key-here' >> ~/.ironhermes/.env
 The file is created with mode `600` by the installer (API keys are not
 world-readable).
 
+> **Optional: encrypted vault storage.** Instead of a plaintext `.env`, keys
+> can be stored in an encrypted, operator-managed vault (off by default,
+> requires building with `--features rusty-vault`). See
+> [CONFIGURATION.md — Vault](CONFIGURATION.md#vault-vault).
+
 ### 2. Verify your setup
 
 ```bash
@@ -92,7 +97,7 @@ ironhermes doctor
 This checks that required environment variables are present, the config file
 parses cleanly, and all configured providers are reachable.
 
-> **Note:** If you completed the setup wizard, `hermes doctor` runs automatically
+> **Note:** If you completed the setup wizard, `ironhermes doctor` runs automatically
 > before the wizard's completion summary. You do not need to run it again
 > separately.
 
@@ -124,7 +129,7 @@ block). Make sure the matching key (`OPENROUTER_API_KEY`) is set in
 `~/.ironhermes/.env`.
 
 If your key is in `.env` but the wizard still relaunches, the `api_key_env`
-entry may be missing from `config.yaml`. Run `hermes setup model` to trigger
+entry may be missing from `config.yaml`. Run `ironhermes setup model` to trigger
 the wizard's backfill: it detects env vars present in `.env` and silently
 writes the missing `providers.<provider>.api_key_env` entry into `config.yaml`.
 
@@ -142,8 +147,9 @@ Or invoke the binary directly: `~/.local/bin/ironhermes`.
 
 ### Port conflict (web UI)
 
-The Dioxus web UI (`iron_hermes_ui`) listens on a port that can be overridden
-via the `PORT` environment variable before running the server: <!-- VERIFY: confirm the env var name and default port used by iron_hermes_ui -->
+The Dioxus web UI (`iron_hermes_ui`) binds to `127.0.0.1:8080` by default.
+Override it with the `IP` / `PORT` environment variables (or `DIOXUS_ADDRESS`)
+before running the standalone binary:
 
 ```bash
 PORT=9090 ./target/dx/iron_hermes_ui/debug/web/iron_hermes_ui
@@ -159,6 +165,33 @@ rustup update stable
 ```
 
 ---
+
+## Talk to the agent (voice mode)
+
+IronHermes supports two voice paths: turn-based (CLI/TUI + web) and realtime open-mic (web only, Phase 39.3).
+
+### Turn-based voice (CLI/TUI + web)
+
+Set a cloud STT key — `GROQ_API_KEY` (preferred) or `VOICE_TOOLS_OPENAI_KEY` — in `~/.ironhermes/.env`, then in the TUI:
+
+- `/voice status` — show the active mode, provider, and record key
+- `/voice on` — **Voice-Only mode.** Press `Ctrl+B` to record; speak, then either pause (silence ends it automatically after `silence_duration`) or press `Ctrl+B` again to send what you just said. The transcript is submitted as a normal turn, and **the agent speaks its reply back** — but only for voice turns. If you type a message, the reply stays text-only.
+- `/voice tts` — **All mode.** The agent speaks its reply to *every* message, whether you typed it or spoke it.
+- `/voice off` — text-only for all interactions.
+
+Spoken replies use the TTS provider from `tts.provider` (default **Edge**, no API key needed; falls back to Edge if a configured provider is unavailable). Code blocks, markdown, and over-long replies are stripped/trimmed so the agent reads back clean prose rather than narrating code.
+
+**Wake-word activation** (`voice.wake_word.enabled: true`, phrase default `"hey hermes"`) applies to turn-based mode only — it has no effect in open-mic mode.
+
+### Realtime open-mic voice (web, Phase 39.3)
+
+The web UI mic button also supports `voice.barge_in_mode: open_mic` — a full-duplex realtime voice session over the OpenAI Realtime API and WebRTC. Requires `OPENAI_API_KEY` (or the env var named in `providers.openai.api_key_env`) in `~/.ironhermes/.env`. When the key is absent or unreachable, the mic button gracefully falls back to turn-based voice.
+
+**Open-mic is a first-class Hermes agent surface (Phase 39.3):** it runs with the full Hermes identity and skills, exposes all registered tools, and routes tool calls through the same approval gate as text chat. An Approve/Deny card appears in the orb overlay for gated tool calls; background turns show an in-flight "working…" badge and voice the result on completion. Transcripts and trajectory entries are written at the same fidelity as text turns.
+
+> **Wake-word limitation:** `voice.wake_word` applies to turn-based mode only. In `open_mic` mode the wake-word control is greyed out in the UI with an explanatory hint.
+
+See [CONFIGURATION.md — Voice Mode](CONFIGURATION.md#voice-mode-voice) for all tunables (barge-in mode, wake word, realtime model/voice, VAD, noise reduction, etc.).
 
 ## Next Steps
 

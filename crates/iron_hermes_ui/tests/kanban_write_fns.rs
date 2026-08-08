@@ -197,3 +197,151 @@ fn patch_task_status_rejects_empty_summary_and_empty_reason() {
          (look for `.is_empty()` guard)"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 46.3 Plan 01 — D-01 / D-02 source-string regression locks
+// ---------------------------------------------------------------------------
+
+/// Phase 46.3 Plan 01 (D-01 lock): `run_decompose_or_specify` must dispatch
+/// to the real kernel fns rather than reverting to the `NotWired`-only stub.
+#[test]
+fn run_decompose_or_specify_invokes_real_kernel_fns() {
+    let src = read("src/server/kanban_api.rs");
+    assert!(
+        src.contains("decompose_triage_task("),
+        "D-01: kanban_api.rs must call decompose_triage_task("
+    );
+    assert!(
+        src.contains("specify_triage_task("),
+        "D-01: kanban_api.rs must call specify_triage_task("
+    );
+}
+
+/// Phase 46.3 Plan 01 (D-02 lock): the ported three-tier model cascade +
+/// preserved CLI bail message must remain present in `kanban_api.rs`.
+#[test]
+fn run_decompose_or_specify_mirrors_cli_three_tier_cascade() {
+    let src = read("src/server/kanban_api.rs");
+    assert!(
+        src.contains("decomposer_model"),
+        "D-02: kanban_api.rs must reference `decomposer_model` (Tier 1 cascade)"
+    );
+    assert!(
+        src.contains("kanban_decomposer"),
+        "D-02: kanban_api.rs must reference `kanban_decomposer` (Tier 2 role cascade)"
+    );
+    assert!(
+        src.contains("decomposer model not configured"),
+        "D-02: kanban_api.rs must preserve the CLI's actionable bail message \
+         substring `decomposer model not configured`"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 46.4 Plan 06 — D-03/D-04/D-10/D-19 source-string regression locks
+// ---------------------------------------------------------------------------
+
+/// D-03/D-04: `attach_file` and `fetch_attachments` #[server] fns exist and
+/// take `board: Option<String>` (D-19).
+#[test]
+fn kanban_api_declares_attach_file_and_fetch_attachments() {
+    let src = read("src/server/kanban_api.rs");
+    assert!(
+        src.contains("fn attach_file"),
+        "D-03/D-04: kanban_api.rs must declare `fn attach_file`"
+    );
+    assert!(
+        src.contains("fn fetch_attachments"),
+        "D-03/D-04: kanban_api.rs must declare `fn fetch_attachments`"
+    );
+}
+
+/// D-03/D-04: `attach_file` decodes a base64 payload and persists via the
+/// SAME shared store method the CLI's `kanban attach` verb uses — never a
+/// hand-rolled INSERT / inline SQL.
+#[test]
+fn attach_file_decodes_base64_and_calls_add_attachment() {
+    let src = read("src/server/kanban_api.rs");
+    assert!(
+        src.contains("base64::engine::general_purpose::STANDARD") || src.contains("base64::"),
+        "D-03/D-04: attach_file must base64-decode the inbound content_b64 payload"
+    );
+    assert!(
+        src.contains(".add_attachment("),
+        "D-03/D-04: attach_file must persist via `store.add_attachment(...)` — \
+         the single shared traversal-safe writer, not inline SQL"
+    );
+}
+
+/// T-46.4-06: the 10MB cap is enforced server-side before any store write.
+#[test]
+fn attach_file_enforces_max_attachment_bytes_cap() {
+    let src = read("src/server/kanban_api.rs");
+    assert!(
+        src.contains("MAX_ATTACHMENT_BYTES"),
+        "T-46.4-06: attach_file must enforce a documented MAX_ATTACHMENT_BYTES cap"
+    );
+    assert!(
+        src.contains("10 * 1024 * 1024"),
+        "T-46.4-06: MAX_ATTACHMENT_BYTES must be the 10MB cap"
+    );
+}
+
+/// D-05 prohibition: the web attach surface only stores — it never copies
+/// attachments into any workspace (copy-into-workspace is Plan 04's
+/// spawn-time job, not a web-request concern).
+#[test]
+fn kanban_api_never_copies_attachments_into_a_workspace() {
+    let src = read("src/server/kanban_api.rs");
+    assert_eq!(
+        src.matches("copy_attachments_into").count(),
+        0,
+        "D-05: kanban_api.rs must NOT call copy_attachments_into — the web \
+         surface only stores via add_attachment; workspace copy-in happens \
+         at spawn time (Plan 04), not here"
+    );
+}
+
+/// D-10: every `TaskRow { ... }` construction sets `output_path` so the
+/// wire field round-trips from every read/write fn (fetch_board,
+/// patch_task_status, create_task).
+#[test]
+fn every_task_row_construction_sets_output_path() {
+    let src = read("src/server/kanban_api.rs");
+    let task_row_count = src.matches("TaskRow {").count();
+    let output_path_count = src.matches("output_path:").count();
+    assert!(
+        output_path_count >= task_row_count,
+        "D-10: every `TaskRow {{ ... }}` construction ({} found) must set \
+         `output_path:` ({} found) — output_path must round-trip on every \
+         TaskRow-returning fn",
+        task_row_count,
+        output_path_count,
+    );
+}
+
+/// D-19: the base count of 9 (5 reads + 4 writes from Plan 01/02) is now 11
+/// with attach_file + fetch_attachments added in Plan 06.
+#[test]
+fn kanban_api_board_option_string_count_includes_plan_06_fns() {
+    let src = read("src/server/kanban_api.rs");
+    let board_param_count = src.matches("board: Option<String>").count();
+    assert!(
+        board_param_count >= 11,
+        "D-19: every #[server] fn must take `board: Option<String>` — found {} \
+         occurrences (need ≥ 11: 9 from Plans 01/02 + attach_file + fetch_attachments)",
+        board_param_count,
+    );
+}
+
+/// The `iron_hermes_ui` Cargo.toml references the pre-pinned `base64`
+/// workspace dependency (used for base64 decode server-side / encode
+/// client-side).
+#[test]
+fn cargo_toml_references_base64_workspace_dep() {
+    let src = read("Cargo.toml");
+    assert!(
+        src.contains("base64 = { workspace = true }"),
+        "Cargo.toml must reference `base64 = {{ workspace = true }}`"
+    );
+}

@@ -101,6 +101,29 @@ pub trait PlatformAdapter: Send + Sync {
 
     /// Check if the adapter is currently running.
     fn is_running(&self) -> bool;
+
+    /// Selects the response-delivery strategy for the agent-turn pipeline
+    /// (Phase 47.6 Plan 01, D-13).
+    ///
+    /// `true` (the default): the adapter supports in-place message edits, so
+    /// the agent-turn pipeline publishes a placeholder message and streams
+    /// the real text into it via [`Self::edit_message`] /
+    /// [`Self::edit_message_markdown_v2`] as the turn progresses. Telegram,
+    /// Discord and Slack all natively support this and are unaffected by
+    /// this method's addition — no existing impl needs to change.
+    ///
+    /// `false`: the adapter receives NO placeholder message and gets its
+    /// response in exactly one send when the turn completes. `BuzzAdapter`
+    /// overrides this to `false` — Nostr events are immutable, so its
+    /// [`Self::edit_message`] is a logged no-op (declared immediately beside
+    /// this method for exactly that reason: the no-op and this mode flag
+    /// must never drift apart, or the agent-turn pipeline streams into an
+    /// edit that silently does nothing and the operator never sees a
+    /// response at all — the defect the cross-AI review of this phase's plan
+    /// found).
+    fn supports_in_place_edits(&self) -> bool {
+        true
+    }
 }
 
 // Phase 36.17.2.2 D-18: re-export the media-tag types so consumers can write

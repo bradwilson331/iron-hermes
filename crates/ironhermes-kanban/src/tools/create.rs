@@ -123,7 +123,7 @@ impl Tool for KanbanCreateTool {
                     },
                     "workspace": {
                         "type": "string",
-                        "description": "Workspace spec: 'scratch' (default), 'dir:/abs/path', or 'worktree'."
+                        "description": "Workspace spec: 'scratch' (default, private tmp dir), 'dir:/abs/path' (shared persistent directory), or 'project:/abs/repo' (dispatcher creates an isolated git worktree of the repo — never in-place)."
                     },
                     "skills": {
                         "type": "array",
@@ -175,7 +175,7 @@ impl Tool for KanbanCreateTool {
                     },
                     "board": {
                         "type": "string",
-                        "description": "Board slug to target. Omit to use HERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
+                        "description": "Board slug to target. Omit to use IRONHERMES_KANBAN_BOARD env / current file / 'default' (4-tier resolution)."
                     }
                 },
                 "required": ["title", "assignee"]
@@ -184,7 +184,7 @@ impl Tool for KanbanCreateTool {
     }
 
     fn is_available(&self) -> bool {
-        std::env::var("HERMES_KANBAN_TASK").is_ok() || self.explicit_enable
+        crate::kanban_env("TASK").is_some() || self.explicit_enable
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<String> {
@@ -347,19 +347,19 @@ mod tests {
     fn is_available_respects_env() {
         let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
-            std::env::remove_var("HERMES_KANBAN_TASK");
+            std::env::remove_var("IRONHERMES_KANBAN_TASK");
         }
         let store = make_store();
         let tool = KanbanCreateTool::new(store.clone(), false);
         assert!(!tool.is_available());
 
         unsafe {
-            std::env::set_var("HERMES_KANBAN_TASK", "t_test");
+            std::env::set_var("IRONHERMES_KANBAN_TASK", "t_test");
         }
         let tool2 = KanbanCreateTool::new(store.clone(), false);
         assert!(tool2.is_available());
         unsafe {
-            std::env::remove_var("HERMES_KANBAN_TASK");
+            std::env::remove_var("IRONHERMES_KANBAN_TASK");
         }
 
         let tool3 = KanbanCreateTool::new(store, true);

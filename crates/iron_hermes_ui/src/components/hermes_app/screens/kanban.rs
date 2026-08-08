@@ -22,12 +22,20 @@ pub mod card;
 pub mod column;
 pub mod drawer;
 pub mod modals;
+// Phase 47.4 Plan 08 (D-04): the profile detail drawer (editable).
+pub mod profile_drawer;
+// Phase 47.4 Plan 01 (D-05): board-header PROFILE dropdown.
+pub mod profile_switcher;
+// Phase 47.4 Plan 07 (D-01): the Create Kanban Profile wizard.
+pub mod wizard;
 
 use crate::components::hermes_app::screens::kanban::board::KanbanBoard;
 use crate::components::hermes_app::screens::kanban::drawer::TaskDrawer;
 use crate::components::hermes_app::screens::kanban::modals::{
     ArchiveConfirmModal, BlockModal, CompleteModal, CreateTaskModal,
 };
+use crate::components::hermes_app::screens::kanban::profile_switcher::ProfileSwitcher;
+use crate::components::hermes_app::screens::kanban::wizard::CreateProfileWizard;
 use crate::protocol::TaskRow;
 use dioxus::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -66,6 +74,10 @@ pub fn ScreenKanban(is_active: bool) -> Element {
     // 36.3.7.11 UAT). Declared BEFORE `board_resource` so the
     // use_resource closure can capture it.
     let mut archived_visible: Signal<bool> = use_signal(|| false);
+
+    // Phase 46.6 gap-closure: the root screen router, so the toolbar can link to
+    // the Artifacts gallery (a kanban task's output is often an artifact).
+    let mut nav_screen = use_context::<Signal<crate::state::Screen>>();
 
     // Board fetch resource. Re-runs whenever `archived_visible` flips
     // (the toggle handler calls `board_resource.restart()` after `.set()`).
@@ -112,6 +124,23 @@ pub fn ScreenKanban(is_active: bool) -> Element {
 
     // WS connection state indicator.
     let mut ws_state: Signal<WsState> = use_signal(|| WsState::Connecting);
+
+    // Phase 47.4 Plan 01 (D-05): the PROFILE switcher's assignee lens
+    // (`None` = "ALL PROFILES", no filter) and the profile detail-drawer
+    // target the switcher's EDIT chip / footer link set. Neither drives a
+    // DB re-resolution (D-05 prohibition) — `active_profile` is purely a
+    // client-side highlight/filter axis.
+    let active_profile: Signal<Option<String>> = use_signal(|| None);
+    let mut detail_profile: Signal<Option<String>> = use_signal(|| None);
+
+    // Phase 47.4 Plan 07 (D-01): the Create Kanban Profile wizard's open
+    // state — mirrors `create_modal_open`'s existing idiom exactly.
+    let mut wizard_open: Signal<bool> = use_signal(|| false);
+    // Working copy of the known profile names, refreshed after a
+    // successful create by calling `list_profiles()` directly (a plain
+    // async fn) — never by restarting a resource, which would desync
+    // hook ordering for `ProfileSwitcher`'s own signals.
+    let mut profile_list_refresh_tick: Signal<u32> = use_signal(|| 0);
 
     // Sync the board_resource Ok value into tasks. This must run on every
     // render so a successful re-fetch propagates into the column children.
@@ -228,6 +257,10 @@ pub fn ScreenKanban(is_active: bool) -> Element {
     };
 
     let archived_visible_ro: ReadSignal<bool> = archived_visible.into();
+    // Phase 47.4 Plan 09 (D-05): read-only view of the lens for
+    // `KanbanBoard` — pure pass-through, never used to re-fetch or
+    // re-resolve the board.
+    let active_profile_ro: ReadSignal<Option<String>> = active_profile.into();
 
     let on_open_drawer = move |task_id: String| {
         // Plan 03 opens the drawer by writing the task_id signal.
@@ -237,10 +270,33 @@ pub fn ScreenKanban(is_active: bool) -> Element {
     let live_msg_str = live_region_msg.read().clone().unwrap_or_default();
     let toast_text = toast_msg.read().clone();
 
+    // GAP-10 (47.4-16 Task 1): whether either drawer is currently open,
+    // snapshotted into a plain bool BEFORE `rsx!`. `.read()` (not
+    // `.peek()`) so the toast's corner reacts when a drawer opens — the
+    // reads are temporaries dropped at the end of this statement, so no
+    // live borrow crosses into the rsx! tree (clippy.toml).
+    let drawer_open = open_drawer_task_id.read().is_some() || detail_profile.read().is_some();
+
+    // Phase 47.4 Plan 09 (D-05): the toolbar lens indicator. Computed
+    // from `tasks` — already-fetched, unfiltered board data — never a
+    // new fetch. `None` (ALL PROFILES) renders no indicator at all
+    // (E7/covered). The template is the same at n=0, n=1, and n=many —
+    // no special-casing (E7/zero-one-many).
+    let lens_indicator_text: Option<String> = active_profile.read().clone().map(|name| {
+        let all_tasks = tasks.read();
+        let total = all_tasks.len();
+        let matching = all_tasks.iter().filter(|t| t.assignee == name).count();
+        format!("Showing {matching} of {total} for {name}")
+    });
+
     // Read-only views of the drawer/counter signals for the TaskDrawer
     // component (props use ReadSignal for read-only access).
     let drawer_task_id_ro: ReadSignal<Option<String>> = open_drawer_task_id.into();
     let per_task_counter_ro: ReadSignal<HashMap<String, u64>> = per_task_event_counter.into();
+    // Phase 47.4 Plan 12 (GAP-2/GAP-3): read-only view of the profile
+    // refresh tick, shared by `ProfileSwitcher` and `TaskDrawer` so both
+    // consumers of the known-profile list re-fetch on the same bump.
+    let profile_list_refresh_tick_ro: ReadSignal<u32> = profile_list_refresh_tick.into();
 
     // Drawer-event handlers — they update the modal-target signals or
     // spawn one-click writes (Unblock).
@@ -275,6 +331,16 @@ pub fn ScreenKanban(is_active: bool) -> Element {
     };
     let on_decompose = move |task_id: String| {
         let mut tm = toast_msg;
+        // D-03: rebind pending_task_ids to a mutable local — the signal
+        // read/write API needs `&mut self`. Mirrors move_task_optimistic
+        // (board.rs) exactly.
+        let mut p = pending_task_ids;
+        let task_id_owned = task_id.clone();
+        // D-03: scoped write — mark pending BEFORE the spawn. WriteLock
+        // drops at this closing brace, well before the .await below.
+        {
+            p.write().insert(task_id_owned.clone());
+        }
         spawn(async move {
             match crate::server::kanban_api::run_decompose_or_specify(
                 task_id,
@@ -287,19 +353,45 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                     children_count,
                     summary,
                 }) => {
+                    // D-03: scoped write — clear pending after the .await
+                    // resolves (Ok arm).
+                    {
+                        p.write().remove(&task_id_owned);
+                    }
                     tm.set(Some(format!(
                         "Decomposed into {children_count} children: {summary}"
                     )));
+                    // D-04: re-fetch the board so new children appear
+                    // without a manual reload.
+                    board_resource.restart();
                 }
                 Ok(crate::protocol::DecomposeResult::NotWired { message }) => {
+                    // D-03: scoped write — clear pending (NotWired arm).
+                    {
+                        p.write().remove(&task_id_owned);
+                    }
                     tm.set(Some(format!("Decompose not configured. {message}")));
                 }
-                Err(e) => tm.set(Some(format!("Decompose failed: {e}"))),
+                Err(e) => {
+                    // D-03: scoped write — clear pending (Err arm) so the
+                    // card never stays stuck disabled.
+                    {
+                        p.write().remove(&task_id_owned);
+                    }
+                    tm.set(Some(format!("Decompose failed: {e}")));
+                }
             }
         });
     };
     let on_specify = move |task_id: String| {
         let mut tm = toast_msg;
+        // D-03: rebind pending_task_ids to a mutable local — see on_decompose.
+        let mut p = pending_task_ids;
+        let task_id_owned = task_id.clone();
+        // D-03: scoped write — mark pending BEFORE the spawn.
+        {
+            p.write().insert(task_id_owned.clone());
+        }
         spawn(async move {
             match crate::server::kanban_api::run_decompose_or_specify(
                 task_id,
@@ -312,14 +404,31 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                     children_count,
                     summary,
                 }) => {
+                    // D-03: scoped write — clear pending (Ok arm).
+                    {
+                        p.write().remove(&task_id_owned);
+                    }
                     tm.set(Some(format!(
                         "Specified ({children_count} children): {summary}"
                     )));
+                    // D-04: re-fetch the board so the rewritten+promoted
+                    // card appears without a manual reload.
+                    board_resource.restart();
                 }
                 Ok(crate::protocol::DecomposeResult::NotWired { message }) => {
+                    // D-03: scoped write — clear pending (NotWired arm).
+                    {
+                        p.write().remove(&task_id_owned);
+                    }
                     tm.set(Some(format!("Specify not configured. {message}")));
                 }
-                Err(e) => tm.set(Some(format!("Specify failed: {e}"))),
+                Err(e) => {
+                    // D-03: scoped write — clear pending (Err arm).
+                    {
+                        p.write().remove(&task_id_owned);
+                    }
+                    tm.set(Some(format!("Specify failed: {e}")));
+                }
             }
         });
     };
@@ -339,6 +448,16 @@ pub fn ScreenKanban(is_active: bool) -> Element {
     let on_triage_action =
         move |(task_id, action): (String, crate::protocol::DecomposeOrSpecify)| {
             let mut tm = toast_msg;
+            // D-03: rebind pending_task_ids to a mutable local — see
+            // on_decompose above. task_id is moved into the spawn below, so
+            // clone an owned copy for the pre-spawn insert + post-await
+            // removal.
+            let mut p = pending_task_ids;
+            let task_id_owned = task_id.clone();
+            // D-03: scoped write — mark pending BEFORE the spawn.
+            {
+                p.write().insert(task_id_owned.clone());
+            }
             spawn(async move {
                 match crate::server::kanban_api::run_decompose_or_specify(task_id, None, action)
                     .await
@@ -347,16 +466,33 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                         children_count,
                         summary,
                     }) => {
+                        // D-03: scoped write — clear pending (Ok arm).
+                        {
+                            p.write().remove(&task_id_owned);
+                        }
                         tm.set(Some(format!(
                             "{:?}: {children_count} children. {summary}",
                             action
                         )));
+                        // D-04: re-fetch the board so new children / the
+                        // rewritten+promoted card appear without a manual
+                        // reload.
+                        board_resource.restart();
                     }
                     Ok(crate::protocol::DecomposeResult::NotWired { message }) => {
+                        // D-03: scoped write — clear pending (NotWired arm).
+                        {
+                            p.write().remove(&task_id_owned);
+                        }
                         // UI-SPEC §7.5 toast: "{action} not configured. Run: ..."
                         tm.set(Some(format!("{} not configured. {message}", action.slug())));
                     }
                     Err(e) => {
+                        // D-03: scoped write — clear pending (Err arm) so
+                        // the card never stays stuck disabled.
+                        {
+                            p.write().remove(&task_id_owned);
+                        }
                         tm.set(Some(format!("{}: {e}", action.slug())));
                     }
                 }
@@ -387,6 +523,52 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                         "aria-label": "WebSocket status",
                         "•"
                     }
+                    // Phase 47.4 Plan 01 (D-05 / D-10): board profile
+                    // switcher — placed before `+ Add card` per UI-SPEC
+                    // Navigation & Placement. Phase 47.4 Plan 12 (GAP-2):
+                    // `refresh_tick` is passed as a prop the switcher's own
+                    // `use_resource` reads in its sync prefix — a bump
+                    // re-fetches internally, no remount required.
+                    ProfileSwitcher {
+                        active: active_profile,
+                        refresh_tick: profile_list_refresh_tick_ro,
+                        on_edit: move |name: String| {
+                            // Phase 47.4 Plan 08: opening the drawer closes
+                            // the wizard if it's open — the two surfaces
+                            // are mutually exclusive (Claude's-discretion
+                            // interaction detail per the plan).
+                            detail_profile.set(Some(name));
+                            wizard_open.set(false);
+                        },
+                    }
+                    // Phase 47.4 Plan 09 (D-05 / UI-SPEC "Board profile-lens
+                    // highlight"): the lens-match toolbar indicator, next to
+                    // the PROFILE trigger. Absent entirely when the lens is
+                    // ALL PROFILES (`None`) — matches the switcher's own
+                    // clear-on-ALL-PROFILES behavior.
+                    if let Some(text) = lens_indicator_text.clone() {
+                        span { class: "kn-lens-indicator", "{text}" }
+                    }
+                    // Phase 47.4 Plan 07 (D-01 / D-10): opens the Create
+                    // Kanban Profile wizard — placed between the switcher
+                    // and `+ Add card` per UI-SPEC Navigation & Placement.
+                    button {
+                        // Phase 47.4 Plan 14 (GAP-4): `btn btn--sm` resolves
+                        // this button's size against the same site.css:165-186
+                        // / screens.css:229 rules its three toolbar siblings
+                        // use. `btn--ghost` is deliberately omitted so the
+                        // accent stays distinct (`.btn`'s base teal fill) —
+                        // only size had to match, per operator sign-off.
+                        class: "btn btn--sm",
+                        onclick: move |_| {
+                            // Phase 47.4 Plan 08: mutually exclusive with
+                            // the profile detail drawer — see the on_edit
+                            // handler above.
+                            wizard_open.set(true);
+                            detail_profile.set(None);
+                        },
+                        "+ NEW PROFILE"
+                    }
                     button {
                         class: "btn btn--ghost btn--sm",
                         onclick: move |_| create_modal_open.set(true),
@@ -404,6 +586,12 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                             board_resource.restart();
                         },
                         if *archived_visible.read() { "HIDE ARCHIVED" } else { "SHOW ARCHIVED" }
+                    }
+                    // Phase 46.6 gap-closure: jump to the Artifacts gallery.
+                    button {
+                        class: "btn btn--ghost btn--sm",
+                        onclick: move |_| nav_screen.set(crate::state::Screen::Artifacts),
+                        "▤ ARTIFACTS"
                     }
                 }
             }
@@ -436,15 +624,31 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                     live_region_msg: live_region_msg,
                     archive_modal_task: archive_modal_task,
                     on_triage_action: on_triage_action,
+                    active_profile: active_profile_ro,
                 }
             }
             // UI-SPEC §7.5: optimistic-revert toast surface (visible).
+            // GAP-10 (47.4-16 Task 1): the toast now carries an explicit
+            // dismiss control and moves off the drawer's corner while a
+            // drawer is open — see `drawer_open` above. No auto-dismiss
+            // timer: the message may be failure text the operator has not
+            // read yet.
             if let Some(toast) = toast_text {
                 div {
                     class: "kn-toast",
                     role: "status",
                     aria_live: "polite",
-                    "{toast}"
+                    "data-drawer-open": if drawer_open { "true" },
+                    span { "{toast}" }
+                    button {
+                        class: "kn-toast-dismiss",
+                        "aria-label": "Dismiss board update",
+                        onclick: move |_| {
+                            let mut tm = toast_msg;
+                            tm.set(None);
+                        },
+                        "✕"
+                    }
                 }
             }
             // Plan 03 (D-20 / UI-SPEC §3.9): the slide-in detail drawer.
@@ -455,6 +659,7 @@ pub fn ScreenKanban(is_active: bool) -> Element {
             TaskDrawer {
                 task_id: drawer_task_id_ro,
                 per_task_event_counter: per_task_counter_ro,
+                profile_refresh_tick: profile_list_refresh_tick_ro,
                 on_close: on_drawer_close,
                 on_open_complete_modal: on_open_complete,
                 on_open_block_modal: on_open_block,
@@ -463,6 +668,23 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                 on_decompose: on_decompose,
                 on_specify: on_specify,
                 on_post_comment: on_post_comment,
+            }
+            // Phase 47.4 Plan 08 (D-02/D-04/D-10): the profile detail
+            // drawer — mounted unconditionally, same discipline as
+            // TaskDrawer above. Opened from ProfileSwitcher's EDIT chip /
+            // MANAGE ALL PROFILES footer link via `detail_profile`.
+            crate::components::hermes_app::screens::kanban::profile_drawer::ProfileDetailDrawer {
+                profile_id: detail_profile,
+                on_close: move |_| detail_profile.set(None),
+                on_profile_updated: move |_| {
+                    // Refreshes the dropdown's profile list the same way
+                    // the wizard's on_created handler already does — key-
+                    // remounting ProfileSwitcher forces its own internal
+                    // fetch, never a resource-restart call on this file's
+                    // own resources.
+                    let cur = *profile_list_refresh_tick.read();
+                    profile_list_refresh_tick.set(cur + 1);
+                },
             }
             // Plan 03 (D-13 / UI-SPEC §3.10): modals — render conditionally
             // based on the modal-target signals.
@@ -504,6 +726,22 @@ pub fn ScreenKanban(is_active: bool) -> Element {
                     on_success: move |_| {
                         close_create_modal();
                         restart_board();
+                    },
+                    // Phase 47.4 Plan 09 (D-05 + D-12): seed the assignee
+                    // field with the active lens profile, if any — an
+                    // initial value only, still freely editable. `None`
+                    // seeds an empty string exactly as before this plan.
+                    initial_assignee: active_profile.read().clone(),
+                }
+            }
+            // Phase 47.4 Plan 07 (D-01): the Create Kanban Profile wizard,
+            // mounted conditionally exactly like `CreateTaskModal` above.
+            if *wizard_open.read() {
+                CreateProfileWizard {
+                    on_dismiss: move |_| wizard_open.set(false),
+                    on_created: move |_name: String| {
+                        let cur = *profile_list_refresh_tick.read();
+                        profile_list_refresh_tick.set(cur + 1);
                     },
                 }
             }

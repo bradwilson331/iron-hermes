@@ -71,11 +71,10 @@ fn make_ctx_capturing_spawn(
             })
         },
     );
-    Arc::new(DispatcherContext::with_spawn_fn(
-        store,
-        default_config(),
-        spawn_fn,
-    ))
+    Arc::new(
+        DispatcherContext::with_spawn_fn(store, default_config(), spawn_fn)
+            .with_gate_fn(allow_all_gate()),
+        )
 }
 
 /// Seed a `ready` task directly into a store via SQL (bypasses atomic_claim).
@@ -310,4 +309,13 @@ impl Drop for ScopedEnv {
             None => unsafe { std::env::remove_var(&self.key) },
         }
     }
+}
+
+/// Allow-all dispatch gate for tests exercising dispatcher steps OTHER than
+/// the Phase 47.4 pre-spawn gate. The production default is the real
+/// fail-closed predicate, which resolves `$IRONHERMES_HOME/profiles/<assignee>/`;
+/// these tests use synthetic assignees with no profile directory. The gate is
+/// covered against the REAL predicate in `tests/dispatch_gate_loop.rs`.
+fn allow_all_gate() -> ironhermes_kanban::dispatcher::DispatchGateFn {
+    std::sync::Arc::new(|_assignee: &str| ironhermes_core::dispatch_gate::DispatchDecision::Allow)
 }

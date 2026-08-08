@@ -27,7 +27,7 @@ static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 fn setup_test_env() -> (tempfile::TempDir, std::path::PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     unsafe {
-        std::env::set_var("HERMES_HOME", tmp.path());
+        std::env::set_var("IRONHERMES_HOME", tmp.path());
     }
     let skills_root = tmp.path().join("skills");
     std::fs::create_dir_all(&skills_root).unwrap();
@@ -37,8 +37,8 @@ fn setup_test_env() -> (tempfile::TempDir, std::path::PathBuf) {
 fn restore_env(prev: Option<String>) {
     unsafe {
         match prev {
-            Some(v) => std::env::set_var("HERMES_HOME", v),
-            None => std::env::remove_var("HERMES_HOME"),
+            Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+            None => std::env::remove_var("IRONHERMES_HOME"),
         }
     }
 }
@@ -105,7 +105,7 @@ fn build_skill_tarball(extra_content: &str) -> Vec<u8> {
 #[tokio::test]
 async fn update_detects_hash_drift_and_replaces() {
     let _guard = ENV_LOCK.lock().await;
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
     // Install v1
@@ -176,7 +176,7 @@ async fn update_detects_hash_drift_and_replaces() {
 #[tokio::test]
 async fn update_noop_when_hash_matches() {
     let _guard = ENV_LOCK.lock().await;
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
     let tarball = build_skill_tarball("same content");
@@ -225,7 +225,7 @@ async fn update_noop_when_hash_matches() {
 #[tokio::test]
 async fn update_errors_for_unknown_skill() {
     let _guard = ENV_LOCK.lock().await;
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
     let server = MockServer::start().await;
@@ -252,7 +252,7 @@ async fn update_errors_for_unknown_skill() {
 #[tokio::test]
 async fn update_rejects_community_scan_blocked() {
     let _guard = ENV_LOCK.lock().await;
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
     // Install v1 with clean scanner
@@ -306,7 +306,7 @@ async fn update_rejects_community_scan_blocked() {
 #[tokio::test]
 async fn uninstall_removes_dir_and_manifest() {
     let _guard = ENV_LOCK.lock().await;
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
     // Install first
@@ -346,7 +346,7 @@ async fn uninstall_removes_dir_and_manifest() {
 #[tokio::test]
 async fn uninstall_errors_for_unknown_skill() {
     let _guard = ENV_LOCK.lock().await;
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     let (_tmp, _skills_root) = setup_test_env();
 
     let err = uninstall("nonexistent").expect_err("should fail");
@@ -366,7 +366,7 @@ async fn uninstall_errors_for_unknown_skill() {
 #[tokio::test]
 async fn uninstall_cleans_empty_parent_category() {
     let _guard = ENV_LOCK.lock().await;
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
     let server = MockServer::start().await;
@@ -446,7 +446,7 @@ async fn mount_three_hop_mocks(server: &MockServer, server_hash: &str) {
 #[tokio::test]
 async fn update_tolerates_server_client_hash_divergence() {
     let _guard = ENV_LOCK.lock().await;
-    let prev = std::env::var("HERMES_HOME").ok();
+    let prev = std::env::var("IRONHERMES_HOME").ok();
     let (_tmp, skills_root) = setup_test_env();
 
     // Step 1 — prime: install ascii-art with a matching server hash so the

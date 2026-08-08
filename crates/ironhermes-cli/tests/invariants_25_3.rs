@@ -71,17 +71,23 @@ fn workspace_wired_in_all_commandcontext_construction_sites() {
         .collect::<Vec<_>>()
         .join("\n");
 
+    // Phase 41.3 Plan 04 (D-11/D-12): build_cmd_ctx / build_command_context no
+    // longer call `.with_workspace(...)` directly — they populate
+    // `CoreContextHandles.workspace` and the shared `build_core_context` factory
+    // (ironhermes-core) applies the builder internally.
     assert!(
-        main_no_comments.contains(".with_workspace("),
-        "INV-25.3-01a: main.rs::build_cmd_ctx must call `.with_workspace(handle)` on \
-         the CommandContext builder. Phase 25.2 lesson: missing this attach makes \
-         cmd_sessions --workspace fall back to None for the CLI subcommand entry points."
+        main_no_comments.contains("build_core_context(") && main_no_comments.contains("workspace,"),
+        "INV-25.3-01a (revised Phase 41.3 Plan 04): main.rs::build_cmd_ctx must populate \
+         CoreContextHandles.workspace via the D-11 shared factory. Phase 25.2 lesson: \
+         missing this attach makes cmd_sessions --workspace fall back to None for the \
+         CLI subcommand entry points."
     );
     assert!(
-        tui_no_comments.contains(".with_workspace("),
-        "INV-25.3-01b: tui_rata/commands.rs::build_command_context must call \
-         `.with_workspace(handle)`. The ratatui REPL is the DEFAULT hermes chat surface \
-         since Phase 22.4 — missing this attach is the EXACT regression that bit Phase 25.2."
+        tui_no_comments.contains("workspace: app.workspace.clone()"),
+        "INV-25.3-01b (revised Phase 41.3 Plan 04): tui_rata/commands.rs::build_command_context \
+         must populate CoreContextHandles.workspace from app.workspace. The ratatui REPL is the \
+         DEFAULT hermes chat surface since Phase 22.4 — missing this attach is the EXACT \
+         regression that bit Phase 25.2."
     );
 }
 
@@ -92,11 +98,14 @@ fn workspace_wired_in_gateway_handler() {
         .filter(|l| !l.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n");
+    // Phase 41.3 Plan 04 (D-11/D-12): handle_slash_command no longer calls
+    // `.with_workspace(...)` directly — it populates CoreContextHandles.workspace
+    // from self.workspace and the shared build_core_context factory applies it.
     assert!(
-        no_comments.contains(".with_workspace("),
-        "INV-25.3-02: gateway/handler.rs::handle_slash_command must call \
-         `.with_workspace(handle)` on the per-message CommandContext. Without this, \
-         /sessions --workspace returns None for Telegram users."
+        no_comments.contains("workspace: self.workspace.clone()"),
+        "INV-25.3-02 (revised Phase 41.3 Plan 04): gateway/handler.rs::handle_slash_command \
+         must populate CoreContextHandles.workspace from self.workspace on the per-message \
+         CommandContext. Without this, /sessions --workspace returns None for Telegram users."
     );
 }
 
@@ -132,16 +141,22 @@ fn trajectory_writer_wired_in_all_commandcontext_construction_sites() {
         .collect::<Vec<_>>()
         .join("\n");
 
+    // Phase 41.3 Plan 04 (D-11/D-12): build_cmd_ctx / build_command_context no
+    // longer call `.with_trajectory_writer(...)` directly — they populate
+    // `CoreContextHandles.trajectory_writer` and the shared `build_core_context`
+    // factory (ironhermes-core) applies the builder internally.
     assert!(
-        main_no_comments.contains(".with_trajectory_writer("),
-        "INV-25.3-04a: main.rs::build_cmd_ctx must call `.with_trajectory_writer(handle)`. \
-         Without this, slash commands dispatched in the CLI cannot record trajectory entries."
+        main_no_comments.contains("build_core_context(") && main_no_comments.contains("trajectory_writer,"),
+        "INV-25.3-04a (revised Phase 41.3 Plan 04): main.rs::build_cmd_ctx must populate \
+         CoreContextHandles.trajectory_writer via the D-11 shared factory. Without this, \
+         slash commands dispatched in the CLI cannot record trajectory entries."
     );
     assert!(
-        tui_no_comments.contains(".with_trajectory_writer("),
-        "INV-25.3-04b: tui_rata/commands.rs::build_command_context must call \
-         `.with_trajectory_writer(handle)`. The ratatui REPL is the default chat surface — \
-         missing this attach starves Phase 25.4 Curator's training-data source."
+        tui_no_comments.contains("trajectory_writer: app.trajectory_writer.clone()"),
+        "INV-25.3-04b (revised Phase 41.3 Plan 04): tui_rata/commands.rs::build_command_context \
+         must populate CoreContextHandles.trajectory_writer from app.trajectory_writer. The \
+         ratatui REPL is the default chat surface — missing this attach starves Phase 25.4 \
+         Curator's training-data source."
     );
 }
 
@@ -226,9 +241,15 @@ fn existing_toolset_session_parity_still_holds() {
         .filter(|l| !l.trim_start().starts_with("//"))
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(main_no_comments.contains(".with_toolset_session("));
-    assert!(tui_no_comments.contains(".with_toolset_session("));
-    assert!(gw_handler_no_comments.contains(".with_toolset_session("));
+    // Phase 41.3 Plan 04 (D-11/D-12): the three CommandContext build sites no
+    // longer call `.with_toolset_session(...)` directly — they populate
+    // `CoreContextHandles.toolset_session` and the shared `build_core_context`
+    // factory (ironhermes-core) applies the builder internally.
+    assert!(
+        main_no_comments.contains("build_core_context(") && main_no_comments.contains("toolset_session,")
+    );
+    assert!(tui_no_comments.contains("toolset_session: app.toolset_session.clone()"));
+    assert!(gw_handler_no_comments.contains("toolset_session: self.toolset_session.clone()"));
     assert!(gw_runner_no_comments.contains("set_toolset_session("));
 }
 

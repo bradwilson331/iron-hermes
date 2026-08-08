@@ -1,0 +1,1004 @@
+/* Phase 47.3 Plan 01 (D-04, CONTEXT.md flagged assumption #5), expanded by
+ * Plan 04 (Task 1 checkpoint: ui-spec-default responsive behavior): the
+ * login page's own stylesheet, covering the `1a` (Basic, default) and `1b`
+ * (Fade) treatments per 47.3-UI-SPEC.md.
+ *
+ * This file carries its OWN `:root` token block — value-copied from
+ * `tokens.css`'s `slate-dark` (default) theme section for exactly the
+ * variables the login page uses — rather than pulling in `tokens.css` or the
+ * full `design-tokens.css`/`warp-ih.css` bundle via a stylesheet-level rule
+ * that reaches across files. Two reasons: (1) Dioxus's asset pipeline does
+ * not reliably resolve a cross-stylesheet include rule across
+ * `asset!()`-tracked files; (2) this keeps the pre-auth surface at its
+ * narrowest (RESEARCH.md Assumption A3) — no full 17-weight font-face
+ * bundle, no unrelated app tokens, gated pre-auth. This file intentionally
+ * contains zero such cross-file include directives of its own.
+ *
+ * Font spelling: `tokens.css` and `design-tokens.css` spell this family
+ * differently ("Iosekey Mono" vs "Ioskeley Mono"). This file declares its
+ * own `@font-face` rules using the DESIGN EXPORT's spelling — "Iosekey Mono"
+ * / "Iosekey Cond" — so it is bound by neither existing file.
+ *
+ * Loads unconditionally, like every CSS asset in this crate (project rule —
+ * never feature-gated). `1c`/`1d`/`2a` treatments land in Plan 05.
+ *
+ * D-20 (resolved at this plan's Task 1 checkpoint, verbatim "c-1"): the
+ * export's literal "attempt 1 of 3" counter is DROPPED from every failure
+ * box below — the locked 5-attempts-per-60s-per-IP rate limit (AUTH-DESIGN
+ * §3.4, D-18) is the sole source of truth for attempt-count UX, carried by
+ * the 429 countdown, not a client-guessed ordinal.
+ */
+
+@font-face {
+  font-family: "Iosekey Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./fonts/IoskeleyMono-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Iosekey Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("./fonts/IoskeleyMono-Medium.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Iosekey Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("./fonts/IoskeleyMono-Bold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Iosekey Cond";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("./fonts/IoskeleyMono-Condensed.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Iosekey Cond";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("./fonts/IoskeleyMono-CondensedBold.woff2") format("woff2");
+}
+
+:root {
+  /* Value-copied from tokens.css's slate-dark (default) theme section —
+   * the Master Token Table in 47.3-UI-SPEC.md § "Color System Resolution",
+   * value-for-value. --bg-canvas intentionally uses the TOKEN value
+   * (17% 0.012 260), not the export's slightly darker literal
+   * (12% 0.010 260) — the flagged Exception: nothing shipped depends on the
+   * literal since card/status-bars/scene all paint their own backgrounds. */
+  --bg-canvas:    oklch(17% 0.012 260);
+  --bg-surface:   oklch(20% 0.014 260);
+  --bg-input:     oklch(15% 0.010 260);
+
+  --fg:           oklch(94% 0.010 260);
+  --fg-dim:       oklch(62% 0.012 260);
+  --fg-faint:     oklch(48% 0.010 260);
+
+  --border:        oklch(34% 0.014 260);
+  --border-subtle: oklch(28% 0.014 260);
+
+  --accent:      oklch(76% 0.14 210);
+  --accent-soft: oklch(32% 0.08 210);
+
+  --success: oklch(74% 0.17 150);
+  --warning: oklch(78% 0.14 85);
+  --danger:  oklch(68% 0.18 25);
+
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* Keyframe names lifted VERBATIM from the design export per D-04. */
+@keyframes ih-up {
+  from { opacity: 0; transform: translateY(12px); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes ih-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+@keyframes ih-blink {
+  50% { opacity: 0; }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg-canvas);
+  color: var(--fg);
+  font-family: "Iosekey Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+/* Visually-hidden accessible heading — carries the OPERATOR AUTHENTICATION
+ * marker (asserted by root_serves_login_when_unauthenticated, a Plan 01
+ * test, and this plan's own basic_document_marker_present) as a real,
+ * screen-reader-only <h1>, since the visible design has no literal on-page
+ * heading with that exact text. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ===========================================================================
+ * Shared chrome — status bars, card shell (1a + 1b)
+ * =========================================================================== */
+
+.login-shell {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.login-statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 20px;
+  font: 500 11px/1 "Iosekey Mono", monospace;
+  letter-spacing: .15em;
+  color: var(--fg-dim);
+}
+.login-statusbar--top { border-bottom: 1px solid var(--border-subtle); }
+.login-statusbar--bottom { border-top: 1px solid var(--border-subtle); letter-spacing: .1em; }
+
+.login-statusbar-left,
+.login-statusbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.login-statusbar-right { gap: 12px; }
+
+.login-accent { color: var(--accent); }
+.login-dim { color: var(--fg-faint); }
+.login-model-pill { color: oklch(72% 0.16 330); } /* decorative; no token maps this hue (UI-SPEC "Not mapped") */
+.login-success-text { color: var(--success); }
+.login-warning-text { color: var(--warning); }
+
+.login-op-label { color: var(--warning); }
+.login-op-label.is-failed { color: var(--danger); }
+
+/* Mobile-only compact brand mark — hidden by default, shown under 640px
+ * (see Responsive section) in place of the desktop breadcrumb chrome. */
+.login-statusbar-mobile-brand { display: none; }
+
+.login-center {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 452px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  padding: 34px 34px 28px; /* off-grid, lifted verbatim per D-04 — do not round */
+}
+.login-card.is-failed { border-color: var(--danger); }
+
+.login-brand {
+  font: 700 30px/1 "Iosekey Cond", "Iosekey Mono", monospace;
+  letter-spacing: -0.01em;
+  color: var(--accent);
+  margin: 0;
+}
+
+.login-subtitle {
+  margin-top: 8px;
+  font: 400 12px/1.5 "Iosekey Mono", monospace;
+  color: var(--fg-dim);
+}
+
+.login-divider {
+  height: 1px;
+  background: var(--border-subtle);
+  margin: 22px 0; /* off-grid, lifted verbatim per D-04 */
+}
+
+.login-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.login-field-label {
+  font: 600 11px "Iosekey Mono", monospace;
+  letter-spacing: 0.09em;
+  color: var(--fg-dim);
+}
+
+.login-field-static {
+  font: 400 14px "Iosekey Mono", monospace;
+  color: var(--fg-faint);
+}
+
+.login-input {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--fg);
+  font: 400 14px "Iosekey Mono", monospace;
+  letter-spacing: 0.05em;
+  padding: 11px 13px;
+  outline: none;
+  transition: border-color var(--ease-out) 120ms;
+}
+.login-input:focus { border-color: var(--accent); }
+.login-input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.login-submit {
+  background: transparent;
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font: 600 12px "Iosekey Mono", monospace;
+  letter-spacing: 0.16em;
+  padding: 13px;
+  cursor: pointer;
+  transition: background var(--ease-out) 120ms;
+}
+.login-submit:hover { background: var(--accent-soft); }
+.login-submit:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.login-submit:disabled {
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.login-error {
+  margin-top: 18px;
+  border: 1px solid var(--danger);
+  padding: 11px 13px;
+  font: 400 11.5px/1.6 "Iosekey Mono", monospace;
+  color: var(--danger);
+  display: none;
+  /* Plan 05's per-treatment scene copy (1c/1d/2a) carries a two-line body
+   * set via a single data-fail-text attribute (JS textContent, so no <br>
+   * is available) — the second line is a literal newline decoded from an
+   * &#10; HTML entity. pre-line preserves it; 1a/1b's single-line uniform
+   * copy is unaffected (no newline present). */
+  white-space: pre-line;
+}
+.login-error.is-visible { display: block; }
+/* 1b's designed failure state (b1Fail) is the only one of the five that
+ * animates in — D-16a. */
+.login-error--animated.is-visible { animation: ih-in 200ms both; }
+
+/* 1a's designed footer hint (D-04 Spacing Scale off-grid exception: "22px
+ * margin-top before the footer block"). */
+.login-footer-hint {
+  margin-top: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font: 400 11px "Iosekey Mono", monospace;
+  color: var(--fg-faint);
+}
+
+.login-caret {
+  display: inline-block;
+  color: var(--accent);
+  animation: ih-blink 1s steps(2) infinite;
+}
+
+/* ===========================================================================
+ * `1b` Fade — staged-reveal grid + preflight column
+ * =========================================================================== */
+
+.login-fade-content {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
+.login-fade-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: 452px 1px 1fr;
+  gap: 44px;
+  align-items: center;
+  justify-content: center;
+  padding: 0 60px;
+}
+
+.login-fade-left .login-fields {
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.login-fade-divider {
+  width: 1px;
+  height: 340px;
+  background: var(--border-subtle);
+  align-self: center;
+}
+
+.login-fade-right {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.login-preflight-title {
+  font: 600 11px "Iosekey Mono", monospace;
+  letter-spacing: 0.14em;
+  color: var(--fg-dim);
+}
+
+.login-preflight-row {
+  display: flex;
+  gap: 12px;
+  font: 400 13px "Iosekey Mono", monospace;
+  color: var(--fg);
+}
+.login-ok { color: var(--success); }
+.login-missing { color: var(--warning); }
+.login-preflight-label { flex: 1; }
+.login-preflight-hint { color: var(--fg-faint); }
+
+.login-scanner {
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.login-scanner-cells {
+  display: flex;
+  font: 400 15px/1 "Iosekey Mono", monospace;
+  letter-spacing: 2px;
+  color: oklch(32% 0.03 210);
+}
+.login-scanner-label {
+  font: 400 11px "Iosekey Mono", monospace;
+  letter-spacing: 0.1em;
+  color: var(--fg-faint);
+}
+
+.login-replay {
+  position: absolute;
+  top: 52px;
+  right: 20px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  color: var(--fg-dim);
+  font: 600 10px "Iosekey Mono", monospace;
+  letter-spacing: 0.14em;
+  padding: 7px 11px;
+  cursor: pointer;
+}
+.login-replay:hover { color: var(--accent); border-color: var(--accent); }
+.login-replay:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ===========================================================================
+ * Responsive Behavior (Task 1 checkpoint: ui-spec-default)
+ *
+ * Ultrawide (>1180px): 1a/1b's status bars are already full-width flex rows
+ * and their centered content is naturally width-capped by .login-card /
+ * .login-fade-grid's own max-widths — no additional rule needed for these
+ * two treatments (background-scene treatments in Plan 05 need real rules).
+ *
+ * Mobile (<640px): single shared layout — status chrome collapses to a
+ * single-line header (wordmark + lock state only, dropping build/session/
+ * token metadata); the card moves to width: min(452px, calc(100vw - 32px))
+ * in normal flow; 1b's two-column grid collapses to the credential column
+ * only (no decorative background exists on either treatment to hide).
+ * =========================================================================== */
+
+@media (max-width: 639px) {
+  .login-statusbar-mobile-brand { display: inline; font: 700 13px "Iosekey Cond", "Iosekey Mono", monospace; color: var(--accent); }
+  .login-statusbar-metadata { display: none; }
+  .login-statusbar--bottom { display: none; }
+
+  .login-card { width: min(452px, calc(100vw - 32px)); padding: 24px 20px 20px; }
+  .login-center { padding: 16px; }
+
+  .login-fade-grid {
+    display: flex;
+    flex-direction: column;
+    padding: 16px;
+    gap: 16px;
+  }
+  .login-fade-divider,
+  .login-fade-right { display: none; }
+  .login-fade-left .login-fields { margin-top: 16px; }
+}
+
+/* ===========================================================================
+ * Accessibility — prefers-reduced-motion
+ * =========================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  .login-shell * {
+    animation-duration: 0.001ms !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ===========================================================================
+ * Phase 47.3 Plan 05 (D-01/D-04/D-05/D-16a/D-16b/D-16c): `1c` Blast doors,
+ * `1d` Matrix rain, `2a` Orbit Veil — completing the five-treatment set.
+ *
+ * Keyframe names lifted VERBATIM from the design export per D-04.
+ * =========================================================================== */
+
+@keyframes ih-fail {
+  0%, 86%, 100% { opacity: 1; }
+  87% { opacity: .12; }
+  88% { opacity: .85; }
+  89% { opacity: .06; }
+  90.5% { opacity: .7; }
+  91.5% { opacity: .04; }
+  93% { opacity: .55; }
+  94% { opacity: 1; }
+  95.5% { opacity: .18; }
+  96.5% { opacity: .92; }
+}
+@keyframes ih-hum {
+  0%, 100% { opacity: 1; }
+  47% { opacity: .86; }
+  62% { opacity: .97; }
+}
+@keyframes ih-spin-globe {
+  from { background-position: 0 center; }
+  to   { background-position: -1600px center; }
+}
+@keyframes ih-orbit {
+  from { transform: rotate(0); }
+  to   { transform: rotate(360deg); }
+}
+@keyframes ih-twinkle {
+  0%, 100% { opacity: .85; }
+  50% { opacity: .25; }
+}
+
+/* ===========================================================================
+ * `1c` Blast doors — airlock scene, auth-driven alarm cascade (D-16b/D-16c)
+ *
+ * The entire hue-250/230 airlock palette below is a deliberate D-04
+ * keep-literal exception (47.3-UI-SPEC.md "Not mapped — no token exists")
+ * — one colder, more industrial hue distinct from slate-dark's warm 260.
+ * Only the SEALED panel's accent text/input (--accent/--fg/--fg-dim, via
+ * the shared .login-input/.login-divider/.login-field* classes) map to
+ * tokens, matching the rest of the app.
+ *
+ * Lamp system (D-16b): `.cd-lamp--bus` is the auth-driven "ih-hum" working
+ * lamp bus — it switches wholesale to the alarm treatment via the shared
+ * [data-fail-target] mechanism (submit_script()'s showDenied()).
+ * `.cd-lamp--ambient` is the unconditional "ih-fail" flicker (the flaky
+ * lamp A-02, the right side-panel lamp, and Bulkhead B's outer lamp — all
+ * three hardcoded to ih-fail in the export) — it NEVER carries
+ * data-fail-target and NEVER changes on auth state.
+ * =========================================================================== */
+
+.login-shell--blast-doors {
+  position: relative;
+  overflow: hidden;
+  background: oklch(11% 0.010 250);
+}
+
+.cd-scene {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+}
+.cd-statusbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 20px;
+  font: 500 11px/1 "Iosekey Mono", monospace;
+  letter-spacing: .15em;
+  color: var(--fg-dim);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.cd-providers-panel { flex: 1; padding: 34px 40px; }
+.cd-providers-kicker {
+  font: 500 11px "Iosekey Mono", monospace;
+  letter-spacing: .14em;
+  color: var(--fg-faint);
+}
+.cd-providers-title {
+  font: 700 38px/1.1 "Iosekey Cond", monospace;
+  color: var(--fg);
+  margin-top: 6px;
+}
+.cd-providers-sub {
+  font: 400 13px "Iosekey Mono", monospace;
+  color: var(--fg-dim);
+  margin-top: 10px;
+}
+.cd-providers-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 18px;
+  margin-top: 28px;
+}
+.cd-provider {
+  border: 1px solid oklch(34% 0.06 210);
+  background: var(--bg-surface);
+  padding: 16px;
+}
+.cd-provider-row { display: flex; align-items: center; gap: 12px; }
+.cd-provider-icon {
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border: 1px solid oklch(34% 0.06 210);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+  font-size: 12px;
+}
+.cd-provider-name { font: 700 14px "Iosekey Mono", monospace; color: var(--fg); }
+.cd-provider-url { font: 400 11px "Iosekey Mono", monospace; color: var(--fg-faint); margin-top: 3px; }
+.cd-provider-badge {
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  font: 600 9.5px "Iosekey Mono", monospace;
+  letter-spacing: .12em;
+  padding: 4px 7px;
+}
+.cd-provider-meta {
+  border-top: 1px dashed var(--border-subtle);
+  margin-top: 14px;
+  padding-top: 12px;
+  font: 400 10.5px "Iosekey Mono", monospace;
+  letter-spacing: .08em;
+  color: var(--fg-faint);
+}
+
+.cd-airlock { position: absolute; inset: 0; z-index: 2; background: oklch(11% 0.010 250); pointer-events: none; }
+
+.cd-header {
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 112px;
+  background: oklch(14% 0.012 250);
+  border-bottom: 1px solid oklch(22% 0.014 250);
+}
+.cd-header-vent {
+  position: absolute;
+  left: 50%;
+  bottom: 12px;
+  transform: translateX(-50%);
+  width: 420px;
+  height: 14px;
+  background: oklch(17% 0.012 250);
+  border-top: 1px solid oklch(26% 0.016 250);
+}
+
+.cd-side { position: absolute; top: 112px; bottom: 0; width: 172px; background: oklch(15% 0.012 250); }
+.cd-side--left { left: 0; border-right: 1px solid oklch(23% 0.014 250); }
+.cd-side--right { right: 0; border-left: 1px solid oklch(23% 0.014 250); }
+
+.cd-floor {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  height: 78px;
+  background: oklch(13% 0.010 250);
+  border-top: 1px solid oklch(21% 0.014 250);
+}
+
+.cd-lamp {
+  position: absolute;
+  background: oklch(94% 0.02 230);
+  box-shadow: 0 0 30px 9px oklch(68% 0.06 230);
+}
+.cd-lamp--bus { animation: ih-hum 7s infinite; }
+.cd-lamp--bus.is-failed {
+  background: oklch(58% 0.22 25);
+  box-shadow: 0 0 30px 9px oklch(48% 0.18 25);
+  animation: ih-blink 0.9s steps(2) infinite;
+}
+.cd-lamp--ambient { animation: ih-fail 11s infinite; }
+.cd-lamp--floor.cd-lamp--bus { animation: none; } /* floor lamps: color-only, no lampAnim in the export */
+.cd-lamp--floor.cd-lamp--bus.is-failed { animation: none; }
+
+.cd-lamp--header { top: 34px; left: 50%; transform: translateX(-50%); width: 300px; height: 11px; }
+.cd-lamp--header-side { top: 16px; width: 96px; height: 9px; }
+.cd-lamp--header-side.cd-lamp--left { left: 38px; }
+.cd-lamp--header-side.cd-lamp--right { right: 38px; }
+.cd-lamp--vertical { top: 64px; bottom: 150px; width: 9px; }
+.cd-lamp--floor { bottom: 22px; width: 74px; height: 7px; }
+.cd-lamp--floor.cd-lamp--left { left: 44px; }
+.cd-lamp--floor.cd-lamp--right { right: 44px; }
+.cd-lamp--door { top: 28%; bottom: 28%; width: 7px; }
+
+.cd-door {
+  position: absolute;
+  top: 112px;
+  bottom: 78px;
+  width: 418px;
+  z-index: 3;
+  background: oklch(24% 0.018 250);
+  border-top: 2px solid oklch(40% 0.020 250);
+  transition: transform 1050ms cubic-bezier(.7,0,.2,1);
+}
+/* D-16c: the bulkhead slams shut faster than it opens — the ONE
+ * timeout-scoped transition-duration override in the phase. Wiring the
+ * `.is-timeout` class to a live D-17 idle timer is out of this plan's
+ * files_modified; the visual + CSS contract ships now. */
+.login-shell.is-timeout .cd-door { transition-duration: 260ms; }
+.cd-door--left { left: 172px; border-left: 2px solid oklch(34% 0.018 250); }
+.cd-door--right { left: 590px; border-right: 2px solid oklch(34% 0.018 250); }
+.cd-door-panel {
+  position: absolute;
+  inset: 56px 26px;
+  background: oklch(28% 0.020 250);
+  border-top: 1px solid oklch(46% 0.022 250);
+}
+.cd-door-badge {
+  position: absolute;
+  left: 60px; top: 50%;
+  transform: translateY(-50%);
+  width: 72px; height: 26px;
+  background: oklch(13% 0.010 250);
+  border: 1px solid oklch(34% 0.018 250);
+  display: flex; align-items: center; justify-content: center;
+  font: 600 9px "Iosekey Mono", monospace;
+  letter-spacing: .12em;
+  color: oklch(76% 0.10 230);
+}
+.cd-door-label {
+  position: absolute;
+  left: 22px; top: 22px;
+  font: 400 10px "Iosekey Mono", monospace;
+  letter-spacing: .16em;
+  color: oklch(48% 0.020 250);
+}
+.cd-door--right .cd-door-label { left: auto; right: 22px; }
+.cd-blink-light {
+  position: absolute;
+  left: 40px; top: 50%;
+  transform: translateY(-50%);
+  width: 9px; height: 9px;
+  background: oklch(62% 0.20 25);
+  box-shadow: 0 0 14px 4px oklch(50% 0.16 25);
+  animation: ih-blink 2.4s steps(2) infinite;
+}
+
+.cd-panel {
+  position: absolute;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: 430px;
+  z-index: 4;
+  background: oklch(12% 0.010 250);
+  border: 1px solid oklch(76% 0.14 210);
+  padding: 26px 28px; /* off-grid, lifted verbatim per D-04 */
+  pointer-events: auto;
+}
+.cd-panel.is-failed { border-color: var(--danger); }
+.cd-panel-head { display: flex; justify-content: space-between; align-items: baseline; }
+.cd-seal { font: 600 11px "Iosekey Mono", monospace; letter-spacing: .16em; color: var(--accent); }
+.cd-seal.is-failed { color: var(--danger); }
+.cd-status { font: 400 11px "Iosekey Mono", monospace; letter-spacing: .1em; color: var(--fg-dim); }
+.cd-status.is-failed { color: var(--danger); }
+.cd-status--timeout { display: none; }
+.login-shell.is-timeout .cd-status { display: none; }
+.login-shell.is-timeout .cd-status--timeout { display: inline; color: var(--danger); }
+
+.cd-panel .login-divider { margin: 16px 0 18px; }
+.login-input--airlock { background: oklch(9% 0.008 250); border-color: oklch(30% 0.016 250); }
+
+.cd-submit {
+  margin-top: 16px;
+  width: 100%;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  color: var(--fg);
+  font: 700 12px "Iosekey Mono", monospace;
+  letter-spacing: .18em;
+  padding: 13px;
+  cursor: pointer;
+}
+.cd-submit:hover { background: oklch(38% 0.10 210); }
+.cd-submit:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.cd-panel .login-error { margin-top: 14px; padding: 10px 12px; font: 400 11px/1.6 "Iosekey Mono", monospace; }
+.cd-timeout-box {
+  display: none;
+  margin-top: 14px;
+  border: 1px solid var(--danger);
+  padding: 10px 12px;
+  font: 400 11px/1.6 "Iosekey Mono", monospace;
+  color: var(--danger);
+}
+.login-shell.is-timeout .cd-timeout-box { display: block; }
+.cd-panel-footer { margin-top: 14px; font: 400 11px "Iosekey Mono", monospace; color: var(--fg-faint); }
+
+/* ===========================================================================
+ * `1d` Matrix rain — terminal-dark theme scope (D-04/D-05)
+ *
+ * Per 47.3-UI-SPEC.md "Color System Resolution", this scope re-declares the
+ * Master Token Table's terminal-dark column so every EXISTING shared class
+ * (.login-card, .login-input, .login-submit, .login-error, .login-brand,
+ * .login-statusbar, ...) renders correctly for `1d` with zero duplication —
+ * .login-error already reads var(--danger), so the hotter
+ * oklch(70% 0.20 25) (D-16a) falls out of this scope automatically.
+ * =========================================================================== */
+
+[data-theme="terminal-dark"] {
+  --bg-canvas:    oklch(8% 0 0);
+  --bg-surface:   oklch(12% 0 0);
+  --bg-input:     oklch(6% 0 0);
+  --fg:           oklch(94% 0.02 140);
+  --fg-dim:       oklch(58% 0.04 140);
+  --fg-faint:     oklch(40% 0.03 140);
+  --border:        oklch(30% 0.020 140);
+  --border-subtle: oklch(20% 0.010 140);
+  --accent:      oklch(82% 0.18 145);
+  --accent-soft: oklch(24% 0.08 145);
+  --success: oklch(80% 0.18 145);
+  --warning: oklch(82% 0.16 90);
+  --danger:  oklch(70% 0.20 25);
+}
+
+.login-shell--matrix-rain { position: relative; overflow: hidden; background: var(--bg-canvas); }
+
+.login-chat-mock {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  pointer-events: none;
+}
+.login-chat-mock-body {
+  flex: 1;
+  padding: 30px 44px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  font: 400 14px/1.55 "Iosekey Mono", monospace;
+  color: var(--fg);
+}
+.login-chat-mock-line { font-size: 11px; letter-spacing: .12em; }
+
+.login-rain-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+.login-rain-overlay { position: absolute; inset: 0; display: flex; flex-direction: column; z-index: 1; }
+
+.login-card--rain { max-width: 470px; padding: 32px; border-color: var(--accent); }
+.login-submit--rain { background: var(--accent-soft); }
+
+/* ===========================================================================
+ * `2a` Orbit Veil — globe HUD (Tailwind-slate literals, D-04 keep-literal)
+ * with a deliberately clashing auth panel (IronHermes mono / 0-radius,
+ * slate-dark tokens — reuses .login-input/.login-field*/.login-divider/
+ * .login-submit/.login-error unchanged).
+ * =========================================================================== */
+
+.login-shell--orbit-veil { position: relative; overflow: hidden; background: #04060a; min-height: 100vh; }
+
+.ov-sky { position: absolute; inset: 0; overflow: hidden; }
+.ov-star { position: absolute; background: #cfe0f5; animation: ih-twinkle 6s infinite; }
+
+.ov-globe-wrap { position: absolute; left: 50%; top: 50%; transform: translate(-6%, -50%); width: 660px; height: 660px; }
+.ov-globe {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  /* NO background-image here, deliberately. A relative `url("./earth-night.jpg")`
+   * resolves against this stylesheet's own URL to `/assets/earth-night.jpg` — the
+   * UNHASHED path. dx only ever emits the hashed name
+   * (`earth-night-<hash>.jpg`), and `public_asset_paths()` allowlists that hashed
+   * name, so the relative request 401s and the globe renders as empty space. The
+   * image is applied inline by `render_orbit_veil()` in login_page.rs, which is the
+   * only place with access to the `asset!()`-derived hashed URL. See the note there.
+   * Do not "restore" a url() here — it cannot work from a static stylesheet. */
+  background-size: 1600px 800px;
+  background-repeat: repeat-x;
+  background-position: 0 center;
+  animation: ih-spin-globe 240s linear infinite;
+}
+.ov-globe-shade {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(120% 120% at 26% 22%, rgba(51,102,184,.20) 0%, rgba(0,0,0,0) 44%, rgba(0,0,0,.74) 88%);
+}
+.ov-globe-inner-glow { position: absolute; inset: -16px; border-radius: 50%; box-shadow: inset 0 0 46px 15px rgba(77,140,255,.34); }
+.ov-globe-ring { position: absolute; inset: -2px; border-radius: 50%; border: 2px solid rgba(77,140,255,.48); box-shadow: 0 0 44px 11px rgba(77,140,255,.24); }
+
+.ov-orbit { position: absolute; inset: 0; }
+.ov-orbit-spin { position: absolute; inset: 0; animation: ih-orbit linear infinite; }
+.ov-orbit-dot { position: absolute; left: 50%; top: -2px; border-radius: 50%; transform: translateX(-50%); }
+
+.ov-wordmark { position: absolute; left: 28px; top: 24px; font: 600 20px "Iosekey Mono", monospace; letter-spacing: .34em; color: #f1f5f9; }
+.ov-wordmark-o { position: relative; display: inline-block; color: #38bdf8; }
+.ov-wordmark-ring {
+  position: absolute; left: -22%; top: 50%;
+  width: 144%; height: 56%;
+  border: 1.5px solid rgba(56,189,248,.9);
+  border-radius: 50%;
+  transform: translateY(-50%) rotate(-18deg);
+  pointer-events: none;
+}
+.ov-wordmark-sub { margin-top: 5px; font: 400 11px "Iosekey Mono", monospace; letter-spacing: .18em; text-transform: uppercase; color: #94a3b8; }
+
+.ov-clock {
+  position: absolute; left: 50%; top: 24px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 16px;
+  border: 1px solid rgba(255,255,255,.10); border-radius: 12px;
+  background: rgba(10,14,20,.70); padding: 10px 20px;
+  pointer-events: none;
+}
+.ov-clock-time { font: 500 24px "Iosekey Mono", monospace; letter-spacing: .05em; font-variant-numeric: tabular-nums; color: #f1f5f9; }
+.ov-clock-date { font: 400 11px "Iosekey Mono", monospace; letter-spacing: .05em; color: #94a3b8; text-align: right; }
+.ov-clock-badge { margin-top: 2px; display: flex; align-items: center; justify-content: flex-end; gap: 6px; font: 400 10px "Iosekey Mono", monospace; letter-spacing: .05em; color: #34d399; }
+.ov-clock-dot { width: 6px; height: 6px; border-radius: 50%; background: #34d399; }
+
+.ov-search {
+  position: absolute; right: 28px; top: 24px; width: 300px;
+  box-sizing: border-box;
+  border: 1px solid rgba(255,255,255,.10); border-radius: 12px;
+  background: rgba(10,14,20,.70); color: #64748b;
+  font: 400 12px "Iosekey Mono", monospace;
+  padding: 10px 12px 10px 34px;
+  pointer-events: none;
+}
+
+.ov-layers {
+  position: absolute; left: 28px; bottom: 34px; width: 248px;
+  box-sizing: border-box;
+  border: 1px solid rgba(255,255,255,.10); border-radius: 12px;
+  background: rgba(10,14,20,.70); padding: 14px 16px;
+  pointer-events: none;
+}
+.ov-layers-title { margin-bottom: 8px; font: 400 10px "Iosekey Mono", monospace; letter-spacing: .25em; text-transform: uppercase; color: #64748b; }
+.ov-layer-row { display: flex; align-items: center; gap: 10px; min-height: 28px; padding: 2px 8px; }
+.ov-layer-dot { width: 7px; height: 7px; flex: none; border-radius: 50%; }
+.ov-layer-name { flex: 1; font: 400 12px sans-serif; color: #cbd5e1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ov-layer-count { font: 400 11px "Iosekey Mono", monospace; font-variant-numeric: tabular-nums; color: #64748b; }
+
+.ov-transport {
+  position: absolute; left: 50%; bottom: 22px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 2px;
+  border: 1px solid rgba(255,255,255,.10); border-radius: 999px;
+  background: rgba(10,14,20,.75); padding: 6px;
+  pointer-events: none;
+}
+.ov-speed { min-width: 44px; border-radius: 999px; padding: 6px 8px; font: 400 11px "Iosekey Mono", monospace; font-variant-numeric: tabular-nums; text-align: center; color: #94a3b8; }
+.ov-speed--active { background: rgba(56,189,248,.25); color: #bae6fd; }
+.ov-play { margin-left: 4px; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; color: #cbd5e1; font: 400 11px "Iosekey Mono", monospace; }
+.ov-live {
+  margin-left: 4px; display: flex; align-items: center; gap: 6px;
+  border: 1px solid rgba(52,211,153,.50); border-radius: 999px;
+  padding: 6px 14px; font: 400 11px "Iosekey Mono", monospace; letter-spacing: .05em;
+  background: #34d399; color: #022c22;
+}
+.ov-live-dot { width: 6px; height: 6px; border-radius: 50%; background: #022c22; }
+
+.ov-footer-left, .ov-footer-right {
+  position: absolute; bottom: 8px;
+  font: 400 10px "Iosekey Mono", monospace; letter-spacing: .05em; color: #475569;
+}
+.ov-footer-left { left: 28px; }
+.ov-footer-right { right: 28px; font-variant-numeric: tabular-nums; }
+
+.ov-panel-wrap { position: relative; z-index: 5; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 24px; }
+.ov-panel {
+  width: 100%;
+  max-width: 414px;
+  box-sizing: border-box;
+  background: var(--bg-surface);
+  border: 1px solid var(--accent);
+  padding: 30px 30px 26px; /* off-grid, lifted verbatim per D-04 */
+}
+.ov-panel.is-failed { border-color: var(--danger); }
+.ov-panel .login-brand { font-size: 27px; } /* the smaller-card exception to the 30px login-form scale */
+.ov-panel .login-divider { margin: 20px 0; }
+.ov-panel .login-footer-hint { margin-top: 18px; }
+
+/* ===========================================================================
+ * Phase 47.3 Plan 08 (gap-closure, D-01/D-04/D-05/D-15/D-16a/D-18): mobile
+ * (<640px) collapse for `1c`/`1d`/`2a` — the one failed must-have from
+ * 47.3-VERIFICATION.md (truth 24). This is a SECOND max-width:639px media
+ * block, appended at end-of-file rather than merged into the block
+ * above (line ~422): the Plan 05 selectors (this file, above) all come
+ * AFTER that first block, so at equal specificity a later declaration
+ * (e.g. `.ov-panel-wrap { ... padding: 24px }`) would silently override a
+ * reflow rule written into the first block — `display: none` alone would
+ * have survived, the reflow properties would not. Appending here
+ * guarantees this block wins the cascade. Only layout properties (display,
+ * position, transform, overflow, width, max-width, margin, flex, padding)
+ * are set on selectors that already exist — no new colour, keyframe,
+ * token or class (D-04 port fidelity).
+ * =========================================================================== */
+
+@media (max-width: 639px) {
+  /* Shared across all five treatments — NOT a design preference, a platform
+   * threshold. iOS Safari zooms the viewport whenever a focused input computes
+   * below 16px, and this page deliberately does not pin the scale: the viewport
+   * meta is `width=device-width, initial-scale=1` with no `maximum-scale` /
+   * `user-scalable=no`, because suppressing the symptom that way disables
+   * pinch-zoom entirely and that is an accessibility regression on a page an
+   * operator has to read. At the base 14px (login.css:247) the zoom fires the
+   * moment the password field is focused and shifts the card off the left edge,
+   * clipping the first character of every line — reported from an iPhone during
+   * 47.3 UAT, and invisible to every desktop browser and every test in this repo.
+   *
+   * 16px is a hard cutoff, not a target: 15.9px still triggers it. Do not
+   * "restore" this to 14px for port fidelity — D-04's 14px still governs above
+   * 640px, where no handset auto-zoom exists. All five treatments render a single
+   * `#login-password.login-input`; `1c`'s `.login-input--airlock` overrides only
+   * background and border, so this one rule reaches every one of them. */
+  .login-input { font-size: 16px; }
+
+  /* `1c` Blast doors — hide the entire airlock scene (provider grid,
+   * header/side/floor/lamp chassis, both bulkhead doors); the SEALED
+   * credential panel is a SIBLING of `.cd-airlock` (login_page.rs:701),
+   * not a child, so hiding the airlock leaves it untouched. It reflows
+   * into normal document flow at the same shared width Plan 04 shipped
+   * for `.login-card`. */
+  .cd-scene, .cd-airlock, .cd-door { display: none; }
+  .login-shell--blast-doors { overflow: visible; }
+  .cd-panel {
+    position: static;
+    transform: none;
+    width: min(452px, calc(100vw - 32px));
+    max-width: none;
+    margin: auto;
+  }
+
+  /* `1d` Matrix rain — both background layers are absolutely positioned
+   * behind `.login-rain-overlay`, so hiding them falls back to the flat
+   * terminal-dark `--bg-canvas` fill with no layout shift. The REAL
+   * status bar lives inside `.login-rain-overlay` and already collapses
+   * via the shared `.login-statusbar-*` rules above — no per-treatment
+   * duplication is added here. */
+  .login-chat-mock, .login-rain-canvas { display: none; }
+  .login-shell--matrix-rain { overflow: visible; }
+  .login-rain-overlay { position: static; flex: 1; }
+  .login-card--rain { width: min(452px, calc(100vw - 32px)); max-width: none; }
+
+  /* `2a` Orbit Veil — hide the full HUD/sky/globe set, including the
+   * wordmark (brand identity survives inside the card via the existing
+   * `.ov-panel .login-brand` rule); the veil panel reflows to the shared
+   * width and the same mobile padding `.login-center` already uses. */
+  .ov-sky, .ov-globe-wrap, .ov-wordmark, .ov-clock, .ov-search, .ov-layers,
+  .ov-transport, .ov-footer-left, .ov-footer-right { display: none; }
+  .login-shell--orbit-veil { overflow: visible; }
+  .ov-panel-wrap { padding: 16px; }
+  .ov-panel { width: min(452px, calc(100vw - 32px)); max-width: none; }
+}

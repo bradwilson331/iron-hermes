@@ -1,31 +1,33 @@
 ---
 name: kanban-worker
-description: Pitfalls, examples, and edge cases for Hermes Kanban workers. The lifecycle itself is auto-injected into every worker's system prompt as KANBAN_GUIDANCE (from agent/prompt_builder.py); this skill is what you load when you want deeper detail on specific scenarios.
-version: 2.0.0
+description: Pitfalls, examples, and edge cases for Hermes Kanban workers. The lifecycle itself is auto-injected into every worker's system prompt as KANBAN_GUIDANCE (defined in crates/ironhermes-kanban/src/kanban_guidance.rs, injected via crates/ironhermes-cli/src/main.rs); this skill is what you load when you want deeper detail on specific scenarios.
+version: 2.1.0
 platforms: [linux, macos, windows]
 metadata:
-  hermes:
-    tags: [kanban, multi-agent, collaboration, workflow, pitfalls]
-    related_skills: [kanban-orchestrator]
+  ironhermes:
+        tags: [kanban, multi-agent, collaboration, workflow, pitfalls]
+        related_skills: [kanban-orchestrator]
 ---
 
 # Kanban Worker — Pitfalls and Examples
 
-> You're seeing this skill because the Hermes Kanban dispatcher spawned you as a worker with `--skills kanban-worker` — it's loaded automatically for every dispatched worker. The **lifecycle** (6 steps: orient → work → heartbeat → block/complete) also lives in the `KANBAN_GUIDANCE` block that's auto-injected into your system prompt. This skill is the deeper detail: good handoff shapes, retry diagnostics, edge cases.
+> You're seeing this skill because the IronHermes Kanban dispatcher spawned you as a worker with `--skills kanban-worker` — it's loaded automatically for every dispatched worker. The **lifecycle** (6 steps: orient → work → heartbeat → block → complete → terminate) also lives in the `KANBAN_GUIDANCE` block that's auto-injected into your system prompt. This skill is the deeper detail: good handoff shapes, the terminator/run-id contract, swarm root discovery, retry diagnostics, edge cases.
 
 ## Workspace handling
 
-Your workspace kind determines how you should behave inside `$HERMES_KANBAN_WORKSPACE`:
+Your workspace kind determines how you should behave inside `$IRONHERMES_KANBAN_WORKSPACE`:
 
 | Kind | What it is | How to work |
 |---|---|---|
 | `scratch` | Fresh tmp dir, yours alone | Read/write freely; it gets GC'd when the task is archived. |
 | `dir:<path>` | Shared persistent directory | Other runs will read what you write. Treat it like long-lived state. Path is guaranteed absolute (the kernel rejects relative paths). |
-| `worktree` | Git worktree at the resolved path | If `.git` doesn't exist, run `git worktree add <path> ${HERMES_KANBAN_BRANCH:-wt/$HERMES_KANBAN_TASK}` from the main repo first, then cd and work normally. Commit work here. |
+| `project:<repo>` | Isolated git worktree of `<repo>` | The dispatcher already created this worktree (`git worktree add`) and handed it to you as your current directory — never create or `cd` into a worktree yourself. The referenced repo itself is never mutated in-place; commit your work in this worktree normally. |
+
+Any files attached to the task (via the web UI or `kanban attach`) are already copied into your workspace root before you start — no fetch step needed, for any of the three kinds above.
 
 ## Tenant isolation
 
-If `$HERMES_TENANT` is set, the task belongs to a tenant namespace. When reading or writing persistent memory, prefix memory entries with the tenant so context doesn't leak across tenants:
+If `$IRONHERMES_TENANT` is set, the task belongs to a tenant namespace. When reading or writing persistent memory, prefix memory entries with the tenant so context doesn't leak across tenants:
 
 - Good: `business-a: Acme is our biggest customer`
 - Bad (leaks): `Acme is our biggest customer`
@@ -133,7 +135,7 @@ Good: one sentence naming the specific decision you need. Leave longer context a
 
 ```python
 kanban_comment(
-    task_id=os.environ["HERMES_KANBAN_TASK"],
+    task_id=os.environ["IRONHERMES_KANBAN_TASK"],
     body="Full context: I have user IPs from Cloudflare headers but some users are behind NATs with thousands of peers. Keying on IP alone causes false positives.",
 )
 kanban_block(reason="Rate limit key choice: IP (simple, NAT-unsafe) or user_id (requires auth, skips anonymous endpoints)?")
@@ -143,9 +145,17 @@ The block message is what appears in the dashboard / gateway notifier. The comme
 
 ## Heartbeats worth sending
 
+`kanban_heartbeat` is **deferred in v1** (per `KANBAN_GUIDANCE`). Until it lands, the substitute is to *say* when you expect a long run — in your work and in your final summary — so the operator knows you're alive rather than hung. The rules below apply to any status note you emit today and to `kanban_heartbeat` once it's active:
+
 Good heartbeats name progress: `"epoch 12/50, loss 0.31"`, `"scanned 1.2M/2.4M rows"`, `"uploaded 47/120 videos"`.
 
 Bad heartbeats: `"still working"`, empty notes, sub-second intervals. Every few minutes max; skip entirely for tasks under ~2 minutes.
+
+## Protocol terminator contract
+
+Your run ends with **exactly one** terminator call — `kanban_complete` or `kanban_block`. There is no implicit "done": if your process exits without calling one, the kernel records an exit-without-terminator and auto-blocks the task as a protocol violation, so the operator sees a stalled card instead of silent loss.
+
+Terminating tools take an `expected_run_id`, which is `$IRONHERMES_KANBAN_RUN_ID`. If it no longer matches the task's active run, the terminator is rejected with a structured error — your run was superseded (reclaimed, or a newer worker took over). Don't retry the terminator; stop and exit cleanly. Whoever holds the live run owns the handoff now.
 
 ## Retry scenarios
 
@@ -167,7 +177,7 @@ You can configure the gateway to receive cross-profile Kanban task notifications
 ## Do NOT
 
 - Call `delegate_task` as a substitute for `kanban_create`. `delegate_task` is for short reasoning subtasks inside YOUR run; `kanban_create` is for cross-agent handoffs that outlive one API loop.
-- Modify files outside `$HERMES_KANBAN_WORKSPACE` unless the task body says to.
+- Modify files outside `$IRONHERMES_KANBAN_WORKSPACE` unless the task body says to.
 - Create follow-up tasks assigned to yourself — assign to the right specialist.
 - Complete a task you didn't actually finish. Block it instead.
 
@@ -190,6 +200,15 @@ Every tool has a CLI equivalent for human operators and scripts:
 
 Use the tools from inside an agent; the CLI exists for the human at the terminal.
 
+## Swarm graph root discovery
+
+If you were spawned as part of a swarm graph, you find the shared root card from your own handoffs — no separate env var carries it:
+
+1. `kanban_show()` (your own task) and read `parent_handoffs`. The root card is your parent — one hop up.
+2. `kanban_show(<root_id>)` and read `comments`. The first comment is the swarm blackboard (author `swarm`); treat it as shared state for the whole graph.
+
+In the 4-tier shape, verifier and synthesizer cards sit two hops from root (verifier via any worker, synthesizer via the verifier). This rides the existing 9-env worker contract — there's no extra spawn-env variable to read.
+
 ## Goal mode
 
 Cards created with `goal_mode=true` (CLI flag `--goal`, LLM-tool arg
@@ -198,9 +217,9 @@ in-session worker loop with automatic judge LLM evaluation. The dispatcher
 claims goal-mode cards the normal way and spawns the worker the normal way.
 The worker shell detects goal mode via two env vars set by the spawner:
 
-- `HERMES_KANBAN_GOAL_MODE=1` — flag indicating the worker should wrap
+- `IRONHERMES_KANBAN_GOAL_MODE=1` — flag indicating the worker should wrap
   `AgentLoop::run` in a budget-bounded loop.
-- `HERMES_KANBAN_GOAL_MAX_TURNS=<N>` — per-card turn budget. Default 20 (a
+- `IRONHERMES_KANBAN_GOAL_MAX_TURNS=<N>` — per-card turn budget. Default 20 (a
   caller passing `0` is coerced to 20 at two layers: producer-side in
   `KanbanStore::create_task` and again at `build_kanban_worker_env`).
 

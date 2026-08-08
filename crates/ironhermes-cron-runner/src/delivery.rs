@@ -1,6 +1,8 @@
 use ironhermes_core::Config;
 use ironhermes_cron::{
     CronJob,
+    DeliveryRegistry,
+    DeliverySend,
     DeliveryTarget,
     TgSendApi, // Relocated from ironhermes-gateway in Task 1 step (a)
     format_delivery_message,
@@ -135,6 +137,25 @@ async fn route_media_payload(
 }
 
 // ---------------------------------------------------------------------------
+// buzz_media_notice (D-15)
+// ---------------------------------------------------------------------------
+
+/// Build a text notice naming each media artifact and its local path.
+///
+/// D-15: Buzz ships no `MediaSender` implementation this phase (the URL-embed
+/// / relay-blob / file-server choice stays open for a later phase). Rather
+/// than silently dropping a job's image/video/voice/document output, this
+/// notice is sent as a SECOND text message after the body — a media artifact
+/// on Buzz is always named, never vanished.
+fn buzz_media_notice(paths: &[PathBuf]) -> String {
+    let mut lines = vec!["Media attached (not embeddable on Buzz yet):".to_string()];
+    for path in paths {
+        lines.push(format!("- {}", path.display()));
+    }
+    lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
 // dispatch_all_targets
 // ---------------------------------------------------------------------------
 
@@ -146,14 +167,21 @@ async fn route_media_payload(
 /// Defensive behaviours:
 /// - Returns immediately on `[SILENT]` output (even if upstream missed the gate)
 /// - Accumulates per-target errors rather than aborting on first failure
-/// - Returns `"telegram:<id>: no adapter available"` when `tg_client` is `None`
-/// - Returns `"<platform>:<id>: unsupported platform"` for non-Telegram targets
+/// - Returns `"<platform>:<id>: no adapter available"` when the target's
+///   platform has no sender registered in `delivery_registry` (telegram/buzz)
+/// - Returns `"<platform>:<id>: unsupported platform"` for any other target
+///
+/// The text path for every platform goes through `delivery_registry`
+/// (Phase 47.6 Plan 07) — `tg_client` is now used ONLY for Telegram's media
+/// routing (`route_media_payload`), which `DeliverySend` deliberately does
+/// not cover (D-15: no media sender for Buzz this phase either).
 pub async fn dispatch_all_targets(
     targets: Vec<DeliveryTarget>,
     output: &str,
     job: &CronJob,
     config: &Config,
     tg_client: Option<&Arc<dyn TgSendApi>>,
+    delivery_registry: &DeliveryRegistry,
 ) -> Vec<String> {
     let mut errors: Vec<String> = Vec::new();
 
@@ -172,19 +200,32 @@ pub async fn dispatch_all_targets(
 
         match target.platform.as_str() {
             "telegram" => {
-                let Some(tg) = tg_client else {
+                let Some(sender): Option<Arc<dyn DeliverySend>> =
+                    delivery_registry.get("telegram")
+                else {
                     errors.push(format!("telegram:{}: no adapter available", target.chat_id));
                     continue;
                 };
-                match tg
-                    .send_message(&target.chat_id, &payload, target.thread_id.as_deref())
+                match sender
+                    .send_text(&target.chat_id, &payload, target.thread_id.as_deref())
                     .await
                 {
                     Ok(_) => {
                         // Route media after text body (caption-style ordering — Test 9)
                         if !media_paths.is_empty() {
-                            let media_errors = route_media_payload(target, &media_paths, tg).await;
-                            errors.extend(media_errors);
+                            match tg_client {
+                                Some(tg) => {
+                                    let media_errors =
+                                        route_media_payload(target, &media_paths, tg).await;
+                                    errors.extend(media_errors);
+                                }
+                                None => {
+                                    errors.push(format!(
+                                        "telegram:{}: no adapter available",
+                                        target.chat_id
+                                    ));
+                                }
+                            }
                         }
                     }
                     Err(e) => {
@@ -195,6 +236,48 @@ pub async fn dispatch_all_targets(
                             e
                         );
                         errors.push(format!("telegram:{}: {}", target.chat_id, e));
+                    }
+                }
+            }
+            "buzz" => {
+                let Some(sender): Option<Arc<dyn DeliverySend>> = delivery_registry.get("buzz")
+                else {
+                    errors.push(format!("buzz:{}: no adapter available", target.chat_id));
+                    continue;
+                };
+                match sender
+                    .send_text(&target.chat_id, &payload, target.thread_id.as_deref())
+                    .await
+                {
+                    Ok(_) => {
+                        // D-15: media never silently vanishes on Buzz — a
+                        // second text message names each artifact's local
+                        // path, sent AFTER the body (same caption-style
+                        // ordering as the Telegram arm).
+                        if !media_paths.is_empty() {
+                            let notice = buzz_media_notice(&media_paths);
+                            if let Err(e) = sender
+                                .send_text(&target.chat_id, &notice, target.thread_id.as_deref())
+                                .await
+                            {
+                                error!(
+                                    job_id = %job.id,
+                                    chat_id = %target.chat_id,
+                                    "buzz media notice delivery failed: {}",
+                                    e
+                                );
+                                errors.push(format!("buzz:{}: {}", target.chat_id, e));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!(
+                            job_id = %job.id,
+                            chat_id = %target.chat_id,
+                            "buzz delivery failed: {}",
+                            e
+                        );
+                        errors.push(format!("buzz:{}: {}", target.chat_id, e));
                     }
                 }
             }
@@ -344,6 +427,31 @@ mod tests {
         }
     }
 
+    // `FakeTg` also plays the registry-resident `DeliverySend` role for
+    // "telegram" in these tests — delegating to the same `send_message`
+    // implementation above so a test asserting on `recorded_calls()` sees
+    // both the direct `TgSendApi` media routing AND the registry text path
+    // hit the same recording struct.
+    #[async_trait]
+    impl DeliverySend for FakeTg {
+        async fn send_text(
+            &self,
+            chat_id: &str,
+            content: &str,
+            thread_id: Option<&str>,
+        ) -> anyhow::Result<()> {
+            TgSendApi::send_message(self, chat_id, content, thread_id).await
+        }
+    }
+
+    /// Build a `DeliveryRegistry` with `tg` registered under "telegram" —
+    /// the standard fixture for every pre-existing telegram-path test below.
+    fn telegram_registry(tg: &Arc<FakeTg>) -> DeliveryRegistry {
+        let mut registry = DeliveryRegistry::new();
+        registry.insert("telegram", tg.clone() as Arc<dyn DeliverySend>);
+        registry
+    }
+
     impl FakeTg {
         fn with_fail_on(chat_ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
             Self {
@@ -462,7 +570,9 @@ mod tests {
     async fn test1_empty_targets_returns_no_errors() {
         let job = make_job("local");
         let config = Config::default();
-        let errors = dispatch_all_targets(vec![], "output", &job, &config, None).await;
+        let registry = DeliveryRegistry::new();
+        let errors =
+            dispatch_all_targets(vec![], "output", &job, &config, None, &registry).await;
         assert!(errors.is_empty(), "expected no errors for empty targets");
     }
 
@@ -476,6 +586,7 @@ mod tests {
         let config = config_with_wrap(true);
         let tg = Arc::new(FakeTg::default());
         let targets = vec![make_target("telegram", "42")];
+        let registry = telegram_registry(&tg);
 
         let errors = dispatch_all_targets(
             targets,
@@ -483,6 +594,7 @@ mod tests {
             &job,
             &config,
             Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+            &registry,
         )
         .await;
 
@@ -508,6 +620,7 @@ mod tests {
         let config = config_with_wrap(false);
         let tg = Arc::new(FakeTg::default());
         let targets = vec![make_target("telegram", "42")];
+        let registry = telegram_registry(&tg);
 
         let errors = dispatch_all_targets(
             targets,
@@ -515,6 +628,7 @@ mod tests {
             &job,
             &config,
             Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+            &registry,
         )
         .await;
 
@@ -544,6 +658,7 @@ mod tests {
         // discord (chat_id "99") fails, telegram ("42") succeeds
         let tg = Arc::new(FakeTg::with_fail_on(["99"]));
         let targets = vec![make_target("telegram", "42"), make_target("discord", "99")];
+        let registry = telegram_registry(&tg);
 
         let errors = dispatch_all_targets(
             targets,
@@ -551,6 +666,7 @@ mod tests {
             &job,
             &config,
             Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+            &registry,
         )
         .await;
 
@@ -578,6 +694,7 @@ mod tests {
         let config = Config::default();
         let tg = Arc::new(FakeTg::default());
         let targets = vec![make_target("telegram", "42"), make_target("telegram", "99")];
+        let registry = telegram_registry(&tg);
 
         let errors = dispatch_all_targets(
             targets,
@@ -585,6 +702,7 @@ mod tests {
             &job,
             &config,
             Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+            &registry,
         )
         .await;
 
@@ -605,8 +723,10 @@ mod tests {
         let job = make_job("telegram:42");
         let config = Config::default();
         let targets = vec![make_target("telegram", "42")];
+        let registry = DeliveryRegistry::new();
 
-        let errors = dispatch_all_targets(targets, "output", &job, &config, None).await;
+        let errors =
+            dispatch_all_targets(targets, "output", &job, &config, None, &registry).await;
 
         assert_eq!(errors.len(), 1);
         assert!(
@@ -625,8 +745,10 @@ mod tests {
         let job = make_job("reddit:abc");
         let config = Config::default();
         let targets = vec![make_target("reddit", "abc")];
+        let registry = DeliveryRegistry::new();
 
-        let errors = dispatch_all_targets(targets, "output", &job, &config, None).await;
+        let errors =
+            dispatch_all_targets(targets, "output", &job, &config, None, &registry).await;
 
         assert_eq!(errors.len(), 1);
         assert!(
@@ -663,6 +785,7 @@ mod tests {
         let tg = Arc::new(FakeTg::default());
         let targets = vec![make_target("telegram", "42")];
         let output = "MEDIA: /tmp/img.jpg\nactual message content";
+        let registry = telegram_registry(&tg);
 
         let errors = dispatch_all_targets(
             targets,
@@ -670,6 +793,7 @@ mod tests {
             &job,
             &config,
             Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+            &registry,
         )
         .await;
 
@@ -697,6 +821,7 @@ mod tests {
         let config = Config::default();
         let tg = Arc::new(FakeTg::default());
         let targets = vec![make_target("telegram", "42")];
+        let registry = telegram_registry(&tg);
 
         let errors = dispatch_all_targets(
             targets,
@@ -704,6 +829,7 @@ mod tests {
             &job,
             &config,
             Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+            &registry,
         )
         .await;
 
@@ -723,6 +849,7 @@ mod tests {
         let tg = Arc::new(FakeTg::default());
         let targets = vec![make_target("telegram", "42")];
         let output = "caption text\nMEDIA: /tmp/a.png";
+        let registry = telegram_registry(&tg);
 
         let errors = dispatch_all_targets(
             targets,
@@ -730,6 +857,7 @@ mod tests {
             &job,
             &config,
             Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+            &registry,
         )
         .await;
 
@@ -752,6 +880,7 @@ mod tests {
             let tg = Arc::new(FakeTg::default());
             let targets = vec![make_target("telegram", "42")];
             let output = format!("MEDIA: /tmp/file.{}", ext);
+            let registry = telegram_registry(&tg);
 
             let errors = dispatch_all_targets(
                 targets,
@@ -759,6 +888,7 @@ mod tests {
                 &job,
                 &config,
                 Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+                &registry,
             )
             .await;
 
@@ -801,6 +931,7 @@ mod tests {
             let tg = Arc::new(FakeTg::default());
             let targets = vec![make_target("telegram", "42")];
             let output = format!("MEDIA: /tmp/file.{}", ext);
+            let registry = telegram_registry(&tg);
 
             let errors = dispatch_all_targets(
                 targets,
@@ -808,6 +939,7 @@ mod tests {
                 &job,
                 &config,
                 Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+                &registry,
             )
             .await;
 
@@ -850,6 +982,7 @@ mod tests {
             let tg = Arc::new(FakeTg::default());
             let targets = vec![make_target("telegram", "42")];
             let output = format!("MEDIA: /tmp/file.{}", ext);
+            let registry = telegram_registry(&tg);
 
             let errors = dispatch_all_targets(
                 targets,
@@ -857,6 +990,7 @@ mod tests {
                 &job,
                 &config,
                 Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+                &registry,
             )
             .await;
 
@@ -898,6 +1032,7 @@ mod tests {
         let tg = Arc::new(FakeTg::default());
         let targets = vec![make_target("telegram", "42")];
         let output = "MEDIA: /tmp/blob.xyz";
+        let registry = telegram_registry(&tg);
 
         let errors = dispatch_all_targets(
             targets,
@@ -905,6 +1040,7 @@ mod tests {
             &job,
             &config,
             Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+            &registry,
         )
         .await;
 
@@ -929,6 +1065,7 @@ mod tests {
         let tg = Arc::new(FakeTg::default());
         let targets = vec![make_target("telegram", "42")];
         let output = "MEDIA: /tmp/no_ext_file";
+        let registry = telegram_registry(&tg);
 
         let errors = dispatch_all_targets(
             targets,
@@ -936,6 +1073,7 @@ mod tests {
             &job,
             &config,
             Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+            &registry,
         )
         .await;
 
@@ -953,6 +1091,7 @@ mod tests {
         let tg = Arc::new(FakeTg::default());
         let targets = vec![make_target("telegram", "42")];
         let output = "header\nMEDIA: /tmp/a.png\nMEDIA: /tmp/b.mp4\nMEDIA: /tmp/c.xyz\nfooter";
+        let registry = telegram_registry(&tg);
 
         let errors = dispatch_all_targets(
             targets,
@@ -960,6 +1099,7 @@ mod tests {
             &job,
             &config,
             Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+            &registry,
         )
         .await;
 
@@ -1040,6 +1180,15 @@ mod tests {
             }
         }
 
+        #[async_trait]
+        impl DeliverySend for OrderedFake {
+            async fn send_text(&self, _: &str, _: &str, _: Option<&str>) -> anyhow::Result<()> {
+                let n = self.counter.fetch_add(1, Ordering::SeqCst);
+                *self.message_order.lock().unwrap() = Some(n);
+                Ok(())
+            }
+        }
+
         let counter = Arc::new(AtomicUsize::new(0));
         let fake = Arc::new(OrderedFake {
             counter: counter.clone(),
@@ -1051,6 +1200,8 @@ mod tests {
         let config = Config::default();
         let targets = vec![make_target("telegram", "42")];
         let tg: Arc<dyn TgSendApi> = fake.clone();
+        let mut registry = DeliveryRegistry::new();
+        registry.insert("telegram", fake.clone() as Arc<dyn DeliverySend>);
 
         let errors = dispatch_all_targets(
             targets,
@@ -1058,6 +1209,7 @@ mod tests {
             &job,
             &config,
             Some(&tg),
+            &registry,
         )
         .await;
 
@@ -1088,6 +1240,7 @@ mod tests {
         let tg = Arc::new(FakeTg::with_fail_media([PathBuf::from("/tmp/a.png")]));
         let targets = vec![make_target("telegram", "42")];
         let output = "caption\nMEDIA: /tmp/a.png";
+        let registry = telegram_registry(&tg);
 
         let errors = dispatch_all_targets(
             targets,
@@ -1095,6 +1248,7 @@ mod tests {
             &job,
             &config,
             Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+            &registry,
         )
         .await;
 
@@ -1119,8 +1273,10 @@ mod tests {
         let config = Config::default();
         let targets = vec![make_target("telegram", "42")];
         let output = "MEDIA: /tmp/a.png\nsome text";
+        let registry = DeliveryRegistry::new();
 
-        let errors = dispatch_all_targets(targets, output, &job, &config, None).await;
+        let errors =
+            dispatch_all_targets(targets, output, &job, &config, None, &registry).await;
 
         assert_eq!(errors.len(), 1, "expected 1 error: {:?}", errors);
         assert!(
@@ -1138,6 +1294,7 @@ mod tests {
         let tg = Arc::new(FakeTg::default());
         let targets = vec![make_target("telegram", "42")];
         let output = "MEDIA: /tmp/IMG.PNG";
+        let registry = telegram_registry(&tg);
 
         let errors = dispatch_all_targets(
             targets,
@@ -1145,6 +1302,7 @@ mod tests {
             &job,
             &config,
             Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+            &registry,
         )
         .await;
 
@@ -1164,6 +1322,7 @@ mod tests {
         let tg = Arc::new(FakeTg::default());
         let targets = vec![make_target("telegram", "42")];
         let output = "MEDIA: blob.png";
+        let registry = telegram_registry(&tg);
 
         let errors = dispatch_all_targets(
             targets,
@@ -1171,6 +1330,7 @@ mod tests {
             &job,
             &config,
             Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+            &registry,
         )
         .await;
 
@@ -1196,6 +1356,7 @@ mod tests {
         let tg = Arc::new(FakeTg::default());
         let targets = vec![make_target("telegram", "12345")];
         let output = "[SILENT] MEDIA: /tmp/a.png";
+        let registry = telegram_registry(&tg);
 
         let errors = dispatch_all_targets(
             targets,
@@ -1203,6 +1364,7 @@ mod tests {
             &job,
             &config,
             Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+            &registry,
         )
         .await;
 
@@ -1240,6 +1402,7 @@ mod tests {
         let tg = Arc::new(FakeTg::default());
         let targets = vec![make_target("telegram", "12345")];
         let output = "[SILENT] this is silent output";
+        let registry = telegram_registry(&tg);
 
         let errors = dispatch_all_targets(
             targets,
@@ -1247,6 +1410,7 @@ mod tests {
             &job,
             &config,
             Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+            &registry,
         )
         .await;
 
@@ -1267,6 +1431,7 @@ mod tests {
         let config = Config::default();
         let tg = Arc::new(FakeTg::with_fail_on(["fail-me"]));
         let targets = vec![make_target("telegram", "fail-me")];
+        let registry = telegram_registry(&tg);
 
         let errors = dispatch_all_targets(
             targets,
@@ -1274,6 +1439,7 @@ mod tests {
             &job,
             &config,
             Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+            &registry,
         )
         .await;
 
@@ -1281,6 +1447,232 @@ mod tests {
         assert!(
             errors[0].contains("telegram:fail-me"),
             "error should include platform:chat_id prefix: {}",
+            errors[0]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Plan 47.6-07 Task 2: buzz delivery via DeliveryRegistry
+    // -----------------------------------------------------------------------
+
+    /// Recording `DeliverySend` fixture for Buzz — no media methods (D-15:
+    /// Buzz ships no `MediaSender` this phase).
+    #[derive(Default)]
+    struct FakeBuzz {
+        calls: Mutex<Vec<(String, String, Option<String>)>>,
+        fail_on: HashSet<String>,
+    }
+
+    #[async_trait]
+    impl DeliverySend for FakeBuzz {
+        async fn send_text(
+            &self,
+            chat_id: &str,
+            content: &str,
+            thread_id: Option<&str>,
+        ) -> anyhow::Result<()> {
+            if self.fail_on.contains(chat_id) {
+                return Err(anyhow::anyhow!("simulated failure for {}", chat_id));
+            }
+            self.calls.lock().unwrap().push((
+                chat_id.to_string(),
+                content.to_string(),
+                thread_id.map(|s| s.to_string()),
+            ));
+            Ok(())
+        }
+    }
+
+    impl FakeBuzz {
+        fn with_fail_on(chat_ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
+            Self {
+                calls: Mutex::new(vec![]),
+                fail_on: chat_ids.into_iter().map(|s| s.into()).collect(),
+            }
+        }
+
+        fn recorded_calls(&self) -> Vec<(String, String, Option<String>)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    fn buzz_registry(buzz: &Arc<FakeBuzz>) -> DeliveryRegistry {
+        let mut registry = DeliveryRegistry::new();
+        registry.insert("buzz", buzz.clone() as Arc<dyn DeliverySend>);
+        registry
+    }
+
+    #[tokio::test]
+    async fn buzz_target_dispatches_through_the_registry() {
+        let job = make_job("buzz:chat1");
+        let config = Config::default();
+        let buzz = Arc::new(FakeBuzz::default());
+        let targets = vec![make_target("buzz", "chat1")];
+        let registry = buzz_registry(&buzz);
+
+        let errors =
+            dispatch_all_targets(targets, "hello", &job, &config, None, &registry).await;
+
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+        let calls = buzz.recorded_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "chat1");
+    }
+
+    #[tokio::test]
+    async fn buzz_send_failure_is_accumulated() {
+        let job = make_job("buzz:fail-me");
+        let config = Config::default();
+        let buzz = Arc::new(FakeBuzz::with_fail_on(["fail-me"]));
+        let targets = vec![make_target("buzz", "fail-me")];
+        let registry = buzz_registry(&buzz);
+
+        let errors =
+            dispatch_all_targets(targets, "output", &job, &config, None, &registry).await;
+
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].contains("buzz:fail-me"),
+            "error should include platform:chat_id prefix: {}",
+            errors[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn buzz_target_without_a_registered_sender_reports_an_error() {
+        let job = make_job("buzz:chat1");
+        let config = Config::default();
+        let targets = vec![make_target("buzz", "chat1")];
+        let registry = DeliveryRegistry::new();
+
+        let errors =
+            dispatch_all_targets(targets, "hello", &job, &config, None, &registry).await;
+
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].contains("buzz") && errors[0].contains("chat1"),
+            "error should name the buzz platform and chat id: {}",
+            errors[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn buzz_media_output_sends_a_text_notice_naming_the_path() {
+        let job = make_job("buzz:chat1");
+        let config = Config::default();
+        let buzz = Arc::new(FakeBuzz::default());
+        let targets = vec![make_target("buzz", "chat1")];
+        let registry = buzz_registry(&buzz);
+        let output = "caption\nMEDIA: /tmp/img.png";
+
+        let errors =
+            dispatch_all_targets(targets, output, &job, &config, None, &registry).await;
+
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+        let calls = buzz.recorded_calls();
+        assert_eq!(
+            calls.len(),
+            2,
+            "expected body send + media notice send: {:?}",
+            calls
+        );
+        assert!(
+            calls[1].1.contains("/tmp/img.png"),
+            "media notice must name the artifact path: {}",
+            calls[1].1
+        );
+    }
+
+    #[tokio::test]
+    async fn buzz_media_notice_is_sent_after_the_body() {
+        let job = make_job("buzz:chat1");
+        let config = Config::default();
+        let buzz = Arc::new(FakeBuzz::default());
+        let targets = vec![make_target("buzz", "chat1")];
+        let registry = buzz_registry(&buzz);
+        let output = "the body text\nMEDIA: /tmp/img.png";
+
+        let errors =
+            dispatch_all_targets(targets, output, &job, &config, None, &registry).await;
+
+        assert!(errors.is_empty(), "unexpected errors: {:?}", errors);
+        let calls = buzz.recorded_calls();
+        assert_eq!(calls.len(), 2);
+        assert!(
+            calls[0].1.contains("the body text"),
+            "first send must be the body: {}",
+            calls[0].1
+        );
+        assert!(
+            calls[1].1.contains("/tmp/img.png"),
+            "second send must be the media notice: {}",
+            calls[1].1
+        );
+    }
+
+    #[tokio::test]
+    async fn silent_output_still_short_circuits_for_every_platform() {
+        let job = make_job_with_origin("origin");
+        let config = Config::default();
+        let tg = Arc::new(FakeTg::default());
+        let buzz = Arc::new(FakeBuzz::default());
+        let mut registry = telegram_registry(&tg);
+        registry.insert("buzz", buzz.clone() as Arc<dyn DeliverySend>);
+        let targets = vec![
+            make_target("telegram", "12345"),
+            make_target("buzz", "chat1"),
+        ];
+        let output = "[SILENT] should not be delivered";
+
+        let errors = dispatch_all_targets(
+            targets,
+            output,
+            &job,
+            &config,
+            Some(&(tg.clone() as Arc<dyn TgSendApi>)),
+            &registry,
+        )
+        .await;
+
+        assert!(errors.is_empty(), "silent output must produce no errors");
+        assert!(tg.recorded_calls().is_empty(), "telegram must not be sent");
+        assert!(buzz.recorded_calls().is_empty(), "buzz must not be sent");
+    }
+
+    #[tokio::test]
+    async fn mixed_targets_accumulate_per_target_errors() {
+        let job = make_job("buzz:chat1,discord:99");
+        let config = Config::default();
+        let buzz = Arc::new(FakeBuzz::default());
+        let registry = buzz_registry(&buzz);
+        let targets = vec![make_target("buzz", "chat1"), make_target("discord", "99")];
+
+        let errors =
+            dispatch_all_targets(targets, "output", &job, &config, None, &registry).await;
+
+        assert_eq!(errors.len(), 1, "expected exactly 1 error: {:?}", errors);
+        assert!(
+            errors[0].contains("discord") && errors[0].contains("unsupported platform"),
+            "error should be unsupported platform for discord: {}",
+            errors[0]
+        );
+        assert_eq!(buzz.recorded_calls().len(), 1, "buzz target must succeed");
+    }
+
+    #[tokio::test]
+    async fn unknown_platform_still_reports_unsupported() {
+        let job = make_job("mastodon:abc");
+        let config = Config::default();
+        let targets = vec![make_target("mastodon", "abc")];
+        let registry = DeliveryRegistry::new();
+
+        let errors =
+            dispatch_all_targets(targets, "output", &job, &config, None, &registry).await;
+
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].contains("mastodon") && errors[0].contains("unsupported platform"),
+            "unexpected error string: {}",
             errors[0]
         );
     }

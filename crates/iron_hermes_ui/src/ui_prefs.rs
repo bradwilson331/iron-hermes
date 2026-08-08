@@ -34,6 +34,18 @@ pub const KEY_THEME: &str = "ih.ui.theme";
 /// localStorage key for the serialised `WheelState` blob.
 pub const KEY_WHEEL: &str = "ih.ui.wheel";
 
+/// localStorage key for the serialised `AvatarPrefs` blob (Phase 40.2, FE-01).
+pub const KEY_AVATAR: &str = "ih.ui.avatar";
+
+/// Phase 47.3 Plan 06 (D-17): localStorage key for the session-death
+/// composer-draft stash. This is the ONLY thing D-17 ever writes to
+/// JS-readable storage — the session token itself never crosses into
+/// localStorage; it lives solely in the `HttpOnly` cookie (T-47.3-09).
+/// Deliberately a distinct, unrelated-looking key from the session cookie
+/// name (`ih_session`, server/auth.rs::SESSION_COOKIE) so a source-level
+/// scan can never confuse the two.
+pub const KEY_SESSION_DRAFT: &str = "ih.ui.session_expiry_draft";
+
 // ---------------------------------------------------------------------------
 // UiPrefs (D-16) — typed mirror of `window.APP_TWEAKS`
 // ---------------------------------------------------------------------------
@@ -69,6 +81,62 @@ impl Default for UiPrefs {
             footer: true,
             density: Density::Comfy,
             rail: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AvatarPrefs (Phase 40.2, FE-01) — orb ↔ avatar toggle preference
+// ---------------------------------------------------------------------------
+
+/// Persisted avatar-mode preferences for the orb ↔ avatar runtime toggle.
+///
+/// Stored at `KEY_AVATAR` (`"ih.ui.avatar"`) in localStorage. Defaults to
+/// orb-mode with the `"facecap"` head preset (D-01: orb is the default).
+///
+/// # Security (T-40.2-01-01)
+///
+/// Fields are **not** annotated with `#[serde(default)]`. A partial or
+/// tampered localStorage blob therefore fails `serde_json::from_str`, causing
+/// hydration's `.ok()` to return `None` and fall back to `AvatarPrefs::default()`.
+/// This mirrors the T-DESERIALIZE mitigation used by `UiPrefs`.
+///
+/// # Phase 40.5 (D-17)
+///
+/// `active_identity` is the persisted pointer to the active communication-path
+/// identity — an orb preset slug (e.g. `"orb_bloom"`) OR a head preset id
+/// (e.g. `"facecap"`). It is **separate** from `head_id` so an orb-type
+/// identity (which has no head rig) can be the active voice path. Validated
+/// against [`avatar_logic::is_known_identity`] before seeding signals.
+///
+/// A legacy localStorage blob that pre-dates this field lacks `active_identity`
+/// and therefore fails `serde_json::from_str` (no `#[serde(default)]`), causing
+/// hydration to fall back to `AvatarPrefs::default()` where
+/// `active_identity = "orb_classic"` — backward-safe, no migration needed.
+#[derive(Clone, PartialEq, Debug, Serialize, Deserialize)]
+pub struct AvatarPrefs {
+    /// `false` = show orb (default, D-01); `true` = show avatar.
+    pub enabled: bool,
+    /// ID of the selected head preset. Must be a valid `PRESET_REGISTRY` id.
+    /// Default: `"facecap"`. Unknown ids fall back to `"facecap"` at call sites.
+    pub head_id: String,
+    /// Phase 40.5 (D-17): Active communication-path identity slug.
+    ///
+    /// May be an orb preset id (`"orb_classic"`, `"orb_bloom"`, …) or a head
+    /// preset id (`"facecap"`, `"groovy"`). Validated with `is_known_identity`
+    /// before use; unknown slugs fall back to `"orb_classic"` at call sites.
+    ///
+    /// Plans 03 and 08 freeze this value at session start to select TTS voice
+    /// and realtime voice for the turn (D-12: locked for session).
+    pub active_identity: String,
+}
+
+impl Default for AvatarPrefs {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            head_id: "facecap".to_string(),
+            active_identity: "orb_classic".to_string(),
         }
     }
 }
@@ -204,6 +272,46 @@ pub fn write_string(key: &str, val: &str) {
     storage::set_item(key, val);
 }
 
+/// Phase 47.3 Plan 06 (D-17): stash the composer's unsent text before a
+/// session-death redirect. Built directly on the existing `write_string`
+/// helper above (same `cfg(target_arch = "wasm32")` gate, own dedicated
+/// key) — no new storage primitive. A no-op when `text` is empty: "when no
+/// unsent composer draft exists at session death, nothing is stashed"
+/// (must_haves truth) — an empty stash would otherwise make
+/// `restore_composer_draft` indistinguishable from "nothing to restore".
+///
+/// Best-effort by construction: `write_string` never surfaces a failure
+/// (quota exceeded / storage disabled both silently no-op inside
+/// `storage::set_item`). This IS the chosen D-17 backstop behavior for that
+/// edge case — the session-death redirect below always proceeds regardless
+/// of whether this write actually landed, since blocking the redirect on a
+/// storage failure would strand the operator on an already-dead session,
+/// which is strictly worse than losing an unsent draft.
+pub fn stash_composer_draft(text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    write_string(KEY_SESSION_DRAFT, text);
+}
+
+/// Phase 47.3 Plan 06 (D-17): restore a stashed composer draft after
+/// re-authentication. Returns `None` when nothing was stashed (either no
+/// draft ever existed, or a previous call already consumed it).
+///
+/// Consumes (clears) the draft on read — a restored draft must not
+/// resurrect on every subsequent load. Clearing is done by overwriting with
+/// an empty string (there is no localStorage `removeItem` helper in this
+/// module; an empty string is treated identically to "absent" here since
+/// `stash_composer_draft` never writes one).
+pub fn restore_composer_draft() -> Option<String> {
+    let draft = read_string(KEY_SESSION_DRAFT)?;
+    if draft.is_empty() {
+        return None;
+    }
+    write_string(KEY_SESSION_DRAFT, "");
+    Some(draft)
+}
+
 // Non-WASM stubs: keep the public signatures so `cargo test` on the host
 // target (where unit tests run) links cleanly. Callers that try to use
 // these on native get well-typed no-ops.
@@ -329,6 +437,35 @@ mod tests {
         assert_eq!(KEY_WHEEL, "ih.ui.wheel");
     }
 
+    /// Phase 47.3 Plan 06 (D-17): the session-draft key must be textually
+    /// distinct from the session cookie name so a source-level scan can
+    /// never mistake one for the other.
+    #[test]
+    fn session_draft_key_is_distinct_from_session_cookie_name() {
+        assert_eq!(KEY_SESSION_DRAFT, "ih.ui.session_expiry_draft");
+        assert_ne!(KEY_SESSION_DRAFT, "ih_session");
+    }
+
+    /// Phase 47.3 Plan 06 (D-17): on the host (non-wasm) target, stash/
+    /// restore resolve to the no-op stub branch — verify they don't panic
+    /// and behave as documented (nothing stashed = nothing restored).
+    #[test]
+    fn stash_and_restore_composer_draft_host_stubs_are_no_ops() {
+        stash_composer_draft("unsent message");
+        assert!(restore_composer_draft().is_none());
+    }
+
+    /// Phase 47.3 Plan 06 (D-17 must_haves): stashing empty text is a no-op
+    /// — this is exercised at the API-contract level here (the host stub
+    /// can't distinguish "no-op because empty" from "no-op because
+    /// non-wasm", but the empty-string early return is dead-simple enough
+    /// that this test documents the contract regardless of target).
+    #[test]
+    fn stash_composer_draft_empty_text_is_a_documented_no_op() {
+        stash_composer_draft("");
+        assert!(restore_composer_draft().is_none());
+    }
+
     #[test]
     fn host_target_stubs_are_no_ops() {
         // On the host target these resolve to the stub branch above —
@@ -338,5 +475,58 @@ mod tests {
         write_json(KEY_TWEAKS, &UiPrefs::default());
         assert!(read_string(KEY_THEME).is_none());
         write_string(KEY_THEME, "slate-dark");
+    }
+
+    // --- Phase 40.2 Plan 01 Task 1: AvatarPrefs tests (RED) ---
+
+    #[test]
+    fn avatar_prefs_default() {
+        // FE-01: default is orb-mode (enabled=false) with facecap head (D-01).
+        // Phase 40.5 (D-17): active_identity defaults to "orb_classic".
+        let p = AvatarPrefs::default();
+        assert!(!p.enabled);
+        assert_eq!(p.head_id, "facecap");
+        assert_eq!(p.active_identity, "orb_classic");
+    }
+
+    #[test]
+    fn avatar_prefs_missing_active_identity_is_err() {
+        // Phase 40.5 backward-safety: a legacy blob that lacks active_identity must
+        // fail serde so hydration falls back to AvatarPrefs::default().
+        // This exercises the T-40.2-01-01 no-#[serde(default)] invariant for the
+        // new field: partial blobs are rejected, not silently accepted.
+        let result: Result<AvatarPrefs, _> =
+            serde_json::from_str(r#"{"enabled":false,"head_id":"facecap"}"#);
+        assert!(
+            result.is_err(),
+            "blob missing active_identity must fail deserialization; got {result:?}"
+        );
+    }
+
+    #[test]
+    fn avatar_prefs_round_trip() {
+        // FE-01: AvatarPrefs round-trips losslessly through serde_json.
+        let p = AvatarPrefs::default();
+        let json = serde_json::to_string(&p).unwrap();
+        let q: AvatarPrefs = serde_json::from_str(&json).unwrap();
+        assert_eq!(p, q);
+    }
+
+    #[test]
+    fn avatar_key_namespaced() {
+        // FE-01: localStorage key uses the ih.ui.* namespace (mirrors KEY_TWEAKS/KEY_WHEEL).
+        assert_eq!(KEY_AVATAR, "ih.ui.avatar");
+    }
+
+    #[test]
+    fn avatar_prefs_partial_blob_is_err() {
+        // T-40.2-01-01 mitigation: a partial blob (missing head_id) must fail
+        // deserialization so hydration's .ok() falls back to AvatarPrefs::default().
+        // AvatarPrefs must NOT use #[serde(default)] on fields.
+        let result: Result<AvatarPrefs, _> = serde_json::from_str(r#"{"enabled":true}"#);
+        assert!(
+            result.is_err(),
+            "partial AvatarPrefs JSON (missing head_id) must fail deserialization; got {result:?}"
+        );
     }
 }

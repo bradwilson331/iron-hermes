@@ -13,6 +13,9 @@ ironhermes-tools = { path = "../ironhermes-tools" }
 ironhermes-hooks = { path = "../ironhermes-hooks" }
 ironhermes-cron  = { path = "../ironhermes-cron" }
 ironhermes-mcp   = { path = "../ironhermes-mcp" }
+# Phase 46.8 Plan 07 (D-07): run_cron_job calls apply_vault_fallback to top up
+# provider keys from the vault when ctx.config.vault.enabled.
+ironhermes-vault = { path = "../ironhermes-vault" }
 serde       = { workspace = true }
 serde_json  = { workspace = true }
 anyhow      = { workspace = true }
@@ -25,3 +28,9 @@ chrono      = { workspace = true }
 [dev-dependencies]
 async-trait = { workspace = true }
 tempfile = { workspace = true }
+
+[features]
+# Phase 46.8 Plan 07 (D-07): threads the RustyVault backend into the vault
+# fallback consulted by run_cron_job. Off by default — env-var backend
+# (always-on, no cargo feature required) remains the default.
+rusty-vault = ["ironhermes-vault/rusty-vault"]

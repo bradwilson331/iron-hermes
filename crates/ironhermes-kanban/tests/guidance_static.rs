@@ -78,6 +78,26 @@ fn guidance_mentions_anti_patterns() {
     );
 }
 
+/// Phase 46.5 D-01: the guidance must mandate `kanban_show()` as the FIRST
+/// call every run, and must state that an attached image is already
+/// provided as image content in the conversation (so workers stop
+/// brute-forcing images with PIL/Pillow/OpenCV).
+#[test]
+fn guidance_mentions_image_context() {
+    assert!(
+        KANBAN_GUIDANCE.contains("Call `kanban_show()` FIRST"),
+        "KANBAN_GUIDANCE must mandate kanban_show() as the FIRST call every run"
+    );
+    assert!(
+        KANBAN_GUIDANCE.contains("already provided to you as image content"),
+        "KANBAN_GUIDANCE must state the attached image is already provided as image content"
+    );
+    assert!(
+        KANBAN_GUIDANCE.contains("PIL/Pillow"),
+        "KANBAN_GUIDANCE must tell the worker not to use PIL/Pillow to find the image"
+    );
+}
+
 /// Length must be ≥ 800 and ≤ 4096 bytes (cache-friendly, non-trivial).
 #[test]
 fn guidance_length_bounded() {

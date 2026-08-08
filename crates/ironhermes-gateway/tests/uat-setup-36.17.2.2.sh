@@ -8,7 +8,7 @@
 #   bash crates/ironhermes-gateway/tests/uat-setup-36.17.2.2.sh --verify  # check only
 #
 # All fixtures land at /tmp/uat-* which is the canonical allowed-root the
-# MediaSender impl accepts by default (no HERMES_HOME required).
+# MediaSender impl accepts by default (no IRONHERMES_HOME required).
 
 set -euo pipefail
 

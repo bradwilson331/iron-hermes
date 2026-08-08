@@ -495,7 +495,7 @@ mod tests {
         assert!(memory_dir.env_var.is_none());
         assert_eq!(
             memory_dir.default,
-            Some(serde_json::json!("$HERMES_HOME/memory"))
+            Some(serde_json::json!("$IRONHERMES_HOME/memory"))
         );
 
         let mem_limit = schema

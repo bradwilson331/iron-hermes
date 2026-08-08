@@ -111,6 +111,19 @@ impl SessionQueue {
         Ok(())
     }
 
+    /// Push an event to the FRONT of the per-session FIFO (re-queue on cap-hit).
+    ///
+    /// Used by the concurrent worker loop (Phase 39.1 R39.1-03): when a turn
+    /// was popped but `ConcurrencyLayer::try_acquire` returned `None` (cap
+    /// exhausted), the event is pushed back to the front to preserve FIFO
+    /// order. Unlike `try_push` (which push_back), this never hits the
+    /// MAX_QUEUE_DEPTH guard — the event was just removed from the same queue.
+    pub fn push_front(&self, key: &SessionKey, event: MessageEvent) {
+        let mut map = self.queues.lock().unwrap();
+        let q = map.entry(key.clone()).or_default();
+        q.push_front(event);
+    }
+
     /// Pop the oldest event from the per-session FIFO, or `None` if empty.
     ///
     /// Removes the entire map entry when the inner `VecDeque` becomes empty

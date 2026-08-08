@@ -1,7 +1,7 @@
 // Phase 36.2 Plan 04 — disk-cache layer for the pricing registry.
 //
 // Mirrors `models_cache.rs:1-87` (Phase 21.3): JSON-serialized HashMap at
-// `$HERMES_HOME/pricing-cache.json`, safe load (missing/corrupt -> default),
+// `$IRONHERMES_HOME/pricing-cache.json`, safe load (missing/corrupt -> default),
 // pretty-printed save with parent dir creation. Online fetch is wired by
 // Plan 09 (`hermes pricing refresh` CLI) — this module provides the disk
 // infra only.
@@ -33,12 +33,12 @@ pub struct PricingCache {
 impl PricingCache {
     const CACHE_FILENAME: &'static str = "pricing-cache.json";
 
-    /// Path to the cache file under `$HERMES_HOME`.
+    /// Path to the cache file under `$IRONHERMES_HOME`.
     pub fn cache_path() -> PathBuf {
         get_hermes_home().join(Self::CACHE_FILENAME)
     }
 
-    /// Load the cache from the default `$HERMES_HOME/pricing-cache.json`.
+    /// Load the cache from the default `$IRONHERMES_HOME/pricing-cache.json`.
     /// Missing file or malformed JSON both yield `Self::default()` — never panics.
     pub fn load() -> Self {
         Self::load_from(&Self::cache_path())

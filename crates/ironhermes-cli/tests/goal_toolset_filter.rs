@@ -9,9 +9,9 @@
 //!    has exactly 18 entries (RESTRICTED + memory + skills + skill_manage). D-B1.
 //! 3. **full_preset_no_filter** — full preset does NOT call retain_by_name;
 //!    all registered tools survive. D-B1.
-//! 4. **filter_noops_when_not_goal_mode** — HERMES_KANBAN_GOAL_MODE unset → filter
-//!    is a no-op even with HERMES_KANBAN_TASK set. D-B2.
-//! 5. **filter_noops_when_not_worker_mode** — HERMES_KANBAN_TASK unset → filter is
+//! 4. **filter_noops_when_not_goal_mode** — IRONHERMES_KANBAN_GOAL_MODE unset → filter
+//!    is a no-op even with IRONHERMES_KANBAN_TASK set. D-B2.
+//! 5. **filter_noops_when_not_worker_mode** — IRONHERMES_KANBAN_TASK unset → filter is
 //!    a no-op. D-B2.
 //! 6. **clamp_goal_inner_iterations_bounds** — pure unit test of the
 //!    `clamp_goal_inner_iterations` helper: max_iterations=50 clamped by
@@ -268,10 +268,10 @@ async fn full_preset_no_filter() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 4: D-B2 filter no-ops when HERMES_KANBAN_GOAL_MODE is unset
+// Test 4: D-B2 filter no-ops when IRONHERMES_KANBAN_GOAL_MODE is unset
 // ---------------------------------------------------------------------------
 
-/// D-B2: when HERMES_KANBAN_TASK is set but HERMES_KANBAN_GOAL_MODE is NOT "1",
+/// D-B2: when IRONHERMES_KANBAN_TASK is set but IRONHERMES_KANBAN_GOAL_MODE is NOT "1",
 /// the filter is a no-op and tool count stays unchanged. Simulates the gate 2
 /// early-return in filter_for_goal_mode_if_applicable.
 #[tokio::test]
@@ -280,22 +280,22 @@ async fn filter_noops_when_not_goal_mode() {
 
     // Set up: worker mode without goal mode.
     unsafe {
-        std::env::set_var("HERMES_KANBAN_TASK", "t_test_nogoal");
-        std::env::remove_var("HERMES_KANBAN_GOAL_MODE");
-        std::env::remove_var("HERMES_KANBAN_GOAL_TOOLSET");
+        std::env::set_var("IRONHERMES_KANBAN_TASK", "t_test_nogoal");
+        std::env::remove_var("IRONHERMES_KANBAN_GOAL_MODE");
+        std::env::remove_var("IRONHERMES_KANBAN_GOAL_TOOLSET");
     }
 
     let registry = build_full_registry();
     let before_count = registry.read().await.list_tools().len();
 
     // Simulate the filter gate: goal_mode check fails → no filter applied.
-    let goal_mode = std::env::var("HERMES_KANBAN_GOAL_MODE")
+    let goal_mode = std::env::var("IRONHERMES_KANBAN_GOAL_MODE")
         .map(|v| v == "1")
         .unwrap_or(false);
 
     assert!(
         !goal_mode,
-        "HERMES_KANBAN_GOAL_MODE must not be '1' for this test"
+        "IRONHERMES_KANBAN_GOAL_MODE must not be '1' for this test"
     );
 
     // Since goal_mode=false, filter would early-return. Tool count unchanged.
@@ -307,35 +307,35 @@ async fn filter_noops_when_not_goal_mode() {
 
     // Cleanup.
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_TASK");
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
     }
 }
 
 // ---------------------------------------------------------------------------
-// Test 5: D-B2 filter no-ops when HERMES_KANBAN_TASK is unset
+// Test 5: D-B2 filter no-ops when IRONHERMES_KANBAN_TASK is unset
 // ---------------------------------------------------------------------------
 
-/// D-B2: when HERMES_KANBAN_TASK is unset (not a kanban worker process),
-/// the filter is a no-op regardless of HERMES_KANBAN_GOAL_MODE. Simulates
+/// D-B2: when IRONHERMES_KANBAN_TASK is unset (not a kanban worker process),
+/// the filter is a no-op regardless of IRONHERMES_KANBAN_GOAL_MODE. Simulates
 /// the gate 1 early-return.
 #[tokio::test]
 async fn filter_noops_when_not_worker_mode() {
     let _g = ENV_LOCK.lock().await;
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_TASK");
-        std::env::set_var("HERMES_KANBAN_GOAL_MODE", "1");
-        std::env::set_var("HERMES_KANBAN_GOAL_TOOLSET", "restricted");
+        std::env::remove_var("IRONHERMES_KANBAN_TASK");
+        std::env::set_var("IRONHERMES_KANBAN_GOAL_MODE", "1");
+        std::env::set_var("IRONHERMES_KANBAN_GOAL_TOOLSET", "restricted");
     }
 
     let registry = build_full_registry();
     let before_count = registry.read().await.list_tools().len();
 
-    // Simulate the filter gate 1: HERMES_KANBAN_TASK unset → early-return.
-    let worker_mode = std::env::var("HERMES_KANBAN_TASK").is_ok();
+    // Simulate the filter gate 1: IRONHERMES_KANBAN_TASK unset → early-return.
+    let worker_mode = std::env::var("IRONHERMES_KANBAN_TASK").is_ok();
     assert!(
         !worker_mode,
-        "HERMES_KANBAN_TASK must be unset for this test"
+        "IRONHERMES_KANBAN_TASK must be unset for this test"
     );
 
     // No filter applied.
@@ -347,8 +347,8 @@ async fn filter_noops_when_not_worker_mode() {
 
     // Cleanup.
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_GOAL_MODE");
-        std::env::remove_var("HERMES_KANBAN_GOAL_TOOLSET");
+        std::env::remove_var("IRONHERMES_KANBAN_GOAL_MODE");
+        std::env::remove_var("IRONHERMES_KANBAN_GOAL_TOOLSET");
     }
 }
 

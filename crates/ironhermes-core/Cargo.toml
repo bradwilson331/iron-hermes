@@ -21,13 +21,32 @@ regex = { workspace = true }
 async-trait = { workspace = true }
 fs2 = { workspace = true }
 url = { workspace = true }
+# Phase 43 — OAuth 2.1 PKCE + device-code flows (wave 2 fills the stubs)
+oauth2 = { workspace = true }
+open = { workspace = true }
 tiktoken-rs = "0.11.0"
 reqwest = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 toml = "0.8"
+# Phase 46.8 D-01: one-directional dep — ironhermes-vault is a zero-cycle leaf
+# crate (no dep on ironhermes-core); this crate embeds its VaultConfig and
+# consumes its SecretStore trait for the ProviderResolver fallback seam.
+ironhermes-vault = { path = "../ironhermes-vault" }
+secrecy = { version = "0.10.3", features = ["serde"] }
+
+[features]
+# Phase 46.8 UAT gap G-46.8-1: threads the RustyVault backend in so
+# tests/vault_resolve_integration.rs can init + open a real on-disk vault
+# through resolve_vault_config_with_home. Off by default — same
+# zero-behavioral-change posture as ironhermes-vault's own feature.
+rusty-vault = ["ironhermes-vault/rusty-vault"]
 
 [dev-dependencies]
 tempfile = "3"
+# Phase 43 Wave-0 RED scaffolds — mock OAuth HTTP endpoints
+wiremock = { workspace = true }
+serde_json = { workspace = true }
 # Phase 36.3.7.5 BUG-36.3.7.5-07d: lifecycle e2e test in
 # tests/handlers_kanban_notify.rs drives the full cross-crate pipeline
 # (cmd_kanban Create arm -> auto-subscribe -> notifier_tick -> mock send_fn).

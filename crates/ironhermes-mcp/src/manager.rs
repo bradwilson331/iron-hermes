@@ -1,6 +1,7 @@
 use crate::config::McpServerConfig;
 use crate::server_task::{self, ServerTaskResult};
 use crate::tool::sanitize_server_name;
+use ironhermes_core::auth::AuthStore;
 use ironhermes_tools::ToolRegistry;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -63,17 +64,53 @@ pub struct McpManager {
     /// `connected_server_names()` reads this map instead of `tasks.keys()` so servers
     /// whose child exited before handshake completion are correctly reported as FAILED.
     connected_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
+    /// D-08: Optional AuthStore for OAuth-enabled MCP servers (44-05).
+    ///
+    /// Threaded to each `run_server_task` call. `None` (the default) leaves
+    /// all existing call sites and non-OAuth servers fully unchanged.
+    auth_store: Option<Arc<AuthStore>>,
+    /// Phase 46.1 D-01: global additive MCP-OAuth issuer allowlist
+    /// (`Config.mcp_oauth.issuer_allowlist`), threaded to each `run_server_task`
+    /// call. Empty (the default) leaves all existing call sites and
+    /// baseline-only (Cloudflare) servers fully unchanged (CFL-02).
+    global_issuer_allowlist: Vec<String>,
 }
 
 impl McpManager {
     /// Create a new `McpManager` backed by the given `ToolRegistry`.
+    ///
+    /// D-08: Existing call sites pass only `registry`; `auth_store` defaults to `None`
+    /// so non-OAuth servers and all current callers are completely unchanged.
     pub fn new(registry: Arc<RwLock<ToolRegistry>>) -> Self {
         Self {
             registry,
             tasks: Mutex::new(HashMap::new()),
             configs: Mutex::new(HashMap::new()),
             connected_flags: Mutex::new(HashMap::new()),
+            auth_store: None,
+            global_issuer_allowlist: Vec::new(),
         }
+    }
+
+    /// Builder: attach an `AuthStore` for OAuth-enabled MCP servers (44-05, D-08).
+    ///
+    /// Call this AFTER `McpManager::new(registry)` at production entry points that
+    /// have Phase 41 auth infrastructure available. Passing `None` is a no-op and
+    /// leaves OAuth servers skipped with a `tracing::warn` (D-04 headless posture).
+    pub fn with_auth_store(mut self, auth_store: Option<Arc<AuthStore>>) -> Self {
+        self.auth_store = auth_store;
+        self
+    }
+
+    /// Builder: attach the global additive MCP-OAuth issuer allowlist (D-01, 46.1).
+    ///
+    /// Mirrors `with_auth_store`. Passing an empty `Vec` (the default) is a no-op —
+    /// servers with no per-server pin fall back to the built-in baseline only
+    /// (`security::BASELINE_ISSUER_ALLOWLIST`), preserving CFL-02 zero-new-config
+    /// behavior for existing Cloudflare servers.
+    pub fn with_global_issuer_allowlist(mut self, list: Vec<String>) -> Self {
+        self.global_issuer_allowlist = list;
+        self
     }
 
     /// Start all configured MCP servers as background tasks (fire-and-forget).
@@ -109,6 +146,8 @@ impl McpManager {
                 cancel.clone(),
                 connected.clone(),
                 child_slot.clone(),
+                self.auth_store.clone(),
+                self.global_issuer_allowlist.clone(),
             ));
             tasks.insert(name.clone(), (handle, cancel, child_slot));
             flags.insert(name.clone(), connected);
@@ -151,6 +190,8 @@ impl McpManager {
                     cancel.clone(),
                     connected.clone(),
                     child_slot.clone(),
+                    self.auth_store.clone(),
+                    self.global_issuer_allowlist.clone(),
                 ));
                 task_names.push(name.clone());
                 tasks.insert(name.clone(), (handle, cancel, child_slot));

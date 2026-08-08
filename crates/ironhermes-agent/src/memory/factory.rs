@@ -4,7 +4,7 @@ use ironhermes_core::MemoryProvider;
 use ironhermes_core::constants::get_hermes_home;
 use ironhermes_core::memory_store::MemoryStore;
 
-/// Load provider-specific JSON config from `$HERMES_HOME/<provider_name>.json`.
+/// Load provider-specific JSON config from `$IRONHERMES_HOME/<provider_name>.json`.
 /// Returns `Value::Null` when the file is missing (provider uses defaults).
 /// Logs a warning and returns `Value::Null` when JSON is malformed.
 // Every non-test caller lives inside a `#[cfg(feature = "memory-{sqlite,duckdb,grafeo}")]`
@@ -71,6 +71,12 @@ pub async fn build_memory_provider(
             let provider_config = load_provider_config(&hermes_home, "sqlite");
             let db_path = hermes_home.join("memory.db");
             let mut p = memory_sqlite::SqliteMemoryProvider::new(&db_path)?;
+            // Phase 47.5 (D-03): wire the relevance floor from config so
+            // off-topic memories are never recalled. duckdb arm is
+            // deliberately unchanged — its recall is ILIKE substring match
+            // with synthetic 1.0/0.5 scores, so any floor <= 1.0 is a no-op
+            // there (see MemoryConfig::recall_min_score doc comment).
+            p.set_recall_min_score(config.recall_min_score);
             p.initialize("factory-boot", &hermes_home, &provider_config)
                 .await?;
             p.load_from_disk()?;
@@ -256,6 +262,14 @@ async fn build_tokio_provider(
             let provider_config = load_provider_config(&hermes_home, "sqlite");
             let db_path = hermes_home.join("memory.db");
             let mut p = memory_sqlite::SqliteMemoryProvider::new(&db_path)?;
+            // Phase 47.5 (D-03): wire the relevance floor from config so
+            // off-topic memories are never recalled. This is the arm that
+            // `build_memory_manager` actually exercises for CLI/TUI/gateway/
+            // web (main.rs, iron_hermes_ui state.rs) — see the deviation
+            // note in the 47.5-02 SUMMARY for why both sqlite arms need the
+            // setter call. duckdb arm is deliberately unchanged (see
+            // MemoryConfig::recall_min_score doc comment).
+            p.set_recall_min_score(config.recall_min_score);
             p.initialize("factory-boot", &hermes_home, &provider_config)
                 .await?;
             p.load_from_disk()?;
@@ -413,7 +427,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         // SAFETY: test-only env mutation; serialized by `env_lock` so no other
         // test in this module can race this thread's view of IRONHERMES_HOME.
-        // NOTE: `get_hermes_home()` reads `IRONHERMES_HOME` (not `HERMES_HOME`).
+        // NOTE: `get_hermes_home()` reads `IRONHERMES_HOME` (not `IRONHERMES_HOME`).
         // Using the wrong name falls through to `~/.ironhermes`, which is
         // the user's real directory — tests must never write there.
         unsafe {

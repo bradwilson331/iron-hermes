@@ -206,6 +206,7 @@ impl Tool for WebReadTool {
             name: "FIRECRAWL_API_KEY".to_string(),
             description: "Firecrawl API key — optional. Without it, web_read uses the plain-text fallback path.".to_string(),
             required: false,
+            group: None,
         }]
     }
 

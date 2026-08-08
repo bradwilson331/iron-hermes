@@ -145,9 +145,15 @@ fn map_core_to_tui(core: CoreCommandResult) -> CommandResult {
         CoreCommandResult::McpReload => CommandResult::McpReload,
         // Phase 21.8.2 Plan 02: pass through to REPL loop — Plan 03 lands real integration arms.
         CoreCommandResult::SkillsReload => CommandResult::SkillsReload,
-        CoreCommandResult::SkillActivated { name, body } => {
-            CommandResult::SkillActivated { name, body }
-        }
+        // Phase 41.1: the legacy (non-ratatui) TUI surface stays activate-only
+        // dead-code (Pitfall 5 / Plan 05). Drop the new core `args` at this
+        // boundary rather than adding an unread field to the legacy variant
+        // (which would trip dead_code under -D warnings) — no behavior rewire.
+        CoreCommandResult::SkillActivated {
+            name,
+            body,
+            args: _,
+        } => CommandResult::SkillActivated { name, body },
         CoreCommandResult::PersonalityApplied(text) => CommandResult::Handled(text),
         // Phase 36.17.1 Plan 03 Task 1: the SessionQueue lives on GatewayRunner
         // only — the legacy TUI surface has no per-session FIFO and cannot
@@ -163,6 +169,33 @@ fn map_core_to_tui(core: CoreCommandResult) -> CommandResult {
         // Plan 05). Map to Silent so the legacy REPL stays exhaustive without
         // surfacing user-visible behavior change.
         CoreCommandResult::PauseQueue | CoreCommandResult::UnpauseQueue => CommandResult::Silent,
+        // Phase 39.1 (R39.1-09): Plan 39.1-01 added the AgentsList variant in
+        // core. Render the active TurnRegistry entries as handled output so the
+        // legacy TUI stays exhaustive; richer `/agents` wiring lands in Plan 04.
+        CoreCommandResult::AgentsList(turns) => {
+            let text = if turns.is_empty() {
+                "No active turns.".to_string()
+            } else {
+                let mut out = format!("Active turns ({}):\n", turns.len());
+                for t in &turns {
+                    out.push_str(&format!(
+                        "• {} — {} — session {} — {}ms\n",
+                        t.turn_id, t.surface, t.session_id, t.elapsed_ms
+                    ));
+                }
+                out
+            };
+            CommandResult::Handled(text)
+        }
+        // Phase 36.6.3 Plan 03 (TUI-INPUT-02, D-06): bare `/model`/`/provider`
+        // open an interactive picker only in tui_rata — the legacy widget-slot
+        // TUI has no such overlay surface. Fall back to the pre-existing
+        // plain-text output (model_list_text()/status_text()) so nothing
+        // regresses (non-TUI mapping, mirrors the gateway/CLI fallback).
+        CoreCommandResult::OpenModelPicker { fallback_text }
+        | CoreCommandResult::OpenProviderPicker { fallback_text } => {
+            CommandResult::Handled(fallback_text)
+        }
     }
 }
 
@@ -248,8 +281,6 @@ mod tests {
     use ironhermes_core::commands::context::CommandContext;
     use ironhermes_core::commands::registry::build_registry;
     use ironhermes_core::types::Platform;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicBool;
 
     #[allow(dead_code)] // test helper retained for future keybinding dispatch tests
     fn make_key(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
@@ -266,11 +297,8 @@ mod tests {
     }
 
     fn test_ctx() -> CommandContext {
-        CommandContext::new(
-            Platform::Local,
-            "test-session".to_string(),
-            Arc::new(AtomicBool::new(false)),
-        )
+        // Phase 39.1 (R39.1-06 / D-06): agent_running removed from CommandContext.
+        CommandContext::new(Platform::Local, "test-session".to_string())
     }
 
     // --- Test extension helpers ---

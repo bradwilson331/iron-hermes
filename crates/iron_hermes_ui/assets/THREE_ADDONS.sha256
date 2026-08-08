@@ -1,0 +1,24 @@
+# Provenance record for vendored three.js r184 addon ES modules (Plan 40.5-02, REND-01).
+# Reproduction command to verify: npm pack three@0.184.0 (scratch dir) -> tar xzf three-0.184.0.tgz ->
+#   copy examples/jsm/{postprocessing/EffectComposer.js,postprocessing/RenderPass.js,
+#   postprocessing/UnrealBloomPass.js,postprocessing/ShaderPass.js,postprocessing/OutputPass.js,
+#   postprocessing/Pass.js,postprocessing/MaskPass.js,shaders/LuminosityHighPassShader.js,
+#   shaders/CopyShader.js,shaders/OutputShader.js,effects/AsciiEffect.js} to assets/ ->
+#   prepend 3-line vendoring header comment ->
+#   sed "s|from 'three'|from './three.module.js'|g" and
+#       "s|from '../shaders/\([^']*\)'|from './\1'|g" ->
+#   shasum -a 256 <files>
+# Files: 8 primary addons + 3 transitive dependencies (Pass.js, MaskPass.js, OutputShader.js
+#   required for browser ES module graph; see Plan 40.5-02 deviation notes).
+# Verify with: cd crates/iron_hermes_ui/assets && shasum -a 256 -c THREE_ADDONS.sha256
+e9f737318bc092ccf45794183121ac261940f163775670c96de279398a6b1ce9  EffectComposer.js
+fde8c4e6c57ada0c41be3602e96a7cf0615b5052456dd67f0e8877625449e0fe  RenderPass.js
+4c877218b820ccaaef8dcfac29d974898c8ed1843c2f6c4844a84b68f3c952bc  UnrealBloomPass.js
+8550151f2def4cea6e1e988b2ba1282842baf56f8c30f03fd636c083c1a12a80  ShaderPass.js
+c0344dfa542d104989b2fa5332cb3578a6d4aa688a5e49c41d8bfeee96197a20  OutputPass.js
+94663c169c2d26660512b6f68a534505dbe1dca29417e47c87bc94f6b7e5c62a  LuminosityHighPassShader.js
+8669b7b9cb07686ef98a55e3ee06bc32614f16a2733b485a34df7ca786bf7027  CopyShader.js
+c896e16ed92f63df854e34327c54445f04f36269dd3cde30d1fb48894e0b53c7  AsciiEffect.js
+b24a12148d63a1de388ef2450b1943b805c67eda99f742fe91e0f6ee2b96363d  Pass.js
+29abd7bbe8aaac0add5c1d617321ed1af3b85b25ed3b06d4c1141efcf9fbac75  MaskPass.js
+8f812cdf904ada34505c447dbf29252b8d4422c18c0546b96a58685d1be41297  OutputShader.js

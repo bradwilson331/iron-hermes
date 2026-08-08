@@ -31,7 +31,7 @@ impl ScopedHome {
         // SAFETY: test-only; we hold ENV_LOCK for the duration.
         unsafe { std::env::set_var("IRONHERMES_HOME", &root) };
         // Clear board-selection env vars so tests start from a known state.
-        unsafe { std::env::remove_var("HERMES_KANBAN_BOARD") };
+        unsafe { std::env::remove_var("IRONHERMES_KANBAN_BOARD") };
         ScopedHome { _dir: dir, root }
     }
 }
@@ -39,7 +39,7 @@ impl ScopedHome {
 impl Drop for ScopedHome {
     fn drop(&mut self) {
         unsafe { std::env::remove_var("IRONHERMES_HOME") };
-        unsafe { std::env::remove_var("HERMES_KANBAN_BOARD") };
+        unsafe { std::env::remove_var("IRONHERMES_KANBAN_BOARD") };
     }
 }
 

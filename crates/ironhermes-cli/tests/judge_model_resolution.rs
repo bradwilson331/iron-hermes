@@ -16,7 +16,10 @@
 //! NOT execute the returned `JudgeFn` closure — that would require a live
 //! provider. Closure execution lands in Plan 05 manual UAT.
 
-use ironhermes_cli::kanban::commands::resolve_judge_model_and_endpoint;
+use ironhermes_cli::kanban::commands::{
+    build_runtime_judge_fn_with_env_overrides, resolve_judge_model_and_endpoint,
+    resolve_judge_model_and_endpoint_with_env_overrides,
+};
 use ironhermes_core::config::{Config, ModelRoleConfig, ProviderConfig};
 use ironhermes_kanban::KanbanConfig;
 use std::collections::HashMap;
@@ -140,7 +143,7 @@ fn error_message_names_both_config_keys() {
     let saved_or = std::env::var("OPENROUTER_API_KEY").ok();
     // SAFETY: tests in this binary are not run concurrently for env mutation
     // sensitivity; the kanban-tools `ENV_LOCK` is only required for tests that
-    // mutate kanban-task env vars (HERMES_KANBAN_*). OPENROUTER_API_KEY has no
+    // mutate kanban-task env vars (IRONHERMES_KANBAN_*). OPENROUTER_API_KEY has no
     // such cross-test owner in this binary.
     unsafe {
         std::env::remove_var("OPENROUTER_API_KEY");
@@ -201,7 +204,7 @@ fn build_runtime_judge_fn_symbol_exists() {
 
 use ironhermes_core::config::ProviderConfig as Provider2; // alias to keep tier_* using config::ProviderConfig naming
 use ironhermes_kanban::{JudgeRequest, JudgeVerdict};
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// Build a Config where the main provider points at a wiremock server's
@@ -424,4 +427,223 @@ async fn missing_verdict_field_returns_error() {
         msg.contains("missing 'verdict'"),
         "error msg must name the missing field; got: {msg}"
     );
+}
+
+// ===========================================================================
+// Phase 47.4 Plan 02 (D-14) — override-map judge resolution siblings.
+//
+// `resolve_judge_model_and_endpoint_with_env_overrides` /
+// `build_runtime_judge_fn_with_env_overrides` let the web server resolve a
+// judge cascade against an arbitrary kanban worker profile's `.env` inside
+// one running (multi-threaded) process, without touching
+// `std::env::set_var` and without validating the operator's own root key by
+// accident.
+// ===========================================================================
+
+/// Empty override map behaves exactly like the original (unscoped) fn for
+/// identical inputs — this is the delegation contract `build_with_cache` /
+/// `resolve_judge_model_and_endpoint` both rely on.
+#[test]
+fn with_env_overrides_empty_map_matches_original() {
+    let kanban = KanbanConfig {
+        judge_model: "mistral-large".to_string(),
+        ..KanbanConfig::default()
+    };
+    let main = config_with_main_provider_and_key();
+
+    let (endpoint_a, model_a) =
+        resolve_judge_model_and_endpoint(&kanban, &main).expect("original resolution");
+    let (endpoint_b, model_b) =
+        resolve_judge_model_and_endpoint_with_env_overrides(&kanban, &main, &HashMap::new())
+            .expect("override-sibling resolution with empty map");
+
+    assert_eq!(
+        model_a, model_b,
+        "empty override map must resolve the same model as the original fn"
+    );
+    assert_eq!(endpoint_a.base_url, endpoint_b.base_url);
+    assert_eq!(endpoint_a.api_key, endpoint_b.api_key);
+}
+
+/// A map entry for `OPENROUTER_API_KEY` must win over a differently-valued
+/// `OPENROUTER_API_KEY` in the process environment — the whole point of
+/// D-14 (a profile-scoped probe must never silently validate the root key).
+#[test]
+fn with_env_overrides_map_key_wins_over_process_env() {
+    let saved_or = std::env::var("OPENROUTER_API_KEY").ok();
+    // SAFETY: this binary does not run this test concurrently with another
+    // OPENROUTER_API_KEY mutator; the value is restored before any
+    // assertion that could panic.
+    unsafe {
+        std::env::set_var("OPENROUTER_API_KEY", "process-env-key");
+    }
+
+    let mut config = Config::default();
+    config.model.provider = "openrouter".to_string();
+    config.model.default = "main-default".to_string();
+    // No `providers` entry at all — the only possible key source is the
+    // legacy env var (process) vs. the override map (Priority 3).
+    config.providers = HashMap::new();
+
+    let kanban = KanbanConfig::default();
+    let mut overrides = HashMap::new();
+    overrides.insert(
+        "OPENROUTER_API_KEY".to_string(),
+        "override-key".to_string(),
+    );
+
+    let result = resolve_judge_model_and_endpoint_with_env_overrides(&kanban, &config, &overrides);
+
+    if let Some(val) = saved_or {
+        unsafe {
+            std::env::set_var("OPENROUTER_API_KEY", val);
+        }
+    } else {
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
+    }
+
+    let (endpoint, _model) = result.expect("resolution should succeed via the override key");
+    assert_eq!(
+        endpoint.api_key.as_deref(),
+        Some("override-key"),
+        "the override map's key must win over the process environment's value"
+    );
+}
+
+/// A map carrying no key, and no key resolvable from the process
+/// environment either, must still fail closed with the existing actionable
+/// message — the override sibling must not silently accept an unconfigured
+/// judge.
+#[test]
+fn with_env_overrides_fails_closed_when_key_absent_from_map_and_env() {
+    let saved_or = std::env::var("OPENROUTER_API_KEY").ok();
+    unsafe {
+        std::env::remove_var("OPENROUTER_API_KEY");
+    }
+
+    let mut config = Config::default();
+    config.model.provider = "openrouter".to_string();
+    config.model.default = "".to_string();
+    config.providers = HashMap::new();
+
+    let kanban = KanbanConfig::default();
+    let overrides = HashMap::new(); // deliberately empty — no key anywhere
+
+    let result = resolve_judge_model_and_endpoint_with_env_overrides(&kanban, &config, &overrides);
+
+    if let Some(val) = saved_or {
+        unsafe {
+            std::env::set_var("OPENROUTER_API_KEY", val);
+        }
+    }
+
+    let err = result.expect_err("expected Err when no key is resolvable via map or env");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("kanban.judge_model"),
+        "error must name `kanban.judge_model`; got: {msg}"
+    );
+    assert!(
+        msg.contains("auxiliary.kanban_judge"),
+        "error must name `auxiliary.kanban_judge`; got: {msg}"
+    );
+}
+
+/// Tier cascade is unchanged through the override sibling: `kanban.judge_model`
+/// set still wins tier 1 even when an override map is also supplied.
+#[test]
+fn with_env_overrides_tier_1_explicit_judge_model_still_wins() {
+    let kanban = KanbanConfig {
+        judge_model: "mistral-large".to_string(),
+        ..KanbanConfig::default()
+    };
+    let main = config_with_main_provider_and_key();
+    let overrides = HashMap::new();
+
+    let (_endpoint, resolved_model) =
+        resolve_judge_model_and_endpoint_with_env_overrides(&kanban, &main, &overrides)
+            .expect("tier-1 resolution via override sibling");
+    assert_eq!(
+        resolved_model, "mistral-large",
+        "tier-1: explicit kanban.judge_model must still win through the override sibling"
+    );
+}
+
+fn config_pointing_at_wiremock_via_openrouter(server: &MockServer) -> Config {
+    let mut config = Config::default();
+    config.model.provider = "openrouter".to_string();
+    config.model.default = "stub-model".to_string();
+    let mut providers: HashMap<String, Provider2> = HashMap::new();
+    providers.insert(
+        "openrouter".to_string(),
+        Provider2 {
+            base_url: Some(server.uri()),
+            // Deliberately no `api_key` literal (Priority 2) — the only way
+            // this endpoint can carry a key is via the legacy env var
+            // (process) or the D-14 override map (Priority 3).
+            ..Default::default()
+        },
+    );
+    config.providers = providers;
+    config
+}
+
+/// `build_runtime_judge_fn_with_env_overrides` returns a `JudgeFn` whose
+/// closure carries the override-sourced key: the wiremock server only
+/// accepts a request bearing the override value's Bearer token, and the
+/// process environment's `OPENROUTER_API_KEY` is deliberately cleared for
+/// the duration of the call — so a passing test can only be explained by the
+/// override map reaching the closure, never by an accidental process-env
+/// fallback.
+#[tokio::test]
+async fn build_runtime_judge_fn_with_env_overrides_closure_authenticates_with_override_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(header("authorization", "Bearer override-only-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "stub-model",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "{\"verdict\":\"met\",\"reason\":\"override key reached the closure\"}"
+                },
+                "finish_reason": "stop"
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let saved_or = std::env::var("OPENROUTER_API_KEY").ok();
+    unsafe {
+        std::env::remove_var("OPENROUTER_API_KEY");
+    }
+
+    let config = config_pointing_at_wiremock_via_openrouter(&server);
+    let kanban = KanbanConfig::default();
+    let mut overrides = HashMap::new();
+    overrides.insert(
+        "OPENROUTER_API_KEY".to_string(),
+        "override-only-key".to_string(),
+    );
+
+    let build_result = build_runtime_judge_fn_with_env_overrides(&kanban, &config, &overrides);
+
+    if let Some(val) = saved_or {
+        unsafe {
+            std::env::set_var("OPENROUTER_API_KEY", val);
+        }
+    }
+
+    let judge = build_result.expect("build_runtime_judge_fn_with_env_overrides");
+    let out = judge(synthetic_judge_request())
+        .await
+        .expect("Ok JudgeOutput — proves wiremock accepted the override-sourced Bearer token");
+    assert_eq!(out.verdict, JudgeVerdict::Met);
 }

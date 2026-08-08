@@ -91,6 +91,15 @@ pub struct Task {
     /// (D-E1). Non-goal cards: field is always `None`, ignored by dispatcher.
     #[serde(default)]
     pub goal_toolset: Option<String>,
+    // -----------------------------------------------------------------------
+    // Phase 46.4 — Output Path (D-10).
+    // -----------------------------------------------------------------------
+    /// Free-form pointer string recorded by `kanban_complete` (LLM tool arg)
+    /// or the CLI `--output-path` flag (Plan 05), surfaced read-only by the
+    /// web dashboard (Plan 06). NULL when not set. A `None` completion never
+    /// clears a previously-set value (`complete_task` COALESCE-preserves).
+    #[serde(default)]
+    pub output_path: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -147,6 +156,33 @@ pub struct TaskComment {
     pub task_id: String,
     pub author: String,
     pub body: String,
+    pub created_at: f64,
+}
+
+// ---------------------------------------------------------------------------
+// AttachmentMeta (Phase 46.4 — D-03/D-05)
+// ---------------------------------------------------------------------------
+
+/// A row in the `task_attachments` table — metadata for a file a worker or
+/// operator uploaded while working a task.
+///
+/// The bytes themselves live on disk under `kanban_attachments_dir(task_id)`
+/// (never as a SQLite BLOB, per D-05); `stored_path` records the on-disk
+/// location and `filename` preserves the original client-supplied name as
+/// display metadata only — it is NEVER used to construct a filesystem path
+/// (T-46.4-03, path-traversal mitigation lives in
+/// [`crate::store::KanbanStore::add_attachment`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentMeta {
+    pub id: String,
+    pub task_id: String,
+    /// Original client-supplied filename — display metadata only.
+    pub filename: String,
+    pub size_bytes: i64,
+    pub content_type: Option<String>,
+    /// Absolute on-disk path (id-named, under `kanban_attachments_dir`).
+    pub stored_path: String,
+    pub uploaded_by: Option<String>,
     pub created_at: f64,
 }
 

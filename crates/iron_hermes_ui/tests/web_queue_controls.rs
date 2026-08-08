@@ -11,7 +11,6 @@
 //! `AppState::get_or_create_paused_flag` returns, so no Axum spawn or real
 //! WebSocket handshake is needed (D-10: highest-leverage seam).
 
-use ironhermes_core::commands::running_agent::is_bypass;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -42,31 +41,32 @@ fn get_or_create_paused(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// D-08: downstream consumer contract for is_bypass.
-// Mirrors Plan 01's is_bypass_locked_list inline test from a downstream
-// crate's perspective — if Plan 01 regresses, this test fails loud.
+// Phase 39.1 Plan 06 (R39.1-06): running_agent module deleted — is_bypass gone.
+//
+// The original D-08 test asserted is_bypass("pause") / is_bypass("unpause")
+// from downstream. The running_agent module is now deleted; the gate no longer
+// exists. All commands dispatch regardless — no bypass list needed.
+// This test is CONVERTED to verify the negative: ws.rs no longer references
+// is_bypass (gate teardown complete).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// D-08: `is_bypass("pause")` and `is_bypass("unpause")` must hold so that
-/// pause/unpause slash commands are dispatched even while a turn is in
-/// flight. The pre-Plan-01 bypass list did NOT include these two — this
-/// test failing is the canary that the extension regressed.
+/// Phase 39.1 Plan 06 (D-08 converted): ws.rs must NOT reference is_bypass.
+///
+/// The original D-08 test asserted that pause/unpause were on the bypass list.
+/// With running_agent.rs deleted (Plan 06 teardown), the bypass mechanism is
+/// gone — all slash commands dispatch without a gate check. Verify ws.rs no
+/// longer imports or calls is_bypass.
 #[test]
-fn is_bypass_includes_pause_and_unpause() {
+fn ws_rs_no_longer_uses_is_bypass() {
     assert!(
-        is_bypass("pause"),
-        "D-08: `pause` must bypass the running-agent guard (Plan 01 extension)"
+        !WS_SOURCE.contains("is_bypass("),
+        "Plan 06 (D-08 converted): ws.rs must NOT call is_bypass() after gate teardown \
+         (running_agent module deleted — all commands dispatch)"
     );
     assert!(
-        is_bypass("unpause"),
-        "D-08: `unpause` must bypass the running-agent guard (Plan 01 extension)"
+        !WS_SOURCE.contains("running_agent"),
+        "Plan 06: ws.rs must NOT reference the running_agent module after teardown"
     );
-    // The pre-existing bypass members must still hold — verify the
-    // extension did not delete them by accident.
-    assert!(is_bypass("stop"), "stop must still bypass");
-    assert!(is_bypass("new"), "new must still bypass");
-    assert!(is_bypass("status"), "status must still bypass");
-    assert!(is_bypass("queue"), "queue must still bypass");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -140,8 +140,15 @@ fn ws_rs_stop_arm_no_abort_or_cancel() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// D-04a: /stop ordering — queue.clear → paused.store(false) → QueueUpdated
-//                       → "Queue cleared. Current turn finishing." → Finished.
+// D-04a: /stop ordering — queue.clear → cancel_session → paused.store(false)
+//                       → QueueUpdated → "Queue cleared. In-flight turns
+//                       cancelled." → Finished.
+//
+// Phase 39.1 Plan 02 (R39.1-08/D-06) inserted a `turn_registry.cancel_session`
+// call between `queue.clear` and `.store(`, and changed the confirmation
+// Delta text from "Queue cleared. Current turn finishing." (the old web
+// surface never cancelled the in-flight JoinHandle, D-05) to "Queue cleared.
+// In-flight turns cancelled." (now it does, via CancellationToken).
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// D-04a ordering invariant inside the /stop window.
@@ -150,12 +157,17 @@ fn ws_rs_stop_arm_no_abort_or_cancel() {
 /// `false,` literal sits on its own line after `.store(`); we anchor on
 /// the `.store(` token, which always appears between `queue.clear` and the
 /// `QueueUpdated` emission.
+///
+/// Window sizing: the /stop arm now spans ~2200 bytes (measured on develop
+/// at 46.9: `queue.clear` +151, `.store(` +1279, `QueueUpdated` +1563, the
+/// Delta message +1967, `Finished {` +2207) after the Phase 39.1 Plan 02
+/// `cancel_session` insertion widened the arm body. 3000 leaves headroom.
 #[test]
 fn ws_rs_stop_arm_ordering() {
     let intercept = WS_SOURCE
         .find("def.name == \"stop\"")
         .expect("ws.rs must contain the `def.name == \"stop\"` intercept");
-    let window_end = (intercept + 1500).min(WS_SOURCE.len());
+    let window_end = (intercept + 3000).min(WS_SOURCE.len());
     let window = &WS_SOURCE[intercept..window_end];
 
     let p_clear = window
@@ -168,8 +180,11 @@ fn ws_rs_stop_arm_ordering() {
         .find("QueueUpdated")
         .expect("D-04a: /stop window must emit `QueueUpdated`");
     let p_delta = window
-        .find("Queue cleared. Current turn finishing.")
-        .expect("D-04a: /stop window must emit the canonical Delta message");
+        .find("Queue cleared. In-flight turns cancelled.")
+        .expect(
+            "D-04a: /stop window must emit the canonical Delta message (Phase 39.1: \
+             turn_registry cancellation replaced the old 'current turn finishing' text)",
+        );
     let p_finished = window
         .find("Finished {")
         .expect("D-04a: /stop window must emit a `Finished` event");

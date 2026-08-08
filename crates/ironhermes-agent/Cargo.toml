@@ -11,9 +11,18 @@ memory-sqlite = ["dep:memory-sqlite"]
 memory-duckdb = ["dep:memory-duckdb"]
 memory-grafeo = ["dep:memory-grafeo"]
 test-support = []
+# Phase 46.8 Plan 07 (D-07): threads the RustyVault backend into the vault
+# fallback consulted at resolver-construction sites. Off by default —
+# env-var backend (always-on, no cargo feature required) remains the default.
+rusty-vault = ["ironhermes-vault/rusty-vault"]
 
 [dependencies]
 ironhermes-core = { path = "../ironhermes-core" }
+# Phase 46.8 Plan 07 (D-07): subagent_runner's resolver-construction site
+# (test-only — production subagents inherit the parent's already-vault-topped-up
+# resolver via clone, per D-13) applies the same guarded vault fallback.
+ironhermes-vault = { path = "../ironhermes-vault" }
+ironhermes-blackbox = { path = "../ironhermes-blackbox" }
 ironhermes-tools = { path = "../ironhermes-tools" }
 ironhermes-state = { path = "../ironhermes-state" }
 ironhermes-hooks = { path = "../ironhermes-hooks" }
@@ -36,6 +45,7 @@ futures = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+chrono-tz = { workspace = true }
 regex = { workspace = true }
 sha2 = { workspace = true }
 # Phase 36.2 Plan 07: per-turn usage_events INSERT + sessions UPDATE inside a

@@ -8,11 +8,11 @@
 //! 4. Call `provider.get_config_schema()`.
 //! 5. Prompt only for fields where `required == true && default.is_none()`.
 //!    (Optional-or-defaulted fields go to the JSON with their default value.)
-//! 6. For secret fields, append `KEY='VALUE'` to `$HERMES_HOME/.env`
+//! 6. For secret fields, append `KEY='VALUE'` to `$IRONHERMES_HOME/.env`
 //!    with POSIX single-quote escaping and newline refusal (T-20-03).
 //! 7. For non-secret fields, pass the collected values to
 //!    `provider.save_config(&values, &hermes_home)`.
-//! 8. Update `$HERMES_HOME/config.yaml` to set `memory.provider` to the
+//! 8. Update `$IRONHERMES_HOME/config.yaml` to set `memory.provider` to the
 //!    selected name so the next launch picks it up
 //!    (resolves research Open Question #1).
 
@@ -37,7 +37,7 @@ const ENV_VAR_DENY_LIST: &[&str] = &[
     "USER",
     "SHELL",
     "IRONHERMES_HOME",
-    "HERMES_HOME",
+    "IRONHERMES_HOME",
 ];
 
 /// Validate that `s` is a POSIX-shell-safe environment variable name AND
@@ -111,7 +111,7 @@ pub fn available_providers() -> Vec<&'static str> {
 /// `Commands::Memory { action: MemorySubcommand::Setup }`.
 pub async fn run_memory_setup(_cli: &crate::Cli) -> Result<()> {
     let hermes_home = get_hermes_home();
-    std::fs::create_dir_all(&hermes_home).context("creating HERMES_HOME")?;
+    std::fs::create_dir_all(&hermes_home).context("creating IRONHERMES_HOME")?;
 
     let providers = available_providers();
     println!("Available memory providers: {}", providers.join(", "));
@@ -130,7 +130,7 @@ pub(crate) async fn run_memory_setup_with_io<R: BufRead, W: Write>(
     hermes_home: &Path,
     providers: &[&str],
 ) -> Result<()> {
-    std::fs::create_dir_all(hermes_home).context("creating HERMES_HOME")?;
+    std::fs::create_dir_all(hermes_home).context("creating IRONHERMES_HOME")?;
 
     let selected = prompt_line(reader, writer, "Select provider", Some("file"))?;
     if !providers.iter().any(|p| *p == selected) {
@@ -153,7 +153,7 @@ pub(crate) async fn run_memory_setup_with_io<R: BufRead, W: Write>(
     }
 
     // Build the provider (read-only; no writes yet) via the factory so we
-    // can call get_config_schema() on it. Override HERMES_HOME only for
+    // can call get_config_schema() on it. Override IRONHERMES_HOME only for
     // the duration of this call — factory reads IRONHERMES_HOME via
     // `get_hermes_home()`.
     let cfg = ironhermes_core::config::MemoryConfig {
@@ -207,7 +207,7 @@ pub(crate) async fn run_memory_setup_with_io<R: BufRead, W: Write>(
         }
     }
 
-    // 1. Write secrets to $HERMES_HOME/.env (append-only, POSIX-quoted).
+    // 1. Write secrets to $IRONHERMES_HOME/.env (append-only, POSIX-quoted).
     if !secrets_to_env.is_empty() {
         let env_path = hermes_home.join(".env");
         let mut file = OpenOptions::new()
@@ -267,7 +267,7 @@ pub(crate) fn prompt_line<R: BufRead, W: Write>(
     Ok(line)
 }
 
-/// Parse-then-write update of `$HERMES_HOME/config.yaml` setting
+/// Parse-then-write update of `$IRONHERMES_HOME/config.yaml` setting
 /// `memory.provider` to `selected`. Preserves all other keys.
 pub(crate) fn update_config_yaml_memory_provider(hermes_home: &Path, selected: &str) -> Result<()> {
     let cfg_path = hermes_home.join("config.yaml");
@@ -315,7 +315,7 @@ mod tests {
         assert!(!is_valid_env_var_name("")); // empty
         assert!(!is_valid_env_var_name("PATH")); // deny-list
         assert!(!is_valid_env_var_name("HOME")); // deny-list
-        assert!(!is_valid_env_var_name("HERMES_HOME")); // deny-list
+        assert!(!is_valid_env_var_name("IRONHERMES_HOME")); // deny-list
         assert!(!is_valid_env_var_name("IRONHERMES_HOME")); // deny-list
     }
 

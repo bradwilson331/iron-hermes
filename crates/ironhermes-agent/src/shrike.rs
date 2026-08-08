@@ -23,8 +23,9 @@
 //!
 //! - `registry: Arc<RwLock<SubagentRegistry>>` — the canonical
 //!   in-memory registry from Plan 01 / Plan 02. ShrikeService bridges
-//!   sync-trait callers to the async lock via `block_in_place` +
-//!   `block_on`, identical to `SubagentRegistryHandle::kill` (subagent_registry.rs:300–304).
+//!   sync-trait callers to the async lock via
+//!   `ironhermes_core::async_bridge::block_on_sync`, identical to
+//!   `SubagentRegistryHandle::kill`.
 //! - `active_handles: Arc<Mutex<HashMap<SubagentId, JoinHandle<()>>>>` —
 //!   the JoinHandle map populated by `DelegateTaskTool::execute_batch`
 //!   after `tokio::spawn`. `kill` aborts entries here; `interrupt` does
@@ -36,10 +37,16 @@
 //! same methods via the `SubagentListSnapshot` trait — no surface owns a
 //! copy of the kill/interrupt/prune/status logic.
 //!
-//! **Constraint:** All four methods use the `block_in_place` + `block_on`
-//! bridge to bridge the tokio async lock into the sync `SubagentListSnapshot`
-//! trait surface. This is only safe on the tokio multi-thread runtime —
-//! tests must use `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`.
+//! **Constraint:** All four methods bridge the tokio async lock into the sync
+//! `SubagentListSnapshot` trait surface via
+//! [`ironhermes_core::async_bridge::block_on_sync`]. That bridge is safe on
+//! every runtime context — multi-thread, current-thread, inside a `LocalSet`,
+//! and with no runtime at all. It replaced a `block_in_place` + `block_on`
+//! bridge that panicked inside the Dioxus web server's per-connection
+//! `LocalSet` (Phase 41.3 UAT; regression test at
+//! `tests/localset_sync_bridge.rs`). Existing tests still use
+//! `#[tokio::test(flavor = "multi_thread", worker_threads = 2)]`, but that is
+//! no longer a hard requirement of this module.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -120,8 +127,8 @@ impl ShrikeService {
     /// Returns `Some(KillResult)` with uptime captured before the cancel,
     /// or `None` when the id is not present.
     pub fn kill(&self, id: &str) -> Option<KillResult> {
-        let kill_result: Option<KillResult> = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
+        let kill_result: Option<KillResult> =
+            ironhermes_core::async_bridge::block_on_sync(async {
                 let guard = self.registry.write().await;
                 let info = guard.get(id)?.clone();
                 let uptime_secs = info.started_at.elapsed().as_secs();
@@ -136,8 +143,7 @@ impl ShrikeService {
                     uptime_secs,
                     turns_used: 0,
                 })
-            })
-        });
+            });
 
         // W3 / D-08 abort: if the JoinHandle is in our map, abort it.
         // This is what makes kill *more* than interrupt — a wedged future
@@ -172,17 +178,15 @@ impl ShrikeService {
     ///
     /// Returns `true` when the id was present, `false` otherwise.
     pub fn interrupt(&self, id: &str) -> bool {
-        let cancelled: bool = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let guard = self.registry.read().await;
-                match guard.get(id) {
-                    Some(info) => {
-                        info.cancel.cancel();
-                        true
-                    }
-                    None => false,
+        let cancelled: bool = ironhermes_core::async_bridge::block_on_sync(async {
+            let guard = self.registry.read().await;
+            match guard.get(id) {
+                Some(info) => {
+                    info.cancel.cancel();
+                    true
                 }
-            })
+                None => false,
+            }
         });
 
         if cancelled {
@@ -211,23 +215,21 @@ impl ShrikeService {
     /// (the actual entry removal happens via the spawned future's
     /// RegistrationGuard Drop, same as kill).
     pub fn prune(&self, stale_secs: u64) -> Vec<SubagentId> {
-        let stale_ids: Vec<SubagentId> = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let guard = self.registry.read().await;
-                guard
-                    .list()
-                    .into_iter()
-                    .filter_map(|info| {
-                        let al = info.activity_last.as_ref()?;
-                        let elapsed = al.lock().ok()?.elapsed().as_secs();
-                        if elapsed > stale_secs {
-                            Some(info.id)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect()
-            })
+        let stale_ids: Vec<SubagentId> = ironhermes_core::async_bridge::block_on_sync(async {
+            let guard = self.registry.read().await;
+            guard
+                .list()
+                .into_iter()
+                .filter_map(|info| {
+                    let al = info.activity_last.as_ref()?;
+                    let elapsed = al.lock().ok()?.elapsed().as_secs();
+                    if elapsed > stale_secs {
+                        Some(info.id)
+                    } else {
+                        None
+                    }
+                })
+                .collect()
         });
 
         // Cancel each stale entry's token (same as interrupt semantics for
@@ -235,13 +237,11 @@ impl ShrikeService {
         // The RegistrationGuard Drop on the future will deregister the
         // entry naturally.
         for id in &stale_ids {
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(async {
-                    let guard = self.registry.read().await;
-                    if let Some(info) = guard.get(id) {
-                        info.cancel.cancel();
-                    }
-                })
+            ironhermes_core::async_bridge::block_on_sync(async {
+                let guard = self.registry.read().await;
+                if let Some(info) = guard.get(id) {
+                    info.cancel.cancel();
+                }
             });
             if let Ok(mut handles) = self.active_handles.lock()
                 && let Some(handle) = handles.remove(id)
@@ -263,44 +263,42 @@ impl ShrikeService {
     /// cross-crate-safe [`SubagentStatusInfo`]. Returns `None` when the id
     /// is not present.
     pub fn status(&self, id: &str) -> Option<SubagentStatusInfo> {
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let guard = self.registry.read().await;
-                let info = guard.get(id)?;
-                let uptime_secs = info.started_at.elapsed().as_secs();
-                let last_activity_secs = info
-                    .activity_last
-                    .as_ref()
-                    .and_then(|al| al.lock().ok().map(|g| g.elapsed().as_secs()));
-                let derived_status = if info.cancel.is_cancelled() {
-                    "killed".to_string()
-                } else if let Some(idle) = last_activity_secs {
-                    if idle > info.stale_warn_seconds {
-                        "stale".to_string()
-                    } else {
-                        "running".to_string()
-                    }
+        ironhermes_core::async_bridge::block_on_sync(async {
+            let guard = self.registry.read().await;
+            let info = guard.get(id)?;
+            let uptime_secs = info.started_at.elapsed().as_secs();
+            let last_activity_secs = info
+                .activity_last
+                .as_ref()
+                .and_then(|al| al.lock().ok().map(|g| g.elapsed().as_secs()));
+            let derived_status = if info.cancel.is_cancelled() {
+                "killed".to_string()
+            } else if let Some(idle) = last_activity_secs {
+                if idle > info.stale_warn_seconds {
+                    "stale".to_string()
                 } else {
                     "running".to_string()
-                };
-                Some(SubagentStatusInfo {
-                    id: info.id.clone(),
-                    parent_id: info.parent_id.clone(),
-                    task_summary: info.task_summary.clone(),
-                    // Plan 03 does NOT plumb role/depth onto SubagentInfo —
-                    // both are runner-local in Phase 32.2 D-01. Surface as
-                    // None for now; Plan 04 may thread them if needed.
-                    role: None,
-                    depth: None,
-                    uptime_secs,
-                    last_activity_secs,
-                    // Phase 32.1 ActivityTracker tracks activity bumps but
-                    // does not yet expose an iteration count back to the
-                    // registry. Conservatively None today.
-                    turns_used: None,
-                    transcript_path: info.transcript_path.display().to_string(),
-                    status: derived_status,
-                })
+                }
+            } else {
+                "running".to_string()
+            };
+            Some(SubagentStatusInfo {
+                id: info.id.clone(),
+                parent_id: info.parent_id.clone(),
+                task_summary: info.task_summary.clone(),
+                // Plan 03 does NOT plumb role/depth onto SubagentInfo —
+                // both are runner-local in Phase 32.2 D-01. Surface as
+                // None for now; Plan 04 may thread them if needed.
+                role: None,
+                depth: None,
+                uptime_secs,
+                last_activity_secs,
+                // Phase 32.1 ActivityTracker tracks activity bumps but
+                // does not yet expose an iteration count back to the
+                // registry. Conservatively None today.
+                turns_used: None,
+                transcript_path: info.transcript_path.display().to_string(),
+                status: derived_status,
             })
         })
     }

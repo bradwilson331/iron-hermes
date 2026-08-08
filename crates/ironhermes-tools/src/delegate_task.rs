@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use ironhermes_core::{SubagentConfig, ToolSchema};
+use ironhermes_core::{Config, SubagentConfig, ToolSchema};
 use serde_json::json;
 use tokio::sync::Semaphore;
 use tracing::info;
@@ -19,6 +19,8 @@ use tokio_util::sync::CancellationToken;
 
 use tokio::sync::RwLock;
 
+use crate::gen_guardrail::{GenerationGuardrail, ReservationKind};
+use crate::image_gen::ArtifactCaptureSink;
 use crate::memory_tool::SharedMemoryManager;
 use crate::registry::{Tool, ToolRegistry};
 
@@ -64,23 +66,56 @@ const STRUCTURED_SUMMARY_INSTRUCTIONS: &str = "\n\nWhen you complete the task, p
      - **Issues Encountered**: Any problems or blockers (or 'None')";
 
 /// Maps toolset group names to individual tool names (D-01).
-pub fn resolve_toolset_tools(toolset: &str) -> anyhow::Result<Vec<&'static str>> {
+///
+/// Phase 47 Plan 08 (D-09): `generation_enabled` gates the `"generation"`
+/// group — mirroring the 46.6 `"artifacts"` group precedent, a child opts in
+/// via `toolsets: ["generation"]`. When `generation_enabled` is `false` the
+/// group resolves to an EMPTY list (fail-closed: the four gen tools are
+/// never registered — the wall stays up, not merely hidden). Callers pass
+/// `config.generation.guardrails.surfaces.delegate` (or, equivalently,
+/// `DelegateTaskTool::gen_wiring.is_some()`, since the wiring is only ever
+/// constructed when that surface flag is true).
+pub fn resolve_toolset_tools(
+    toolset: &str,
+    generation_enabled: bool,
+) -> anyhow::Result<Vec<&'static str>> {
     match toolset {
         "terminal" => Ok(vec!["terminal"]),
         "file" => Ok(vec!["read_file", "write_file", "patch", "search_files"]),
         "web" => Ok(vec!["web_search", "web_read"]),
+        // Phase 46.6 gap-closure (D-01/D-04): the delegate producer surface. Lets
+        // a delegated task request the `artifact` publish tool via
+        // `toolsets: ["artifacts"]`, paralleling the tool's own `toolset()`.
+        "artifacts" => Ok(vec!["artifact"]),
+        // Phase 47 Plan 08 (D-09): fail-closed on the delegate surface toggle.
+        "generation" => Ok(if generation_enabled {
+            vec![
+                "image_gen",
+                "video_generate",
+                "video_animate",
+                "video_to_video",
+            ]
+        } else {
+            vec![]
+        }),
         other => anyhow::bail!(
-            "Unknown toolset group: {}. Valid groups: terminal, file, web",
+            "Unknown toolset group: {}. Valid groups: terminal, file, web, artifacts, generation",
             other
         ),
     }
 }
 
 /// Resolves a list of toolset group names to a deduplicated list of individual tool names.
-pub fn resolve_toolsets(toolsets: &[String]) -> anyhow::Result<Vec<String>> {
+///
+/// `generation_enabled` is threaded straight through to
+/// [`resolve_toolset_tools`] (Phase 47 Plan 08, D-09).
+pub fn resolve_toolsets(
+    toolsets: &[String],
+    generation_enabled: bool,
+) -> anyhow::Result<Vec<String>> {
     let mut tools: Vec<String> = Vec::new();
     for ts in toolsets {
-        let resolved = resolve_toolset_tools(ts)?;
+        let resolved = resolve_toolset_tools(ts, generation_enabled)?;
         for t in resolved {
             if !tools.contains(&t.to_string()) {
                 tools.push(t.to_string());
@@ -164,6 +199,163 @@ pub type ShrikeHandleMap = std::sync::Arc<
     std::sync::Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>,
 >;
 
+// ---------------------------------------------------------------------------
+// Phase 47 Plan 08 (D-09/D-10): delegate-surface generation wiring
+// ---------------------------------------------------------------------------
+
+/// Per-ROOT generation wiring TEMPLATE, stored once on [`DelegateTaskTool`]
+/// via [`DelegateTaskTool::with_generation_wiring`].
+///
+/// Constructed by the caller (`ironhermes-agent`'s `app_runtime_factory`)
+/// ONLY when `guardrails.surfaces.delegate` is true — `None` on
+/// `DelegateTaskTool` otherwise, which is exactly what keeps
+/// [`resolve_toolsets`]'s `"generation"` group fail-closed-EMPTY (D-09): the
+/// `generation_enabled` bool passed to `resolve_toolsets` is
+/// `self.gen_wiring.is_some()`, so there is only ONE source of truth for
+/// "may this delegate spawn generate media" — the presence of this struct.
+///
+/// Each spawned child is bound to its OWN [`ChildGenWiring`] (this template
+/// plus a fresh per-spawn `child_id`) via [`GenerationSurfaceWiring::for_child`]
+/// so `ReservationKind::Descendant` per-child accounting is scoped correctly
+/// per child, not accidentally shared across an entire batch.
+#[derive(Clone)]
+pub struct GenerationSurfaceWiring {
+    /// Full application config (needed to construct the gen tools —
+    /// `image_gen.t2i.model` etc. — which `SubagentConfig` does not carry).
+    pub config: Arc<Config>,
+    /// The SAME guardrail `Arc` the chat surface holds for this session, so a
+    /// delegate child's generations draw from the session's shared
+    /// `session_pool` (D-08).
+    pub guardrail: Arc<GenerationGuardrail>,
+    /// Best-effort artifact-gallery capture (D-10) — `None` disables capture
+    /// without disabling generation itself.
+    pub capture_sink: Option<Arc<dyn ArtifactCaptureSink>>,
+}
+
+impl GenerationSurfaceWiring {
+    /// Bind this template to a concrete per-spawn `child_id`.
+    pub fn for_child(&self, child_id: impl Into<String>) -> ChildGenWiring {
+        ChildGenWiring {
+            config: self.config.clone(),
+            guardrail: self.guardrail.clone(),
+            child_id: child_id.into(),
+            capture_sink: self.capture_sink.clone(),
+        }
+    }
+}
+
+/// Per-CHILD generation wiring — [`GenerationSurfaceWiring`] bound to one
+/// concrete spawn's `child_id`. Passed to [`build_child_registry`] so the
+/// four gen tool arms construct `ReservationKind::Descendant { child_id }`
+/// tools sharing the root guardrail.
+#[derive(Clone)]
+pub struct ChildGenWiring {
+    pub config: Arc<Config>,
+    pub guardrail: Arc<GenerationGuardrail>,
+    pub child_id: String,
+    pub capture_sink: Option<Arc<dyn ArtifactCaptureSink>>,
+}
+
+/// Concrete production [`ArtifactCaptureSink`] for delegate children (D-10).
+///
+/// Publishes the completed generation into the SAME per-profile artifact
+/// gallery `crate::artifact::ArtifactTool` writes to (Phase 46.6), wrapping
+/// the media as a self-contained HTML page with the file embedded as a
+/// `data:` URI (the artifacts doc's own "images as data URIs" pattern — no
+/// external requests, no backend, matching the gallery's sandboxed-viewer
+/// constraints). Best-effort: a publish failure (most commonly the artifact
+/// store's 16 MiB rendered-size cap — a real video frequently exceeds it
+/// once base64-inflated) is logged and never propagated; the generation
+/// itself already succeeded independent of this capture.
+#[derive(Default)]
+pub struct DelegateGenCaptureSink;
+
+impl DelegateGenCaptureSink {
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn is_video(kind: &str) -> bool {
+        matches!(kind, "video_generate" | "video_animate" | "video_to_video")
+    }
+
+    fn mime_for(path: &std::path::Path) -> &'static str {
+        match path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_ascii_lowercase())
+        {
+            Some(ref e) if e == "webp" => "image/webp",
+            Some(ref e) if e == "png" => "image/png",
+            Some(ref e) if e == "jpg" || e == "jpeg" => "image/jpeg",
+            Some(ref e) if e == "mp4" => "video/mp4",
+            Some(ref e) if e == "mov" => "video/quicktime",
+            Some(ref e) if e == "webm" => "video/webm",
+            _ => "application/octet-stream",
+        }
+    }
+
+    /// Derive a short gallery title from the originating prompt text.
+    fn derive_title(kind: &str, prompt: &str) -> String {
+        let trimmed = prompt.trim();
+        if trimmed.is_empty() {
+            return format!("{kind} artifact");
+        }
+        let mut end = trimmed.len().min(80);
+        while !trimmed.is_char_boundary(end) {
+            end -= 1;
+        }
+        trimmed[..end].to_string()
+    }
+
+    fn try_capture(kind: &str, media_path: &str, prompt: &str) -> anyhow::Result<()> {
+        use base64::Engine as _;
+
+        let path = std::path::Path::new(media_path);
+        let bytes = std::fs::read(path)
+            .map_err(|e| anyhow::anyhow!("read generated media at {media_path}: {e}"))?;
+        let mime = Self::mime_for(path);
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let tag = if Self::is_video(kind) {
+            format!(
+                r#"<video controls style="max-width:100%" src="data:{mime};base64,{b64}"></video>"#
+            )
+        } else {
+            format!(
+                r#"<img alt="generated" style="max-width:100%" src="data:{mime};base64,{b64}">"#
+            )
+        };
+        let body = format!("<!DOCTYPE html><html><body>{tag}</body></html>");
+
+        let mut store = ironhermes_artifacts::ArtifactStore::open_default()?;
+        store.publish(ironhermes_artifacts::PublishInput {
+            profile: ironhermes_core::current_profile(),
+            update_id: None,
+            title: Some(Self::derive_title(kind, prompt)),
+            icon: None,
+            source_kind: Some(kind.to_string()),
+            source_ref: Some(media_path.to_string()),
+            source_format: ironhermes_artifacts::SourceFormat::Html,
+            body,
+        })?;
+        Ok(())
+    }
+}
+
+impl ArtifactCaptureSink for DelegateGenCaptureSink {
+    fn capture(&self, kind: &str, media_path: &str, prompt: &str) {
+        if let Err(e) = Self::try_capture(kind, media_path, prompt) {
+            tracing::warn!(
+                target: "ironhermes_tools::delegate_task",
+                kind,
+                media_path,
+                error = %e,
+                "delegate gen artifact capture failed (best-effort; generation itself already succeeded)"
+            );
+        }
+    }
+}
+
 /// Tool that delegates a focused task to a child agent with restricted tools.
 pub struct DelegateTaskTool {
     runner: Arc<dyn SubagentRunner>,
@@ -181,6 +373,19 @@ pub struct DelegateTaskTool {
     /// ShrikeService — kill in that case falls back to token-only cancel
     /// (which matches pre-Phase-32.3 behavior).
     shrike_handles: Option<ShrikeHandleMap>,
+    /// Phase 47 Plan 08 (D-09/D-10): per-root generation wiring template.
+    /// `None` unless `guardrails.surfaces.delegate` is true — this is the
+    /// sole source of truth `resolve_toolsets` consults (via
+    /// `self.gen_wiring.is_some()`) to fail-closed-empty the `"generation"`
+    /// toolset group.
+    gen_wiring: Option<GenerationSurfaceWiring>,
+    /// Phase 41.3 Plan 11 (D-19): the resolved credential snapshot threaded
+    /// into every child registry this tool builds (`build_child_registry`),
+    /// so a delegated child never silently loses a credential the parent
+    /// had. Defaults to an env-only snapshot in `new()`; production
+    /// registration (`ToolRegistry::register_delegate_task_tool`) always
+    /// overrides it via `with_credentials(self.credentials())`.
+    credentials: Arc<crate::credentials::ToolCredentials>,
 }
 
 impl DelegateTaskTool {
@@ -199,6 +404,8 @@ impl DelegateTaskTool {
             parent_cancel_token,
             progress_callback: None,
             shrike_handles: None,
+            gen_wiring: None,
+            credentials: Arc::new(crate::credentials::ToolCredentials::env_only()),
         }
     }
 
@@ -213,6 +420,25 @@ impl DelegateTaskTool {
     /// The Arc is the value returned by `ShrikeService::handle_map()`.
     pub fn with_shrike_handle_map(mut self, handles: ShrikeHandleMap) -> Self {
         self.shrike_handles = Some(handles);
+        self
+    }
+
+    /// Phase 47 Plan 08 (D-09): install the generation wiring template — ONLY
+    /// called by `register_delegate_task_tool` when
+    /// `guardrails.surfaces.delegate` is true.
+    #[must_use]
+    pub fn with_generation_wiring(mut self, wiring: GenerationSurfaceWiring) -> Self {
+        self.gen_wiring = Some(wiring);
+        self
+    }
+
+    /// Phase 41.3 Plan 11 (D-19): install the resolved credential snapshot.
+    /// Called unconditionally by `ToolRegistry::register_delegate_task_tool`
+    /// with the registering registry's own `credentials()` — a production
+    /// `DelegateTaskTool` is never left on the `new()` default.
+    #[must_use]
+    pub fn with_credentials(mut self, credentials: Arc<crate::credentials::ToolCredentials>) -> Self {
+        self.credentials = credentials;
         self
     }
 }
@@ -268,12 +494,16 @@ impl DelegateTaskTool {
             } else {
                 self.config.default_toolsets.clone()
             };
-            let allowed_tools = resolve_toolsets(&toolsets)?;
+            // Phase 47 Plan 08 (D-09): fail-closed on the delegate surface
+            // toggle — `self.gen_wiring` is `Some` only when
+            // `guardrails.surfaces.delegate` is true.
+            let allowed_tools = resolve_toolsets(&toolsets, self.gen_wiring.is_some())?;
 
             let runner = self.runner.clone();
             let semaphore = self.semaphore.clone();
             let memory_manager = self.memory_manager.clone();
             let config = self.config.clone();
+            let gen_wiring_for_spawn = self.gen_wiring.clone();
 
             // D-21/D-22: Create child cancel token based on detach flag
             let child_cancel_token = if detach {
@@ -367,6 +597,10 @@ impl DelegateTaskTool {
             // exit (no regression vs pre-Plan-03 behavior). Removed on
             // natural completion via the spawned future's cleanup hook.
             let shrike_handles_for_spawn = self.shrike_handles.clone();
+            // Phase 41.3 Plan 11 (D-19): the parent's resolved credential
+            // snapshot, threaded into the spawned child registry so a batch
+            // child never silently loses a credential the parent had.
+            let credentials_for_spawn = self.credentials.clone();
             let batch_task_key = format!("batch_task_{}", index);
             let batch_task_key_for_spawn = batch_task_key.clone();
 
@@ -399,6 +633,12 @@ impl DelegateTaskTool {
                     .await
                     .map_err(|e| anyhow::anyhow!("Semaphore closed: {}", e))?;
 
+                // Phase 47 Plan 08 (D-08): bind the shared root-guardrail
+                // template to THIS spawn's own child_id so per-child
+                // accounting never leaks across batch siblings.
+                let child_gen_wiring = gen_wiring_for_spawn
+                    .as_ref()
+                    .map(|w| w.for_child(batch_task_key_for_spawn.clone()));
                 let child_registry = build_child_registry(
                     &allowed_tools,
                     memory_manager,
@@ -407,6 +647,8 @@ impl DelegateTaskTool {
                     0,
                     &config,
                     Some((runner_for_child.clone(), semaphore_for_child.clone())),
+                    child_gen_wiring,
+                    credentials_for_spawn.clone(),
                 )?;
 
                 let mut system_prompt = format!(
@@ -541,6 +783,19 @@ impl DelegateTaskTool {
 /// - `runner_for_orchestrator`: `Some((runner, semaphore))` when the caller can supply runner
 ///   state for an orchestrator's `DelegateTaskTool`. `None` causes silent downgrade to Leaf
 ///   even when all depth/kill-switch conditions are met.
+///
+/// Phase 47 Plan 08 (D-09/D-10): `gen_wiring` is `Some(ChildGenWiring)` ONLY
+/// when the caller resolved the `"generation"` toolset group with
+/// `surfaces.delegate=true` — i.e. `allowed_tools` can only contain the four
+/// gen tool names when this is `Some` (fail-closed at `resolve_toolset_tools`
+/// already guarantees this in production; the arms below still warn-and-skip
+/// defensively rather than registering an ungated tool if a caller ever
+/// passes a gen tool name with `gen_wiring: None`).
+#[allow(clippy::too_many_arguments)]
+// 9 params: allowed_tools/memory_manager/child_cwd/role/child_depth/config/
+// runner_for_orchestrator/gen_wiring/credentials — a builder would add
+// indirection with no clarity benefit for this pure, already-well-documented
+// function.
 pub fn build_child_registry(
     allowed_tools: &[String],
     memory_manager: Option<SharedMemoryManager>,
@@ -549,6 +804,12 @@ pub fn build_child_registry(
     child_depth: u32,
     config: &SubagentConfig,
     runner_for_orchestrator: Option<(Arc<dyn SubagentRunner>, Arc<Semaphore>)>,
+    gen_wiring: Option<ChildGenWiring>,
+    // Phase 41.3 Plan 11 (D-19): the parent registry's resolved credential
+    // snapshot. A subagent that silently lost a credential its parent had
+    // would be the same class of silent degradation `scope_to()`'s own doc
+    // comment warns against for MCP tools — see `ToolRegistry::scope_to`.
+    credentials: Arc<crate::credentials::ToolCredentials>,
 ) -> anyhow::Result<ToolRegistry> {
     // Phase 32.2 D-01/D-02/D-03: expand tool list for orchestrators BEFORE the
     // structural-exclusion match loop (RESEARCH Pitfall 1: re-add BEFORE not after).
@@ -576,6 +837,10 @@ pub fn build_child_registry(
     };
 
     let mut registry = ToolRegistry::new();
+    // Phase 41.3 Plan 11 (D-19): carry the parent's snapshot forward so
+    // credential-backed tools registered below (and any future default
+    // construction path) read it instead of defaulting to env-only.
+    registry.with_credentials(credentials.clone());
 
     for tool_name in &effective_tools {
         match tool_name.as_str() {
@@ -594,7 +859,12 @@ pub fn build_child_registry(
                         memory_manager.clone(),
                         config.clone(),
                         None,
-                    );
+                    )
+                    // Phase 41.3 Plan 11 (D-19): an orchestrator's own child
+                    // DelegateTaskTool must inherit the same snapshot — a
+                    // grandchild spawned two delegate hops down must not
+                    // silently fall back to env-only credentials.
+                    .with_credentials(credentials.clone());
                     registry.register(Box::new(child_tool));
                 }
                 // If runner_for_orchestrator is None (shouldn't reach here given effective_tools
@@ -615,8 +885,30 @@ pub fn build_child_registry(
             "search_files" => registry.register(Box::new(crate::file_tools::SearchFilesTool)),
 
             // Web tools
-            "web_search" => registry.register(Box::new(crate::web_search::WebSearchTool)),
+            "web_search" => registry.register(Box::new(crate::web_search::WebSearchTool::new(
+                credentials.clone(),
+            ))),
             "web_read" => registry.register(Box::new(crate::web_read::WebReadTool)),
+
+            // Artifact publish — the delegate producer surface (Phase 46.6
+            // gap-closure, D-01/D-04). Before this arm, a child that requested
+            // "artifact" hit the `other => bail!` path below and the WHOLE spawn
+            // failed. The tool needs only an AuditLog + the unattended-producer
+            // cap: `AuditLog::load` always resolves to `get_hermes_home()/
+            // audit.jsonl` (path is cfg-independent — audit.rs), and the child
+            // runs in-process under the ROOT home, so its publishes land in the
+            // same root store the operator gallery reads — no store-routing
+            // bridge is needed (unlike the kanban subprocess). D-06 caps unattended
+            // producers via an explicit `run_key` arg (interactive chat is uncapped).
+            "artifact" => {
+                let audit = Arc::new(ironhermes_core::AuditLog::load(
+                    ironhermes_core::AuditConfig::default(),
+                ));
+                registry.register(Box::new(crate::artifact::ArtifactTool::new(
+                    audit,
+                    crate::artifact::DEFAULT_ARTIFACT_CAP,
+                )));
+            }
 
             // Memory — read-only in child context (D-12)
             "memory" => {
@@ -637,6 +929,100 @@ pub fn build_child_registry(
                     child_cwd.to_path_buf(),
                 )));
             }
+
+            // Phase 47 Plan 08 (D-09/D-10): the "generation" delegate toolset
+            // group. Each arm constructs the tool with the SHARED root
+            // guardrail (`ReservationKind::Descendant { child_id }` — bounded
+            // by BOTH per_child_cap and the shared session_pool, D-08) and the
+            // best-effort artifact-gallery capture sink. `gen_wiring: None`
+            // here would mean a gen tool name reached this function without
+            // `surfaces.delegate` having been true — resolve_toolset_tools
+            // already makes that impossible in production, but we warn+skip
+            // rather than silently registering an ungated tool.
+            "image_gen" => match &gen_wiring {
+                Some(w) => {
+                    let kind = ReservationKind::Descendant {
+                        child_id: w.child_id.clone(),
+                    };
+                    let mut t = crate::image_gen::ImageGenTool::new(
+                        w.config.clone(),
+                        crate::fal::FalClient::new(),
+                    )
+                    .with_guardrail(w.guardrail.clone(), kind);
+                    if let Some(sink) = &w.capture_sink {
+                        t = t.with_capture_sink(sink.clone());
+                    }
+                    registry.register(Box::new(t));
+                }
+                None => tracing::warn!(
+                    target: "ironhermes_tools::delegate_task",
+                    "'image_gen' requested but no generation wiring is available \
+                     (guardrails.surfaces.delegate must be enabled); skipping"
+                ),
+            },
+            "video_generate" => match &gen_wiring {
+                Some(w) => {
+                    let kind = ReservationKind::Descendant {
+                        child_id: w.child_id.clone(),
+                    };
+                    let mut t = crate::video_gen::VideoGenerateTool::new(
+                        w.config.clone(),
+                        crate::fal::FalClient::new(),
+                    )
+                    .with_guardrail(w.guardrail.clone(), kind);
+                    if let Some(sink) = &w.capture_sink {
+                        t = t.with_capture_sink(sink.clone());
+                    }
+                    registry.register(Box::new(t));
+                }
+                None => tracing::warn!(
+                    target: "ironhermes_tools::delegate_task",
+                    "'video_generate' requested but no generation wiring is available \
+                     (guardrails.surfaces.delegate must be enabled); skipping"
+                ),
+            },
+            "video_animate" => match &gen_wiring {
+                Some(w) => {
+                    let kind = ReservationKind::Descendant {
+                        child_id: w.child_id.clone(),
+                    };
+                    let mut t = crate::video_gen::VideoAnimateTool::new(
+                        w.config.clone(),
+                        crate::fal::FalClient::new(),
+                    )
+                    .with_guardrail(w.guardrail.clone(), kind);
+                    if let Some(sink) = &w.capture_sink {
+                        t = t.with_capture_sink(sink.clone());
+                    }
+                    registry.register(Box::new(t));
+                }
+                None => tracing::warn!(
+                    target: "ironhermes_tools::delegate_task",
+                    "'video_animate' requested but no generation wiring is available \
+                     (guardrails.surfaces.delegate must be enabled); skipping"
+                ),
+            },
+            "video_to_video" => match &gen_wiring {
+                Some(w) => {
+                    let kind = ReservationKind::Descendant {
+                        child_id: w.child_id.clone(),
+                    };
+                    let mut t = crate::video_to_video::VideoToVideoTool::new(
+                        w.config.clone(),
+                        crate::fal::FalClient::new(),
+                    )
+                    .with_guardrail(w.guardrail.clone(), kind);
+                    if let Some(sink) = &w.capture_sink {
+                        t = t.with_capture_sink(sink.clone());
+                    }
+                    registry.register(Box::new(t));
+                }
+                None => tracing::warn!(
+                    target: "ironhermes_tools::delegate_task",
+                    "'video_to_video' requested but no generation wiring is available \
+                     (guardrails.surfaces.delegate must be enabled); skipping"
+                ),
+            },
 
             // Unknown tool — fail early (D-04)
             other => anyhow::bail!("Unknown tool in allowed_tools: {}", other),
@@ -742,6 +1128,15 @@ impl Tool for DelegateTaskTool {
         )
     }
 
+    /// D-04 (Phase 41.3): opt out of the registry-level bound. Child-agent
+    /// runs own their own budget and cancellation token —
+    /// `tests/delegate_task_timeout_cancel.rs` is the existing proof that
+    /// `delegate_task` already bounds and cancels its children correctly
+    /// without this wrap.
+    fn timeout_secs(&self) -> Option<u64> {
+        None
+    }
+
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
         // Validate: either "task" or "tasks" must be present (mutually exclusive modes)
         if args.get("tasks").is_none() && args.get("task").is_none() {
@@ -773,7 +1168,7 @@ impl Tool for DelegateTaskTool {
                         .map(|s| s.to_string())
                 })
                 .collect::<anyhow::Result<Vec<String>>>()?;
-            resolve_toolsets(&ts)?
+            resolve_toolsets(&ts, self.gen_wiring.is_some())?
         } else if let Some(tools) = args.get("allowed_tools") {
             tools
                 .as_array()
@@ -787,7 +1182,7 @@ impl Tool for DelegateTaskTool {
                 .collect::<anyhow::Result<Vec<String>>>()?
         } else {
             // D-01 default: resolve from config.default_toolsets
-            resolve_toolsets(&self.config.default_toolsets)?
+            resolve_toolsets(&self.config.default_toolsets, self.gen_wiring.is_some())?
         };
 
         // Create isolated temp directory for child (D-10, D-13)
@@ -840,6 +1235,11 @@ impl Tool for DelegateTaskTool {
         // child_depth=0 here: DelegateTaskTool::execute is invoked by the parent AgentLoop;
         // the runner carries current_depth and the child's AgentSubagentRunner is constructed
         // with current_depth+1 (Task 2 wiring in subagent_runner.rs).
+        // Phase 47 Plan 08 (D-08): a fresh per-spawn child_id — this call site
+        // has no batch index to reuse (single-task mode), so a uuid scopes
+        // the per-child cap to just this one spawn.
+        let child_id = uuid::Uuid::new_v4().to_string();
+        let child_gen_wiring = self.gen_wiring.as_ref().map(|w| w.for_child(child_id));
         let child_registry = build_child_registry(
             &allowed_tools,
             self.memory_manager.clone(),
@@ -848,6 +1248,8 @@ impl Tool for DelegateTaskTool {
             0,
             &self.config,
             Some((self.runner.clone(), self.semaphore.clone())),
+            child_gen_wiring,
+            self.credentials.clone(),
         )?;
 
         // Build system prompt with structured summary instructions (D-10)
@@ -1022,12 +1424,49 @@ mod tests {
             0,
             &SubagentConfig::default(),
             None,
-        )
+            None,
+                Arc::new(crate::credentials::ToolCredentials::env_only()),
+    )
         .unwrap();
         let tools = registry.list_tools();
         assert!(tools.contains(&"read_file"), "should have read_file");
         assert!(tools.contains(&"write_file"), "should have write_file");
         assert_eq!(tools.len(), 2, "should have exactly 2 tools");
+    }
+
+    #[test]
+    fn test_build_child_registry_registers_artifact() {
+        // Phase 46.6 gap-closure (D-01/D-04): the delegate producer surface.
+        // Before the "artifact" arm, this returned Err (Unknown tool) and the
+        // whole child spawn failed. Now it must register the publish tool.
+        let registry = build_child_registry(
+            &["read_file".to_string(), "artifact".to_string()],
+            None,
+            Path::new("/tmp"),
+            ChildRole::Leaf,
+            0,
+            &SubagentConfig::default(),
+            None,
+            None,
+                Arc::new(crate::credentials::ToolCredentials::env_only()),
+    )
+        .expect("a child requesting 'artifact' must build, not bail");
+        let tools = registry.list_tools();
+        assert!(
+            tools.contains(&"artifact"),
+            "delegate child must expose the artifact producer tool; got: {tools:?}"
+        );
+    }
+
+    #[test]
+    fn test_artifacts_toolset_resolves() {
+        // The "artifacts" toolset group must expand to the artifact tool so a
+        // delegated task can request it via `toolsets: ["artifacts"]`.
+        assert_eq!(
+            resolve_toolset_tools("artifacts", false).unwrap(),
+            vec!["artifact"],
+            "the 'artifacts' toolset group must map to [artifact]"
+        );
     }
 
     #[test]
@@ -1041,7 +1480,9 @@ mod tests {
             0,
             &SubagentConfig::default(),
             None,
-        )
+            None,
+                Arc::new(crate::credentials::ToolCredentials::env_only()),
+    )
         .unwrap();
         let tools = registry.list_tools();
         assert!(
@@ -1062,7 +1503,9 @@ mod tests {
             0,
             &SubagentConfig::default(),
             None,
-        )
+            None,
+                Arc::new(crate::credentials::ToolCredentials::env_only()),
+    )
         .unwrap();
         let tools = registry.list_tools();
         assert!(
@@ -1082,7 +1525,9 @@ mod tests {
             0,
             &SubagentConfig::default(),
             None,
-        );
+            None,
+                Arc::new(crate::credentials::ToolCredentials::env_only()),
+    );
         assert!(result.is_err(), "unknown tool should cause error");
         let err = result.err().unwrap().to_string();
         assert!(
@@ -1102,7 +1547,9 @@ mod tests {
             0,
             &SubagentConfig::default(),
             None,
-        )
+            None,
+                Arc::new(crate::credentials::ToolCredentials::env_only()),
+    )
         .unwrap();
         assert!(registry.list_tools().is_empty());
     }
@@ -1118,7 +1565,9 @@ mod tests {
             0,
             &SubagentConfig::default(),
             None,
-        )
+            None,
+                Arc::new(crate::credentials::ToolCredentials::env_only()),
+    )
         .unwrap();
         let tools = registry.list_tools();
         assert!(tools.contains(&"terminal"), "should have terminal");
@@ -1153,7 +1602,9 @@ mod tests {
             0,
             &SubagentConfig::default(),
             None,
-        )
+            None,
+                Arc::new(crate::credentials::ToolCredentials::env_only()),
+    )
         .unwrap();
         let tools = registry.list_tools();
         assert!(tools.contains(&"memory"), "should have memory");
@@ -1170,7 +1621,9 @@ mod tests {
             0,
             &SubagentConfig::default(),
             None,
-        )
+            None,
+                Arc::new(crate::credentials::ToolCredentials::env_only()),
+    )
         .unwrap();
         let tools = registry.list_tools();
         assert!(
@@ -1426,7 +1879,7 @@ mod tests {
         let config = SubagentConfig::default();
         let runner: Arc<dyn SubagentRunner> = Arc::new(MockRunner);
 
-        registry.register_delegate_task_tool(runner, semaphore, None, config, None, None);
+        registry.register_delegate_task_tool(runner, semaphore, None, config, None, None, None);
 
         let tools = registry.list_tools();
         assert!(
@@ -1457,6 +1910,7 @@ mod tests {
             SubagentConfig::default(),
             None,
             None,
+            None,
         );
         // Parent has delegate_task
         assert!(parent_registry.list_tools().contains(&"delegate_task"));
@@ -1471,7 +1925,9 @@ mod tests {
             0,
             &SubagentConfig::default(),
             None,
-        )
+            None,
+                Arc::new(crate::credentials::ToolCredentials::env_only()),
+    )
         .unwrap();
         assert!(
             !child_registry.list_tools().contains(&"delegate_task"),
@@ -1488,7 +1944,9 @@ mod tests {
             0,
             &SubagentConfig::default(),
             None,
-        )
+            None,
+                Arc::new(crate::credentials::ToolCredentials::env_only()),
+    )
         .unwrap();
         assert!(
             !child_registry2.list_tools().contains(&"delegate_task"),
@@ -1502,13 +1960,13 @@ mod tests {
 
     #[test]
     fn test_resolve_toolset_terminal() {
-        let tools = resolve_toolset_tools("terminal").unwrap();
+        let tools = resolve_toolset_tools("terminal", false).unwrap();
         assert_eq!(tools, vec!["terminal"]);
     }
 
     #[test]
     fn test_resolve_toolset_file() {
-        let tools = resolve_toolset_tools("file").unwrap();
+        let tools = resolve_toolset_tools("file", false).unwrap();
         assert_eq!(
             tools,
             vec!["read_file", "write_file", "patch", "search_files"]
@@ -1517,13 +1975,13 @@ mod tests {
 
     #[test]
     fn test_resolve_toolset_web() {
-        let tools = resolve_toolset_tools("web").unwrap();
+        let tools = resolve_toolset_tools("web", false).unwrap();
         assert_eq!(tools, vec!["web_search", "web_read"]);
     }
 
     #[test]
     fn test_resolve_toolset_unknown_errors() {
-        let result = resolve_toolset_tools("unknown");
+        let result = resolve_toolset_tools("unknown", false);
         assert!(result.is_err());
         assert!(
             result
@@ -1535,7 +1993,7 @@ mod tests {
 
     #[test]
     fn test_resolve_toolsets_union() {
-        let tools = resolve_toolsets(&["terminal".into(), "file".into()]).unwrap();
+        let tools = resolve_toolsets(&["terminal".into(), "file".into()], false).unwrap();
         assert!(tools.contains(&"terminal".to_string()));
         assert!(tools.contains(&"read_file".to_string()));
         assert!(tools.contains(&"write_file".to_string()));
@@ -1547,8 +2005,54 @@ mod tests {
     #[test]
     fn test_resolve_toolsets_deduplicates() {
         // Requesting "file" twice should not produce duplicates
-        let tools = resolve_toolsets(&["file".into(), "file".into()]).unwrap();
+        let tools = resolve_toolsets(&["file".into(), "file".into()], false).unwrap();
         assert_eq!(tools.len(), 4, "should not have duplicate tools");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 47 Plan 08 — "generation" toolset group (D-09, fail-closed)
+    // -----------------------------------------------------------------------
+
+    /// resolve_toolset_tools_generation: full list when delegate=true, EMPTY
+    /// when delegate=false — the wall stays up (fail-closed), tools are never
+    /// registered rather than merely hidden.
+    #[test]
+    fn resolve_toolset_tools_generation_full_list_when_enabled() {
+        let tools = resolve_toolset_tools("generation", true).unwrap();
+        assert_eq!(
+            tools,
+            vec![
+                "image_gen",
+                "video_generate",
+                "video_animate",
+                "video_to_video"
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_toolset_tools_generation_empty_when_disabled() {
+        let tools = resolve_toolset_tools("generation", false).unwrap();
+        assert!(
+            tools.is_empty(),
+            "surfaces.delegate=false must resolve to an EMPTY list (fail-closed), got: {tools:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_toolsets_generation_group_threads_through() {
+        let enabled = resolve_toolsets(&["generation".into()], true).unwrap();
+        assert_eq!(
+            enabled,
+            vec![
+                "image_gen",
+                "video_generate",
+                "video_animate",
+                "video_to_video"
+            ]
+        );
+        let disabled = resolve_toolsets(&["generation".into()], false).unwrap();
+        assert!(disabled.is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -2067,7 +2571,9 @@ mod tests {
             0,
             &SubagentConfig::default(),
             None,
-        )
+            None,
+                Arc::new(crate::credentials::ToolCredentials::env_only()),
+    )
         .unwrap();
         let tools = registry.list_tools();
         assert!(
@@ -2088,7 +2594,9 @@ mod tests {
             0,
             &SubagentConfig::default(),
             None,
-        )
+            None,
+                Arc::new(crate::credentials::ToolCredentials::env_only()),
+    )
         .unwrap();
         let tools = registry.list_tools();
         assert!(
@@ -2232,7 +2740,9 @@ mod tests {
             0, // child_depth=0 < max_spawn_depth=2
             &config,
             Some((runner, semaphore)),
-        )
+            None,
+                Arc::new(crate::credentials::ToolCredentials::env_only()),
+    )
         .unwrap();
         let tools = registry.list_tools();
         assert!(
@@ -2264,7 +2774,9 @@ mod tests {
             0,
             &config,
             Some((runner, semaphore)),
-        )
+            None,
+                Arc::new(crate::credentials::ToolCredentials::env_only()),
+    )
         .unwrap();
         let tools = registry.list_tools();
         assert!(
@@ -2291,7 +2803,9 @@ mod tests {
             2, // child_depth=2 == max_spawn_depth=2 → downgrade
             &config,
             Some((runner, semaphore)),
-        )
+            None,
+                Arc::new(crate::credentials::ToolCredentials::env_only()),
+    )
         .unwrap();
         let tools = registry.list_tools();
         assert!(
@@ -2318,7 +2832,9 @@ mod tests {
             0,
             &config,
             Some((runner, semaphore)),
-        )
+            None,
+                Arc::new(crate::credentials::ToolCredentials::env_only()),
+    )
         .unwrap();
         let tools = registry.list_tools();
         assert!(

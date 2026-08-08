@@ -48,6 +48,12 @@ pub struct ResolvedEndpoint {
     pub fallback_providers: Vec<String>,
     pub model_metadata: Option<ModelMetadata>, // Phase 21.3 D-14
     pub config_context_length: Option<usize>,  // Phase 21.3 D-06
+    /// The provider's configured model-override keys (`ProviderConfig.models`,
+    /// sparse) unioned with `default_model`, deduped (D-10, Phase 36.6.3).
+    /// Populated by `ProviderResolver::build` after overlay + custom-provider
+    /// resolution so it reflects the FINAL `default_model`, not a pre-overlay
+    /// snapshot. Not a full catalog — "your configured models," honestly sparse.
+    pub models: Vec<String>,
 }
 
 impl ResolvedEndpoint {
@@ -78,6 +84,7 @@ impl fmt::Debug for ResolvedEndpoint {
             .field("fallback_providers", &self.fallback_providers)
             .field("model_metadata", &self.model_metadata)
             .field("config_context_length", &self.config_context_length)
+            .field("models", &self.models)
             .finish()
     }
 }
@@ -101,6 +108,29 @@ fn is_provider_url_safe(url: &str) -> bool {
         "https" => true,
         "http" => matches!(parsed.host_str(), Some("localhost") | Some("127.0.0.1")),
         _ => false,
+    }
+}
+
+/// Phase 47.4 (D-14): resolve an env var NAME against the override map first,
+/// falling back to the process environment when the map has no entry for it.
+/// Returns whether the value came from the override map so callers can
+/// suppress process-env-only side effects (the legacy deprecation banner)
+/// for an internal, profile-scoped lookup — this is not operator
+/// misconfiguration and must not be logged as such.
+fn resolve_env_or_override(
+    overrides: &HashMap<String, String>,
+    name: &str,
+    allow_process_env: bool,
+) -> (Option<String>, bool) {
+    if let Some(v) = overrides.get(name) {
+        (Some(v.clone()), true)
+    } else if allow_process_env {
+        (std::env::var(name).ok(), false)
+    } else {
+        // Strict / profile-scoped mode: the caller is asking what a SCRUBBED
+        // child process would see, so the ambient process environment must not
+        // leak into the answer. See `build_with_env_overrides_strict`.
+        (None, false)
     }
 }
 
@@ -137,9 +167,88 @@ impl ProviderResolver {
     /// - `auxiliary.provider` references an unknown provider name (D-10)
     /// - Main provider is disabled (D-14)
     pub fn build(config: &Config) -> Result<Self> {
+        Self::build_with_cache(config, ModelsCache::load())
+    }
+
+    /// [`ProviderResolver::build`] with the model cache injected instead of read
+    /// from `$IRONHERMES_HOME/models-cache.json`.
+    ///
+    /// `build` reads the operator's real home dir, so any test that goes through
+    /// it silently depends on ambient machine state: on a fresh CI box the cache
+    /// is absent and the static table wins, while on a dev box that has run the
+    /// app the cache overrides it (e.g. `claude-sonnet-4` = 1M from OpenRouter vs
+    /// 200K in the static table). That made two tests pass in CI and fail locally.
+    /// Tests pass `ModelsCache::default()` to pin the static table.
+    pub fn build_with_cache(config: &Config, disk_cache: ModelsCache) -> Result<Self> {
+        Self::build_with_env_overrides(config, disk_cache, &HashMap::new())
+    }
+
+    /// [`Self::build_with_cache`] with a profile-scoped API-key override map.
+    ///
+    /// Phase 47.4 (D-14): the web server resolves a **non-root profile's**
+    /// config inside a single, multi-threaded running process. [`Self::build`]
+    /// (via [`Self::build_with_cache`]) resolves API keys from the *server
+    /// process* environment, which is always the ROOT profile — never the
+    /// target profile a caller may be probing. This constructor resolves each
+    /// of the four key-lookup sites against `overrides` first, falling back to
+    /// the process environment only when `overrides` has no entry for that
+    /// variable name. `overrides` is populated by the caller from the target
+    /// profile's `.env` via `dotenvy::from_path_iter` — never via
+    /// `std::env::set_var`, which is unsafe to call from this multi-threaded
+    /// server.
+    ///
+    /// An empty `overrides` map makes this behave identically to
+    /// [`Self::build_with_cache`] — that delegation is exactly how `build` /
+    /// `build_with_cache` continue to work for every existing caller.
+    ///
+    /// Resolving a value through `overrides` never trips the legacy-env
+    /// deprecation banner ([`emit_deprecation_once`]) — an internal,
+    /// profile-scoped probe is not operator misconfiguration.
+    pub fn build_with_env_overrides(
+        config: &Config,
+        disk_cache: ModelsCache,
+        overrides: &HashMap<String, String>,
+    ) -> Result<Self> {
+        Self::build_with_env_scope(config, disk_cache, overrides, true)
+    }
+
+    /// [`Self::build_with_env_overrides`] with the process-environment fallback
+    /// **disabled** — `overrides` is the entire world.
+    ///
+    /// Phase 47.4 UAT (GAP-1, third root cause). The permissive variant answers
+    /// "can *this process* reach the provider?". For a pre-spawn dispatch check
+    /// that is the wrong question and produces a false ALLOW: the gateway loads
+    /// the ROOT `~/.ironhermes/.env` into its own environment
+    /// (`ironhermes-cli/src/main.rs`), while the kanban worker it spawns runs
+    /// under `.env_clear()` with only 7 safe system vars
+    /// (`ironhermes-kanban/src/worker_spawn.rs`) and therefore sees ONLY the
+    /// target profile's own `.env`. Any profile whose keys are a subset of
+    /// root's — the normal case — was judged reachable by the gate and then
+    /// died `401` ~1s after spawn.
+    ///
+    /// There is no runtime inheritance to preserve here: the wizard's "key
+    /// inheritance" COPIES keys into the profile's `.env` at creation time, so
+    /// a profile that lacks a key genuinely cannot use root's.
+    ///
+    /// Use this for any "what would the spawned worker see?" question. Use
+    /// [`Self::build_with_env_overrides`] for the operator's own interactive
+    /// resolution.
+    pub fn build_with_env_overrides_strict(
+        config: &Config,
+        disk_cache: ModelsCache,
+        overrides: &HashMap<String, String>,
+    ) -> Result<Self> {
+        Self::build_with_env_scope(config, disk_cache, overrides, false)
+    }
+
+    fn build_with_env_scope(
+        config: &Config,
+        disk_cache: ModelsCache,
+        overrides: &HashMap<String, String>,
+        allow_process_env: bool,
+    ) -> Result<Self> {
         let mut endpoints: HashMap<String, ResolvedEndpoint> = HashMap::new();
         let mut model_registry = ModelRegistry::new();
-        let disk_cache = ModelsCache::load();
         model_registry.merge_cache(disk_cache.into_metadata_map());
         let config_context_length = config.model.context_length;
 
@@ -154,6 +263,7 @@ impl ProviderResolver {
                 fallback_providers: vec![],
                 model_metadata: None,
                 config_context_length: None,
+                models: vec![], // D-10: populated below (step 6) after overlay resolves default_model
             },
         );
         endpoints.insert(
@@ -166,6 +276,7 @@ impl ProviderResolver {
                 fallback_providers: vec![],
                 model_metadata: None,
                 config_context_length: None,
+                models: vec![], // D-10: populated below (step 6) after overlay resolves default_model
             },
         );
         endpoints.insert(
@@ -178,6 +289,7 @@ impl ProviderResolver {
                 fallback_providers: vec![],
                 model_metadata: None,
                 config_context_length: None,
+                models: vec![], // D-10: populated below (step 6) after overlay resolves default_model
             },
         );
 
@@ -201,6 +313,7 @@ impl ProviderResolver {
                     fallback_providers: vec![],
                     model_metadata: None,
                     config_context_length: None,
+                    models: vec![], // D-10: populated below (step 6) after overlay resolves default_model
                 });
             if let Some(ref url) = prov_cfg.base_url {
                 entry.base_url = url.clone();
@@ -258,6 +371,7 @@ impl ProviderResolver {
                     fallback_providers: vec![],
                     model_metadata: None,
                     config_context_length: None,
+                    models: vec![], // D-10: populated below (step 6) after overlay resolves default_model
                 },
             );
         }
@@ -269,7 +383,7 @@ impl ProviderResolver {
                 .providers
                 .get(name.as_str())
                 .and_then(|p| p.api_key_env.as_deref())
-                .and_then(|env_name| std::env::var(env_name).ok());
+                .and_then(|env_name| resolve_env_or_override(overrides, env_name, allow_process_env).0);
 
             // Priority 2 (deprecated): api_key literal from config.providers[name] (D-01 / Pitfall 5)
             let config_literal_key: Option<String> = config
@@ -290,8 +404,9 @@ impl ProviderResolver {
             // Only for the three canonical built-in provider names; custom providers get None (D-11).
             let legacy_env_key: Option<String> = match name.as_str() {
                 "openrouter" => {
-                    let val = std::env::var("OPENROUTER_API_KEY").ok();
-                    if val.is_some() {
+                    let (val, from_override) =
+                        resolve_env_or_override(overrides, "OPENROUTER_API_KEY", allow_process_env);
+                    if val.is_some() && !from_override {
                         let prov_cfg = config.providers.get("openrouter");
                         let has_explicit = prov_cfg.and_then(|p| p.api_key_env.as_ref()).is_some()
                             || prov_cfg.and_then(|p| p.api_key.as_ref()).is_some();
@@ -305,8 +420,9 @@ impl ProviderResolver {
                     val
                 }
                 "anthropic" => {
-                    let val = std::env::var("ANTHROPIC_API_KEY").ok();
-                    if val.is_some() {
+                    let (val, from_override) =
+                        resolve_env_or_override(overrides, "ANTHROPIC_API_KEY", allow_process_env);
+                    if val.is_some() && !from_override {
                         let prov_cfg = config.providers.get("anthropic");
                         let has_explicit = prov_cfg.and_then(|p| p.api_key_env.as_ref()).is_some()
                             || prov_cfg.and_then(|p| p.api_key.as_ref()).is_some();
@@ -320,8 +436,9 @@ impl ProviderResolver {
                     val
                 }
                 "openai" => {
-                    let val = std::env::var("OPENAI_API_KEY").ok();
-                    if val.is_some() {
+                    let (val, from_override) =
+                        resolve_env_or_override(overrides, "OPENAI_API_KEY", allow_process_env);
+                    if val.is_some() && !from_override {
                         let prov_cfg = config.providers.get("openai");
                         let has_explicit = prov_cfg.and_then(|p| p.api_key_env.as_ref()).is_some()
                             || prov_cfg.and_then(|p| p.api_key.as_ref()).is_some();
@@ -372,10 +489,28 @@ impl ProviderResolver {
             }
         }
 
-        // --- 6. Populate model_metadata and config_context_length (Phase 21.3) ---
-        for endpoint in endpoints.values_mut() {
+        // --- 6. Populate model_metadata, config_context_length, and models (Phase 21.3 / D-10) ---
+        for (name, endpoint) in endpoints.iter_mut() {
             endpoint.model_metadata = model_registry.lookup(&endpoint.default_model).cloned();
             endpoint.config_context_length = config_context_length;
+
+            // Phase 36.6.3 D-10: the per-provider configured-model list — union of
+            // the provider's configured override keys (ProviderConfig.models, a
+            // sparse per-model override map, NOT a catalog) with the FINAL
+            // (post-overlay) default_model, deduped. Computed here rather than at
+            // each literal construction site above so it always reflects the
+            // resolved default_model, never a pre-overlay snapshot. Stable order:
+            // override keys (sorted) then default_model if not already present.
+            let mut model_keys: Vec<String> = config
+                .providers
+                .get(name.as_str())
+                .map(|p| p.models.keys().cloned().collect())
+                .unwrap_or_default();
+            model_keys.sort();
+            if !model_keys.contains(&endpoint.default_model) {
+                model_keys.push(endpoint.default_model.clone());
+            }
+            endpoint.models = model_keys;
         }
 
         // --- 7. Store roles ---
@@ -466,6 +601,83 @@ impl ProviderResolver {
     /// Get a reference to the model registry (Phase 21.3).
     pub fn model_registry(&self) -> &ModelRegistry {
         &self.model_registry
+    }
+
+    /// Phase 36.6.3 D-10: enumerate every configured provider as a flat,
+    /// credential-free DTO for the `/model`/`/provider` picker.
+    ///
+    /// A pure accessor over the already-validated `endpoints` map built by
+    /// [`Self::build`] — introduces no new trust boundary and no new config
+    /// parsing (RESEARCH Open Questions §1). Any provider excluded from
+    /// `endpoints` (e.g. `disabled: true`, D-14) is already absent here.
+    ///
+    /// Sorted by `name` for a deterministic, stable listing across calls.
+    /// `is_current` is `true` for exactly the active main provider.
+    pub fn providers(&self) -> Vec<crate::commands::context::ProviderPickerRow> {
+        let mut rows: Vec<crate::commands::context::ProviderPickerRow> = self
+            .endpoints
+            .iter()
+            .map(
+                |(name, endpoint)| crate::commands::context::ProviderPickerRow {
+                    name: name.clone(),
+                    base_url: endpoint.base_url.clone(),
+                    default_model: endpoint.default_model.clone(),
+                    is_current: name == &self.main_provider,
+                    models: endpoint.models.clone(),
+                },
+            )
+            .collect();
+        rows.sort_by(|a, b| a.name.cmp(&b.name));
+        rows
+    }
+
+    /// Phase 46.8 D-02/D-07: consult the vault as resolution priority 5, ONLY after
+    /// the existing 4-priority chain (api_key_env → deprecated literal → legacy env
+    /// vars → deprecated model.api_key, all applied in [`Self::build_with_cache`])
+    /// have already run and left an endpoint's `api_key` at `None`.
+    ///
+    /// Additive top-up only — does NOT touch [`Self::build`]/[`Self::build_with_cache`]
+    /// signatures (both stay synchronous; the 15+ existing call sites are unaffected).
+    ///
+    /// # Precedence (D-07)
+    /// An endpoint whose `api_key` is already `Some(...)` is skipped entirely — the
+    /// vault is never even consulted for it. Priorities 1-4 always win.
+    ///
+    /// # Hard-error on sealed (D-07)
+    /// `store.get_secret` returning `Err` (sealed/corrupt/unreachable backend) is
+    /// propagated LOUDLY via `?` — it is never swallowed into a silent "no api key
+    /// configured" state. A healthy vault that simply lacks the key (`Ok(None)`) is
+    /// NOT an error; the endpoint stays `None` and falls through to the existing
+    /// "no key configured" error at call time.
+    ///
+    /// # Key encoding (D-07)
+    /// The store is keyed by provider NAME (this loop's `name`, the same identifier
+    /// `resolve()`/`resolve_for_main()` use) — stable across `api_key_env` renames,
+    /// never by `api_key_env`.
+    ///
+    /// # Secret boundary (D-08)
+    /// The `SecretString` → `String` conversion happens ONLY here, at the
+    /// `ResolvedEndpoint.api_key: Option<String>` boundary — matching the existing
+    /// redacting `Debug` impl on [`ResolvedEndpoint`].
+    pub async fn apply_vault_fallback(
+        &mut self,
+        store: &dyn ironhermes_vault::SecretStore,
+    ) -> Result<()> {
+        use secrecy::ExposeSecret;
+
+        for (name, endpoint) in self.endpoints.iter_mut() {
+            // Priorities 1-4 already won (D-07) — never override an existing key,
+            // and never even consult the vault for this provider.
+            if endpoint.api_key.is_some() {
+                continue;
+            }
+            // `?` propagates a sealed/corrupt-vault Err loudly (D-07 hard-error);
+            // Ok(None) leaves the endpoint untouched (healthy vault, key absent).
+            if let Some(secret) = store.get_secret(name).await? {
+                endpoint.api_key = Some(secret.expose_secret().to_string());
+            }
+        }
+        Ok(())
     }
 }
 
@@ -693,6 +905,7 @@ mod tests {
             fallback_providers: vec![],
             model_metadata: None,
             config_context_length: None,
+            models: vec![],
         };
         let debug_str = format!("{:?}", ep);
         assert!(
@@ -746,6 +959,7 @@ mod tests {
             fallback_providers: vec![],
             model_metadata: None,
             config_context_length: None,
+            models: vec![],
         }
     }
 
@@ -800,10 +1014,17 @@ mod tests {
         );
     }
 
+    /// Pins the STATIC-table metadata by injecting an empty cache. `build()`
+    /// reads the operator's real `$IRONHERMES_HOME/models-cache.json`, which puts
+    /// `claude-sonnet-4` at 1,000,000 (OpenRouter) instead of the static table's
+    /// 200,000 — so this passed on a fresh CI box and failed on any dev machine
+    /// that had run the app. The cache-override path has its own coverage
+    /// (`test_user_config_context_length_overrides_metadata`, `merge_cache` tests);
+    /// this test is about the static default, so the cache must not be ambient.
     #[test]
     fn test_provider_resolver_populates_model_metadata() {
         let config = default_config();
-        let resolver = ProviderResolver::build(&config).unwrap();
+        let resolver = ProviderResolver::build_with_cache(&config, ModelsCache::default()).unwrap();
         let ep = resolver.resolve_for_main();
         // Default model is "anthropic/claude-sonnet-4" — should resolve to claude-sonnet-4 metadata
         assert!(
@@ -1162,5 +1383,326 @@ mod tests {
         // Compile-only: ensures the trait can be made into a trait object.
         // Without Send + Sync, Arc<dyn SummarizationClientHandle> would not be valid.
         fn _accepts(_: std::sync::Arc<dyn super::SummarizationClientHandle>) {}
+    }
+
+    // =========================================================================
+    // Phase 36.6.3 Plan 02 (D-10): ProviderResolver::providers() / ProviderPickerRow
+    // =========================================================================
+
+    #[test]
+    fn provider_resolver_providers_lists_configured_sorted() {
+        let config = default_config();
+        let resolver = ProviderResolver::build(&config).expect("build");
+        let rows = resolver.providers();
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        let mut sorted_names = names.clone();
+        sorted_names.sort();
+        assert_eq!(names, sorted_names, "providers() must be sorted by name");
+        assert_eq!(names, vec!["anthropic", "openai", "openrouter"]);
+
+        let current: Vec<&str> = rows
+            .iter()
+            .filter(|r| r.is_current)
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(
+            current,
+            vec!["openrouter"],
+            "is_current must be true for exactly the main provider"
+        );
+    }
+
+    #[test]
+    fn provider_resolver_providers_models_sparse_defaults_to_default_model() {
+        let config = default_config();
+        let resolver = ProviderResolver::build(&config).expect("build");
+        let rows = resolver.providers();
+        let anthropic = rows
+            .iter()
+            .find(|r| r.name == "anthropic")
+            .expect("anthropic row");
+        assert_eq!(
+            anthropic.models,
+            vec![anthropic.default_model.clone()],
+            "a provider with no configured overrides must yield exactly one entry — its default_model"
+        );
+    }
+
+    #[test]
+    fn provider_resolver_providers_models_union_dedup() {
+        use crate::config_extras::ProviderModelConfig;
+
+        let mut config = default_config();
+        let default_model = config.model.default.clone();
+        let mut models = HashMap::new();
+        // Override key equal to the (soon-to-be) default_model — must not duplicate.
+        models.insert(default_model.clone(), ProviderModelConfig::default());
+        config.providers.insert(
+            "openrouter".to_string(),
+            ProviderConfig {
+                models,
+                ..Default::default()
+            },
+        );
+        let resolver = ProviderResolver::build(&config).expect("build");
+        let rows = resolver.providers();
+        let openrouter = rows
+            .iter()
+            .find(|r| r.name == "openrouter")
+            .expect("openrouter row");
+        assert_eq!(
+            openrouter.models,
+            vec![default_model],
+            "an override key matching default_model must not be duplicated"
+        );
+    }
+
+    #[test]
+    fn provider_picker_row_carries_no_credentials() {
+        let mut config = default_config();
+        config.providers.insert(
+            "openrouter".to_string(),
+            ProviderConfig {
+                api_key: Some("super-secret-key".to_string()),
+                ..Default::default()
+            },
+        );
+        let resolver = ProviderResolver::build(&config).expect("build");
+        let rows = resolver.providers();
+        // Debug-format the whole Vec<ProviderPickerRow> — the secret must not
+        // leak through even indirectly (stricter than ResolvedEndpoint's
+        // redacting Debug: the field is simply absent from the DTO).
+        let debug_str = format!("{:?}", rows);
+        assert!(
+            !debug_str.contains("super-secret-key"),
+            "ProviderPickerRow Debug output must never carry credential material"
+        );
+        let row = rows
+            .iter()
+            .find(|r| r.name == "openrouter")
+            .expect("openrouter row");
+        // Exhaustive field list — if `api_key` were ever added to the DTO,
+        // this destructure would fail to compile and catch the regression.
+        let crate::commands::context::ProviderPickerRow {
+            name: _,
+            base_url: _,
+            default_model: _,
+            is_current: _,
+            models: _,
+        } = row.clone();
+    }
+
+    // =========================================================================
+    // Phase 47.4 (D-14): build_with_env_overrides
+    // =========================================================================
+
+    #[test]
+    fn test_build_with_env_overrides_empty_map_matches_build_with_cache() {
+        let config = default_config();
+        let via_cache =
+            ProviderResolver::build_with_cache(&config, ModelsCache::default()).expect("build");
+        let via_overrides = ProviderResolver::build_with_env_overrides(
+            &config,
+            ModelsCache::default(),
+            &HashMap::new(),
+        )
+        .expect("build");
+
+        assert_eq!(via_cache.main_provider(), via_overrides.main_provider());
+        for name in ["openrouter", "anthropic", "openai"] {
+            let a = via_cache.resolve(name).expect("cache endpoint");
+            let b = via_overrides.resolve(name).expect("overrides endpoint");
+            assert_eq!(a.base_url, b.base_url, "base_url mismatch for {name}");
+            assert_eq!(a.api_key, b.api_key, "api_key mismatch for {name}");
+            assert_eq!(
+                a.default_model, b.default_model,
+                "default_model mismatch for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_with_env_overrides_map_wins_over_process_env_legacy() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let config = default_config();
+
+        // SAFETY: test-only env var mutation, held behind env_lock
+        unsafe {
+            std::env::set_var("OPENROUTER_API_KEY", "process-env-key");
+        }
+
+        let mut overrides = HashMap::new();
+        overrides.insert("OPENROUTER_API_KEY".to_string(), "override-key".to_string());
+
+        let resolver = ProviderResolver::build_with_env_overrides(
+            &config,
+            ModelsCache::default(),
+            &overrides,
+        )
+        .expect("build");
+        let ep = resolver.resolve("openrouter").expect("openrouter");
+        assert_eq!(ep.api_key.as_deref(), Some("override-key"));
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+        }
+    }
+
+    #[test]
+    fn test_build_with_env_overrides_map_wins_for_priority_1_api_key_env() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let mut config = default_config();
+        config.providers.insert(
+            "openrouter".to_string(),
+            ProviderConfig {
+                api_key_env: Some("MY_CUSTOM_ENV_NAME".to_string()),
+                ..Default::default()
+            },
+        );
+
+        // SAFETY: test-only env var mutation, held behind env_lock
+        unsafe {
+            std::env::set_var("MY_CUSTOM_ENV_NAME", "process-value");
+        }
+
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "MY_CUSTOM_ENV_NAME".to_string(),
+            "override-value".to_string(),
+        );
+
+        let resolver = ProviderResolver::build_with_env_overrides(
+            &config,
+            ModelsCache::default(),
+            &overrides,
+        )
+        .expect("build");
+        let ep = resolver.resolve("openrouter").expect("openrouter");
+        assert_eq!(ep.api_key.as_deref(), Some("override-value"));
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            std::env::remove_var("MY_CUSTOM_ENV_NAME");
+        }
+    }
+
+    #[test]
+    fn test_build_with_env_overrides_absent_from_map_falls_back_to_process_env() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let config = default_config();
+
+        // SAFETY: test-only env var mutation, held behind env_lock
+        unsafe {
+            std::env::set_var("ANTHROPIC_API_KEY", "process-only-key");
+        }
+
+        // Overrides map has entries, but none named ANTHROPIC_API_KEY.
+        let mut overrides = HashMap::new();
+        overrides.insert("OPENAI_API_KEY".to_string(), "unrelated".to_string());
+
+        let via_overrides = ProviderResolver::build_with_env_overrides(
+            &config,
+            ModelsCache::default(),
+            &overrides,
+        )
+        .expect("build");
+        let via_build = ProviderResolver::build(&config).expect("build");
+
+        assert_eq!(
+            via_overrides
+                .resolve("anthropic")
+                .expect("anthropic")
+                .api_key
+                .as_deref(),
+            Some("process-only-key")
+        );
+        assert_eq!(
+            via_overrides.resolve("anthropic").expect("a").api_key,
+            via_build.resolve("anthropic").expect("b").api_key,
+        );
+
+        // SAFETY: test-only cleanup
+        unsafe {
+            std::env::remove_var("ANTHROPIC_API_KEY");
+        }
+    }
+
+    #[test]
+    fn test_build_with_env_overrides_priority_1_beats_priority_3_via_map() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let mut config = default_config();
+        config.providers.insert(
+            "openrouter".to_string(),
+            ProviderConfig {
+                api_key_env: Some("EXPLICIT_ENV_NAME".to_string()),
+                ..Default::default()
+            },
+        );
+
+        // Both the explicit (Priority 1) and legacy (Priority 3) names are
+        // present in the override map — Priority 1 must still win.
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "EXPLICIT_ENV_NAME".to_string(),
+            "priority-1-value".to_string(),
+        );
+        overrides.insert(
+            "OPENROUTER_API_KEY".to_string(),
+            "priority-3-value".to_string(),
+        );
+
+        let resolver = ProviderResolver::build_with_env_overrides(
+            &config,
+            ModelsCache::default(),
+            &overrides,
+        )
+        .expect("build");
+        let ep = resolver.resolve("openrouter").expect("openrouter");
+        assert_eq!(ep.api_key.as_deref(), Some("priority-1-value"));
+    }
+
+    #[test]
+    fn test_build_with_env_overrides_suppresses_legacy_deprecation_warning() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        let config = default_config();
+
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "OPENROUTER_API_KEY".to_string(),
+            "override-key".to_string(),
+        );
+
+        let banner_key = "legacy_env_openrouter";
+        assert!(
+            !legacy_warned()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains(banner_key),
+            "banner must not have fired before this test runs"
+        );
+
+        let resolver = ProviderResolver::build_with_env_overrides(
+            &config,
+            ModelsCache::default(),
+            &overrides,
+        )
+        .expect("build");
+        assert_eq!(
+            resolver
+                .resolve("openrouter")
+                .expect("openrouter")
+                .api_key
+                .as_deref(),
+            Some("override-key")
+        );
+
+        assert!(
+            !legacy_warned()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains(banner_key),
+            "resolving through the override map must never emit the legacy-env deprecation banner"
+        );
     }
 }

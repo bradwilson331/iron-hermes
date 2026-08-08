@@ -383,59 +383,10 @@ pub fn tools() -> Vec<ToolStub> {
 }
 
 // ---------------------------------------------------------------------------
-// Schedules (app.html `screen-schedules` ~1074)
+// Schedules — Phase 46.9 Plan 04 (D-06): removed. `screens/schedules.rs` is
+// now live-wired to `server::schedules_api::get_schedules` (real
+// `ironhermes-cron::JobStore` rows), so this mock data source is dead code.
 // ---------------------------------------------------------------------------
-
-/// One row in the Schedules list.
-#[derive(Clone, PartialEq, Debug)]
-pub struct ScheduleStub {
-    pub id: &'static str,
-    pub cron: &'static str,
-    pub target: &'static str,
-    pub status: &'static str,
-    pub last_run: &'static str,
-}
-
-/// 5 schedule rows verbatim from app.html `screen-schedules` (lines 1091-1145).
-pub fn schedules() -> Vec<ScheduleStub> {
-    vec![
-        ScheduleStub {
-            id: "Daily competitor digest",
-            cron: "0 9 * * 1-5",
-            target: "Telegram → @social_ops",
-            status: "ACTIVE",
-            last_run: "May 13 · 09:00 UTC",
-        },
-        ScheduleStub {
-            id: "Weekly market brief",
-            cron: "0 7 * * 1",
-            target: "Email → ops@stark.io",
-            status: "ACTIVE",
-            last_run: "May 18 · 07:00 UTC",
-        },
-        ScheduleStub {
-            id: "Threat intel sweep",
-            cron: "*/30 * * * *",
-            target: "Slack → #sec-feed",
-            status: "ACTIVE",
-            last_run: "May 13 · 03:30 UTC",
-        },
-        ScheduleStub {
-            id: "Quarterly persona retune",
-            cron: "0 0 1 */3 *",
-            target: "Email → operator@stark.io",
-            status: "PAUSED",
-            last_run: "Jul 1 · 00:00 UTC",
-        },
-        ScheduleStub {
-            id: "Memory garbage collect",
-            cron: "0 4 * * 0",
-            target: "— (silent)",
-            status: "DISABLED",
-            last_run: "May 19 · 04:00 UTC",
-        },
-    ]
-}
 
 // ---------------------------------------------------------------------------
 // Gateway (app.html `screen-gateway` ~1150)

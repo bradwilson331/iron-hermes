@@ -237,7 +237,8 @@ pub async fn run_kanban_tail_loop(
     // WAL boundary — gateway notifier holds its own connection to the same
     // file). Q8: persistent per-loop connection avoids per-tick open cost.
     // Phase 36.3.7.13 D-A1: env-bridged open so the dashboard WS tailer
-    // honors HERMES_KANBAN_DB when run under a non-default profile.
+    // honors IRONHERMES_KANBAN_DB when run under a non-default profile
+    // (legacy HERMES_KANBAN_DB also accepted during deprecation window).
     let store = match KanbanStore::open_from_env() {
         Ok(s) => Arc::new(TokioMutex::new(s)),
         Err(e) => {

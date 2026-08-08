@@ -35,9 +35,11 @@ const CAS_SOURCE_PLACEHOLDER: &str = include_str!("../src/cas.rs");
 const DISPATCHER_SOURCE: &str = include_str!("../src/dispatcher.rs");
 const WORKER_SPAWN_SOURCE: &str = include_str!("../src/worker_spawn.rs");
 
-// Plan 06 landed: `kanban` is now in `is_bypass()`.
-const RUNNING_AGENT_SOURCE: &str =
-    include_str!("../../ironhermes-core/src/commands/running_agent.rs");
+// Phase 39.1 Plan 06: running_agent.rs DELETED — module and is_bypass() are gone.
+// The kanban_is_in_bypass_list test is converted to assert the new contract:
+// the gate is removed, so no bypass list is needed. Handlers.rs contains the
+// comment that the kanban command dispatches unconditionally (no gate check).
+const HANDLERS_SOURCE: &str = include_str!("../../ironhermes-core/src/commands/handlers.rs");
 
 // PID-liveness lives in this crate already (plan 01 Task 0 + Task 2). The
 // invariant is non-ignored because the file exists.
@@ -154,18 +156,31 @@ fn worker_spawn_calls_env_clear() {
 }
 
 // ---------------------------------------------------------------------------
-// Plan 06 invariants (ironhermes-core running_agent.rs edit)
+// Plan 06 invariants (Phase 39.1 Plan 06 — running_agent.rs deleted)
 // ---------------------------------------------------------------------------
 
-/// INV-36.3.7-03: `"kanban"` must appear in `is_bypass()` so the
-/// `/kanban` slash command bypasses the running-agent guard (D-36).
+/// INV-36.3.7-03 (converted): running-agent gate deleted — no bypass list needed.
+///
+/// The original assertion checked that `"kanban"` appears in `is_bypass()` so
+/// the `/kanban` slash command bypasses the running-agent guard (D-36). In
+/// Phase 39.1 Plan 06, `running_agent.rs` is deleted and the gate is removed.
+/// All slash commands (including `/kanban`) dispatch unconditionally.
+///
+/// Converted to assert the new contract: handlers.rs contains the canonical
+/// kanban dispatch path (cmd_kanban) without any is_bypass check.
 #[test]
-fn kanban_is_in_bypass_list() {
+fn kanban_dispatches_without_gate() {
     assert!(
-        RUNNING_AGENT_SOURCE.contains("\"kanban\""),
-        "INV-36.3.7-03: 'kanban' must appear in is_bypass() (D-36 mid-run \
-         safety). The /kanban slash command must bypass the running-agent \
-         guard for all subcommands."
+        HANDLERS_SOURCE.contains("cmd_kanban"),
+        "INV-36.3.7-03 (converted): handlers.rs must contain cmd_kanban dispatch \
+         (gate removed in Plan 06 — /kanban dispatches unconditionally)"
+    );
+    // The gate (is_bypass check) must no longer appear in handlers.rs for kanban.
+    // After Plan 06, no call to is_bypass() exists in handlers.rs.
+    assert!(
+        !HANDLERS_SOURCE.contains("is_bypass("),
+        "INV-36.3.7-03 (converted): handlers.rs must NOT call is_bypass() after \
+         Plan 06 teardown (running_agent module deleted)"
     );
 }
 

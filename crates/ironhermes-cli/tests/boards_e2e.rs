@@ -32,7 +32,7 @@ use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::sync::Mutex as TokioMutex;
 
-/// Serialise all tests that mutate IRONHERMES_HOME / HERMES_KANBAN_BOARD.
+/// Serialise all tests that mutate IRONHERMES_HOME / IRONHERMES_KANBAN_BOARD.
 static ENV_LOCK: TokioMutex<()> = TokioMutex::const_new(());
 
 // ---------------------------------------------------------------------------
@@ -50,7 +50,7 @@ impl ScopedHome {
         let dir = TempDir::new().expect("create tempdir");
         let root = dir.path().to_path_buf();
         unsafe { std::env::set_var("IRONHERMES_HOME", &root) };
-        unsafe { std::env::remove_var("HERMES_KANBAN_BOARD") };
+        unsafe { std::env::remove_var("IRONHERMES_KANBAN_BOARD") };
         ScopedHome { _dir: dir, root }
     }
 }
@@ -58,7 +58,7 @@ impl ScopedHome {
 impl Drop for ScopedHome {
     fn drop(&mut self) {
         unsafe { std::env::remove_var("IRONHERMES_HOME") };
-        unsafe { std::env::remove_var("HERMES_KANBAN_BOARD") };
+        unsafe { std::env::remove_var("IRONHERMES_KANBAN_BOARD") };
     }
 }
 
@@ -212,8 +212,8 @@ async fn scenario_b_board_flag_overrides_env_and_file() {
     let code = boards::cmd_boards_switch("alpha".into()).await.unwrap();
     assert_eq!(code, 0, "switch to alpha should succeed");
 
-    // Set HERMES_KANBAN_BOARD env to "beta" (env tier wins over file tier).
-    unsafe { std::env::set_var("HERMES_KANBAN_BOARD", "beta") };
+    // Set IRONHERMES_KANBAN_BOARD env to "beta" (env tier wins over file tier).
+    unsafe { std::env::set_var("IRONHERMES_KANBAN_BOARD", "beta") };
 
     // Seed a task on the gamma board to use in KanbanShowTool.
     let gamma_task_id = {
@@ -266,7 +266,7 @@ async fn scenario_b_board_flag_overrides_env_and_file() {
         "expected a rejected/error status for cross-board lookup miss; got: {show_rejection}"
     );
 
-    unsafe { std::env::remove_var("HERMES_KANBAN_BOARD") };
+    unsafe { std::env::remove_var("IRONHERMES_KANBAN_BOARD") };
 }
 
 // ---------------------------------------------------------------------------

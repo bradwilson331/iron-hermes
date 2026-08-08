@@ -122,8 +122,8 @@ async fn non_goal_passthrough_calls_run_once() {
     let _g = ENV_LOCK.lock().await;
     // SAFETY: tests serialize via ENV_LOCK; production code only reads env.
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_GOAL_MODE");
-        std::env::remove_var("HERMES_KANBAN_GOAL_MAX_TURNS");
+        std::env::remove_var("IRONHERMES_KANBAN_GOAL_MODE");
+        std::env::remove_var("IRONHERMES_KANBAN_GOAL_MAX_TURNS");
     }
 
     let dir = TempDir::new().unwrap();
@@ -202,8 +202,8 @@ async fn non_goal_passthrough_calls_run_once() {
 async fn judge_met_exits_cleanly() {
     let _g = ENV_LOCK.lock().await;
     unsafe {
-        std::env::set_var("HERMES_KANBAN_GOAL_MODE", "1");
-        std::env::set_var("HERMES_KANBAN_GOAL_MAX_TURNS", "10");
+        std::env::set_var("IRONHERMES_KANBAN_GOAL_MODE", "1");
+        std::env::set_var("IRONHERMES_KANBAN_GOAL_MAX_TURNS", "10");
     }
 
     let dir = TempDir::new().unwrap();
@@ -246,8 +246,8 @@ async fn judge_met_exits_cleanly() {
     drop(store_arc);
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_GOAL_MODE");
-        std::env::remove_var("HERMES_KANBAN_GOAL_MAX_TURNS");
+        std::env::remove_var("IRONHERMES_KANBAN_GOAL_MODE");
+        std::env::remove_var("IRONHERMES_KANBAN_GOAL_MAX_TURNS");
     }
 
     assert!(result.is_ok(), "wrapper returned Err: {:?}", result.err());
@@ -272,8 +272,8 @@ async fn judge_met_exits_cleanly() {
 async fn self_termination_exits_cleanly() {
     let _g = ENV_LOCK.lock().await;
     unsafe {
-        std::env::set_var("HERMES_KANBAN_GOAL_MODE", "1");
-        std::env::set_var("HERMES_KANBAN_GOAL_MAX_TURNS", "10");
+        std::env::set_var("IRONHERMES_KANBAN_GOAL_MODE", "1");
+        std::env::set_var("IRONHERMES_KANBAN_GOAL_MAX_TURNS", "10");
     }
 
     let dir = TempDir::new().unwrap();
@@ -336,8 +336,8 @@ async fn self_termination_exits_cleanly() {
     drop(store_arc);
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_GOAL_MODE");
-        std::env::remove_var("HERMES_KANBAN_GOAL_MAX_TURNS");
+        std::env::remove_var("IRONHERMES_KANBAN_GOAL_MODE");
+        std::env::remove_var("IRONHERMES_KANBAN_GOAL_MAX_TURNS");
     }
 
     assert!(result.is_ok(), "wrapper returned Err: {:?}", result.err());
@@ -362,8 +362,8 @@ async fn self_termination_exits_cleanly() {
 async fn budget_exhaustion_synthesizes_block() {
     let _g = ENV_LOCK.lock().await;
     unsafe {
-        std::env::set_var("HERMES_KANBAN_GOAL_MODE", "1");
-        std::env::set_var("HERMES_KANBAN_GOAL_MAX_TURNS", "3");
+        std::env::set_var("IRONHERMES_KANBAN_GOAL_MODE", "1");
+        std::env::set_var("IRONHERMES_KANBAN_GOAL_MAX_TURNS", "3");
     }
 
     let dir = TempDir::new().unwrap();
@@ -406,8 +406,8 @@ async fn budget_exhaustion_synthesizes_block() {
     drop(store_arc);
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_GOAL_MODE");
-        std::env::remove_var("HERMES_KANBAN_GOAL_MAX_TURNS");
+        std::env::remove_var("IRONHERMES_KANBAN_GOAL_MODE");
+        std::env::remove_var("IRONHERMES_KANBAN_GOAL_MAX_TURNS");
     }
 
     assert!(result.is_ok(), "wrapper returned Err: {:?}", result.err());
@@ -440,8 +440,8 @@ async fn budget_exhaustion_synthesizes_block() {
 async fn two_consecutive_judge_errors_block() {
     let _g = ENV_LOCK.lock().await;
     unsafe {
-        std::env::set_var("HERMES_KANBAN_GOAL_MODE", "1");
-        std::env::set_var("HERMES_KANBAN_GOAL_MAX_TURNS", "10");
+        std::env::set_var("IRONHERMES_KANBAN_GOAL_MODE", "1");
+        std::env::set_var("IRONHERMES_KANBAN_GOAL_MAX_TURNS", "10");
     }
 
     let dir = TempDir::new().unwrap();
@@ -483,8 +483,8 @@ async fn two_consecutive_judge_errors_block() {
     drop(store_arc);
 
     unsafe {
-        std::env::remove_var("HERMES_KANBAN_GOAL_MODE");
-        std::env::remove_var("HERMES_KANBAN_GOAL_MAX_TURNS");
+        std::env::remove_var("IRONHERMES_KANBAN_GOAL_MODE");
+        std::env::remove_var("IRONHERMES_KANBAN_GOAL_MAX_TURNS");
     }
 
     assert!(result.is_ok(), "wrapper returned Err: {:?}", result.err());

@@ -1,5 +1,6 @@
 pub mod config;
 pub mod event;
+pub mod gated_exec;
 pub mod guardrail;
 pub mod hot_reload;
 pub mod log_writer;
@@ -9,7 +10,12 @@ pub mod webhook;
 
 pub use config::{ErrorDetailLevel, HooksConfig, WebhookEndpointConfig};
 pub use event::{HookEvent, HookEventKind};
-pub use guardrail::{BlocklistGuardrail, GuardrailDecision, GuardrailHook, format_guardrail_error};
+pub use gated_exec::{GatedOutcome, execute_gated_command};
+pub use guardrail::{
+    BlocklistGuardrail, DANGEROUS_PATTERNS, DEFAULT_VERBS, DangerousCommandGuardrail,
+    GuardrailDecision, GuardrailHook, McpMutationGuardrail, Tier, WranglerMutationGuardrail,
+    format_guardrail_error,
+};
 pub use hot_reload::spawn_config_watcher;
 pub use log_writer::create_jsonl_listener;
 pub use registry::{AsyncHookListener, HookListener, HookRegistry};

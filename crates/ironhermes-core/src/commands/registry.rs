@@ -107,8 +107,25 @@ pub fn build_registry() -> Vec<CommandDef> {
             "Export a session to flat JSON files (4-file layout)",
             Session,
         )
+        // The Telegram bot menu maps hyphens to underscores (Telegram only
+        // allows [a-z0-9_] in command names), so the underscore form must
+        // resolve too — mirrors the "reload-mcp"/"reload_mcp" pair below.
+        .aliases(&["export_session"])
         .args_hint("[session_id]")
         .platform(Universal),
+        // Phase 46.7 Plan 06 (D-18): queues a local file — copied into the
+        // session attachment store immediately (D-20) — for the NEXT
+        // submitted message. TUI/CLI-only (no gateway analog exists; the
+        // gateway/Telegram surface is already covered by multimodal.rs).
+        // The core dispatch table intentionally has no "attach" arm — it
+        // falls through to `todo_stub` (never surfaced), because the real
+        // handler needs App-side state (the pending-attachment queue,
+        // StateStore, session_id) that CommandContext doesn't carry. See
+        // `tui_rata::commands::dispatch_slash`'s post-router hook, which
+        // mirrors the existing `"mouse"` App-side-handler pattern.
+        CommandDef::new("attach", "Attach a file to your next message", Session)
+            .args_hint("<path>")
+            .platform(CliOnly),
         // -----------------------------------------------------------------------
         // CONFIGURATION
         // -----------------------------------------------------------------------
@@ -205,7 +222,14 @@ pub fn build_registry() -> Vec<CommandDef> {
         )
         .args_hint("[list|enable|disable|show] [name]")
         .platform(Universal),
-        CommandDef::new("skills", "List installed skills", ToolsAndSkills).platform(CliOnly),
+        // Phase 41.1 (D-09): /skills registered Universal (was CliOnly) so the
+        // catalog-listing command propagates to Web/Telegram via CommandRouter —
+        // CliOnly made `CommandRouter::resolve` filter it out on those surfaces
+        // regardless of `.with_skill_registry` wiring (Pitfall 2). Mirrors the
+        // adjacent "kanban" Universal precedent. NOTE: individual skill
+        // invocation (e.g. /gsd-config) is unaffected — it resolves via the
+        // SKILL-13 NotFound fallback against the SkillRegistry, not this CommandDef.
+        CommandDef::new("skills", "List installed skills", ToolsAndSkills).platform(Universal),
         CommandDef::new("cron", "Manage cron jobs", ToolsAndSkills)
             .args_hint("[subcommand]")
             .platform(CliOnly),
@@ -251,7 +275,8 @@ pub fn build_registry() -> Vec<CommandDef> {
         CommandDef::new("paste", "Paste clipboard image", Info).platform(CliOnly),
         CommandDef::new("update", "Check for updates", Info).platform(GatewayOnly),
         CommandDef::new("snapshot", "Save a conversation snapshot", Info).platform(Universal),
-        CommandDef::new("profile", "Show active profile and HERMES_HOME", Info).platform(Universal),
+        CommandDef::new("profile", "Show active profile and IRONHERMES_HOME", Info)
+            .platform(Universal),
         // -----------------------------------------------------------------------
         // EXIT
         // -----------------------------------------------------------------------
@@ -315,6 +340,33 @@ mod tests {
         assert!(
             matches!(result, ResolveResult::Exact(c) if c.name == "toolset"),
             "expected /toolset on Telegram (Universal platform), got: {:?}",
+            result
+        );
+    }
+
+    /// Phase 46.7 Plan 06 (D-18): `/attach` registers as a CommandDef and
+    /// `CommandRouter::new` does not panic (mirrors RESEARCH's
+    /// "command_router_registers_attach" test).
+    #[test]
+    fn command_router_registers_attach() {
+        let router = CommandRouter::new(build_registry());
+        let result = router.resolve("attach", &Platform::Local);
+        assert!(
+            matches!(result, ResolveResult::Exact(c) if c.name == "attach"),
+            "expected /attach Exact match, got: {:?}",
+            result
+        );
+    }
+
+    /// Phase 46.7 Plan 06 (D-18): `/attach` is CLI-only — no gateway analog
+    /// (Telegram is already covered by multimodal.rs).
+    #[test]
+    fn slash_attach_not_available_on_gateway() {
+        let router = CommandRouter::new(build_registry());
+        let result = router.resolve("attach", &Platform::Telegram);
+        assert!(
+            !matches!(result, ResolveResult::Exact(c) if c.name == "attach"),
+            "/attach must not resolve on the gateway platform, got: {:?}",
             result
         );
     }

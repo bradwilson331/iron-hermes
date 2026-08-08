@@ -101,16 +101,47 @@ impl TtsProvider for EdgeProvider {
         // Open a new WebSocket connection per call (stateless, matches project
         // convention of per-call clients — mirrors web_search.rs reqwest pattern).
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-        let mut client = msedge_tts::tts::client::tokio_runtime::connect_async()
-            .await
-            .map_err(|e| anyhow::anyhow!("Edge TTS connect failed: {}", e))?;
 
-        let audio = client
-            .synthesize(text, &speech_config)
-            .await
-            .map_err(|e| anyhow::anyhow!("Edge TTS synthesis failed: {}", e))?;
+        // Edge TTS over WebSocket intermittently completes with an EMPTY audio
+        // payload (the stream ends after turn.start/turn.end without delivering
+        // audio chunks under transient throttling / WS drops). Persisting that
+        // empty buffer produced silent 0-byte mp3 files reported as success
+        // (debug: web-tts-zero-byte-audio). Retry with a fresh connection, and
+        // treat an empty result as a hard error so it never reaches disk.
+        const MAX_ATTEMPTS: usize = 3;
+        let mut last_err: Option<anyhow::Error> = None;
+        let mut audio_bytes: Option<Vec<u8>> = None;
 
-        tokio::fs::write(output_path, &audio.audio_bytes)
+        for attempt in 1..=MAX_ATTEMPTS {
+            let mut client = match msedge_tts::tts::client::tokio_runtime::connect_async().await {
+                Ok(c) => c,
+                Err(e) => {
+                    last_err = Some(anyhow::anyhow!("Edge TTS connect failed: {}", e));
+                    continue;
+                }
+            };
+
+            match client.synthesize(text, &speech_config).await {
+                Ok(audio) if !audio.audio_bytes.is_empty() => {
+                    audio_bytes = Some(audio.audio_bytes);
+                    break;
+                }
+                Ok(_) => {
+                    last_err = Some(anyhow::anyhow!(
+                        "Edge TTS returned empty audio (attempt {attempt}/{MAX_ATTEMPTS})"
+                    ));
+                }
+                Err(e) => {
+                    last_err = Some(anyhow::anyhow!("Edge TTS synthesis failed: {}", e));
+                }
+            }
+        }
+
+        let audio_bytes = audio_bytes.ok_or_else(|| {
+            last_err.unwrap_or_else(|| anyhow::anyhow!("Edge TTS produced no audio"))
+        })?;
+
+        tokio::fs::write(output_path, &audio_bytes)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to write Edge audio file: {}", e))?;
 

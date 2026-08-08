@@ -48,25 +48,35 @@ impl FakeProvider {
 // TTS-08 (D-10): BUILTIN_TTS_NAMES constant shape
 // ---------------------------------------------------------------------------
 
+/// TTS-08 (D-10): `BUILTIN_TTS_NAMES` is the compile-time source of truth for the
+/// built-in provider set — `register()` accepts only names in it. The set must not
+/// gain or lose an entry silently, so this pins it exactly; adding a provider is a
+/// deliberate act that must update this list.
+///
+/// Was written in 36.17.5 when the set was `["edge", "elevenlabs"]`, and pinned the
+/// literal AND the length AND each index. Phase 40.5 (`6ad469dc7`) legitimately added
+/// `OpenAiTtsProvider` to the constant without updating the test, so it has been red
+/// ever since — masked because `cargo test -p ironhermes-core` aborts at the first
+/// failing target and two earlier lib tests were failing. Dropped the redundant
+/// length/index assertions: they restate the set equality and were pure churn.
 #[test]
 fn test_builtin_names_set() {
     assert_eq!(
         BUILTIN_TTS_NAMES,
-        &["edge", "elevenlabs"],
-        "TTS-08 (D-10): BUILTIN_TTS_NAMES must equal [\"edge\", \"elevenlabs\"]"
+        &["edge", "elevenlabs", "openai"],
+        "TTS-08 (D-10): BUILTIN_TTS_NAMES is the source of truth for the built-in set. \
+         If you added or removed a provider, update this list deliberately; if you did \
+         not, something registered a provider it should not have."
     );
+
+    let mut sorted = BUILTIN_TTS_NAMES.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
     assert_eq!(
+        sorted.len(),
         BUILTIN_TTS_NAMES.len(),
-        2,
-        "TTS-08 (D-10): BUILTIN_TTS_NAMES must have exactly 2 entries"
-    );
-    assert_eq!(
-        BUILTIN_TTS_NAMES[0], "edge",
-        "TTS-08 (D-10): first entry must be \"edge\""
-    );
-    assert_eq!(
-        BUILTIN_TTS_NAMES[1], "elevenlabs",
-        "TTS-08 (D-10): second entry must be \"elevenlabs\""
+        "TTS-08 (D-10): BUILTIN_TTS_NAMES must not contain duplicates — a dupe would let \
+         register() accept the same name twice"
     );
 }
 

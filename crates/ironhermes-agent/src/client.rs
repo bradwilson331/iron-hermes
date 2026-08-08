@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
 use ironhermes_core::{
-    ChatMessage, ChatRequest, ChatResponse, ChatStreamChunk, FunctionCall, ToolCall, ToolSchema,
-    Usage,
+    ChatMessage, ChatRequest, ChatResponse, ChatStreamChunk, FunctionCall, Role, ToolCall,
+    ToolSchema, Usage,
 };
 use reqwest::Client;
 use std::collections::HashMap;
@@ -85,6 +85,111 @@ fn sse_error_to_bail_string(raw: &str, val: &serde_json::Value) -> String {
     )
 }
 
+/// Cause C fix: syntactic model-ID sanity guard.
+///
+/// Returns `Some(reason)` when the model ID is structurally malformed — i.e.
+/// guaranteed to be rejected by any provider — so the caller can bail before
+/// the streaming POST rather than paying a round-trip HTTP 400 + silent failover.
+///
+/// Rejects: empty IDs, IDs containing ASCII whitespace, IDs containing control
+/// characters. These are unambiguous corruption signals that no real provider
+/// model ID exhibits.
+///
+/// Does NOT attempt to catch single-character-insertion typos (e.g. "g0emma",
+/// "1qwen3.7-max") — those are syntactically valid strings indistinguishable from
+/// real model IDs without a model list. Catching them would require a models-cache
+/// lookup on the hot streaming path (disk I/O per request; false-rejects on stale
+/// cache). The syntactic guard handles structural garbage; the typo class remains
+/// best-addressed upstream at model-selection time.
+fn model_id_looks_malformed(model: &str) -> Option<&'static str> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return Some("model id is empty");
+    }
+    if trimmed.chars().any(|c| c.is_ascii_whitespace()) {
+        return Some("model id contains whitespace");
+    }
+    if trimmed.chars().any(|c| c.is_control()) {
+        return Some("model id contains control characters");
+    }
+    None
+}
+
+/// Anthropic-family models (reachable in ChatCompletions mode via OpenRouter →
+/// Vertex/Bedrock/Anthropic) reject a `system` message that is not the leading
+/// message. OpenAI tolerates mid-array system messages, but ironhermes injects
+/// several of them (the compression history summary in `summarizing_engine`,
+/// plus transient/advisory notes in `agent_loop`), so a long-context turn that
+/// has compressed fails on Anthropic providers with
+/// `messages.N: role 'system' must follow a 'user'/'assistant' message`.
+///
+/// Normalize before the wire: keep only a leading (index 0) `system` message as
+/// `system`; demote every other `system` message to `user` in place (content,
+/// name, and position preserved). Zero-copy when nothing needs changing, so the
+/// common (uncompressed) turn and OpenAI-only turns pay no allocation.
+fn normalize_non_leading_system(messages: &[ChatMessage]) -> std::borrow::Cow<'_, [ChatMessage]> {
+    let needs_fix = messages
+        .iter()
+        .enumerate()
+        .any(|(i, m)| i != 0 && m.role == Role::System);
+    if !needs_fix {
+        return std::borrow::Cow::Borrowed(messages);
+    }
+    let fixed = messages
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            if i != 0 && m.role == Role::System {
+                let mut demoted = m.clone();
+                demoted.role = Role::User;
+                demoted
+            } else {
+                m.clone()
+            }
+        })
+        .collect();
+    std::borrow::Cow::Owned(fixed)
+}
+
+#[cfg(test)]
+mod system_norm_tests {
+    use super::*;
+
+    #[test]
+    fn demotes_non_leading_system_to_user() {
+        let msgs = vec![
+            ChatMessage::system("main prompt"),
+            ChatMessage::user("hi"),
+            ChatMessage::system("[CONTEXT HISTORY] summary"),
+            ChatMessage::assistant("ok"),
+        ];
+        let out = normalize_non_leading_system(&msgs);
+        assert_eq!(out[0].role, Role::System, "leading system preserved");
+        assert_eq!(out[1].role, Role::User);
+        assert_eq!(out[2].role, Role::User, "mid-array system demoted to user");
+        assert_eq!(out[3].role, Role::Assistant);
+        assert!(
+            out[2]
+                .content_text()
+                .map(|t| t.contains("[CONTEXT HISTORY]"))
+                .unwrap_or(false),
+            "content preserved on demotion"
+        );
+    }
+
+    #[test]
+    fn zero_copy_when_only_leading_system() {
+        let msgs = vec![ChatMessage::system("sys"), ChatMessage::user("q")];
+        let out = normalize_non_leading_system(&msgs);
+        assert!(
+            matches!(out, std::borrow::Cow::Borrowed(_)),
+            "no non-leading system -> borrow, no clone"
+        );
+        assert_eq!(out[0].role, Role::System);
+        assert_eq!(out[1].role, Role::User);
+    }
+}
+
 /// Client for OpenAI-compatible chat completions API.
 #[derive(Clone)]
 pub struct LlmClient {
@@ -147,6 +252,11 @@ impl LlmClient {
         temperature: Option<f64>,
         extra: Option<HashMap<String, serde_json::Value>>,
     ) -> Result<ChatResponse> {
+        // Demote non-leading `system` messages to `user` so Anthropic-family
+        // providers don't reject a mid-array system message (see
+        // normalize_non_leading_system). Shadows `messages` for all uses below.
+        let normalized_msgs = normalize_non_leading_system(messages);
+        let messages: &[ChatMessage] = &normalized_msgs;
         // Phase 25.1 GAP-7: pre-send invariant guard. Convert opaque provider
         // 400 ("tool_call_ids did not have response messages") into a
         // deterministic, locally-named, non-retriable error before the wire.
@@ -211,6 +321,11 @@ impl LlmClient {
         temperature: Option<f64>,
         extra: Option<HashMap<String, serde_json::Value>>,
     ) -> Result<mpsc::Receiver<StreamEvent>> {
+        // Demote non-leading `system` messages to `user` so Anthropic-family
+        // providers don't reject a mid-array system message (see
+        // normalize_non_leading_system). Shadows `messages` for all uses below.
+        let normalized_msgs = normalize_non_leading_system(messages);
+        let messages: &[ChatMessage] = &normalized_msgs;
         // Phase 25.1 GAP-7: pre-send invariant guard. Catches orphan tool-call
         // sequences (caused by same-tick timestamp ties in session restore)
         // BEFORE the streaming POST. Returns a non-retriable error so the
@@ -235,6 +350,19 @@ impl LlmClient {
             .or_insert_with(|| serde_json::json!({ "include_usage": true }));
 
         let resolved_model = model.unwrap_or(&self.default_model).to_string();
+
+        // Cause C fix: reject structurally-malformed model IDs before the POST
+        // so we avoid paying a round-trip HTTP 400 + silent failover. The guard
+        // is syntactic-only (no disk I/O, no models-cache.json on the hot path).
+        // Tradeoff: single-character-insertion typos (e.g. "g0emma", "1qwen3.7-max")
+        // are indistinguishable from valid-looking IDs without a model list and are
+        // NOT caught here — those remain best-addressed upstream at model-selection
+        // time or via a future opt-in cache check. See DIAGNOSIS-primary-llm-failover.md.
+        if let Some(reason) = model_id_looks_malformed(&resolved_model) {
+            warn!(model = %resolved_model, reason, "rejecting malformed model id before streaming send");
+            anyhow::bail!("invalid model id '{}': {}", resolved_model, reason);
+        }
+
         let url = format!("{}/chat/completions", self.base_url);
 
         // Phase 36.2 CR-09: when the (provider, model) pair is OpenRouter

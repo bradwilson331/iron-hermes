@@ -13,6 +13,17 @@ fn parse_env_usize(name: &str) -> Option<usize> {
     std::env::var(name).ok().and_then(|s| s.parse().ok())
 }
 
+/// Resolve the parallel-job concurrency cap.
+///
+/// Precedence: the `IRONHERMES_CRON_MAX_PARALLEL` env override (if set) wins,
+/// else `config.cron.max_parallel`. A resolved value of `0` means **unbounded**
+/// (returns `None` → no semaphore, legacy behavior). Any `n > 0` returns
+/// `Some(n)` → a `Semaphore::new(n)` caps concurrent jobs at `n`.
+fn resolve_cron_max_parallel(env_override: Option<usize>, config_value: usize) -> Option<usize> {
+    let n = env_override.unwrap_or(config_value);
+    (n > 0).then_some(n)
+}
+
 // ---------------------------------------------------------------------------
 // Public entry points
 // ---------------------------------------------------------------------------
@@ -24,8 +35,9 @@ fn parse_env_usize(name: &str) -> Option<usize> {
 /// 2. Run `run_tick_check` to collect due jobs.
 /// 3. Partition due jobs into workdir-serial vs parallel groups.
 /// 4. Execute workdir jobs sequentially (TERMINAL_CWD is process-global).
-/// 5. Execute parallel jobs concurrently via `JoinSet`, optionally capped by
-///    `IRONHERMES_CRON_MAX_PARALLEL` semaphore.
+/// 5. Execute parallel jobs concurrently via `JoinSet`, capped by the resolved
+///    cron concurrency limit (`IRONHERMES_CRON_MAX_PARALLEL` env override, else
+///    `config.cron.max_parallel`; `0` = unbounded).
 ///
 /// Single-job failures NEVER panic the tick loop — errors are logged and the
 /// loop continues. Cancels cleanly via `cancel`.
@@ -34,9 +46,13 @@ pub async fn run_tick_loop(ctx: Arc<CronRunnerContext>, cancel: CancellationToke
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut first_tick = true;
 
-    // Optional concurrency cap for parallel jobs
-    let semaphore =
-        parse_env_usize("IRONHERMES_CRON_MAX_PARALLEL").map(|n| Arc::new(Semaphore::new(n)));
+    // Concurrency cap for parallel jobs — bounds the parent×subagent memory
+    // product so a tick with several due jobs cannot spike memory into an OOM.
+    let semaphore = resolve_cron_max_parallel(
+        parse_env_usize("IRONHERMES_CRON_MAX_PARALLEL"),
+        ctx.config.cron.max_parallel,
+    )
+    .map(|n| Arc::new(Semaphore::new(n)));
 
     loop {
         tokio::select! {
@@ -145,6 +161,26 @@ mod tests {
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
 
+    #[test]
+    fn resolve_cron_max_parallel_precedence_and_unbounded() {
+        // env override wins over config
+        assert_eq!(resolve_cron_max_parallel(Some(1), 2), Some(1));
+        // no env → config value
+        assert_eq!(resolve_cron_max_parallel(None, 2), Some(2));
+        // config 0 → unbounded (no semaphore)
+        assert_eq!(resolve_cron_max_parallel(None, 0), None);
+        // explicit env 0 → unbounded, overriding a bounded config
+        assert_eq!(resolve_cron_max_parallel(Some(0), 2), None);
+        // env override raising the cap above config
+        assert_eq!(resolve_cron_max_parallel(Some(4), 2), Some(4));
+    }
+
+    #[test]
+    fn cron_config_default_is_bounded() {
+        // Default must NOT be unbounded (the OOM regression guard).
+        assert_eq!(ironhermes_core::Config::default().cron.max_parallel, 2);
+    }
+
     fn make_ctx(tmpdir: &TempDir) -> Arc<CronRunnerContext> {
         let cron_dir = tmpdir.path().join("cron");
         let store = Arc::new(Mutex::new(JobStore::open(cron_dir).expect("open store")));
@@ -157,6 +193,8 @@ mod tests {
             config: ironhermes_core::Config::default(),
             mcp_manager: None,
             tg_client: None,
+            audio_dispatcher: None, // cron-only path has no Telegram adapter
+            delivery_registry: ironhermes_cron::DeliveryRegistry::new(),
         })
     }
 

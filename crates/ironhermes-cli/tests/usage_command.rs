@@ -25,13 +25,11 @@
 //!         `format!(...SELECT` lines (T-36.2-10-INJ structural lock).
 //!   b13 — running-agent guard does NOT bypass /usage.
 
-use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
 use ironhermes_core::commands::context::{CommandContext, StateStoreHandle};
 use ironhermes_core::commands::handlers::{dispatch, parse_since};
 use ironhermes_core::commands::registry::build_registry;
-use ironhermes_core::commands::running_agent::is_bypass;
 use ironhermes_core::commands::{CommandDef, CommandResult, CommandRouter};
 use ironhermes_core::types::Platform;
 use ironhermes_state::{StateStore, UsageEvent, UsageFilter, format_usage_rollups};
@@ -99,11 +97,7 @@ fn fresh_store() -> (Arc<Mutex<StateStore>>, NamedTempFile) {
 }
 
 fn make_ctx_with_session(session_id: &str, store: Arc<Mutex<StateStore>>) -> CommandContext {
-    let mut ctx = CommandContext::new(
-        Platform::Local,
-        session_id.to_string(),
-        Arc::new(AtomicBool::new(false)),
-    );
+    let mut ctx = CommandContext::new(Platform::Local, session_id.to_string());
     ctx.state_store = Some(Arc::new(TestStateStoreAdapter(store)));
     ctx
 }
@@ -421,11 +415,7 @@ fn b9_registry_usage_command_has_args_hint() {
 
 #[test]
 fn b10_dispatch_for_usage_is_no_longer_todo_stub() {
-    let ctx = CommandContext::new(
-        Platform::Local,
-        "any-session".to_string(),
-        Arc::new(AtomicBool::new(false)),
-    );
+    let ctx = CommandContext::new(Platform::Local, "any-session".to_string());
     let router = make_router();
     let cmd = find_cmd("usage");
     let res = dispatch(&cmd, &[], &ctx, &router);
@@ -499,14 +489,33 @@ fn b12_state_lib_has_no_format_select_lines() {
 }
 
 // ---------------------------------------------------------------------------
-// b13 — running-agent guard does NOT bypass /usage.
+// b13 — running-agent guard removed (Phase 39.1 Plan 06).
 // ---------------------------------------------------------------------------
 
+/// Phase 39.1 Plan 06 (R39.1-06): running_agent module deleted — is_bypass() gone.
+///
+/// The original b13 asserted `!is_bypass("usage")` (usage must not bypass the gate).
+/// The gate is now removed entirely — all commands dispatch unconditionally.
+/// Converted to a traceability note: /usage dispatches like any other command.
 #[test]
-fn b13_usage_is_not_on_running_agent_bypass_list() {
-    assert!(
-        !is_bypass("usage"),
-        "/usage must NOT bypass the running-agent guard; \
-         it is a post-turn report command (CONTEXT.md correction)"
-    );
+fn b13_usage_dispatches_without_gate() {
+    use ironhermes_core::commands::registry::build_registry;
+    use ironhermes_core::commands::{CommandRouter, ResolveResult};
+    use ironhermes_core::types::Platform;
+
+    // /usage must resolve to the canonical "usage" command (gate removed — no rejection).
+    let router = CommandRouter::new(build_registry());
+    let resolved = router.resolve("/usage", &Platform::Local);
+    match resolved {
+        ResolveResult::Exact(def) | ResolveResult::PrefixMatch(def) => {
+            assert_eq!(
+                def.name, "usage",
+                "/usage must resolve to canonical 'usage' def (gate removed in Plan 06)"
+            );
+        }
+        other => panic!(
+            "/usage must resolve to a known command (gate removed — no rejection), got: {:?}",
+            other
+        ),
+    }
 }

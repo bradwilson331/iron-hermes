@@ -26,7 +26,7 @@ impl SkillManageTool {
         Self
     }
 
-    /// Two-level skill directory: `<HERMES_HOME>/skills/<category>/<slug>/`.
+    /// Two-level skill directory: `<IRONHERMES_HOME>/skills/<category>/<slug>/`.
     /// `SkillRegistry.load_with_paths` walks level 2 (Pitfall 3).
     fn skill_dir(&self, category: &str, slug: &str) -> PathBuf {
         get_hermes_home().join("skills").join(category).join(slug)
@@ -35,7 +35,7 @@ impl SkillManageTool {
     /// Resolve a file path inside the skill directory, rejecting path traversal.
     ///
     /// Rejects any `rel_path` containing `..` or starting with `/` — guards
-    /// against escape from the skill dir into HERMES_HOME or the filesystem.
+    /// against escape from the skill dir into IRONHERMES_HOME or the filesystem.
     fn resolve_skill_file_path(
         &self,
         category: &str,
@@ -301,13 +301,13 @@ impl SkillManageTool {
             }
         };
 
-        // Boundary check: canonical path must live under HERMES_HOME/skills/.
+        // Boundary check: canonical path must live under IRONHERMES_HOME/skills/.
         let skills_root = get_hermes_home().join("skills");
         let canonical_root = skills_root.canonicalize().unwrap_or(skills_root);
         if !canonical.starts_with(&canonical_root) {
             return Ok(json!({
                 "error": "path_out_of_scope",
-                "reason": "delete target is not within HERMES_HOME/skills/",
+                "reason": "delete target is not within IRONHERMES_HOME/skills/",
             })
             .to_string());
         }

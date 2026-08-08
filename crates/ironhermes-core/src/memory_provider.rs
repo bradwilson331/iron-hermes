@@ -208,7 +208,7 @@ impl MemoryProvider for MemoryStore {
                 secret: false,
                 required: false,
                 cache_breaking: false,
-                default: Some(json!("$HERMES_HOME/memory")),
+                default: Some(json!("$IRONHERMES_HOME/memory")),
                 choices: None,
                 env_var: None,
                 url: None,

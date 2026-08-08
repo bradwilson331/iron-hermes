@@ -4,7 +4,7 @@
 //! (highest first):
 //!
 //! 1. Explicit `--board <slug>` CLI flag
-//! 2. `HERMES_KANBAN_BOARD` environment variable
+//! 2. `IRONHERMES_KANBAN_BOARD` environment variable (legacy `HERMES_KANBAN_BOARD` also accepted)
 //! 3. `~/.ironhermes/kanban/current` file (single-line slug)
 //! 4. Literal `"default"` (legacy single-board path, D-01)
 //!
@@ -26,17 +26,10 @@ pub fn resolve_board_context(cli_flag: Option<&str>) -> Result<BoardContext, Boa
     // 4-tier if-let chain — explicit source tracking alongside slug resolution.
     let (raw_slug, source) = if let Some(f) = cli_flag {
         (f.to_string(), BoardSource::Flag)
-    } else if let Ok(v) = std::env::var("HERMES_KANBAN_BOARD") {
-        if v.is_empty() {
-            // Empty env var falls through to file/default tiers.
-            if let Some(v) = read_current_board_file_opt() {
-                (v, BoardSource::File)
-            } else {
-                ("default".to_string(), BoardSource::Default)
-            }
-        } else {
-            (v, BoardSource::Env)
-        }
+    } else if let Some(v) = crate::kanban_env("BOARD") {
+        // Dual-read: checks IRONHERMES_KANBAN_BOARD first, then HERMES_KANBAN_BOARD.
+        // kanban_env already treats empty as unset, so no extra is_empty() check needed.
+        (v, BoardSource::Env)
     } else if let Some(v) = read_current_board_file_opt() {
         (v, BoardSource::File)
     } else {
@@ -138,7 +131,7 @@ mod tests {
     fn flag_overrides_env() {
         let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_dir, _home) = setup_home();
-        let _env = ScopedEnv::set("HERMES_KANBAN_BOARD", "env-board");
+        let _env = ScopedEnv::set("IRONHERMES_KANBAN_BOARD", "env-board");
 
         let ctx = resolve_board_context(Some("flag-board")).unwrap();
         assert_eq!(ctx.slug, "flag-board");
@@ -159,7 +152,7 @@ mod tests {
         std::fs::create_dir_all(&kanban_dir).unwrap();
         std::fs::write(kanban_dir.join("current"), "file-board").unwrap();
 
-        let _env = ScopedEnv::set("HERMES_KANBAN_BOARD", "env-board");
+        let _env = ScopedEnv::set("IRONHERMES_KANBAN_BOARD", "env-board");
 
         let ctx = resolve_board_context(None).unwrap();
         assert_eq!(ctx.slug, "env-board");
@@ -174,7 +167,7 @@ mod tests {
     fn file_overrides_default() {
         let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (dir, _home) = setup_home();
-        let _no_env = ScopedEnv::remove("HERMES_KANBAN_BOARD");
+        let _no_env = ScopedEnv::remove("IRONHERMES_KANBAN_BOARD");
 
         let kanban_dir = dir.path().join("kanban");
         std::fs::create_dir_all(&kanban_dir).unwrap();
@@ -193,7 +186,7 @@ mod tests {
     fn fourth_tier_is_default() {
         let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_dir, _home) = setup_home();
-        let _no_env = ScopedEnv::remove("HERMES_KANBAN_BOARD");
+        let _no_env = ScopedEnv::remove("IRONHERMES_KANBAN_BOARD");
         // No current file exists in tempdir
 
         let ctx = resolve_board_context(None).unwrap();
@@ -209,7 +202,7 @@ mod tests {
     fn default_slug_skips_validation_and_uses_legacy_db_path() {
         let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (_dir, _home) = setup_home();
-        let _no_env = ScopedEnv::remove("HERMES_KANBAN_BOARD");
+        let _no_env = ScopedEnv::remove("IRONHERMES_KANBAN_BOARD");
 
         let ctx = resolve_board_context(None).unwrap();
         assert_eq!(ctx.slug, "default");
@@ -249,7 +242,7 @@ mod tests {
     fn current_file_trims_trailing_newline() {
         let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (dir, _home) = setup_home();
-        let _no_env = ScopedEnv::remove("HERMES_KANBAN_BOARD");
+        let _no_env = ScopedEnv::remove("IRONHERMES_KANBAN_BOARD");
 
         let kanban_dir = dir.path().join("kanban");
         std::fs::create_dir_all(&kanban_dir).unwrap();
@@ -268,7 +261,7 @@ mod tests {
     fn empty_current_file_falls_through_to_default() {
         let _lock = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (dir, _home) = setup_home();
-        let _no_env = ScopedEnv::remove("HERMES_KANBAN_BOARD");
+        let _no_env = ScopedEnv::remove("IRONHERMES_KANBAN_BOARD");
 
         let kanban_dir = dir.path().join("kanban");
         std::fs::create_dir_all(&kanban_dir).unwrap();

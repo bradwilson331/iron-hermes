@@ -285,3 +285,100 @@ fn detector_fires_on_synthetic_private_ip() {
         "detector must NOT flag 172.32.x.x — outside the RFC-1918 172.16.0.0/12 range"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 43 (OAUTH-03): AuthProviderConfig / AuthConfig backward-compat + round-trip
+// ---------------------------------------------------------------------------
+
+/// Phase 43 (OAUTH-03): An empty config deserializes with an empty auth.providers map.
+/// No `auth:` block in config.yaml → backward compatible with pre-43 configs.
+#[test]
+fn auth_backward_compat_empty_config() {
+    let cfg: Config = serde_yaml::from_str("").expect("empty config must parse");
+    assert!(
+        cfg.auth.providers.is_empty(),
+        "an empty config must yield an empty auth.providers map (OAUTH-03 backward compat)"
+    );
+}
+
+/// Phase 43 (OAUTH-03): auth.providers.xai round-trip — all six fields serialize and
+/// deserialize correctly.
+#[test]
+fn auth_provider_round_trip() {
+    let yaml = r#"
+auth:
+  providers:
+    xai:
+      display_name: "xAI Grok"
+      authorization_url: "https://accounts.x.ai/oauth/authorize"
+      token_url: "https://accounts.x.ai/oauth/token"
+      device_authorization_url: "https://accounts.x.ai/oauth/device/code"
+      client_id: "test-client-id"
+      scopes:
+        - "read"
+        - "write"
+"#;
+    let cfg: Config = serde_yaml::from_str(yaml).expect("auth provider config must parse");
+    let xai = cfg
+        .auth
+        .providers
+        .get("xai")
+        .expect("xai provider must be present");
+    assert_eq!(xai.display_name.as_deref(), Some("xAI Grok"));
+    assert_eq!(
+        xai.authorization_url.as_deref(),
+        Some("https://accounts.x.ai/oauth/authorize")
+    );
+    assert_eq!(
+        xai.token_url.as_deref(),
+        Some("https://accounts.x.ai/oauth/token")
+    );
+    assert_eq!(
+        xai.device_authorization_url.as_deref(),
+        Some("https://accounts.x.ai/oauth/device/code")
+    );
+    assert_eq!(xai.client_id.as_deref(), Some("test-client-id"));
+    assert_eq!(xai.scopes, vec!["read", "write"]);
+
+    // Round-trip: serialize back to YAML and re-parse
+    let serialized = serde_yaml::to_string(&cfg).expect("Config must serialize");
+    let cfg2: Config = serde_yaml::from_str(&serialized).expect("re-parsed config must be valid");
+    let xai2 = cfg2
+        .auth
+        .providers
+        .get("xai")
+        .expect("xai provider must survive round-trip");
+    assert_eq!(xai2.client_id, xai.client_id);
+    assert_eq!(xai2.scopes, xai.scopes);
+}
+
+/// Phase 43 (OAUTH-03): Missing optional fields (e.g. device_authorization_url absent)
+/// deserialize to None without error.
+#[test]
+fn auth_provider_optional_fields_absent() {
+    let yaml = r#"
+auth:
+  providers:
+    minimax:
+      display_name: "MiniMax"
+      token_url: "https://api.minimax.chat/oauth/token"
+      client_id: "mm-client"
+      scopes:
+        - "default"
+"#;
+    let cfg: Config = serde_yaml::from_str(yaml).expect("partial auth provider config must parse");
+    let mm = cfg
+        .auth
+        .providers
+        .get("minimax")
+        .expect("minimax provider must be present");
+    assert_eq!(mm.display_name.as_deref(), Some("MiniMax"));
+    assert!(
+        mm.device_authorization_url.is_none(),
+        "absent device_authorization_url must be None"
+    );
+    assert!(
+        mm.authorization_url.is_none(),
+        "absent authorization_url must be None"
+    );
+}

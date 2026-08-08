@@ -1,0 +1,30 @@
+# IronHermes Web UI — systemd --user unit.
+# Install location: ~/.config/systemd/user/ironhermes-web.service
+# Enable: systemctl --user daemon-reload && systemctl --user enable --now ironhermes-web
+# Logs:   journalctl --user -u ironhermes-web -f
+# Headless servers (no graphical login): loginctl enable-linger $USER
+
+[Unit]
+Description=IronHermes Web UI Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.ironhermes/scripts/web-run.sh
+WorkingDirectory=%h
+EnvironmentFile=-%h/.ironhermes/.env
+Restart=always
+RestartSec=5
+# Cap restart storms: 5 starts in 60s window
+StartLimitIntervalSec=60
+StartLimitBurst=5
+# Unlike the gateway, this server handles SIGTERM directly (main.rs
+# shutdown_signal() selects on both SIGTERM and Ctrl-C), so the systemd
+# default KillSignal (SIGTERM) is correct here — no override needed.
+# TimeoutStopSec gives the graceful-shutdown path time to flush the tracing
+# WorkerGuards before a hard kill.
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

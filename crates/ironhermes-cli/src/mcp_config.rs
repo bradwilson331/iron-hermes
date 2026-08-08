@@ -7,6 +7,8 @@
 use clap::Subcommand;
 use colored::Colorize;
 use ironhermes_core::Config;
+use ironhermes_core::auth::AuthStore;
+use ironhermes_core::get_hermes_home;
 use ironhermes_mcp::{McpServerConfig, interpolate_config, sanitize_error};
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -48,6 +50,17 @@ pub enum McpAction {
         /// Server name to configure
         name: String,
     },
+    /// Interactively authorize an OAuth-protected MCP server (first-time auth, D-04).
+    ///
+    /// Performs DCR + PKCE browser flow against the configured server.
+    /// Persists the token to auth.json so subsequent gateway auto-starts need zero DCR.
+    Connect {
+        /// Server name as configured under mcp_servers.<name> in config.yaml
+        name: String,
+        /// Force browser (PKCE loopback) flow
+        #[arg(long)]
+        browser: bool,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -66,6 +79,7 @@ pub async fn handle_mcp_command(action: McpAction) -> anyhow::Result<()> {
         McpAction::List => cmd_list().await,
         McpAction::Test { name } => cmd_test(name).await,
         McpAction::Configure { name } => cmd_configure(name).await,
+        McpAction::Connect { name, browser } => cmd_connect(name, browser).await,
     }
 }
 
@@ -496,6 +510,165 @@ async fn cmd_configure(name: String) -> anyhow::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// D-02: new-issuer DEFCON-tiered confirm decision (pure/testable)
+// ---------------------------------------------------------------------------
+
+/// Phase 46.1 D-02: whether a first connect to a newly-added, non-baseline
+/// OAuth issuer should prompt for interactive confirmation before proceeding.
+///
+/// Mirrors the CR-01 `at_least_as_strict_as(2)` precedent (`skills.rs:559`):
+/// DEFCON 1-2 (strict) → confirm; DEFCON 3-5 (relaxed) → silent (audit-only,
+/// see `cmd_connect`'s unconditional audit-floor write).
+fn should_confirm_new_issuer(defcon: ironhermes_core::config::DefconLevel) -> bool {
+    defcon.at_least_as_strict_as(2)
+}
+
+// ---------------------------------------------------------------------------
+// cmd_connect  (D-04: interactive first-time OAuth authorization)
+// ---------------------------------------------------------------------------
+
+/// Perform DCR + PKCE browser OAuth flow for an OAuth-protected MCP server.
+///
+/// Intended for first-time authorization. On success, persists the access/refresh
+/// token to auth.json so subsequent gateway auto-starts run zero-DCR hot-path.
+///
+/// Security invariants (A-1, B-4):
+/// - Token values are never printed; only tool names are displayed.
+/// - `validate_prm_issuer` runs inside `connect_http_oauth` before any network call.
+/// - AuthStore is opened at `get_hermes_home().join("auth.json")`, never HERMES_HOME.
+async fn cmd_connect(name: String, _browser: bool) -> anyhow::Result<()> {
+    use ironhermes_mcp::transport::connect_http_oauth;
+    let config = Config::load().unwrap_or_default();
+    let server_val = match config.mcp_servers.get(&name).cloned() {
+        Some(v) => v,
+        None => {
+            eprintln!("error: server '{}' not found in config", name);
+            std::process::exit(1);
+        }
+    };
+    let mut server: McpServerConfig = serde_yaml::from_value(server_val)
+        .map_err(|e| anyhow::anyhow!("Failed to parse server config: {}", e))?;
+    if server.oauth_provider.is_none() {
+        eprintln!(
+            "error: server '{}' has no oauth_provider configured \
+             — Connect is only for OAuth servers",
+            name
+        );
+        std::process::exit(1);
+    }
+    interpolate_config(&mut server);
+    let store = AuthStore::open(get_hermes_home().join("auth.json")).await?;
+
+    // Phase 46.1 D-02: new-issuer detection + unconditional audit floor +
+    // DEFCON-tiered confirm-on-first-use, before connect_http_oauth runs.
+    // "New" = the server's issuer is not the built-in baseline (is_baseline_issuer)
+    // AND no DcrEntry has been persisted for this URL yet (first-ever connect).
+    // A server that has already completed a first connect is never re-prompted
+    // and never re-audited — the persisted DcrEntry is the "remembered" signal.
+    let is_new = match server.url.as_deref() {
+        Some(url) => {
+            !ironhermes_mcp::security::is_baseline_issuer(url)
+                && store.get_client(url).await.is_none()
+        }
+        None => false,
+    };
+    if is_new {
+        let host = server
+            .url
+            .as_deref()
+            .and_then(|u| url::Url::parse(u).ok())
+            .and_then(|u| u.host_str().map(|h| h.to_string()))
+            .unwrap_or_else(|| "unknown-host".to_string());
+
+        let must_confirm = should_confirm_new_issuer(config.skills.defcon_level);
+        let mut proceed = true;
+        let (decision, resolution): (&str, &str) = if must_confirm {
+            println!(
+                "{}",
+                format!(
+                    "New issuer '{}' for server '{}' has not been connected before.",
+                    host, name
+                )
+                .yellow()
+            );
+            let confirmed = prompt_yn(
+                &format!(
+                    "Trust '{}' and connect ({} requires confirmation)?",
+                    host, config.skills.defcon_level
+                ),
+                false,
+            );
+            proceed = confirmed;
+            if confirmed {
+                ("approved", "operator")
+            } else {
+                ("denied", "operator")
+            }
+        } else {
+            ("approved", "bypass")
+        };
+
+        // Audit floor (D-02): always written, regardless of DEFCON tier or
+        // confirm outcome. Non-blocking — an append failure is logged and the
+        // connect flow continues (or the already-decided abort still happens);
+        // the audit floor must never abort an otherwise-approved connect.
+        let audit_log = ironhermes_core::AuditLog::load(config.audit.clone());
+        let entry = audit_log.make_entry(
+            "new_issuer",
+            format!("connect:{name}"),
+            Some(name.clone()),
+            "cli-connect",
+            "cli",
+            "n/a",
+            format!("new issuer {host} allowed for server {name}"),
+            decision,
+            resolution,
+            &serde_json::json!({}),
+        );
+        if let Err(e) = audit_log.append(&entry).await {
+            tracing::warn!(
+                "failed to write new_issuer audit entry for host {host}, server {name}: {e:#}"
+            );
+        }
+
+        if !proceed {
+            println!("{}", "Aborted — new issuer not confirmed.".dimmed());
+            return Ok(());
+        }
+    }
+
+    println!(
+        "{}",
+        format!("Connecting to '{}' via OAuth...", name).cyan()
+    );
+    let (client, child) = connect_http_oauth(&server, store, &config.mcp_oauth.issuer_allowlist)
+        .await
+        .map_err(|e| anyhow::anyhow!("OAuth connect failed: {}", sanitize_error(&e.to_string())))?;
+    let mcp_tools = client.list_all_tools().await?;
+    let tools: Vec<(String, String)> = mcp_tools
+        .iter()
+        .map(|t| {
+            (
+                t.name.as_ref().to_string(),
+                t.description.as_deref().unwrap_or("").to_string(),
+            )
+        })
+        .collect();
+    println!(
+        "{}",
+        format!("Connected \u{2014} {} tool(s) available", tools.len()).green()
+    );
+    for (tool_name, description) in &tools {
+        let padded = format!("{:<30}", tool_name);
+        println!("  {} \u{2014} {}", padded.yellow(), description);
+    }
+    // Drop client (disconnects transport) and child (kill_on_drop reaps process).
+    drop(client);
+    drop(child);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Connection helper: connect, list tools, disconnect
 // ---------------------------------------------------------------------------
 
@@ -805,6 +978,22 @@ mod tests {
             msg.contains("Check command and args."),
             "error message must carry the user-actionable hint; got: {msg}"
         );
+    }
+
+    #[test]
+    fn should_confirm_new_issuer_true_at_strict_defcon_tiers() {
+        use ironhermes_core::config::DefconLevel;
+        assert!(should_confirm_new_issuer(DefconLevel::ONE));
+        assert!(should_confirm_new_issuer(DefconLevel::try_from(2).unwrap()));
+    }
+
+    #[test]
+    fn should_confirm_new_issuer_false_at_relaxed_defcon_tiers() {
+        use ironhermes_core::config::DefconLevel;
+        assert!(!should_confirm_new_issuer(
+            DefconLevel::try_from(3).unwrap()
+        ));
+        assert!(!should_confirm_new_issuer(DefconLevel::FIVE));
     }
 
     #[test]

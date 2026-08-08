@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
 # Phase 21.7 CI gates — runnable locally and from .github/workflows/ci.yml.
+# Extended in Phase 47.3 with Gates 5-6 (D-10 auth-layer ordering /
+# connect-info wiring, D-13a artifact CSP + viewer sandbox invariants).
 #
 # Each gate maps to an AI-SPEC §5 eval dimension + a locked CONTEXT decision.
 # For the three gates that already exist as Rust tests (E-05, E-08, E-09) we
 # call `cargo test` instead of duplicating them as shell greps — the
 # #[test] names are authoritative and fail with a richer diagnostic. The
 # "no per-request yolo" gate (D-12) is a straight static-grep since there's
-# no concrete runtime surface to probe.
+# no concrete runtime surface to probe. Gates 5-6 (Phase 47.3) are also
+# static greps, pinning invariants ADR-001 says "must stay that way" into CI
+# rather than leaving them as assumptions.
 #
 # Exit 0 on all-pass; non-zero on any fail.
 
@@ -77,4 +81,100 @@ fi
 echo "    OK"
 echo
 
-echo "==> All 21.7 CI gates green."
+# -----------------------------------------------------------------------------
+# Gate 5 / D-10 / Phase 47.3:
+#   Auth layer ordering + connect-info wiring. Axum layers wrap only
+#   previously-registered routes, so the auth layer (from_fn_with_state) must
+#   be registered strictly after every raw `.route(` call in main.rs — a
+#   future router refactor that silently moves it earlier would otherwise
+#   unprotect /artifacts/{id} and /chat-attachments/{sid}/{id} without any
+#   compile error. The login rate limiter also needs the real peer IP, so
+#   `into_make_service_with_connect_info` must replace the bare
+#   `into_make_service()` call (Pitfall 3).
+# -----------------------------------------------------------------------------
+echo "--> Gate 5 (D-10): auth layer ordering + connect-info wiring"
+MAIN_RS="crates/iron_hermes_ui/src/main.rs"
+
+# Comment lines are filtered (grep -vE '^[0-9]+: *//') so a doc comment that
+# merely mentions `.route(` or `from_fn_with_state` in prose can never
+# satisfy or invalidate this gate — only real call sites count.
+LAST_ROUTE_LINE=$(grep -n '\.route(' "$MAIN_RS" | grep -vE '^[0-9]+: *//' | tail -1 | cut -d: -f1) || true
+AUTH_LAYER_LINE=$(grep -n 'from_fn_with_state' "$MAIN_RS" | grep -vE '^[0-9]+: *//' | tail -1 | cut -d: -f1) || true
+
+if [ -z "${LAST_ROUTE_LINE:-}" ] || [ -z "${AUTH_LAYER_LINE:-}" ]; then
+    echo "    GATE FAIL (D-10): could not locate a raw .route( call or from_fn_with_state in $MAIN_RS"
+    exit 1
+fi
+
+if [ "$AUTH_LAYER_LINE" -le "$LAST_ROUTE_LINE" ]; then
+    echo "    GATE FAIL (D-10): auth layer (line $AUTH_LAYER_LINE) is registered at or before the last raw .route( call (line $LAST_ROUTE_LINE) in $MAIN_RS. Axum layers wrap only previously-registered routes — this ordering would silently unprotect routes registered after the auth layer."
+    exit 1
+fi
+
+if ! grep -q 'into_make_service_with_connect_info' "$MAIN_RS"; then
+    echo "    GATE FAIL (D-10): into_make_service_with_connect_info not found in $MAIN_RS — the login rate limiter's ConnectInfo<SocketAddr> extractor will fail to resolve peer IPs."
+    exit 1
+fi
+
+if grep -qE '\.into_make_service\(\)' "$MAIN_RS"; then
+    echo "    GATE FAIL (D-10): bare .into_make_service() found in $MAIN_RS — this must be into_make_service_with_connect_info::<SocketAddr>() instead."
+    exit 1
+fi
+echo "    OK (auth layer line $AUTH_LAYER_LINE > last route line $LAST_ROUTE_LINE; into_make_service_with_connect_info present)"
+echo
+
+# -----------------------------------------------------------------------------
+# Gate 6 / D-13a / ADR-001 Consequences / Phase 47.3:
+#   The artifact CSP's `connect-src 'none'` and the artifact viewer's iframe
+#   sandbox (never `allow-same-origin`) are the two containments ADR-001
+#   states "must stay that way" now that D-07's session cookie makes them
+#   load-bearing for authentication, not just content isolation. This
+#   backstops the existing Rust tests (artifact_route_csp_has_all_directives,
+#   sandbox_never_grants_same_origin) with a CI-pinned invariant rather than
+#   replacing them. Each grep is scoped to a single source file so the
+#   forbidden token this gate necessarily contains as its own search pattern
+#   can never cause a whole-repo grep to self-fail.
+# -----------------------------------------------------------------------------
+echo "--> Gate 6 (D-13a): artifact CSP connect-src + viewer sandbox invariants"
+ARTIFACT_ROUTE="crates/iron_hermes_ui/src/server/artifact_route.rs"
+ARTIFACT_VIEWER="crates/iron_hermes_ui/src/components/hermes_app/screens/artifact_viewer.rs"
+
+# Scoped to the ARTIFACT_CSP const's own definition block (from the `const
+# ARTIFACT_CSP` line through the closing `";`), not the whole file:
+# artifact_route.rs's own doc comment (lines 46-59) explains the directive in
+# prose and legitimately contains the literal substring "connect-src 'none'"
+# — a whole-file grep would pass even if the actual const's value dropped the
+# directive, since the doc comment alone would satisfy it. Ground-truthed:
+# removing the directive from the const while leaving the doc comment intact
+# left a whole-file grep green. The invariant that matters is the const's
+# runtime value, so the check is scoped to its definition block only.
+CSP_BLOCK=$(awk '/^const ARTIFACT_CSP/,/";$/' "$ARTIFACT_ROUTE") || true
+if [ -z "${CSP_BLOCK:-}" ]; then
+    echo "    GATE FAIL (D-13a): ARTIFACT_CSP const definition not found in $ARTIFACT_ROUTE"
+    exit 1
+fi
+if ! echo "$CSP_BLOCK" | grep -q "connect-src 'none'"; then
+    echo "    GATE FAIL (D-13a): connect-src 'none' missing from ARTIFACT_CSP's definition in $ARTIFACT_ROUTE — this is what blocks all outbound fetch/XHR/WS/beacon activity from a framed agent-authored artifact."
+    exit 1
+fi
+
+# Scoped to the ARTIFACT_SANDBOX const's own definition line, not the whole
+# file: artifact_viewer.rs's doc comments and its own
+# sandbox_never_grants_same_origin test legitimately contain the literal
+# substring "allow-same-origin" (explaining/asserting that it must NEVER be
+# granted) — a whole-file grep would self-fail on that pre-existing, correct
+# content. The invariant that actually matters is the const's value.
+SANDBOX_CONST_LINE=$(grep -n '^const ARTIFACT_SANDBOX' "$ARTIFACT_VIEWER") || true
+if [ -z "${SANDBOX_CONST_LINE:-}" ]; then
+    echo "    GATE FAIL (D-13a): ARTIFACT_SANDBOX const definition not found in $ARTIFACT_VIEWER"
+    exit 1
+fi
+if echo "$SANDBOX_CONST_LINE" | grep -q 'allow-same-origin'; then
+    echo "    GATE FAIL (D-13a): ARTIFACT_SANDBOX grants allow-same-origin in $ARTIFACT_VIEWER. Offending line:"
+    echo "    $SANDBOX_CONST_LINE"
+    exit 1
+fi
+echo "    OK"
+echo
+
+echo "==> All 21.7 + 47.3 CI gates green."
