@@ -20,7 +20,11 @@ FROM docker.io/tianon/gosu:1.17 AS gosu_source
 
 # --- Stage 1: Rust + Dioxus build ---
 # Edition 2024 requires rustc >= 1.85; pin for reproducibility.
-FROM docker.io/library/rust:1.96-bookworm AS builder
+# Base is Debian *trixie* (glibc 2.41), NOT bookworm (glibc 2.36): the prebuilt
+# `dx` binary that binstall fetches below is linked against glibc 2.39 (Dioxus
+# builds its release binaries on Ubuntu 24.04). On bookworm `dx` fails at
+# startup with "GLIBC_2.38/2.39 not found". Runtime stage must match (trixie).
+FROM docker.io/library/rust:1.96-trixie AS builder
 WORKDIR /build
 
 # Build-time system deps:
@@ -37,11 +41,13 @@ RUN apt-get update && \
 # WASM target for the Dioxus web client.
 RUN rustup target add wasm32-unknown-unknown
 
-# Dioxus CLI — MUST match the dioxus crate version (=0.7.1). binstall is fast
-# (prebuilt); fall back to a from-source install if binstall lacks the pin.
+# Dioxus CLI — MUST match the dioxus crate version (=0.7.1). Install ONLY the
+# prebuilt binary via binstall; do NOT fall back to `cargo install dioxus-cli`
+# (the from-source build regularly OOM-crashes the builder). Fail hard if
+# binstall can't fetch the pin. The prebuilt `dx` needs glibc 2.39 — see the
+# trixie base-image note above.
 RUN cargo install cargo-binstall --locked && \
-    cargo binstall -y dioxus-cli@0.7.1 || \
-    cargo install dioxus-cli@0.7.1 --locked
+    cargo binstall -y dioxus-cli@0.7.1
 
 # Copy dependency manifests first for layer caching.
 COPY Cargo.toml Cargo.lock ./
@@ -88,20 +94,23 @@ RUN cargo build --release --bin ironhermes
 RUN dx bundle --platform web -p iron_hermes_ui --release
 
 # --- Stage 2: Minimal runtime ---
-FROM docker.io/library/debian:bookworm-slim AS runtime
+# trixie-slim (glibc 2.41) to match the builder: the binaries copied from the
+# builder are linked against trixie's glibc, so the runtime must be >= that.
+FROM docker.io/library/debian:trixie-slim AS runtime
 
 # Runtime deps:
 # - python3: execute_code sandbox
 # - ca-certificates: HTTPS for API calls
 # - procps: ps for process management
-# - libasound2: ALSA runtime for cpal/rodio audio
+# - libasound2t64: ALSA runtime for cpal/rodio audio (renamed from libasound2
+#   by Debian's 64-bit time_t transition; plain `libasound2` is gone in trixie)
 # - curl: compose healthcheck (GET http://localhost:8080/)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3 \
         ca-certificates \
         procps \
-        libasound2 \
+        libasound2t64 \
         curl && \
     rm -rf /var/lib/apt/lists/*
 
