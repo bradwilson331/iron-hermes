@@ -56,9 +56,9 @@ COPY crates/ crates/
 COPY providers/ providers/
 # Embedded at compile time via include_str! from crate sources:
 # - skills/: kanban-worker & kanban-orchestrator SKILL.md (ironhermes-kanban)
-# - assets/: site.css (iron_hermes_ui)
+#   (iron_hermes_ui's site.css lives inside crates/iron_hermes_ui/assets/,
+#    already covered by `COPY crates/ crates/` — the repo has no root assets/)
 COPY skills/ skills/
-COPY assets/ assets/
 
 # Build release binary
 RUN cargo build --release --bin ironhermes
