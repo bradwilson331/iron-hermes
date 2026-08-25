@@ -195,6 +195,48 @@ pub fn build_help_registry() -> KeybindingRegistry {
         "palette_tab_insert",
     );
 
+    // Phase 36.6.4 Plan 06 (T-36.6.4-DISC-01/02): discoverability entries for
+    // the four affordances Plans 02/03/05 shipped without any Help-overlay
+    // registration. Copy is lifted VERBATIM from the UI-SPEC Copywriting
+    // Contract's "Help overlay new entries" row. This registry is
+    // display-only scaffolding (see the module doc comment above) — every
+    // one of these bindings already has its real dispatch arm in
+    // `App::handle_key` (`v`/`hjkl`/`y`/`Esc`/`Ctrl+Y` from Plan 02, `!` from
+    // Plan 03); this block adds no behaviour, only findability.
+    push(
+        KeyCode::Char('y'),
+        KeyModifiers::CONTROL,
+        "Yank (copy) the current selection via OSC52 — requires terminal or tmux OSC52 support",
+        "yank_selection",
+    );
+    push(
+        KeyCode::Char('v'),
+        KeyModifiers::NONE,
+        "Start visual selection (vim-style: hjkl/arrows extend, y yanks, Esc cancels)",
+        "visual_mode",
+    );
+    // `!` is a text prefix typed at the start of input, not a standalone
+    // keypress — represented the same way the pre-existing `/` palette entry
+    // represents its own text-prefix trigger (KeyCode::Char of the trigger
+    // character, NONE modifiers), not forced into a discrete key-event shape
+    // that would misrepresent it as an always-active binding.
+    push(
+        KeyCode::Char('!'),
+        KeyModifiers::NONE,
+        "Run a shell command (prefix your input with !); output enters the conversation",
+        "shell_bang",
+    );
+    // `/image <path>` is a full slash command, reachable through the same
+    // `/`-prefix trigger the palette entry above already documents — reusing
+    // that same (key, modifiers) pair rather than inventing an unbound key
+    // event for a multi-character command name.
+    push(
+        KeyCode::Char('/'),
+        KeyModifiers::NONE,
+        "Show a clickable chip for an image file (/image <path>)",
+        "open_image_command",
+    );
+
     r
 }
 
@@ -470,5 +512,39 @@ mod tests {
                 "expected help registry to contain {expected:?}; got {keys:?}"
             );
         }
+    }
+
+    /// Phase 36.6.4 Plan 06 (T-36.6.4-DISC-01/02): the Help registry must
+    /// carry a discoverable entry for each of the four affordances Plans
+    /// 02/03/05 shipped without any Help-overlay registration — the yank
+    /// binding (with its OSC52 caveat, so the caveat lives in exactly ONE
+    /// place per Plan 02's D-05/D-04 design), the visual-mode entry key, the
+    /// `!` shell prefix, and the `/image` command.
+    #[test]
+    fn help_registry_includes_new_phase_affordances() {
+        let registry = build_help_registry();
+        let entries = registry.help_entries();
+        let descriptions: Vec<&str> = entries.iter().map(|e| e.1).collect();
+
+        assert!(
+            descriptions
+                .iter()
+                .any(|d| d.contains("Yank") && d.contains("OSC52")),
+            "expected a Help entry for the yank binding carrying the OSC52 caveat; got {descriptions:?}"
+        );
+        assert!(
+            descriptions
+                .iter()
+                .any(|d| d.contains("visual selection") && d.contains("vim-style")),
+            "expected a Help entry for the visual-mode entry key; got {descriptions:?}"
+        );
+        assert!(
+            descriptions.iter().any(|d| d.contains("shell command")),
+            "expected a Help entry for the shell prefix; got {descriptions:?}"
+        );
+        assert!(
+            descriptions.iter().any(|d| d.contains("image file")),
+            "expected a Help entry for the /image command; got {descriptions:?}"
+        );
     }
 }

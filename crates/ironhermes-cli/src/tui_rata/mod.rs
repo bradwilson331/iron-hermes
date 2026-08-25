@@ -15,10 +15,13 @@ pub mod commands;
 pub mod double_ctrl_c;
 pub mod event_loop;
 pub mod history;
+pub mod hyperlink; // Phase 36.6.4 Plan 04 — OSC8 clickable hyperlinks (TUI-LINK-01)
 pub mod keybindings;
 pub mod knight_rider;
 pub mod overlay; // Phase 36.6.2 Plan 01 — shared overlay/modal rendering
 pub mod palette; // Phase 36.6.3 Plan 01 — command palette / slash menu (TUI-INPUT-01)
+pub mod selection; // Phase 36.6.4 Plan 01 — text selection + OSC52 clipboard write
+pub mod shell_bang; // Phase 36.6.4 Plan 03 — `!` shell execution (D-09..D-11)
 pub mod status_line;
 pub mod stream_events;
 pub mod ui;

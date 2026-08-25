@@ -11,6 +11,7 @@
 use anyhow::{Context, Result};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tempfile::NamedTempFile;
 
 const PID_FILENAME: &str = "gateway.pid";
@@ -130,6 +131,146 @@ pub fn is_pid_alive(_pid: u32) -> PidLiveness {
         "Gateway PID liveness check is not supported on this platform \
          in IronHermes v2.1 (Windows support tracked under Phase 30)."
     );
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Phase 48.2 Plan 13 (G-48.2-6 slice b): graceful stop-signal helper.
+//
+// Lives here — not in `iron_hermes_ui` — because `nix` and the signal
+// knowledge already live in this crate (`is_pid_alive` above), and because
+// a future CLI `gateway stop` subcommand (the very thing `acquire_pid_lock`'s
+// own error text points an operator at, without this workspace having ever
+// implemented it) would have exactly one implementation to call.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Every outcome [`request_gateway_stop`] can honestly report. `NotRunning`
+/// covers both "no pidfile" and "the pid probed stale" — both mean nothing
+/// was signalled. `RefusedInvalidTarget` never carries a pid: the whole
+/// point is that pid must never be treated as a legitimate target (it is
+/// pid 0, pid 1, this process's own pid, or this process's own process
+/// group), so nothing about it is used past the refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopSignalOutcome {
+    /// No pidfile, or the pid it named was already gone.
+    NotRunning,
+    /// SIGTERM was delivered to a live pid owned by the calling user.
+    Signalled { pid: u32 },
+    /// The pid is live but owned by another user (EPERM on signal-0) — the
+    /// real SIGTERM would fail the same way, so it is never attempted.
+    RefusedOtherUser { pid: u32 },
+    /// The pid failed target validation (0, 1, this process, or this
+    /// process's own process group) before any probe or signal was issued.
+    RefusedInvalidTarget,
+    /// This platform cannot probe or signal pids (mirrors `is_pid_alive`'s
+    /// non-Unix arm, but returns a value instead of panicking).
+    Unsupported,
+}
+
+/// `true` when `pid` must never be treated as a legitimate signal target:
+/// pid 0 (a process-group broadcast on some signal paths), pid 1 (init),
+/// this calling process's own pid, or this calling process's own process
+/// group id. Pure and Unix-only — the caller (`request_gateway_stop`)
+/// checks this BEFORE any probe or signal, so a corrupted or hand-edited
+/// pidfile naming one of these can never reach `kill()`.
+#[cfg(unix)]
+fn is_forbidden_signal_target(pid: u32) -> bool {
+    if pid == 0 || pid == 1 {
+        return true;
+    }
+    if pid == std::process::id() {
+        return true;
+    }
+    // getpgrp() is infallible per POSIX (it can never fail for the calling
+    // process) — nix's binding mirrors that with a plain `Pid`, not a
+    // `Result`.
+    let self_pgid = nix::unistd::getpgrp().as_raw();
+    if self_pgid > 0 && pid == self_pgid as u32 {
+        return true;
+    }
+    false
+}
+
+/// Request graceful shutdown of the gateway recorded at `home`'s
+/// `gateway.pid`. Reads the record, validates the target, re-probes
+/// liveness immediately before signalling (the window between reading the
+/// file and sending the signal is exactly one more syscall — as small as
+/// this API allows), then sends SIGTERM only. Never SIGKILL; never any
+/// escalation. `#[cfg(unix)]`-gated per `is_pid_alive`'s own contract —
+/// the other arm below returns [`StopSignalOutcome::Unsupported`] without
+/// ever reading the pidfile or calling the probe.
+#[cfg(unix)]
+pub fn request_gateway_stop(home: &Path) -> Result<StopSignalOutcome> {
+    let Some(record) = read_gateway_pid(home)? else {
+        return Ok(StopSignalOutcome::NotRunning);
+    };
+
+    if is_forbidden_signal_target(record.pid) {
+        return Ok(StopSignalOutcome::RefusedInvalidTarget);
+    }
+
+    // Re-probe immediately before signalling — this is the whole window.
+    match is_pid_alive(record.pid) {
+        PidLiveness::Stale => Ok(StopSignalOutcome::NotRunning),
+        PidLiveness::LiveOtherUser => Ok(StopSignalOutcome::RefusedOtherUser { pid: record.pid }),
+        PidLiveness::Live => {
+            use nix::sys::signal::{Signal, kill};
+            use nix::unistd::Pid;
+            match kill(Pid::from_raw(record.pid as i32), Signal::SIGTERM) {
+                Ok(()) => Ok(StopSignalOutcome::Signalled { pid: record.pid }),
+                // The pid exited in the syscall-wide race between the probe
+                // above and this signal — it is gone, which is the same
+                // fact `NotRunning` reports elsewhere. Any other errno
+                // (e.g. EPERM from an ownership change in that same race)
+                // mirrors `is_pid_alive`'s own "treat as stale" fallback
+                // rather than inventing a new outcome for a race this
+                // narrow.
+                Err(_) => Ok(StopSignalOutcome::NotRunning),
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+pub fn request_gateway_stop(_home: &Path) -> Result<StopSignalOutcome> {
+    Ok(StopSignalOutcome::Unsupported)
+}
+
+/// Whether [`await_stopped`]'s bounded poll observed the pid go stale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeathConfirmation {
+    Confirmed,
+    NotConfirmed,
+}
+
+/// Production deadline for [`await_stopped`] — modest on purpose. A
+/// gateway that has not exited within it is reported not-confirmed, which
+/// is a true statement, never escalated to a second, harder signal.
+pub const STOP_CONFIRM_DEADLINE: Duration = Duration::from_secs(5);
+
+const STOP_CONFIRM_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Poll `probe` (mirrors [`is_pid_alive`]'s signature, so the production
+/// call site can pass that function directly) until it reports
+/// [`PidLiveness::Stale`] or `deadline` elapses. Synchronous and blocking
+/// by design — a caller on an async executor must run it via
+/// `spawn_blocking`. `deadline` is a parameter (not baked in) precisely so
+/// a test can pass a small one and never wait out [`STOP_CONFIRM_DEADLINE`]
+/// for real; `probe` is injected for the same reason — no real process is
+/// ever required to exercise either branch.
+pub fn await_stopped<F>(pid: u32, deadline: Duration, mut probe: F) -> DeathConfirmation
+where
+    F: FnMut(u32) -> PidLiveness,
+{
+    let start = std::time::Instant::now();
+    loop {
+        if probe(pid) == PidLiveness::Stale {
+            return DeathConfirmation::Confirmed;
+        }
+        if start.elapsed() >= deadline {
+            return DeathConfirmation::NotConfirmed;
+        }
+        std::thread::sleep(STOP_CONFIRM_POLL_INTERVAL);
+    }
 }
 
 /// Drop guard that removes `$IRONHERMES_HOME/gateway.pid` on graceful shutdown.
@@ -378,5 +519,98 @@ mod tests {
         assert_eq!(current_profile_label(&path), "work");
         let path2 = std::path::PathBuf::from("/home/user/.ironhermes");
         assert_eq!(current_profile_label(&path2), "default");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Phase 48.2 Plan 13 (G-48.2-6 slice b) — target validation, stop
+    // signalling, and the bounded death-confirmation helper.
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn forbidden_target_refuses_zero_one_self_and_own_process_group() {
+        assert!(is_forbidden_signal_target(0), "pid 0 must be refused");
+        assert!(
+            is_forbidden_signal_target(1),
+            "pid 1 (init) must be refused"
+        );
+        assert!(
+            is_forbidden_signal_target(std::process::id()),
+            "this process's own pid must be refused"
+        );
+        let self_pgid = nix::unistd::getpgrp().as_raw() as u32;
+        assert!(
+            is_forbidden_signal_target(self_pgid),
+            "this process's own process group id must be refused"
+        );
+    }
+
+    #[test]
+    fn forbidden_target_accepts_an_ordinary_pid() {
+        // Same guaranteed-dead-but-plausible pid used by
+        // `guaranteed_dead_pid_is_stale` above — an ordinary target that is
+        // none of pid 0, pid 1, this process, or this process's own group.
+        assert!(!is_forbidden_signal_target(i32::MAX as u32));
+    }
+
+    #[test]
+    fn request_gateway_stop_with_no_pidfile_is_not_running() {
+        let dir = TempDir::new().unwrap();
+        let outcome = request_gateway_stop(dir.path()).unwrap();
+        assert_eq!(outcome, StopSignalOutcome::NotRunning);
+    }
+
+    #[test]
+    fn request_gateway_stop_with_stale_pid_is_not_running() {
+        let dir = TempDir::new().unwrap();
+        let stale = GatewayPidRecord {
+            pid: i32::MAX as u32,
+            started_at: "2020-01-01T00:00:00Z".to_string(),
+            profile: "test".to_string(),
+        };
+        write_gateway_pid(dir.path(), &stale).unwrap();
+        let outcome = request_gateway_stop(dir.path()).unwrap();
+        assert_eq!(outcome, StopSignalOutcome::NotRunning);
+    }
+
+    /// A pidfile naming this test process's own pid must be refused as an
+    /// invalid target BEFORE any signal is attempted — proves the
+    /// forbidden-target check runs inside `request_gateway_stop` itself,
+    /// not just as a standalone predicate. (This process's own pid is
+    /// "live" by definition, so absent this check the naive path would
+    /// send SIGTERM to the test runner.)
+    #[test]
+    fn request_gateway_stop_refuses_a_pidfile_naming_this_process() {
+        let dir = TempDir::new().unwrap();
+        let record = GatewayPidRecord {
+            pid: std::process::id(),
+            started_at: "2026-01-01T00:00:00Z".to_string(),
+            profile: "test".to_string(),
+        };
+        write_gateway_pid(dir.path(), &record).unwrap();
+        let outcome = request_gateway_stop(dir.path()).unwrap();
+        assert_eq!(outcome, StopSignalOutcome::RefusedInvalidTarget);
+    }
+
+    #[test]
+    fn await_stopped_reports_confirmed_when_probe_flips_to_stale() {
+        let mut calls = 0u32;
+        let outcome = await_stopped(42, Duration::from_secs(1), |_| {
+            calls += 1;
+            if calls >= 3 {
+                PidLiveness::Stale
+            } else {
+                PidLiveness::Live
+            }
+        });
+        assert_eq!(outcome, DeathConfirmation::Confirmed);
+        assert!(calls >= 3);
+    }
+
+    #[test]
+    fn await_stopped_reports_not_confirmed_at_the_deadline() {
+        // A tiny injected deadline — never waits out the real
+        // `STOP_CONFIRM_DEADLINE` constant. The probe never goes stale.
+        let outcome = await_stopped(42, Duration::from_millis(50), |_| PidLiveness::Live);
+        assert_eq!(outcome, DeathConfirmation::NotConfirmed);
     }
 }

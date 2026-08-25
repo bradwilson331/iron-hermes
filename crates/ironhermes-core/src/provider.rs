@@ -111,6 +111,94 @@ fn is_provider_url_safe(url: &str) -> bool {
     }
 }
 
+// =============================================================================
+// Provider-key startup guard (quick task 260818-t3y)
+// =============================================================================
+
+/// Pure predicate: is a main-provider endpoint's resolved API key usable?
+///
+/// Modeled directly on `bind_guard_allows` (`crates/iron_hermes_ui/src/main.rs`):
+/// no logging, no panicking, no env reads, no `Config` argument — so the
+/// invariant is provable by unit test without spawning a process.
+///
+/// Returns `true` when the trimmed key is non-empty, OR when `base_url`'s
+/// host is loopback (`localhost`, `127.0.0.1`, or `::1`) — a keyless local
+/// model server (Ollama, vLLM, ...) is a legitimate configuration, mirroring
+/// the reasoning already encoded in [`is_provider_url_safe`] above.
+///
+/// A trimmed-empty key (`Some("")`, `Some("   ")`) is treated as absent
+/// because `AnyClient::from_endpoint` / `from_endpoint_with_model`
+/// (`crates/ironhermes-agent/src/any_client.rs`) collapse `None` to `""` via
+/// `.unwrap_or("")` — an unresolved key must never reach this guard as a
+/// literal empty string that would otherwise be waved through and ride out
+/// as a bare `Bearer` header.
+///
+/// An unparseable `base_url` returns `false`: a malformed config is refused
+/// rather than waved through as "must be local".
+pub fn provider_key_guard_allows(api_key: Option<&str>, base_url: &str) -> bool {
+    let has_key = api_key.is_some_and(|k| !k.trim().is_empty());
+    if has_key {
+        return true;
+    }
+    let Ok(parsed) = url::Url::parse(base_url) else {
+        return false;
+    };
+    matches!(
+        parsed.host_str(),
+        Some("localhost") | Some("127.0.0.1") | Some("::1") | Some("[::1]")
+    )
+}
+
+/// The built-in env var NAME for each of the three canonical built-in
+/// providers (quick task 260819-rkz, RKZ-B enrichment).
+///
+/// This is the name-only half of [`main_provider_key_env_name`]'s priority-3
+/// fallback, extracted so callers that hold a provider name but no [`Config`]
+/// — specifically `ironhermes-agent`'s failure-path chain-attribution
+/// reporting — can still name the variable an operator should set.
+///
+/// Pure: config-free, env-free, allocation-free (`&'static str`). Matching
+/// is exact and case-sensitive, mirroring [`ProviderResolver::build`]'s own
+/// per-provider `match` at the priority-3 resolution step. `None` means
+/// "custom provider — the operator must declare `providers.<name>.api_key_env`
+/// (or `providers.<name>.api_key`) explicitly"; it does NOT mean the
+/// provider has no key requirement.
+pub fn canonical_api_key_env_name(provider: &str) -> Option<&'static str> {
+    match provider {
+        "openrouter" => Some("OPENROUTER_API_KEY"),
+        "anthropic" => Some("ANTHROPIC_API_KEY"),
+        "openai" => Some("OPENAI_API_KEY"),
+        _ => None,
+    }
+}
+
+/// Reproduce the NAME half of [`ProviderResolver::build`]'s API-key
+/// resolution cascade (step 4, priorities 1 and 3 below) so a startup
+/// refusal message can tell the operator the exact environment variable to
+/// set, without needing to resolve its value.
+///
+/// Reads `config` fields only — no `std::env` access — so it stays
+/// unit-testable without the env-var mutex the resolver's own tests need.
+///
+/// - Priority 1: `providers.<main>.api_key_env`, if set, returned verbatim.
+/// - Priority 3 fallback: delegates to [`canonical_api_key_env_name`] for the
+///   three canonical built-in provider names, so the mapping exists exactly
+///   once.
+/// - Otherwise `None` — an unrecognized custom main provider with no
+///   `api_key_env` configured has no name to report; the caller falls back
+///   to instructing the operator to set `providers.<name>.api_key_env`.
+pub fn main_provider_key_env_name(config: &Config) -> Option<String> {
+    let main = config.model.provider.as_str();
+    if let Some(name) = config
+        .providers
+        .get(main)
+        .and_then(|p| p.api_key_env.as_deref())
+    {
+        return Some(name.to_string());
+    }
+    canonical_api_key_env_name(main).map(str::to_string)
+}
+
 /// Phase 47.4 (D-14): resolve an env var NAME against the override map first,
 /// falling back to the process environment when the map has no entry for it.
 /// Returns whether the value came from the override map so callers can
@@ -1026,12 +1114,17 @@ mod tests {
         let config = default_config();
         let resolver = ProviderResolver::build_with_cache(&config, ModelsCache::default()).unwrap();
         let ep = resolver.resolve_for_main();
-        // Default model is "anthropic/claude-sonnet-4" — should resolve to claude-sonnet-4 metadata
+        // The default model (constants::DEFAULT_MODEL) must always have an
+        // entry in the static registry — a default the registry does not know
+        // silently loses context_length and pricing. Asserted against the
+        // constant rather than a literal so bumping the default cannot pass
+        // this test while leaving model_metadata.rs un-updated.
         assert!(
             ep.model_metadata.is_some(),
-            "main endpoint should have model_metadata"
+            "the default model {} must have a static model_metadata entry",
+            crate::constants::DEFAULT_MODEL
         );
-        assert_eq!(ep.context_length(), 200_000);
+        assert_eq!(ep.context_length(), 1_000_000);
     }
 
     #[test]
@@ -1703,6 +1796,171 @@ mod tests {
                 .unwrap_or_else(|p| p.into_inner())
                 .contains(banner_key),
             "resolving through the override map must never emit the legacy-env deprecation banner"
+        );
+    }
+
+    // =========================================================================
+    // provider_key_guard_allows / main_provider_key_env_name
+    // (quick task 260818-t3y)
+    // =========================================================================
+
+    #[test]
+    fn provider_key_guard_allows_key_present_https() {
+        assert!(provider_key_guard_allows(
+            Some("sk-or-abc"),
+            "https://openrouter.ai/api/v1"
+        ));
+    }
+
+    #[test]
+    fn provider_key_guard_refuses_none_key_public_url() {
+        assert!(!provider_key_guard_allows(
+            None,
+            "https://openrouter.ai/api/v1"
+        ));
+    }
+
+    #[test]
+    fn provider_key_guard_refuses_empty_string_key() {
+        assert!(!provider_key_guard_allows(
+            Some(""),
+            "https://openrouter.ai/api/v1"
+        ));
+    }
+
+    #[test]
+    fn provider_key_guard_refuses_whitespace_only_key() {
+        assert!(!provider_key_guard_allows(
+            Some("   "),
+            "https://openrouter.ai/api/v1"
+        ));
+    }
+
+    #[test]
+    fn provider_key_guard_allows_no_key_loopback_localhost() {
+        assert!(provider_key_guard_allows(
+            None,
+            "http://localhost:11434/v1"
+        ));
+    }
+
+    #[test]
+    fn provider_key_guard_allows_no_key_loopback_127() {
+        assert!(provider_key_guard_allows(
+            None,
+            "http://127.0.0.1:11434/v1"
+        ));
+    }
+
+    #[test]
+    fn provider_key_guard_allows_no_key_loopback_ipv6() {
+        assert!(provider_key_guard_allows(
+            None,
+            "http://[::1]:11434/v1"
+        ));
+    }
+
+    #[test]
+    fn provider_key_guard_refuses_no_key_unparseable_url() {
+        assert!(!provider_key_guard_allows(None, "not a url"));
+    }
+
+    #[test]
+    fn main_provider_key_env_name_explicit_api_key_env() {
+        let mut config = default_config();
+        config.model.provider = "custom".to_string();
+        config.providers.insert(
+            "custom".to_string(),
+            ProviderConfig {
+                base_url: Some("https://example.com/v1".to_string()),
+                api_key: None,
+                api_key_env: Some("MY_CUSTOM_KEY".to_string()),
+                api_mode: None,
+                default_model: None,
+                fallback_providers: vec![],
+                disabled: None,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            main_provider_key_env_name(&config).as_deref(),
+            Some("MY_CUSTOM_KEY")
+        );
+    }
+
+    #[test]
+    fn main_provider_key_env_name_legacy_builtin_openrouter() {
+        let mut config = default_config();
+        config.model.provider = "openrouter".to_string();
+        assert_eq!(
+            main_provider_key_env_name(&config).as_deref(),
+            Some("OPENROUTER_API_KEY")
+        );
+    }
+
+    #[test]
+    fn main_provider_key_env_name_unrecognized_custom_returns_none() {
+        let mut config = default_config();
+        config.model.provider = "totally_unknown".to_string();
+        assert_eq!(main_provider_key_env_name(&config), None);
+    }
+
+    // =========================================================================
+    // canonical_api_key_env_name (quick task 260819-rkz)
+    // =========================================================================
+
+    #[test]
+    fn canonical_api_key_env_name_maps_each_builtin_provider() {
+        assert_eq!(
+            canonical_api_key_env_name("openrouter"),
+            Some("OPENROUTER_API_KEY")
+        );
+        assert_eq!(
+            canonical_api_key_env_name("anthropic"),
+            Some("ANTHROPIC_API_KEY")
+        );
+        assert_eq!(canonical_api_key_env_name("openai"), Some("OPENAI_API_KEY"));
+    }
+
+    #[test]
+    fn canonical_api_key_env_name_unrecognized_provider_returns_none() {
+        assert_eq!(canonical_api_key_env_name("totally_unknown"), None);
+    }
+
+    #[test]
+    fn canonical_api_key_env_name_matching_is_case_sensitive() {
+        // A differently-cased spelling of a canonical name must map to
+        // nothing, matching ProviderResolver::build's own `match` semantics.
+        // Without this test a future "helpful" case-insensitive edit would
+        // silently diverge from the resolver.
+        assert_eq!(canonical_api_key_env_name("OpenRouter"), None);
+        assert_eq!(canonical_api_key_env_name("ANTHROPIC"), None);
+        assert_eq!(canonical_api_key_env_name("OpenAI"), None);
+    }
+
+    #[test]
+    fn main_provider_key_env_name_still_prefers_configured_api_key_env() {
+        // The delegation to canonical_api_key_env_name must not reorder the
+        // priority-1 / priority-3 cascade: an explicit providers.<main>.api_key_env
+        // still wins even for a canonical built-in provider name.
+        let mut config = default_config();
+        config.model.provider = "openrouter".to_string();
+        config.providers.insert(
+            "openrouter".to_string(),
+            ProviderConfig {
+                base_url: Some("https://openrouter.ai/api/v1".to_string()),
+                api_key: None,
+                api_key_env: Some("MY_OVERRIDE_KEY".to_string()),
+                api_mode: None,
+                default_model: None,
+                fallback_providers: vec![],
+                disabled: None,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            main_provider_key_env_name(&config).as_deref(),
+            Some("MY_OVERRIDE_KEY")
         );
     }
 }

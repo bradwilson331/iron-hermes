@@ -126,6 +126,17 @@ pub fn build_registry() -> Vec<CommandDef> {
         CommandDef::new("attach", "Attach a file to your next message", Session)
             .args_hint("<path>")
             .platform(CliOnly),
+        // Phase 36.6.4 Plan 05 (D-12/D-13, TUI-IMG-01): shows a clickable
+        // image chip for a file on disk — mirrors `/attach`'s registration
+        // exactly. The core dispatch table intentionally has no "image" arm
+        // (falls through to `todo_stub`, never surfaced) because the real
+        // handler needs App-side state (the image-chip collection, bounded
+        // file-size check) that CommandContext doesn't carry. See
+        // `tui_rata::commands::dispatch_slash`'s post-router hook, which
+        // mirrors the existing `"attach"` App-side-handler pattern.
+        CommandDef::new("image", "Show a clickable chip for an image file", Session)
+            .args_hint("<path>")
+            .platform(CliOnly),
         // -----------------------------------------------------------------------
         // CONFIGURATION
         // -----------------------------------------------------------------------
@@ -368,6 +379,28 @@ mod tests {
             !matches!(result, ResolveResult::Exact(c) if c.name == "attach"),
             "/attach must not resolve on the gateway platform, got: {:?}",
             result
+        );
+    }
+
+    /// Phase 36.6.4 Plan 05 (TUI-IMG-01): `/image` registers as a CommandDef
+    /// and resolves Exact on the CLI (Local) platform, and is CLI-only —
+    /// does not resolve on the gateway (Telegram) platform. Mirrors
+    /// `command_router_registers_attach` + `slash_attach_not_available_on_gateway`
+    /// combined into one test per this plan's acceptance criterion name.
+    #[test]
+    fn image_slash_command_registers_and_is_cli_only() {
+        let router = CommandRouter::new(build_registry());
+        let local = router.resolve("image", &Platform::Local);
+        assert!(
+            matches!(local, ResolveResult::Exact(c) if c.name == "image"),
+            "expected /image Exact match on Local, got: {:?}",
+            local
+        );
+        let gateway = router.resolve("image", &Platform::Telegram);
+        assert!(
+            !matches!(gateway, ResolveResult::Exact(c) if c.name == "image"),
+            "/image must not resolve on the gateway platform, got: {:?}",
+            gateway
         );
     }
 }

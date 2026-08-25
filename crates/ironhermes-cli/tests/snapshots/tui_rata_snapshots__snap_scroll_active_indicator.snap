@@ -1,6 +1,6 @@
 ---
 source: crates/ironhermes-cli/tests/tui_rata_snapshots.rs
-assertion_line: 110
+assertion_line: 118
 expression: render(&app)
 ---
 "┌Chat [live]───────────────────────────────────────────────────────────────────┐"
@@ -23,7 +23,7 @@ expression: render(&app)
 "│Hermes: consectetur adipiscing elit                                          ▼│"
 "└──────────────────────────────────────────────────────────────────────────────┘"
 "                                                                                "
-"Chat · ? · ? · 0/128.0K (0%) · ctrl+c cancel · Ctrl+T thinking · Ctrl+K skills ·"
+"Chat · ? · ? · 0/128.0K (0%) · ctrl+c cancel · Ctrl+Y copy · ! shell · Ctrl+T th"
 "┌Prompt────────────────────────────────────────────────────────────────────────┐"
 "│                                                                              │"
 "└──────────────────────────────────────────────────────────────────────────────┘"

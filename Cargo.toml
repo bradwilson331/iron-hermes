@@ -21,6 +21,8 @@ members = [
     "crates/iron_hermes_ui",
     "crates/ironhermes-blackbox",
     "crates/ironhermes-vault",
+    "crates/ironhermes-acp",
+    "crates/ironhermes-restgw",
 ]
 # crates/ironagent-tools-api is a stale byte-for-byte duplicate of
 # crates/ironhermes-tools (its test files import the sibling `ironhermes_tools`
@@ -50,6 +52,8 @@ default-members = [
     "providers/memory-duckdb",
     "crates/ironhermes-blackbox",
     "crates/ironhermes-vault",
+    "crates/ironhermes-acp",
+    "crates/ironhermes-restgw",
 ]
 resolver = "2"
 
@@ -101,7 +105,9 @@ regex = "1"
 # Glob
 glob = "0.3"
 # Terminal UI
-crossterm = { version = "0.29", features = ["event-stream"] }
+# Phase 36.6.4 Plan 01 (D-06): "osc52" feature enables crossterm::clipboard::CopyToClipboard
+# for the transcript-selection yank path (write-only OSC52, no native clipboard dep chain).
+crossterm = { version = "0.29", features = ["event-stream", "osc52"] }
 colored = "3"
 indicatif = "0.17"
 rustyline = "15"
@@ -144,9 +150,14 @@ msedge-tts = { version = "0.4", features = ["tokio-runtime"] }
 rodio = { version = "0.22.2", features = ["mp3"] }
 # Phase 22.4: ratatui-backed REPL (tmon architecture) — D-13/D-14 dep floor
 ansi-to-tui = "8"
-ratatui = "0.30"
+# Phase 36.6.4 Plan 01 (D-17): bumped 0.30 -> 0.30.1 — the floor `ratatui-image`
+# needs in Plan 05 (transitive ratatui-core >=0.1.1, CellDiffOption::ForcedWidth
+# for Plan 04's OSC8 emission). No behavior change at 0.30.1 for this plan.
+ratatui = "0.30.1"
 tui-logger = { version = "0.18", features = ["tracing-support"] }
 tui-textarea-2 = "0.10.2"
+# Phase 36.6.4 Plan 01 (D-02): transcript scroll authority — tui_scrollview::ScrollView.
+tui-scrollview = "0.6.7"
 # Phase 36.3.7.9 Plan 05: notifier.toml parser for subscribe_boards config (D-03)
 toml = "0.8"
 

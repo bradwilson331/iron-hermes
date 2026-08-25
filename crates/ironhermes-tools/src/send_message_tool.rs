@@ -71,6 +71,22 @@ impl SendMessageTool {
             config,
         }
     }
+
+    /// Whether an outbound message dispatcher is available for this tool's
+    /// platform.
+    ///
+    /// Phase 48.2 Plan 10 (D-16/G-48.2-3): single source of truth shared by
+    /// `Tool::is_available()` and `Tool::prerequisites()` so the two can never
+    /// silently disagree.
+    ///
+    /// Local platform never needs a dispatcher; every other platform needs one
+    /// attached.
+    fn dispatcher_available(&self) -> bool {
+        if self.session_key.platform == ironhermes_core::Platform::Local {
+            return true;
+        }
+        self.dispatcher.is_some()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -127,12 +143,31 @@ impl crate::registry::Tool for SendMessageTool {
     /// Returns false when no dispatcher is attached (e.g. wasm32 or non-gateway
     /// sessions that haven't wired a MessageDispatcher), keeping registration
     /// inert on platforms where the tool can't function.
+    ///
+    /// Delegates to `dispatcher_available()` — see that method's doc comment
+    /// for why this must stay the single source of truth shared with
+    /// `prerequisites()` (D-09/D-16, Phase 48.2 Plan 10).
     fn is_available(&self) -> bool {
-        // Local platform never needs a dispatcher
-        if self.session_key.platform == ironhermes_core::Platform::Local {
-            return true;
+        self.dispatcher_available()
+    }
+
+    /// D-09 (Phase 48.2 Plan 10, closing G-48.2-3): declares the real cause when
+    /// `is_available()` is false, so `unsatisfied_prerequisites()` — and the Tools
+    /// page card it feeds — has something to show instead of `missing: []`.
+    ///
+    /// Derived from the SAME condition `is_available()` evaluates
+    /// (`dispatcher_available()`), so the two can never drift apart: empty when
+    /// available, exactly one `Prerequisite::runtime` entry when not.
+    fn prerequisites(&self) -> Vec<crate::registry::Prerequisite> {
+        if self.dispatcher_available() {
+            vec![]
+        } else {
+            vec![crate::registry::Prerequisite::runtime(
+                "message_dispatcher",
+                "Outbound message delivery needs a platform dispatcher, and this \
+                 runtime was started without one.",
+            )]
         }
-        self.dispatcher.is_some()
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
@@ -496,6 +531,7 @@ pub fn validate_media_path(path: &Path) -> anyhow::Result<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::Tool;
     use ironhermes_core::{Config, Platform, SessionKey};
 
     fn minimal_config_with_whitelist(ids: Vec<i64>) -> Arc<Config> {
@@ -670,5 +706,72 @@ mod tests {
         let resolved = resolve_home_channel("telegram", &cfg).unwrap();
         assert_eq!(resolved, "55555");
         validate_send_target("telegram", &resolved, &cfg).unwrap();
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 48.2 Plan 10 (D-16/G-48.2-3): prerequisites() declares the real cause.
+    // ---------------------------------------------------------------------------
+
+    fn make_send_message_tool(platform: Platform) -> SendMessageTool {
+        SendMessageTool::new(
+            SessionKey::new(platform, "test-chat"),
+            None,
+            Arc::new(Config::default()),
+        )
+    }
+
+    /// Available shape (Local platform, no dispatcher needed): `prerequisites()`
+    /// returns an empty vec and `unsatisfied_prerequisites()` returns nothing.
+    #[test]
+    fn send_message_prerequisites_empty_when_available() {
+        let tool = make_send_message_tool(Platform::Local);
+        assert!(tool.is_available(), "Local platform is always available");
+        assert!(
+            tool.prerequisites().is_empty(),
+            "no prerequisite should be reported when available"
+        );
+        assert!(
+            crate::registry::unsatisfied_prerequisites(&tool).is_empty(),
+            "unsatisfied_prerequisites() must be empty when available"
+        );
+    }
+
+    /// Unavailable shape (non-Local platform, no dispatcher): `prerequisites()`
+    /// returns exactly one named, described runtime prerequisite, and
+    /// `unsatisfied_prerequisites()` reports it too.
+    #[test]
+    fn send_message_prerequisites_one_runtime_entry_when_unavailable() {
+        let tool = make_send_message_tool(Platform::Telegram);
+        assert!(
+            !tool.is_available(),
+            "non-Local platform with no dispatcher must be unavailable"
+        );
+        let prereqs = tool.prerequisites();
+        assert_eq!(prereqs.len(), 1, "exactly one prerequisite expected");
+        assert_eq!(prereqs[0].kind, "runtime");
+        assert_eq!(prereqs[0].name, "message_dispatcher");
+        assert!(
+            !prereqs[0].description.is_empty(),
+            "description must be non-empty — it is the sentence the card shows"
+        );
+
+        let missing = crate::registry::unsatisfied_prerequisites(&tool);
+        assert_eq!(
+            missing.len(),
+            1,
+            "unsatisfied_prerequisites() must report exactly one entry when unavailable"
+        );
+    }
+
+    /// The property that actually closes the gap: whenever `is_available()` is
+    /// false, `unsatisfied_prerequisites()` is non-empty. Uses the SAME shared
+    /// helper `clarify_tool::assert_unavailable_implies_nonempty_prereqs` that
+    /// `ClarifyTool`'s test exercises, so a third tool can be dropped into the
+    /// same check later.
+    #[test]
+    fn send_message_unavailable_implies_nonempty_unsatisfied_prerequisites() {
+        crate::clarify_tool::assert_unavailable_implies_nonempty_prereqs(
+            &make_send_message_tool(Platform::Telegram),
+        );
     }
 }

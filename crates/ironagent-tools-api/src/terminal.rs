@@ -27,6 +27,14 @@ const MAX_OUTPUT_LEN: usize = 50_000;
 /// `build_terminal_safe_env()` so that secrets in the parent process env (e.g.
 /// `CLOUDFLARE_API_TOKEN`) cannot be exfiltrated by a subprocess that runs
 /// `env`, `printenv`, or `curl -d "$(env)"`.
+///
+/// Phase 36.6.4 Plan 03 (D-09): `crates/ironhermes-cli/src/tui_rata/shell_bang.rs`
+/// deliberately DIVERGES from this allowlist posture for the operator-typed
+/// `!` shell-escape — that module inherits the operator's real environment
+/// by construction (no `env_clear()`), because this allowlist exists to
+/// constrain AGENT-initiated subprocesses and `!` is OPERATOR-initiated, so
+/// this threat model does not apply there. See that module's own doc
+/// comment for the full rationale.
 pub struct TerminalTool {
     cwd: Option<PathBuf>,
     /// Phase 42 EXEC-03 / D-05: global operator allowlist for terminal subprocesses.

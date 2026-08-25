@@ -1,5 +1,13 @@
 //! Agents screen — Phase 26.7 Plan 05 (Tasks 2 + 3) + Phase 26.7.1 Plan 01 (Task 4).
 //!
+//! Phase 50.1 Plan 01 (D-08/D-09/D-11) additions: the `BotRoster` section is
+//! mounted directly beneath the screen header, ABOVE the subagent-turn grid
+//! documented below — the `+ NEW AGENT` button (previously a dead visual
+//! affordance) now opens `CreateProfileWizard`, whose `on_created` callback
+//! saves an initial bot-meta entry and bumps the roster's refresh tick. The
+//! subagent grid, `AgentCard`, `TurnCard`, PRUNE ENDED, CANCEL and the
+//! HOLD-N decay sweep documented below are unchanged by this plan (D-09).
+//!
 //! Replaces the Plan 26.2.1-08 visual stub with a live
 //! `api_agents_list` resource backed by the SubagentRegistry.  Per-card
 //! KILL? inline confirm (two-click, 3-second timeout via gloo_timers) and
@@ -29,6 +37,16 @@
 
 use dioxus::prelude::*;
 use dioxus::CapturedError;
+
+// Phase 50.1 Plan 02 (D-10): the create-profile wizard mounted from this
+// screen's `+ NEW AGENT` button, opened in bot context — this is the one
+// import Plan 01's tracer deliberately left pointing at the pre-lift kanban
+// shim path; Plan 02 repoints it at the shared module directly.
+use crate::components::hermes_app::screens::profile_shared::create_dialog::CreateProfileWizard;
+use crate::components::hermes_app::screens::profile_shared::ProfileDialogContext;
+// Phase 50.1 Plan 01 (D-08/D-09): the bot roster section mounted directly
+// beneath the screen header, above the pre-existing subagent-turn grid.
+use crate::components::hermes_app::screens::bot_roster::BotRoster;
 
 // ── Screen ───────────────────────────────────────────────────────────────────
 
@@ -65,6 +83,22 @@ pub fn ScreenAgents(is_active: bool) -> Element {
     // same UI as if no agents exist yet.
     let mut agents_resource =
         use_resource(move || async move { crate::server::api::api_agents_list().await });
+
+    // Phase 50.1 Plan 01 (D-08/D-09/D-11): roster signals. `wizard_open`
+    // mirrors `create_modal_open`'s existing idiom (`kanban.rs:113`).
+    // `bot_roster_refresh_tick` is the crate's proven refresh idiom
+    // (`profile_switcher.rs:55-58`) — bumped after `save_bot_meta` resolves
+    // so a freshly created bot appears without a page reload.
+    let mut wizard_open: Signal<bool> = use_signal(|| false);
+    let bot_roster_refresh_tick: Signal<u32> = use_signal(|| 0u32);
+    let bot_roster_refresh_tick_ro: ReadSignal<u32> = bot_roster_refresh_tick.into();
+    // Phase 50.1 Plan 02 Task 3 (D-10 extension): owned here (mirrors
+    // `kanban.rs`'s own `detail_profile` idiom) and threaded down into
+    // `BotRoster` as a plain `Signal<Option<String>>` prop — never a
+    // context provider — so both a roster card's `EDIT` action and the
+    // create wizard's post-create hand-off below can open the same shared
+    // drawer instance.
+    let drawer_target: Signal<Option<String>> = use_signal(|| None);
 
     // Phase 26.7.1 Plan 01 — screen-level signals.
     //
@@ -379,8 +413,14 @@ pub fn ScreenAgents(is_active: bool) -> Element {
                     }
                 }
                 div { class: "screen-actions",
-                    // Static visual affordance — write op deferred per out-of-scope.
-                    button { class: "btn btn--sm", "+ NEW AGENT" }
+                    // Phase 50.1 Plan 01 (D-08): opens the create-profile
+                    // wizard — the same component `kanban.rs`'s
+                    // `+ NEW PROFILE` button opens.
+                    button {
+                        class: "btn btn--sm",
+                        onclick: move |_| wizard_open.set(true),
+                        "+ NEW AGENT"
+                    }
                     // PRUNE ENDED: D-12 — clear client-side HOLD state synchronously,
                     // then call server prune and restart the resource.
                     button {
@@ -409,6 +449,26 @@ pub fn ScreenAgents(is_active: bool) -> Element {
                         "KANBAN BOARD →"
                     }
                 }
+            }
+
+            // ── ROSTER (D-08/D-09/D-11) ───────────────────────────────
+            // Bot roster, mounted directly beneath the screen header and
+            // BEFORE the subagent-turn grid below — D-09 ordering. The
+            // subagent grid, the `// TURNS` header, In-Flight Turns,
+            // `AgentCard`, `TurnCard`, PRUNE ENDED, CANCEL and the HOLD-N
+            // decay sweep are unchanged by this plan.
+            BotRoster {
+                refresh_tick: bot_roster_refresh_tick_ro,
+                on_create: move |_| wizard_open.set(true),
+                // Phase 50.1 Plan 02 Task 3 (D-10 extension): the shared
+                // drawer target — a roster card's `EDIT` action and the
+                // create wizard's post-create hand-off below both set it.
+                drawer_target,
+                on_profile_updated: move |_| {
+                    let mut tick = bot_roster_refresh_tick;
+                    let cur = *tick.read();
+                    tick.set(cur + 1);
+                },
             }
 
             // ── Agent grid ────────────────────────────────────────────
@@ -479,6 +539,47 @@ pub fn ScreenAgents(is_active: bool) -> Element {
                     }
                 }
             }
+
+            // Phase 50.1 Plan 01 (D-08): the create-profile wizard, mounted
+            // conditionally exactly like `kanban.rs`'s own
+            // `CreateProfileWizard` mount. `on_created` fires after
+            // `create_profile` succeeds — this plan additionally calls
+            // `save_bot_meta` so the store gains an entry at creation time,
+            // then bumps the roster's refresh tick once so the new bot
+            // appears without a page reload. Phase 50.1 Plan 02 Task 3
+            // (UI-SPEC Component Inventory §3 wizard footer / D-10): after
+            // the refresh, also opens the new bot's detail drawer — the
+            // operator lands somewhere real, not back on an unchanged grid
+            // (matches the 47.4 create-into-edit precedent).
+            if *wizard_open.read() {
+                CreateProfileWizard {
+                    // Phase 50.1 Plan 02 (D-10): explicit at the call site,
+                    // not implicit in the default — the same discipline
+                    // `kanban.rs` uses for its own `Kanban` mounts.
+                    context: ProfileDialogContext::Bot,
+                    on_dismiss: move |_| wizard_open.set(false),
+                    on_created: move |name: String| {
+                        let mut tick = bot_roster_refresh_tick;
+                        let mut drawer_target_sig = drawer_target;
+                        let name_for_drawer = name.clone();
+                        spawn(async move {
+                            let patch = crate::protocol::BotMetaPatch {
+                                name,
+                                title: None,
+                                description: None,
+                                avatar: None,
+                                group: None,
+                                preview: None,
+                                preview_at_ms: None,
+                            };
+                            let _ = crate::server::bot_meta_api::save_bot_meta(patch).await;
+                            let cur = *tick.read();
+                            tick.set(cur + 1);
+                            drawer_target_sig.set(Some(name_for_drawer));
+                        });
+                    },
+                }
+            }
         }
     }
 }
@@ -514,6 +615,13 @@ fn AgentCard(
     let mut armed = use_signal(|| false);
     let mut killing = use_signal(|| false);
     let mut interrupting = use_signal(|| false);
+
+    // Phase 50.2 Plan 16 (G-50.2-2c): the screen-navigation context every
+    // sibling component already consumes (`ScreenAgents` itself at
+    // agents.rs:134, the roster card's own CHAT button at card.rs:143/191).
+    // Context providers live at the `HermesApp` root, so consuming here is
+    // safe — a PROVIDER declared in a child is what panics, not a consumer.
+    let mut active_screen = use_context::<Signal<crate::state::Screen>>();
 
     // Clone IDs for use in owned async closures (PATTERNS.md Pitfall 6 /
     // RESEARCH §"Common Pitfalls" #6 — never borrow from component scope
@@ -557,8 +665,26 @@ fn AgentCard(
             // screens.css hides this block for ENDED cards — no RSX conditional needed.
             div { class: "card-footer",
 
-                // CHAT — static visual affordance (deferred per UI-SPEC).
-                button { class: "btn btn--sm", "CHAT" }
+                // Phase 50.2 Plan 16 (G-50.2-2c): CHAT navigates to the LIVE
+                // profile's own Chat screen — the correct destination, not a
+                // per-bot chat window. `AgentInfo.id` (this card) is a
+                // subagent id from the live runtime's `SubagentRegistry`,
+                // and `SubagentInfo` (subagent_registry.rs) carries no
+                // profile field because every subagent on this screen
+                // belongs to the live profile's own in-process runtime —
+                // there is no agent-id -> profile-name mapping to invent
+                // (this plan's own prohibition). The Chat screen's composer
+                // already queues a mid-turn message for the next turn
+                // (ws.rs:931-957, R39.1-06), so this button reaches a real
+                // steering surface, not a placeholder. No additional
+                // status gating is needed here: the ENDED card's whole
+                // footer (this button included) is already hidden by the
+                // `.card.is-ended .card-footer` CSS rule above.
+                button {
+                    class: "btn btn--sm",
+                    onclick: move |_| active_screen.set(crate::state::Screen::Chat),
+                    "CHAT"
+                }
 
                 // INTERRUPT — 500 ms visual `...` feedback + list refresh.
                 // D-05: increments rpc_in_flight while the RPC is in flight.
@@ -649,6 +775,62 @@ fn AgentCard(
 
 // ── TurnCard ─────────────────────────────────────────────────────────────────
 
+/// Phase 50.2 Plan 14 (G-50.2-2b): `true` when `s` is shaped like a 36-char
+/// UUID string (hyphens at the four canonical positions — 8, 13, 18, 23 —
+/// every other character an ASCII hex digit). Pure, dependency-free (no
+/// `uuid` import in this wasm-compiled file) — used only to decide the
+/// `TurnCard` meta line's rendering, never to validate a real identifier.
+///
+/// `#[allow(dead_code)]`: called from `turn_session_display` below (live
+/// production code, `TurnCard`'s own `card-meta` line) and from this file's
+/// `#[cfg(test)] mod tests` — the native "bin" clippy target's dead-code
+/// pass does not trace through this crate's Dioxus component tree, the same
+/// false-positive `state.rs`'s `WsConnectedContext` et al. already document
+/// with an identical annotation.
+#[allow(dead_code)]
+fn looks_like_uuid(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() != 36 {
+        return false;
+    }
+    for (i, b) in bytes.iter().enumerate() {
+        match i {
+            8 | 13 | 18 | 23 => {
+                if *b != b'-' {
+                    return false;
+                }
+            }
+            _ => {
+                if !b.is_ascii_hexdigit() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Phase 50.2 Plan 14 (G-50.2-2b): render a `TurnSummaryWire.session_id` for
+/// the `TurnCard` meta line. A UUID-shaped session id (web, gateway and
+/// realtime turns today) shortens to its first eight characters followed by
+/// a horizontal-ellipsis character — today's unchanged behaviour. Any other
+/// session id (a subprocess-transport handoff turn's
+/// `crate::server::cli_handoff::handoff_turn_session_id` label, e.g.
+/// `"zig · Bot Chat"`) passes through in full, so the operator reads the
+/// bot's name and its thread rather than a truncated, meaningless prefix.
+///
+/// `#[allow(dead_code)]`: see `looks_like_uuid`'s doc comment above — same
+/// native-bin-target dead-code false positive despite the live call site in
+/// `TurnCard`'s `card-meta` line just below.
+#[allow(dead_code)]
+pub(crate) fn turn_session_display(session_id: &str) -> String {
+    if looks_like_uuid(session_id) {
+        format!("{}\u{2026}", session_id.chars().take(8).collect::<String>())
+    } else {
+        session_id.to_string()
+    }
+}
+
 /// One in-flight turn card rendered in the turns section (R39.1-09).
 ///
 /// Shows turn_id (truncated to 12 chars), surface pill, session_id, elapsed_ms,
@@ -693,7 +875,7 @@ fn TurnCard(
                 div { style: "flex:1",
                     div { class: "card-title", "{short_id}…" }
                     div { class: "card-meta",
-                        "session: {turn.session_id.chars().take(8).collect::<String>()}… · {elapsed_s}s"
+                        "session: {turn_session_display(&turn.session_id)} · {elapsed_s}s"
                     }
                 }
                 span { class: "{surface_class}", "{turn.surface.to_uppercase()}" }
@@ -720,5 +902,65 @@ fn TurnCard(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------
+    // looks_like_uuid (Phase 50.2 Plan 14, Task 3)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn looks_like_uuid_true_for_a_real_uuid() {
+        assert!(looks_like_uuid("550e8400-e29b-41d4-a716-446655440000"));
+    }
+
+    #[test]
+    fn looks_like_uuid_false_for_a_short_non_uuid_id() {
+        assert!(!looks_like_uuid("zig"));
+    }
+
+    #[test]
+    fn looks_like_uuid_false_for_the_handoff_label() {
+        assert!(!looks_like_uuid("zig \u{b7} Bot Chat"));
+    }
+
+    #[test]
+    fn looks_like_uuid_false_for_36_chars_with_a_non_hex_character() {
+        // Right length, hyphens in the right places, but a non-hex 'g'
+        // character in one of the digit positions.
+        assert!(!looks_like_uuid("550e8400-e29b-41d4-a716-44665544000g"));
+    }
+
+    // -------------------------------------------------------------------
+    // turn_session_display (Phase 50.2 Plan 14, Task 3)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn turn_session_display_shortens_a_real_uuid() {
+        assert_eq!(
+            turn_session_display("550e8400-e29b-41d4-a716-446655440000"),
+            "550e8400\u{2026}"
+        );
+    }
+
+    #[test]
+    fn turn_session_display_passes_the_handoff_label_through_in_full() {
+        let label = "zig \u{b7} Bot Chat";
+        assert_eq!(turn_session_display(label), label);
+    }
+
+    #[test]
+    fn turn_session_display_passes_a_short_non_uuid_id_through_in_full() {
+        assert_eq!(turn_session_display("scout"), "scout");
+    }
+
+    #[test]
+    fn turn_session_display_36_chars_with_a_non_hex_character_passes_through_in_full() {
+        let id = "550e8400-e29b-41d4-a716-44665544000g";
+        assert_eq!(turn_session_display(id), id);
     }
 }

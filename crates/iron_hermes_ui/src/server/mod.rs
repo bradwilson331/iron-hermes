@@ -128,3 +128,152 @@ pub mod profile_api;
 // `register_server_functions()` (main.rs), so `require_auth` wraps it same
 // as every other `#[server]` fn.
 pub mod profile_verify_api;
+// Phase 50.1 Plan 01 (D-08/D-11/D-13/D-23): UI-owned bot display-metadata
+// store — `list_bot_meta`/`save_bot_meta`/`delete_bot_meta`/
+// `live_profile_name`. Unconditional like `profile_api` — the `#[server]`
+// macro handles the client/server split, and internal helper fns are gated
+// with `#[cfg(feature = "server")]`. Its own sibling store/mutex, isolated
+// from `state_store` (module doc has the full persistence-shape record).
+pub mod bot_meta_api;
+// Phase 50.1 Plan 03 (D-04/D-05/D-06/D-20): process-isolated bot message
+// dispatch — `dispatch_bot_message` spawns an `ironhermes` subprocess for a
+// non-live bot, reusing the kanban worker path's `.env_clear()` + allowlist
+// isolation model. Unconditional like `profile_api` — the `#[server]` macro
+// handles the client/server split, and internal helper fns are gated with
+// `#[cfg(feature = "server")]`.
+pub mod cli_handoff;
+// Phase 50.2 Plan 16 (G-50.2-2c): the subprocess transport's own next-turn
+// steering primitive — the accept-and-queue analogue of the LIVE profile's
+// embedded-runtime mid-turn queue (`ws.rs:931-957`, R39.1-06). Server-only
+// like `state` — its only caller is `cli_handoff` (and, transitively,
+// `group_chat_api`'s round driver), never reached from wasm.
+#[cfg(feature = "server")]
+pub mod handoff_steering;
+// Phase 50.1 Plan 04 (D-11/D-12): avatar upload and AI-portrait generation
+// server paths — `upload_bot_avatar`/`generate_bot_avatar`. Unconditional
+// like `profile_api` — the `#[server]` macro handles the client/server
+// split, and internal helper fns are gated with `#[cfg(feature = "server")]`.
+pub mod bot_avatar_api;
+// Phase 50.1 Plan 04 (D-06 analog): GET /bot-avatars/{name}/{image_id} raw
+// avatar-serving route. Same raw-axum-handler pattern as
+// `chat_attachment_route` above (Vec<u8>-via-server-fn-codec would break
+// the <img src> render). Body is gated `#[cfg(feature = "server")]`; the
+// module is otherwise empty on wasm.
+pub mod bot_avatar_route;
+// Phase 50.1 Plan 07 (D-02/D-14): profile-scoped, read-only public identity
+// key (npub) derivation — `fetch_bot_npub`. Unconditional like
+// `profile_api` — the `#[server]` macro handles the client/server split,
+// and the buzz-dependent derivation is further gated with
+// `#[cfg(feature = "buzz")]` inside the module (see its own doc comment).
+pub mod buzz_npub_api;
+// Phase 50.2 Plan 01 (D-13/D-23/D-05/D-20): the UI-owned group-chat room
+// store — `create_room_impl`/`list_rooms_impl`/`load_room_impl`/
+// `append_room_messages_impl`/`delete_room_impl`/`set_room_needs_you_impl`.
+// Unconditional like `bot_meta_api` — no `#[server]` fns of its own (those
+// live in `group_chat_api`), and internal items are gated with
+// `#[cfg(feature = "server")]`. Its own sibling store/mutex, isolated from
+// `state_store` and `BOT_META_LOCK` (module doc has the full
+// persistence-shape record).
+pub mod group_chat_store;
+// Phase 50.2 Plan 01 (D-20/D-21/D-05/D-04/D-06): the group-chat round
+// driver — `dispatch_group_round`/`create_group_room`/`list_group_rooms`/
+// `load_group_room`/`delete_group_room`. Unconditional like `bot_meta_api`
+// — the `#[server]` macro handles the client/server split, and internal
+// helper fns (`dispatch_member_turn`, `build_group_turn_prompt`,
+// `dispatch_group_round_impl`) are gated with
+// `#[cfg(feature = "server")]`. A NEW caller of `cli_handoff::run_bot_handoff`
+// — defines no second env-scrub allowlist, sanitizer, or argv builder.
+pub mod group_chat_api;
+// Phase 50.2 Plan 05 (D-21/D-10/D-11): the persisted, app-wide Group Chat
+// Settings record — `load_group_chat_settings`/`save_group_chat_settings`.
+// Unconditional like `bot_meta_api` — the `#[server]` macro handles the
+// client/server split, and internal helper fns (`load_group_settings_impl`,
+// `save_group_settings_impl`, `clamp_group_settings`) are gated with
+// `#[cfg(feature = "server")]`. Its own sibling store/mutex, isolated from
+// `state_store`, `BOT_META_LOCK` and `GROUP_CHAT_LOCK` (module doc has the
+// full reasoning).
+pub mod group_settings_api;
+// Phase 50.2 Plan 15 (G-50.2-2a): the room-membership-update `#[server]`
+// surface — `update_group_room_members`. Unconditional like
+// `group_settings_api` — the `#[server]` macro handles the client/server
+// split. Defines no second member validator and no second persistence
+// path: it calls straight through to
+// `group_chat_store::update_room_members_impl`, which itself calls the
+// single `group_chat_store::validate_room_members` this plan extracted
+// from `create_room_impl`. No UI change lands in this plan — plan 50.2-17
+// owns the header's `Edit members` control.
+pub mod group_members_api;
+// Phase 50.2 Plan 07 (D-20/D-21): the @mention handoff middleware —
+// `dispatch_mention_handoff`. Unconditional like `group_chat_api` — the
+// `#[server]` macro handles the client/server split, and internal helper
+// fns (`resolve_roster_mentions`, `resolve_roster_mentions_client`) are
+// gated per-item (`resolve_roster_mentions` requires `feature = "server"`
+// for its regex dependency; `resolve_roster_mentions_client` compiles
+// unconditionally as its wasm-reachable isomorphic duplicate — module doc
+// has the full reasoning). Deterministic host-orchestrated middleware, NOT
+// an agent-callable tool (RESEARCH Pitfall 1 / Open Question 2, locked by
+// this plan) — a NEW caller of `group_chat_api::dispatch_member_turn`,
+// defining no second env-scrub allowlist, argv builder, or reply
+// sanitizer.
+pub mod mention_handoff_api;
+// Phase 50.2 Plan 08 (D-13/D-23/D-11/D-04/D-21): the UI-owned per-bot Bot
+// Chat thread store — `load_bot_chat_thread`/`append_bot_chat_entry`. The
+// OPERATOR half of "every bot has a persistent Bot Chat" (plan 02 gave the
+// BOT half). Unconditional like `bot_meta_api` — the `#[server]` macro
+// handles the client/server split, and internal helper fns are gated with
+// `#[cfg(feature = "server")]`. Its own sibling store/mutex, isolated from
+// `state_store`, `BOT_META_LOCK` and `GROUP_CHAT_LOCK` (module doc has the
+// full persistence-shape record). Never reads a profile's own `state.db`
+// (D-13/D-23) — the operator's view is served from this UI-owned file.
+pub mod bot_chat_store;
+// Phase 48.2 Plan 01 (D-05/D-08/D-10/D-11/D-12/D-13/D-14/D-16/D-20): the
+// Tools page's config-editing server surface — `get_tools_page_state`/
+// `toggle_toolset`. Unconditional like `provider_config_api` — the
+// `#[server]` macro handles the client/server split, and internal helper
+// fns are gated with `#[cfg(not(target_arch = "wasm32"))]`.
+pub mod tools_config_api;
+// Phase 48.2 Plan 02 (D-01/D-02/D-03/D-04/D-12/D-13/D-22): MCP server admin
+// surface — snippet parsing, probe-before-commit, honest status, non-blocking
+// OAuth CONNECT, and live apply. Unconditional like `tools_config_api` — the
+// `#[server]` macro handles the client/server split, internal helper fns are
+// gated with `#[cfg(not(target_arch = "wasm32"))]`.
+pub mod mcp_admin_api;
+// Phase 48.2 Plan 09 (D-03/T-48.2-09-01): GET /oauth/mcp/callback — the
+// public, unauthenticated raw axum route that finishes a web MCP OAuth
+// authorization. Same raw-axum-handler pattern as `bot_avatar_route` above
+// (an authorization server redirects a *browser* here with an ordinary GET,
+// which the server-fn codec cannot serve as HTML). Body is gated
+// `#[cfg(feature = "server")]`; the module is otherwise empty on wasm.
+pub mod mcp_oauth_callback_route;
+// Phase 48.2 Plan 07 (D-05/D-06/D-07/D-09/D-16/D-22): write-only,
+// masked-presence tool-credential API — root scope (vault-first, honest
+// plaintext fallback) and profile scope (the existing hardened profile-key
+// `.env` write, reused unmodified). Unconditional like `tools_config_api` —
+// the `#[server]` macro handles the client/server split, internal helper
+// fns are gated with `#[cfg(not(target_arch = "wasm32"))]`.
+pub mod tools_credentials_api;
+// Phase 48.2 Plan 11 (D-03/D-14/D-16, G-48.2-6 slice a): read-only,
+// scope-aware gateway liveness for the Tools page RUNTIME section —
+// `get_gateway_runtime_status`. Unconditional like `tools_config_api` — the
+// `#[server]` macro handles the client/server split, internal helper fns
+// are gated with `#[cfg(not(target_arch = "wasm32"))]`. Never calls
+// `check_tools_write_gate` — this is a read, not a write (module doc).
+pub mod gateway_status_api;
+// Phase 48.2 Plan 13 (G-48.2-6 slice b): start/stop/restart the
+// `ironhermes gateway` process from the Tools page RUNTIME section —
+// `stop_gateway`/`start_gateway`/`restart_gateway`. Unconditional like
+// `gateway_status_api` above — the `#[server]` macro handles the
+// client/server split, internal helper fns are gated with
+// `#[cfg(not(target_arch = "wasm32"))]`. Full security posture (module doc):
+// two independent config gates, SIGTERM-only stop, env-scrubbed detached
+// spawn, audited every attempt including refusals.
+pub mod gateway_control_api;
+// Phase 48.2 Plan 12 (D-06/D-08/D-09/D-10/D-11/D-12/D-14, G-48.2-7): the
+// Buzz platform's read/write surface over `gateway.platforms["buzz"]` — an
+// explicit-allowlist DTO (never a passthrough of the shared
+// `PlatformGatewayConfig`) plus the gated scope-resolved write path.
+// Unconditional like `tools_config_api` — the `#[server]` macro handles the
+// client/server split, internal helper fns are gated with
+// `#[cfg(not(target_arch = "wasm32"))]`. Never touches `BUZZ_NSEC` — that
+// stays entirely in `tools_credentials_api`/`buzz_npub_api` (module doc).
+pub mod platform_config_api;

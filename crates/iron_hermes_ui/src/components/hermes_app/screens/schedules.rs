@@ -94,6 +94,30 @@ pub fn ScreenSchedules(is_active: bool) -> Element {
     let mut delete_confirm: Signal<Option<ScheduleRow>> = use_signal(|| None);
     let mut deleting = use_signal(|| false);
 
+    // Phase 50.1 Plan 08 (D-22): read the bot drawer's Routines deep-link
+    // prefill. When set, open THIS SAME inline editor panel above with the
+    // job-name field pre-filled to the bot's namespace prefix — no second
+    // create form, no restyle of this screen. Clear the prefill in the
+    // same effect so a later visit does not reopen it. Reads and mutates
+    // the SAME context signal, so the `.set(None)` below re-triggers this
+    // effect once more with an already-`None` value, which is a no-op.
+    let mut schedule_name_prefill =
+        use_context::<crate::state::ScheduleNamePrefillCtx>().0;
+    use_effect(move || {
+        let prefill = schedule_name_prefill.read().clone();
+        if let Some(prefix) = prefill {
+            editor_is_new.set(true);
+            editor_id.set(String::new());
+            editor_name.set(prefix);
+            editor_schedule.set(String::new());
+            editor_prompt.set(String::new());
+            editor_deliver.set(String::new());
+            save_error.set(None);
+            editor_open.set(true);
+            schedule_name_prefill.set(None);
+        }
+    });
+
     // Read all signal values into owned locals BEFORE rsx! (Pattern B).
     let editor_open_val = *editor_open.read();
     let editor_is_new_val = *editor_is_new.read();

@@ -224,6 +224,17 @@ fn build_static_table() -> HashMap<&'static str, ModelMetadata> {
         cl100k(1_000_000, Some(32_000), true, true, true, true),
     );
 
+    // Claude 5 series — 1M context, 128K max output, extended thinking.
+    // Values taken from the OpenRouter model catalog, not estimated.
+    m.insert(
+        "claude-sonnet-5",
+        cl100k(1_000_000, Some(128_000), true, true, true, true),
+    );
+    m.insert(
+        "claude-opus-5",
+        cl100k(1_000_000, Some(128_000), true, true, true, true),
+    );
+
     // ── GPT family (o200k_base for 4o+, cl100k_base for older) ────────
     m.insert(
         "gpt-4o",

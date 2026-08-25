@@ -146,6 +146,14 @@ ironhermes-exec = { path = "../ironhermes-exec" }
 ironhermes-hooks = { path = "../ironhermes-hooks" }
 ironhermes-state = { path = "../ironhermes-state" }
 ironhermes-tools = { path = "../ironhermes-tools" }
+# Phase 48.2 Plan 01 (D-20): tools_config_api.rs needs
+# ironhermes_mcp::sanitize_server_name to map an mcp__<slug> display group
+# back to its mcp_servers config key (mcp_group_server_key). Moved here from
+# Plan 02 because this plan's tracer already needs it. Native-only (cfg-gated,
+# same table as ironhermes-tools/ironhermes-core above) — the wasm client
+# build never compiles it. Already an in-workspace path dependency consumed
+# by ironhermes-agent, ironhermes-cli and ironhermes-gateway.
+ironhermes-mcp = { path = "../ironhermes-mcp" }
 # Phase 39.3 Plan 03 (D-04 / OQ#3): trajectory logging for realtime tool calls.
 # Provides TrajectoryEntry (for building JSONL records) and TrajectoryWriterHandleImpl
 # (the concrete AppState.realtime_trajectory_writer impl, opt-in / config-gated).
@@ -153,6 +161,13 @@ ironhermes-trajectory = { path = "../ironhermes-trajectory" }
 # Phase 36.17.4 Plan 03 (D-01): need SessionQueue from gateway — the concrete
 # MessageQueue<SessionKey> implementor instantiated in AppState::init.
 ironhermes-gateway = { path = "../ironhermes-gateway" }
+# Phase 50.1 Plan 07 (D-14): npub derivation from a profile's resolved Nostr
+# secret (`Keys::parse(...).public_key().to_bech32()`), the same call the
+# gateway crate's own buzz.rs already makes. Optional, folded into the `buzz`
+# feature below — declared here (under the non-wasm target table, alongside
+# ironhermes-gateway above) so the wasm client build never sees it. Same
+# "0.45.0" version line ironhermes-cli's own `buzz` feature pins.
+nostr-sdk = { version = "0.45.0", optional = true }
 # Phase 36.3.7.11 Plan 01: dashboard `#[server]` fns + tail consumer read
 # directly from the per-board KanbanStore. Behind the cfg gate so the WASM
 # client build stays unaffected (D-05 / Pattern A in PATTERNS.md).
@@ -232,6 +247,14 @@ rand = "0.8"
 # resolved transitively at 0.12.5 (tokio-util and others) — this adds a
 # direct-dep entry at the same version, not a new crate to the graph.
 parking_lot = "0.12"
+# Phase 50.2 Plan 04 (D-21/D-03): group_chat_api.rs's pure orchestration
+# rules (parse_group_mentions, is_group_pass_text, message_addresses_user)
+# port plugin.js's regexes verbatim. Workspace-pinned version (root
+# Cargo.toml's `regex = "1"`), already resolved in the lockfile via
+# ironhermes-tools/ironhermes-cli/others. Native-only (this target table):
+# every caller is `#[cfg(feature = "server")]`, so the wasm client build
+# never pulls this in.
+regex = { workspace = true }
 
 [dev-dependencies]
 # Test-only features for `#[tokio::test]` (macros + rt).
@@ -262,8 +285,18 @@ server = [
     "tokio/full",
     "tower-http/compression-gzip",
     "tower-http/compression-br",
+    "buzz",
 ]
 demo = []
+# Phase 50.1 Plan 07 (D-14): forwards the gateway crate's `buzz` (Nostr)
+# feature plus this crate's own optional `nostr-sdk` dep, mirroring
+# ironhermes-cli's own `buzz = ["ironhermes-gateway/buzz", "dep:nostr-sdk"]`
+# precedent verbatim (RESEARCH "Alternatives Considered"). Attached to the
+# `server` feature above rather than left standalone-opt-in — the
+# derivation only ever runs server-side, so any build serving the UI gets
+# the read-only npub row, and the wasm client bundle never pulls
+# `nostr-sdk` in (it lives under the non-wasm target dependency table).
+buzz = ["ironhermes-gateway/buzz", "dep:nostr-sdk"]
 # Phase 26.2.1: Gate the legacy Warp-style shell behind an opt-in feature.
 # Default builds mount the new wheel-driven `HermesApp`; enable `legacy-shell`
 # to mount `WarpHermes` instead (kept compiling as a UAT fallback).

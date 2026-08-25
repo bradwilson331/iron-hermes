@@ -1623,7 +1623,15 @@ impl GatewayMessageHandler {
             return Ok(());
         }
 
-        if event.content.starts_with('/') {
+        // Phase 36.7.1 CR-01: same exclusion as the `MessageHandler::handle`
+        // intercept. No production caller reaches here with a
+        // `Platform::Webhook` event today — the three callers are
+        // `runner.rs`'s Telegram dispatch loop (`tg_message_to_event`),
+        // `discord.rs` and `slack.rs` — but this method is `pub`, so the guard
+        // is applied at both sites rather than argued from the current caller
+        // set. A future caller that wires webhook events through here inherits
+        // the exclusion instead of silently reopening CR-01.
+        if platform_may_use_slash_commands(&event.platform) && event.content.starts_with('/') {
             return self
                 .handle_slash_command(event, adapter, cancel, processed)
                 .await;
@@ -2113,13 +2121,8 @@ impl GatewayMessageHandler {
         // comment for why (D-14: the prompt must reach the person who ran
         // the command privately, not the whole channel).
         let approval_target = approval_target_for(event);
-        let approval_gate_for_turn: Option<std::sync::Arc<dyn ironhermes_core::ApprovalGate>> =
-            self.approval_coordinator.as_ref().map(|coord| {
-                std::sync::Arc::new(crate::approval::GatewayApprovalGate::new(
-                    coord.clone(),
-                    approval_target.clone(),
-                )) as std::sync::Arc<dyn ironhermes_core::ApprovalGate>
-            });
+        let (approval_gate_for_turn, webhook_denial_log) =
+            approval_gate_for_event(event, self.approval_coordinator.as_ref(), &approval_target);
 
         // Phase 36.3.12 D-08 (Task 3, checker BLOCKER T-36.3.12-25): build a per-turn
         // terminal intercept that routes LLM-issued `terminal` tool calls through
@@ -2465,6 +2468,50 @@ impl GatewayMessageHandler {
             }
         }
 
+        // T-36.7.1-37, second half: deliver every auto-denial this turn
+        // produced, not just log it.
+        //
+        // `ApprovalGate::request_approval` can only return an
+        // `ApprovalOutcome`, and what `AgentLoop` does with a refusal is hand
+        // the model a terse tool-result string — so whatever the operator
+        // eventually reads is the model's paraphrase of that, and a model may
+        // not mention the refusal at all. Without this the only trace of a
+        // denied gated operation is a log line the operator has no reason to
+        // go looking at, which is exactly the "my route never does X" case
+        // Research Pitfall 4 describes.
+        //
+        // Delivered as a supplementary message, mirroring the media-fallback
+        // notice immediately above: the turn's own answer is still the answer,
+        // and the denial is an additional fact about it rather than a
+        // replacement for it. Both signals are required — the log for whoever
+        // reads process logs, this for whoever reads the route's output.
+        if let Some(log) = &webhook_denial_log {
+            let denials: Vec<String> = {
+                let mut guard = log.lock().unwrap_or_else(|p| p.into_inner());
+                std::mem::take(&mut *guard)
+            };
+            if !denials.is_empty() {
+                let notice = denials.join("\n");
+                if let Err(e) =
+                    with_rate_limit_retry(|| adapter.send_message(&event.chat_id, &notice, None))
+                        .await
+                {
+                    // A `deliver: origin` route cannot accept a supplementary
+                    // message without the delivery id its callback URL is
+                    // keyed by (WINDOWS 17), so this arm is expected there
+                    // until that is wired. Log loudly rather than silently
+                    // dropping the one signal this block exists to produce.
+                    tracing::error!(
+                        chat_id = %event.chat_id,
+                        error = %e,
+                        denial_count = denials.len(),
+                        "webhook approval denial notice failed to deliver — the denial is \
+                         recorded in the log above but did NOT reach the route's output"
+                    );
+                }
+            }
+        }
+
         // RC-1 / REQ-37.2-01 / REQ-37.2-02 / REQ-37.2-06: turn-end fallback.
         //
         // Fires only when the streamed body was empty (D-05 invariant: turns that
@@ -2726,8 +2773,13 @@ impl MessageHandler for GatewayMessageHandler {
         adapter: Arc<dyn PlatformAdapter>,
         cancel: CancellationToken,
     ) -> Result<()> {
-        // Intercept slash commands before agent loop (plan 04)
-        if event.content.starts_with('/') {
+        // Intercept slash commands before agent loop (plan 04).
+        //
+        // Phase 36.7.1 CR-01: `platform_may_use_slash_commands` excludes
+        // `Platform::Webhook`. This is the intercept a webhook turn actually
+        // reaches — `webhook/mod.rs` dispatches through this trait method
+        // (`handler.handle(&msg_event, ..)`), never `handle_with_multimodal`.
+        if platform_may_use_slash_commands(&event.platform) && event.content.starts_with('/') {
             // Text-only path — no multimodal attachments to forward
             let no_attachments = ProcessedAttachments {
                 text_prefix: None,
@@ -2749,6 +2801,40 @@ impl MessageHandler for GatewayMessageHandler {
         };
         self.run_agent(event, adapter, cancel, no_attachments).await
     }
+}
+
+/// Phase 36.7.1 CR-01: is this event allowed to select a gateway slash command?
+///
+/// Slash commands are *operator* commands. `handle_slash_command` returns
+/// before `run_agent` is ever called, so a dispatched command runs with no
+/// `AgentLoop` and therefore no `ApprovalGate` — the webhook lane's
+/// `ImmediateDenyApprovalGate` (T-36.7.1-37) guards tool calls the *model*
+/// issues and never sees this path at all.
+///
+/// A webhook turn's `content` is `template::render(route.prompt_template,
+/// payload)` — the operator's template with attacker-supplied payload values
+/// interpolated. The bare-passthrough template `"{Body}"` (the form used by
+/// `boot_gate.rs`'s example config and by every route config in the test
+/// suite) makes the first character of the prompt wholly sender-controlled.
+/// `template::sanitize` strips `\n`/`\r` and truncates; it does not touch a
+/// leading `/`. A webhook payload of `/kanban create ...` would otherwise
+/// reach `cmd_kanban` with a live `KanbanStoreWriter` attached, and
+/// `/agents kill <id> confirm`, `/provider disable`, `/reload`, `/toolset`,
+/// `/reset` are all `Universal` or `GatewayOnly` and therefore likewise
+/// reachable on `Platform::Webhook` (`PlatformFilter::is_available_on`
+/// excludes only `Local` and `ApiServer`).
+///
+/// So: the webhook lane never takes the slash intercept. The leading `/` is
+/// then simply literal prompt text handed to the agent, where
+/// `ImmediateDenyApprovalGate` governs any gated tool the model attempts.
+///
+/// Deliberately NOT a per-route opt-in: that would be a second authorisation
+/// surface, which D-08 refuses. The webhook lane is autonomous and its
+/// content originates outside the trust boundary — a signed sender relays
+/// third-party text (a GitHub issue title, a commit message), so "the sender
+/// is authenticated" says nothing about who wrote the words.
+pub(crate) fn platform_may_use_slash_commands(platform: &Platform) -> bool {
+    !matches!(platform, Platform::Webhook)
 }
 
 /// Build a ChatMessage for the user's input, incorporating any multimodal data.
@@ -2811,6 +2897,62 @@ pub(crate) fn approval_target_for(event: &MessageEvent) -> String {
     } else {
         event.chat_id.clone()
     }
+}
+
+/// Select the per-turn [`ApprovalGate`](ironhermes_core::ApprovalGate) for
+/// `event` (Phase 45 D-11; Phase 36.7.1 O-02).
+///
+/// A webhook-originated turn is an AUTONOMOUS lane — no human is attached to
+/// answer a prompt — so it gets [`ImmediateDenyApprovalGate`], which denies
+/// synchronously and logs at `warn!` with the sanitized tool and reason
+/// (T-36.7.1-36, T-36.7.1-37, T-36.7.1-41). Every other platform keeps the
+/// existing behaviour exactly: a coordinator-backed `GatewayApprovalGate` when
+/// one is wired, `None` otherwise.
+///
+/// # Why webhook must not simply be given a coordinator
+///
+/// The obvious way to close this gap — calling `set_approval_coordinator` on
+/// the webhook handler the way `runner.rs` does for Telegram and Buzz — is
+/// actively harmful, which is why the branch lives here rather than at the
+/// wiring site where a future reader would be tempted to "fix" it.
+///
+/// A webhook `MessageEvent` sets `chat_id = <route name>`, and
+/// [`approval_target_for`] returns that verbatim for every non-Buzz platform.
+/// A coordinator-backed gate would therefore call
+/// `PlatformAdapter::send_message(<route name>, ..)` — which for a
+/// `deliver: url` route POSTs the approval prompt AND its pending id to the
+/// route's configured outbound URL, then waits the full coordinator timeout.
+/// That is an outbound disclosure of the gated command plus a held concurrency
+/// slot: strictly worse than the fail-closed-by-absence it would replace.
+/// Returns the gate, plus — for the webhook lane only — the [`DenialLog`] the
+/// caller must drain once the turn ends and append to the delivered output.
+/// `None` for every other platform, whose approvals reach a human directly.
+///
+/// [`DenialLog`]: ironhermes_restgw::webhook::approval::DenialLog
+pub(crate) fn approval_gate_for_event(
+    event: &MessageEvent,
+    coordinator: Option<&Arc<crate::approval::ApprovalCoordinator>>,
+    approval_target: &str,
+) -> (
+    Option<Arc<dyn ironhermes_core::ApprovalGate>>,
+    Option<ironhermes_restgw::webhook::approval::DenialLog>,
+) {
+    if event.platform == Platform::Webhook {
+        let denials = ironhermes_restgw::webhook::approval::new_denial_log();
+        let gate = Arc::new(
+            ironhermes_restgw::webhook::approval::ImmediateDenyApprovalGate::with_denial_log(
+                denials.clone(),
+            ),
+        ) as Arc<dyn ironhermes_core::ApprovalGate>;
+        return (Some(gate), Some(denials));
+    }
+    let gate = coordinator.map(|coord| {
+        Arc::new(crate::approval::GatewayApprovalGate::new(
+            coord.clone(),
+            approval_target.to_string(),
+        )) as Arc<dyn ironhermes_core::ApprovalGate>
+    });
+    (gate, None)
 }
 
 /// Render a text notice naming every media artifact that could not be
@@ -3451,6 +3593,177 @@ mod tests {
         assert_eq!(approval_target_for(&dm), "chat-2");
     }
 
+    /// T-36.7.1-36 / T-36.7.1-41 (security audit AR-01, WINDOWS 16). A webhook
+    /// turn is an autonomous lane: it must get a gate, and that gate must deny
+    /// synchronously. Before this fix `approval_gate_for_event` returned `None`
+    /// for webhook (the webhook handler carries no coordinator), so the deny
+    /// came from `AgentLoop`'s `GateUnavailable` fallback with no signal at all.
+    #[tokio::test]
+    async fn webhook_turn_gets_a_synchronous_immediate_deny_gate() {
+        let event = approval_test_event(Platform::Webhook, "webhook", "my-route", "sender-1");
+        // No coordinator — exactly the production wiring (`runner.rs` calls
+        // `set_approval_coordinator` only for Telegram and Buzz).
+        let (gate, denial_log) = approval_gate_for_event(&event, None, "my-route");
+        let gate =
+            gate.expect("a webhook turn must receive an approval gate, not fall through to None");
+        let denial_log =
+            denial_log.expect("the webhook lane must receive a denial log to deliver from");
+
+        let started = std::time::Instant::now();
+        let outcome = gate
+            .request_approval("sess-1", "terminal", "rm -rf /", &serde_json::json!({}))
+            .await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            outcome,
+            ironhermes_core::ApprovalOutcome::Denied,
+            "an autonomous webhook lane must be denied, and denied explicitly"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "the deny must be synchronous, not a coordinator timeout — took {elapsed:?}"
+        );
+
+        // T-36.7.1-37's second half: the denial must also be RECORDED for
+        // delivery, naming the tool and the reason. A log line alone leaves
+        // the operator reading the model's paraphrase of a refusal it may not
+        // mention at all.
+        let recorded = denial_log.lock().unwrap();
+        assert_eq!(recorded.len(), 1, "the denial must be recorded for delivery");
+        assert!(
+            recorded[0].contains("terminal") && recorded[0].contains("rm -rf /"),
+            "the delivered text must name the tool and the reason: {}",
+            recorded[0]
+        );
+    }
+
+    /// Denial text reaching delivered output is attacker-influenced string
+    /// data, so it gets the same newline-stripping every other such string in
+    /// this pipeline gets (T-36.7.1-40).
+    #[tokio::test]
+    async fn webhook_denial_text_is_sanitized_before_delivery() {
+        let event = approval_test_event(Platform::Webhook, "webhook", "my-route", "sender-1");
+        let (gate, denial_log) = approval_gate_for_event(&event, None, "my-route");
+        let gate = gate.expect("gate");
+        let denial_log = denial_log.expect("denial log");
+
+        gate.request_approval(
+            "sess-1",
+            "tool\nwith\nbreaks",
+            "reason\r\nwith breaks",
+            &serde_json::json!({}),
+        )
+        .await;
+
+        let recorded = denial_log.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert!(
+            !recorded[0].contains('\n') && !recorded[0].contains('\r'),
+            "delivered denial text must not carry injected line breaks: {:?}",
+            recorded[0]
+        );
+    }
+
+    /// The companion half: the webhook branch must not steal a coordinator that
+    /// a *different* platform is entitled to, and a non-webhook platform with no
+    /// coordinator must still yield `None` (today's behaviour, preserved).
+    #[test]
+    fn non_webhook_platforms_keep_the_coordinator_behaviour() {
+        let telegram = approval_test_event(Platform::Telegram, "dm", "chat-1", "user-1");
+        assert!(
+            approval_gate_for_event(&telegram, None, "chat-1").0.is_none(),
+            "a non-webhook platform with no coordinator must still yield None"
+        );
+        assert!(
+            approval_gate_for_event(&telegram, None, "chat-1").1.is_none(),
+            "only the webhook lane gets a denial log — other platforms reach a human"
+        );
+    }
+
+    /// WR-05's sibling, WR-04. The test above covers only the *no coordinator*
+    /// case — but `runner.rs:1132` (Telegram) and `:1397` (Buzz) DO call
+    /// `set_approval_coordinator`, so on the only production paths that reach
+    /// this code with a coordinator, the branch under test is never the one
+    /// that runs. The refactor's entire risk lives in the other branch.
+    ///
+    /// Concretely: had the tuple refactor written
+    /// `GatewayApprovalGate::new(coord.clone(), event.chat_id.clone())` instead
+    /// of `approval_target.to_string()`, the Phase 47.6 T-47.6-09-01 fix would
+    /// silently regress — a Buzz channel-originated approval prompt would go
+    /// back to being posted into the CHANNEL, with its pending id, for every
+    /// member to read and answer — and every test in this file would still
+    /// pass.
+    ///
+    /// Asserted on the observable that matters rather than on the gate's
+    /// private field: `request_approval` prompts through the coordinator's
+    /// bound adapter, so the recorded `send_message` target IS the bound
+    /// approval target.
+    #[tokio::test]
+    async fn non_webhook_platform_with_a_coordinator_binds_the_derived_approval_target() {
+        // A Buzz CHANNEL turn: chat_id is the channel, sender_id is the person
+        // who typed the command. `approval_target_for` must pick the sender.
+        let buzz = approval_test_event(Platform::Buzz, "channel", "channel-abc", "sender-123");
+        let target = approval_target_for(&buzz);
+        assert_eq!(target, "sender-123", "precondition for the assertions below");
+
+        let sends = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let adapter: Arc<dyn PlatformAdapter> = Arc::new(RecordingAdapter {
+            sends: sends.clone(),
+        });
+        let audit_dir = std::env::temp_dir().join(format!(
+            "ih_wr04_audit_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&audit_dir).expect("temp audit dir");
+        let coord = Arc::new(crate::approval::ApprovalCoordinator::new(
+            // 1s so the unanswered prompt times out promptly — this test is
+            // about WHERE the prompt was sent, not about the outcome.
+            1,
+            adapter,
+            Arc::new(ironhermes_core::ApprovalsStore::with_path(
+                audit_dir.join("approvals.json"),
+            )),
+            Arc::new(ironhermes_core::AuditLog::with_path(
+                audit_dir.join("audit.jsonl"),
+                ironhermes_core::AuditConfig::default(),
+            )),
+        ));
+
+        let (gate, denial_log) = approval_gate_for_event(&buzz, Some(&coord), &target);
+        let gate = gate.expect("a coordinator-backed platform must still get a gate");
+        assert!(
+            denial_log.is_none(),
+            "only the webhook lane gets a denial log — a Buzz turn reaches a human"
+        );
+
+        let outcome = gate
+            .request_approval("sess-wr04", "srv__delete", "destructive", &serde_json::json!({}))
+            .await;
+        assert_eq!(
+            outcome,
+            ironhermes_core::ApprovalOutcome::TimedOut,
+            "nobody answered, so the coordinator must fail closed on its timeout — \
+             proving the request really went through the coordinator and not some \
+             short-circuit"
+        );
+
+        let recorded = sends.lock().unwrap().clone();
+        assert!(
+            recorded.iter().any(|(chat, body)| chat == "sender-123"
+                && body.contains("Approval required")),
+            "the approval prompt must be bound to the DERIVED target (the sender), \
+             not to the event's chat_id: {recorded:?}"
+        );
+        assert!(
+            !recorded.iter().any(|(chat, _)| chat == "channel-abc"),
+            "T-47.6-09-01: an approval prompt must NEVER be posted into the Buzz \
+             channel — every member would see it and any of them could answer it: \
+             {recorded:?}"
+        );
+    }
+
     #[test]
     fn approval_target_for_buzz_channel_is_the_sender() {
         let event = approval_test_event(
@@ -3522,6 +3835,110 @@ mod tests {
             notice.contains("/tmp/plan09-b.mp4"),
             "second ref missing: {notice}"
         );
+    }
+
+    // ── Phase 36.7.1 CR-01: the slash intercept is closed on the webhook lane ──
+
+    /// CR-01. `/help` is the cheapest command with an unmistakable, purely
+    /// local output ("Available commands:") — it needs no coordinator, no
+    /// network and no writable store, so whether it appears in the adapter's
+    /// output is a clean yes/no answer to "did this event select a gateway
+    /// slash command?".
+    ///
+    /// The mutating families are the ones that matter (`/kanban create`,
+    /// `/agents kill … confirm`, `/provider disable`, `/reload`), but they all
+    /// travel the SAME `handle_slash_command` dispatch this asserts is not
+    /// taken, so gating on `/help` gates on all of them at the one branch that
+    /// decides.
+    ///
+    /// Two-sided by construction:
+    ///   - the webhook event must NOT produce help output, and must instead be
+    ///     observed entering `run_agent` (the `█` placeholder send) — so the
+    ///     test distinguishes "took the agent path" from "did nothing at all";
+    ///   - the identical content on `Platform::Telegram` MUST still dispatch,
+    ///     so a guard that simply disabled slash commands everywhere fails.
+    ///
+    /// `RecordingAdapter` returns `Err` for the placeholder send, which
+    /// short-circuits `run_agent` before any network/AgentRuntime work.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_webhook_payload_beginning_with_a_slash_is_not_dispatched_as_a_command() {
+        let handler = make_handler();
+
+        // The webhook lane: content is `template::render("{Body}", payload)`,
+        // so with the `"{Body}"` template the first character is the sender's.
+        let webhook = MessageEvent {
+            content: "/help".to_string(),
+            ..approval_test_event(Platform::Webhook, "webhook", "my-route", "sender-1")
+        };
+        let sends = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let adapter: Arc<dyn PlatformAdapter> = Arc::new(RecordingAdapter {
+            sends: sends.clone(),
+        });
+        // Err from the placeholder short-circuit is expected and ignored.
+        let _ = handler
+            .handle(&webhook, adapter, CancellationToken::new())
+            .await;
+        let recorded = sends.lock().unwrap().clone();
+        assert!(
+            !recorded
+                .iter()
+                .any(|(_, body)| body.contains("Available commands:")),
+            "a webhook payload starting with '/' must NOT reach the gateway slash-command \
+             dispatcher — handle_slash_command returns before run_agent, so no AgentLoop and \
+             therefore no ImmediateDenyApprovalGate runs. Sent: {recorded:?}"
+        );
+        assert!(
+            recorded
+                .iter()
+                .any(|(_, body)| body == PLACEHOLDER_BLOCK),
+            "the webhook turn must instead take the ordinary agent path, with the leading '/' \
+             as literal prompt text — proven by run_agent's placeholder send. Sent: {recorded:?}"
+        );
+
+        // The control: the same content from a real operator chat is still a
+        // command. Without this half the fix could be "disable slash commands".
+        let telegram = MessageEvent {
+            content: "/help".to_string(),
+            ..approval_test_event(Platform::Telegram, "dm", "chat-1", "user-1")
+        };
+        let tg_sends = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tg_adapter: Arc<dyn PlatformAdapter> = Arc::new(RecordingAdapter {
+            sends: tg_sends.clone(),
+        });
+        let _ = handler
+            .handle(&telegram, tg_adapter, CancellationToken::new())
+            .await;
+        let tg_recorded = tg_sends.lock().unwrap().clone();
+        assert!(
+            tg_recorded
+                .iter()
+                .any(|(_, body)| body.contains("Available commands:")),
+            "operator platforms must keep slash commands — got: {tg_recorded:?}"
+        );
+    }
+
+    /// The predicate itself, enumerated over every `Platform` variant, so a
+    /// newly added autonomous lane is a visible decision rather than an
+    /// accidental `true`.
+    #[test]
+    fn only_the_webhook_lane_is_excluded_from_slash_commands() {
+        assert!(
+            !platform_may_use_slash_commands(&Platform::Webhook),
+            "the webhook lane's content is attacker-influenced and its turns are autonomous"
+        );
+        for p in [
+            Platform::Local,
+            Platform::Telegram,
+            Platform::Discord,
+            Platform::Slack,
+            Platform::Buzz,
+            Platform::ApiServer,
+        ] {
+            assert!(
+                platform_may_use_slash_commands(&p),
+                "{p:?} must keep its existing slash-command behaviour"
+            );
+        }
     }
 
     #[test]

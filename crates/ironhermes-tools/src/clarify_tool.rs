@@ -106,6 +106,26 @@ impl ClarifyTool {
         }
     }
 
+    /// Whether a clarify delivery channel is available for this tool's platform.
+    ///
+    /// Phase 48.2 Plan 10 (D-16/G-48.2-3): single source of truth shared by
+    /// `Tool::is_available()` and `Tool::prerequisites()` so the two can never
+    /// silently disagree — `is_available()` reports the same condition
+    /// `prerequisites()` describes the cause of, by construction.
+    ///
+    /// Local platform is always available (the text fallback works without a
+    /// dispatcher). WR-04: Web sessions wire `clarify_dispatcher: None` and have
+    /// no callback-query resolver yet, so the tool is inert on Web until a
+    /// WS-based resolver exists. Every other platform needs an attached
+    /// dispatcher.
+    fn clarify_channel_available(&self) -> bool {
+        match self.session_key.platform {
+            ironhermes_core::Platform::Local => true,
+            ironhermes_core::Platform::Web => self.clarify_dispatcher.is_some(),
+            _ => self.clarify_dispatcher.is_some(),
+        }
+    }
+
     /// The core suspend/resume logic, exposed as a named method so tests can
     /// call it directly without going through the `Tool` trait's `execute()`.
     ///
@@ -269,15 +289,30 @@ impl crate::registry::Tool for ClarifyTool {
     /// callback-query resolver, so every clarify call would stall the turn for
     /// the full `clarify_timeout_secs`. Return `false` on Web until a WS-based
     /// resolver is implemented, so the tool is not advertised to the LLM.
+    ///
+    /// Delegates to `clarify_channel_available()` — see that method's doc
+    /// comment for why this must stay the single source of truth shared with
+    /// `prerequisites()` (D-09/D-16, Phase 48.2 Plan 10).
     fn is_available(&self) -> bool {
-        match self.session_key.platform {
-            ironhermes_core::Platform::Local => true,
-            ironhermes_core::Platform::Web => {
-                // Web v1 has no callback resolver; gate the tool inert until
-                // a WS round-trip resolver is wired (future phase).
-                self.clarify_dispatcher.is_some()
-            }
-            _ => self.clarify_dispatcher.is_some(),
+        self.clarify_channel_available()
+    }
+
+    /// D-09 (Phase 48.2 Plan 10, closing G-48.2-3): declares the real cause when
+    /// `is_available()` is false, so `unsatisfied_prerequisites()` — and the Tools
+    /// page card it feeds — has something to show instead of `missing: []`.
+    ///
+    /// Derived from the SAME condition `is_available()` evaluates
+    /// (`clarify_channel_available()`), so the two can never drift apart: empty
+    /// when available, exactly one `Prerequisite::runtime` entry when not.
+    fn prerequisites(&self) -> Vec<crate::registry::Prerequisite> {
+        if self.clarify_channel_available() {
+            vec![]
+        } else {
+            vec![crate::registry::Prerequisite::runtime(
+                "clarify_channel",
+                "This tool needs a clarification channel back to the user. The web \
+                 session does not provide one yet — `clarify` works on the CLI.",
+            )]
         }
     }
 
@@ -325,6 +360,24 @@ pub fn parse_clarify_callback(data: &str) -> Option<(String, usize)> {
     Some((id.to_string(), idx))
 }
 
+/// Phase 48.2 Plan 10 (D-16/G-48.2-3): shared test helper — given any `&dyn Tool`,
+/// assert that `!is_available()` implies `unsatisfied_prerequisites()` is
+/// non-empty. `pub(crate)` (not nested in `mod tests`) so `send_message_tool`'s
+/// test module can exercise the SAME assertion against `SendMessageTool` rather
+/// than re-implementing it, letting a third tool added later drop into the same
+/// check.
+#[cfg(test)]
+pub(crate) fn assert_unavailable_implies_nonempty_prereqs(tool: &dyn crate::registry::Tool) {
+    if !tool.is_available() {
+        assert!(
+            !crate::registry::unsatisfied_prerequisites(tool).is_empty(),
+            "tool '{}' is unavailable but reports zero unsatisfied prerequisites — \
+             violates the D-09 contract (registry.rs is_available doc)",
+            tool.name()
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Inline unit tests for callback_data helpers
 // ---------------------------------------------------------------------------
@@ -332,6 +385,7 @@ pub fn parse_clarify_callback(data: &str) -> Option<(String, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::Tool;
 
     #[test]
     fn clarify_callback_data_round_trip() {
@@ -385,5 +439,74 @@ mod tests {
         // the plan SUMMARY accordingly.
         fn _assert_independent<T: ClarifyDispatcher>() {}
         fn _assert_independent_msg<T: crate::send_message_tool::MessageDispatcher>() {}
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 48.2 Plan 10 (D-16/G-48.2-3): prerequisites() declares the real cause.
+    // ---------------------------------------------------------------------------
+
+    fn make_clarify_tool(platform: ironhermes_core::Platform) -> ClarifyTool {
+        ClarifyTool::new(
+            ironhermes_core::SessionKey::new(platform, "test-chat"),
+            None,
+            std::sync::Arc::new(crate::clarify_registry::PendingClarifyRegistry::new()),
+            None,
+            std::sync::Arc::new(ironhermes_core::Config::default()),
+        )
+    }
+
+    /// Available shape (Local platform, no dispatcher needed): `prerequisites()`
+    /// returns an empty vec and `unsatisfied_prerequisites()` returns nothing.
+    #[test]
+    fn clarify_prerequisites_empty_when_available() {
+        let tool = make_clarify_tool(ironhermes_core::Platform::Local);
+        assert!(tool.is_available(), "Local platform is always available");
+        assert!(
+            tool.prerequisites().is_empty(),
+            "no prerequisite should be reported when available"
+        );
+        assert!(
+            crate::registry::unsatisfied_prerequisites(&tool).is_empty(),
+            "unsatisfied_prerequisites() must be empty when available"
+        );
+    }
+
+    /// Unavailable shape (Web platform, no dispatcher): `prerequisites()` returns
+    /// exactly one named, described runtime prerequisite, and
+    /// `unsatisfied_prerequisites()` reports it too.
+    #[test]
+    fn clarify_prerequisites_one_runtime_entry_when_unavailable() {
+        let tool = make_clarify_tool(ironhermes_core::Platform::Web);
+        assert!(
+            !tool.is_available(),
+            "Web platform with no dispatcher must be unavailable (WR-04)"
+        );
+        let prereqs = tool.prerequisites();
+        assert_eq!(prereqs.len(), 1, "exactly one prerequisite expected");
+        assert_eq!(prereqs[0].kind, "runtime");
+        assert_eq!(prereqs[0].name, "clarify_channel");
+        assert!(
+            !prereqs[0].description.is_empty(),
+            "description must be non-empty — it is the sentence the card shows"
+        );
+
+        let missing = crate::registry::unsatisfied_prerequisites(&tool);
+        assert_eq!(
+            missing.len(),
+            1,
+            "unsatisfied_prerequisites() must report exactly one entry when unavailable"
+        );
+    }
+
+    /// The property that actually closes the gap: whenever `is_available()` is
+    /// false, `unsatisfied_prerequisites()` is non-empty. Uses the module-level
+    /// `assert_unavailable_implies_nonempty_prereqs` helper shared with
+    /// `send_message_tool`'s equivalent assertion, so a third tool can be
+    /// dropped into the same check later.
+    #[test]
+    fn clarify_unavailable_implies_nonempty_unsatisfied_prerequisites() {
+        super::assert_unavailable_implies_nonempty_prereqs(&make_clarify_tool(
+            ironhermes_core::Platform::Web,
+        ));
     }
 }

@@ -266,6 +266,19 @@ pub fn global_app_state() -> &'static AppState {
         .expect("global AppState not initialized")
 }
 
+/// Phase 50.2 Plan 14 (G-50.2-2b): the non-panicking twin of
+/// [`global_app_state`], for code paths that are ALSO reachable from
+/// in-file `#[cfg(test)]` modules — those modules never call
+/// `install_global_app_state`, so `global_app_state()` would panic with
+/// `global AppState not initialized` if called from a path they exercise.
+/// In production the web server always initialises `AppState` before any
+/// server fn can run, so this returns `Some` there; the `None` branch is
+/// reached only by in-file tests and by any non-server binary linking this
+/// module. Does not change `global_app_state` itself.
+pub fn try_global_app_state() -> Option<&'static AppState> {
+    GLOBAL_APP_STATE.get()
+}
+
 impl AppState {
     pub async fn init() -> Result<Self> {
         let config = Config::load().unwrap_or_default();

@@ -7,6 +7,24 @@
 # All values are integer micro-USD per 1M tokens (1 USD = 1_000_000).
 # No floats — see RESEARCH.md Pitfall 5: Float Cost Drift.
 
+# Claude 5 series. Per-token rates from the OpenRouter catalog:
+# sonnet-5 $2/$10 per 1M, opus-5 $5/$25 per 1M. Cache rates follow the
+# same ratios the rest of this table uses (read = 10% of input,
+# creation = 125% of input).
+[models."claude-sonnet-5"]
+provider                     = "anthropic"
+input_per_1m_micros          = 2_000_000      # $2.00
+output_per_1m_micros         = 10_000_000     # $10.00
+cache_read_per_1m_micros     = 200_000        # $0.20
+cache_creation_per_1m_micros = 2_500_000      # $2.50
+
+[models."claude-opus-5"]
+provider                     = "anthropic"
+input_per_1m_micros          = 5_000_000      # $5.00
+output_per_1m_micros         = 25_000_000     # $25.00
+cache_read_per_1m_micros     = 500_000        # $0.50
+cache_creation_per_1m_micros = 6_250_000      # $6.25
+
 [models."claude-opus-4-7"]
 provider                     = "anthropic"
 input_per_1m_micros          = 5_000_000      # $5.00

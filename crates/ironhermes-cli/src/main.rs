@@ -177,6 +177,18 @@ enum Commands {
         /// `autonomous.yolo` config key; CLI wins over config (D-12).
         #[arg(long)]
         yolo: bool,
+        /// Phase 50.2 Plan 02 (D-21): resume (or create) a named session so a
+        /// bot dispatched via `run_bot_handoff` keeps conversational
+        /// continuity across separate one-shot `chat -q` invocations — each
+        /// bot "keeps a persistent `Group: <name>` session" (or `Bot Chat`)
+        /// rather than starting from a blank slate on every turn. Only the
+        /// literal `Bot Chat` or a `Group: <name>` shape is accepted
+        /// (`validate_bot_session_title`, RESEARCH Security V3); an
+        /// unnamespaced arbitrary title is rejected before it ever reaches
+        /// `get_session_by_title`. Absent, `chat -q` keeps its pre-50.2
+        /// behavior: a fresh uuid session on every invocation.
+        #[arg(long = "session")]
+        session_title: Option<String>,
     },
     /// Show current configuration and status.
     ///
@@ -199,6 +211,12 @@ enum Commands {
         #[arg(long)]
         non_interactive: bool,
     },
+    /// Run the Agent Client Protocol (ACP) stdio server for editors (Phase 36.8).
+    ///
+    /// Speaks JSON-RPC 2.0 over stdio to an ACP-speaking editor (Zed / VS Code /
+    /// JetBrains). Profile selection rides the existing global `--profile` flag (D-07) —
+    /// no dedicated flags here.
+    Acp,
     /// Manage scheduled tasks
     Cron {
         #[command(subcommand)]
@@ -1893,6 +1911,12 @@ async fn main() -> Result<()> {
             .add_directive("ironhermes=info".parse().unwrap()),
     }
     .add_directive("rusty_vault=off".parse().expect("valid static directive"));
+    // Phase 36.8 (D-07 / Pitfall 1): the `acp` subcommand speaks JSON-RPC over stdout —
+    // any tracing output there desyncs the client's NDJSON parser. This branch MUST be
+    // evaluated before `will_use_ratatui_for_chat` below and MUST run before the first
+    // `tracing::info!/warn!/error!` call and before `ironhermes_acp::entry::run_acp`
+    // constructs the SDK's stdio transport.
+    let is_acp = matches!(&cli.command, Some(Commands::Acp));
     // Phase 22.4 D-03/D-04 + Pitfall 2: ratatui chat path defers subscriber
     // install to run_chat_ratatui (which installs TuiTracingSubscriberLayer).
     // All other paths (non-chat commands + chat-when-classic-wins) install the
@@ -1900,7 +1924,13 @@ async fn main() -> Result<()> {
     let is_chat_or_bare =
         matches!(&cli.command, Some(Commands::Chat { .. }) | None) && cli.execute.is_none();
     let will_use_ratatui_for_chat = is_chat_or_bare && !should_use_classic_tui(&cli);
-    if !will_use_ratatui_for_chat {
+    if is_acp {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_writer(std::io::stderr) // D-07: stdout is protocol-only
+            .with_target(false)
+            .init();
+    } else if !will_use_ratatui_for_chat {
         tracing_subscriber::fmt()
             .with_env_filter(env_filter)
             .with_target(false)
@@ -1919,6 +1949,7 @@ async fn main() -> Result<()> {
             ref message,
             ref query,
             yolo: ref chat_yolo,
+            ref session_title,
         }) => {
             // Phase 21.7 Plan 08 (D-12): OR top-level + subcommand yolo flags.
             // `cli.yolo` captures `hermes --yolo chat ...`; `chat_yolo` captures
@@ -1932,7 +1963,7 @@ async fn main() -> Result<()> {
             // the interactive REPL entirely. `-e` on the top-level still wins
             // when both are supplied to preserve back-compat for scripted callers.
             if let Some(prompt) = query.clone() {
-                return run_single(&cli, prompt, cli_yolo_flag).await;
+                return run_single(&cli, prompt, cli_yolo_flag, session_title.clone()).await;
             }
             // Phase 22.4 D-03/D-04: default to ratatui REPL; classic opt-out via
             // --classic-tui flag, IRONHERMES_CLASSIC_TUI=1 env var, or non-TTY.
@@ -1969,6 +2000,7 @@ async fn main() -> Result<()> {
             }
         }
         Some(Commands::Gateway { ref token, .. }) => run_gateway(&cli, token.clone()).await,
+        Some(Commands::Acp) => run_acp_command(&cli).await,
         Some(Commands::Cron { command }) => cron::handle_cron_command(command).await,
         Some(Commands::Auth { command }) => auth_cmd::handle_auth_command(command).await,
         Some(Commands::Vault { command }) => vault_cmd::handle_vault_command(command).await,
@@ -2090,7 +2122,11 @@ async fn main() -> Result<()> {
                 // Phase 21.7 Plan 08 (D-12): `-e` batch mode honors top-level
                 // `--yolo` only (no per-invocation subcommand). The config
                 // value is OR'd inside `run_single` via `resolve_yolo`.
-                run_single(&cli, prompt.clone(), cli.yolo).await
+                // Phase 50.2 Plan 02 (D-21): the top-level `-e` flag has no
+                // `--session` companion — session continuity is scoped to
+                // `chat -q --session`, the exact shape `run_bot_handoff`
+                // spawns; `-e` keeps its pre-50.2 fresh-uuid-per-call behavior.
+                run_single(&cli, prompt.clone(), cli.yolo, None).await
             } else {
                 // Bare `hermes` -> default chat REPL (ratatui per D-03, classic fallback per D-04).
                 if should_use_classic_tui(&cli) {
@@ -2331,8 +2367,399 @@ fn ensure_home_dirs() -> Result<()> {
 // processes, MCP, yolo) and supports `--all`, `--deep`, `--json` flags.
 // The dispatch arm in `main()` calls `run_status(args).await`.
 
+/// Phase 50.2 Plan 02 (D-21): bound on how many prior rows are seeded into a
+/// resumed bot session's turn. Ported verbatim from D-21's
+/// `GROUP_CHAT_HISTORY_LIMIT` (`plugin.js:3297`) — a content-shape rule (how
+/// much prior conversation the model should see) rather than a runtime-cost
+/// rule, so it carries unchanged into this crate's own resume path.
+const BOT_SESSION_HISTORY_LIMIT: usize = 24;
+
+/// Phase 50.2 Plan 02 (D-21 / RESEARCH Security V3): the two accepted shapes
+/// for a bot-scoped session title — the literal `Bot Chat` (the roster
+/// composer's one-shot sends) or `Group: <name>` (a room's per-member
+/// session), where `<name>` must satisfy the same character rules
+/// `iron_hermes_ui::server::group_chat_store::validate_group_room_name`
+/// enforces. That function is `pub(crate)` inside a different crate and
+/// cannot be imported, so its rules are ported here rather than reused.
+/// Anything else is rejected BEFORE it ever reaches `get_session_by_title` —
+/// this is the one gate that stops an arbitrary operator-supplied title from
+/// colliding with (or hijacking) an unrelated session by title string alone.
+/// Returns the trimmed, canonical title on success; the rejection message
+/// names the two accepted shapes and never echoes the rejected input back.
+fn validate_bot_session_title(title: &str) -> Result<String, String> {
+    const REJECTION: &str = "session title must be exactly \"Bot Chat\" or \"Group: <name>\" \
+        (name: 1-64 chars, letters/digits/space/dot/underscore/hyphen only, no path-traversal shapes)";
+    let trimmed = title.trim();
+    if trimmed == "Bot Chat" {
+        return Ok(trimmed.to_string());
+    }
+    let Some(name) = trimmed.strip_prefix("Group: ") else {
+        return Err(REJECTION.to_string());
+    };
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > 64 {
+        return Err(REJECTION.to_string());
+    }
+    let has_invalid_char = name
+        .chars()
+        .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-')));
+    if has_invalid_char {
+        return Err(REJECTION.to_string());
+    }
+    if name.contains("..") || name.contains('/') || name.contains('\\') || name.contains('$') {
+        return Err(REJECTION.to_string());
+    }
+    Ok(format!("Group: {name}"))
+}
+
+/// Phase 50.2 Plan 02 (D-21): resolve-or-create a session by its bot-scoped
+/// title, following `tui_rata/commands.rs`'s established
+/// lock-poisoning/try-by-id-then-by-title calling convention for
+/// `get_session_by_title`/`update_session_title`.
+///
+/// `None` -> today's pre-50.2 behavior byte for byte: a fresh uuid session,
+/// `create_session`, no title touched. `Some(title)` -> validated first
+/// (`validate_bot_session_title`; RESEARCH Security V3: an unvalidated title
+/// never reaches `get_session_by_title`), then looked up: a hit reuses that
+/// session's id, a miss creates a fresh uuid session exactly as the `None`
+/// path does and then calls `update_session_title`.
+///
+/// Returns `(session_id, is_resume)` so the caller (`run_single`'s
+/// history-seeding step) can skip the `get_messages` read entirely on a
+/// fresh session.
+fn resolve_or_create_titled_session(
+    state_store: &std::sync::Arc<std::sync::Mutex<ironhermes_state::StateStore>>,
+    model: Option<&str>,
+    workspace_root_canon: Option<&str>,
+    session_title: Option<&str>,
+) -> Result<(String, bool)> {
+    let Some(raw_title) = session_title else {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        state_store
+            .lock()
+            .map_err(|_| anyhow::anyhow!("StateStore lock poisoned"))?
+            .create_session(&session_id, "cli", model, None, None, workspace_root_canon)
+            .context("failed to create CLI session")?;
+        return Ok((session_id, false));
+    };
+    let title = validate_bot_session_title(raw_title).map_err(anyhow::Error::msg)?;
+    let mut guard = state_store
+        .lock()
+        .map_err(|_| anyhow::anyhow!("StateStore lock poisoned"))?;
+    if let Some(existing) = guard
+        .get_session_by_title(&title)
+        .context("failed to look up session by title")?
+    {
+        return Ok((existing.id, true));
+    }
+    let session_id = uuid::Uuid::new_v4().to_string();
+    guard
+        .create_session(&session_id, "cli", model, None, None, workspace_root_canon)
+        .context("failed to create CLI session")?;
+    guard
+        .update_session_title(&session_id, &title)
+        .context("failed to set session title")?;
+    Ok((session_id, false))
+}
+
+/// Phase 50.2 Plan 10 (G-1 gap closure): third deliberate isomorphic
+/// duplicate of `cli_handoff.rs`'s server-gated `strip_think_blocks` and
+/// `chat_window.rs`'s `strip_think_blocks_for_display` — this crate does not
+/// depend on `iron_hermes_ui` (crate boundary), so the algorithm is
+/// duplicated rather than shared, same precedent `chat_window.rs`'s own
+/// module doc already sets for the second copy. Same behavior on an
+/// unclosed leading tag: everything from the open tag to the end of the
+/// string is dropped rather than echoed as a dangling raw tag.
+fn strip_think_blocks_for_seeding(input: &str) -> String {
+    const OPEN: &str = "<think>";
+    const CLOSE: &str = "</think>";
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    loop {
+        match rest.find(OPEN) {
+            None => {
+                out.push_str(rest);
+                break;
+            }
+            Some(open_idx) => {
+                out.push_str(&rest[..open_idx]);
+                let after_open = &rest[open_idx + OPEN.len()..];
+                match after_open.find(CLOSE) {
+                    Some(close_idx) => {
+                        rest = &after_open[close_idx + CLOSE.len()..];
+                    }
+                    None => {
+                        // Unclosed leading tag: everything from here to the
+                        // end of the string is dropped, deliberately — never
+                        // echoed as a dangling raw tag.
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Phase 50.2 Plan 10 (G-1 gap closure): an in-progress folded turn — a role
+/// plus the list of raw text segments merged into it so far. Segments are
+/// tracked as a real `Vec<String>` rather than re-derived by splitting the
+/// joined display text on a separator: a naive `"\n\n"`-split re-parse would
+/// silently mis-detect duplicates whenever a segment's OWN text happens to
+/// contain `"\n\n"` (a multi-paragraph room-prompt wrapper, for instance) —
+/// tracking the segments themselves sidesteps that class of bug entirely.
+struct SeedTurn {
+    role: Role,
+    segments: Vec<String>,
+}
+
+impl SeedTurn {
+    fn into_chat_message(self) -> ChatMessage {
+        let text = self.segments.join("\n\n");
+        match self.role {
+            Role::User => ChatMessage::user(text),
+            Role::Assistant => ChatMessage::assistant(text),
+            _ => unreachable!("SeedTurn is only ever constructed with User/Assistant roles"),
+        }
+    }
+}
+
+/// Phase 50.2 Plan 10 (G-1 gap closure): appends `text` as a `role`-role
+/// segment onto `turns`, folding it into the previous turn when the
+/// previous turn shares the same role rather than pushing a new element —
+/// this is the fold's step-5 same-role merge rule. A segment already
+/// present verbatim in the merged turn's segment list is skipped rather
+/// than re-appended — this is what collapses N identical verbatim-repeated
+/// room-prompt wrapper rows into a single occurrence. Segments are compared
+/// as real, independently-tracked strings (never by re-splitting an
+/// already-joined display string on a separator), so the dedup check stays
+/// correct even when a segment's own text happens to contain a blank line
+/// (a multi-paragraph room-prompt wrapper, for instance) — the exact class
+/// of false-negative a joined-text-and-resplit check would silently miss.
+fn push_or_merge_segment(turns: &mut Vec<SeedTurn>, role: Role, text: String) {
+    if let Some(last) = turns.last_mut()
+        && last.role == role
+    {
+        if last.segments.iter().any(|seg| seg == &text) {
+            return;
+        }
+        last.segments.push(text);
+        return;
+    }
+    turns.push(SeedTurn { role, segments: vec![text] });
+}
+
+/// Phase 50.2 Plan 10 (G-1 gap closure): folds a window of persisted
+/// `StoredMessage` rows into a provider-valid, strictly alternating,
+/// prose-only transcript. This is what makes the seeded history something a
+/// strict provider (MiniMax-M3, per the UAT) accepts, closing the gap where
+/// `seed_history_messages` (pre-fix) concatenated `prior_rows` straight
+/// through with only a `Role::System` filter.
+///
+/// Order, matching the plan's fold spec exactly:
+/// 1. **Convert** each row via `ironhermes_state::chat_message_from_stored`
+///    — the crate's own canonical converter, called exactly as before. Not
+///    edited, not forked.
+/// 2. **Keep** only `Role::User` and `Role::Assistant`. `Role::System` is
+///    dropped (unchanged) and `Role::Tool` is now dropped too: a seeded
+///    transcript is prose-only by design, and an orphaned tool row with no
+///    paired call is rejected by strict providers.
+/// 3. **Sanitize** each surviving row's text via `MessageContent::as_text`,
+///    running assistant text through [`strip_think_blocks_for_seeding`].
+///    Rows are rebuilt with `ChatMessage::user`/`ChatMessage::assistant`
+///    rather than mutating the converted struct, so `tool_calls`/
+///    `tool_call_id`/`name` are `None` by construction — no dangling tool
+///    reference can survive the fold.
+/// 4. **Drop empties** — any row whose text is empty or whitespace-only
+///    after sanitizing. This is what removes a raw reasoning-only streaming
+///    segment: it strips to nothing.
+/// 5. **Fold same-role runs** via [`push_or_merge_segment`] — consecutive
+///    same-role rows merge into one turn (tracked as [`SeedTurn`] segments,
+///    not as re-split joined text); an already-present verbatim segment is
+///    skipped rather than duplicated.
+/// 6. **Enforce user-first** — if the folded vector's first element is an
+///    assistant message, it is dropped: a provider expects the first
+///    non-system message to come from the user, and a history window can
+///    open mid-exchange.
+///
+/// Pure and I/O-free, exactly like `seed_history_messages` was designed to
+/// be, so this stays directly unit-testable without a real `StateStore`.
+fn fold_seeded_history(prior_rows: &[ironhermes_state::StoredMessage]) -> Vec<ChatMessage> {
+    let mut folded: Vec<SeedTurn> = Vec::new();
+    for row in prior_rows {
+        let Some(converted) = ironhermes_state::chat_message_from_stored(row) else {
+            continue;
+        };
+        if converted.role != Role::User && converted.role != Role::Assistant {
+            continue;
+        }
+        let raw_text = converted
+            .content
+            .as_ref()
+            .and_then(|c| c.as_text())
+            .unwrap_or("");
+        let sanitized = if converted.role == Role::Assistant {
+            strip_think_blocks_for_seeding(raw_text)
+        } else {
+            raw_text.to_string()
+        };
+        let text = sanitized.trim();
+        if text.is_empty() {
+            continue;
+        }
+        push_or_merge_segment(&mut folded, converted.role, text.to_string());
+    }
+    if folded.first().map(|t| t.role.clone()) == Some(Role::Assistant) {
+        folded.remove(0);
+    }
+    folded.into_iter().map(SeedTurn::into_chat_message).collect()
+}
+
+/// Phase 50.2 Plan 12 (CR-01): merges a seeded trailing user row's `carried`
+/// text into an outgoing multipart (`MessageContent::Parts`) user message's
+/// parts, in place. A multipart turn is never reconstructed from
+/// [`MessageContent::as_text`] — that call keeps only the FIRST
+/// `ContentPart::Text` segment of a `Parts` value, so rebuilding a message
+/// from its output silently discards every `ContentPart::ImageUrl` part
+/// (the exact CR-01 data-loss regression). Mutating `parts` here instead
+/// preserves every non-text part verbatim, in its original relative order.
+///
+/// No-op when `carried` is empty (the fresh, zero-prior-rows path). When a
+/// `ContentPart::Text` part exists, its text is replaced with
+/// `{carried}\n\n{existing}` (mirroring `seed_history_messages`'s own
+/// text-path join) unless it is already byte-identical to `carried`, in
+/// which case it is left untouched to avoid duplicating the text. When no
+/// `ContentPart::Text` part exists at all, one carrying `carried` is
+/// inserted at index 0, so the message's `as_text()` is never empty.
+fn merge_seeded_text_into_parts(parts: &mut Vec<ContentPart>, carried: &str) {
+    if carried.is_empty() {
+        return;
+    }
+    match parts.iter_mut().find(|p| matches!(p, ContentPart::Text { .. })) {
+        Some(ContentPart::Text { text }) => {
+            if text != carried {
+                *text = format!("{carried}\n\n{text}");
+            }
+        }
+        _ => parts.insert(
+            0,
+            ContentPart::Text {
+                text: carried.to_string(),
+            },
+        ),
+    }
+}
+
+/// Phase 50.2 Plan 02 (D-21) / Plan 10 (G-1 gap closure) / Plan 12 (CR-01):
+/// builds the seeded message vector for a turn — the system message, then
+/// [`fold_seeded_history`] over up to [`BOT_SESSION_HISTORY_LIMIT`] of the
+/// most recent `prior_rows` (the window still selects the most recent rows
+/// BEFORE folding; folding may only ever REDUCE the seeded count, never
+/// raise it), then the new user message merged into the fold's own
+/// trailing user turn when one exists (so a trailing seeded user row and
+/// the new user message become one message rather than two consecutive
+/// user turns) — a plain whole-string equality check, since at this point
+/// there is exactly one candidate to compare against (the fold's already-
+/// materialized last message text), not a list of independent segments to
+/// search, so no split-based re-parse is needed here.
+///
+/// Post-condition (G-1 fix, replacing the old verbatim-concatenation
+/// behavior): the assembled vector strictly alternates role by role after
+/// the leading system message, ends on a user message, and no element's
+/// content is empty, carries a reasoning block, or carries `tool_calls` /
+/// `tool_call_id` / `name`. This is what makes the history a strict
+/// provider (MiniMax-M3, per the UAT) accepts — the pre-fix version
+/// concatenated `prior_rows` straight through and filtered only
+/// `Role::System`, which is exactly the shape that killed every resumed
+/// member turn. Pure and I/O-free so the assembly shape is directly
+/// unit-testable without a real `StateStore`: an empty `prior_rows` (the
+/// non-resumed path) degrades to the pre-50.2 exact-two-element
+/// `[system_msg, user_msg]` vector byte for byte.
+///
+/// Post-condition (CR-01 fix, Plan 12): the new user message's non-text
+/// content is preserved verbatim — a `MessageContent::Parts` value in is a
+/// `Parts` value out, carrying every `ContentPart::ImageUrl` — and the
+/// trailing seeded user row is merged INTO those parts (via
+/// [`merge_seeded_text_into_parts`]) rather than replacing them, so the
+/// alternation and non-empty post-conditions above continue to hold for an
+/// image-bearing worker turn too. The call site (main.rs:3001, in
+/// `run_single`) is unconditional — a fresh (non-resumed) kanban worker
+/// turn built by `build_worker_turn_with_images` takes this path, not only
+/// a resumed session's — so the old text-only reconstruction silently
+/// dropped every image on first send, not just on resume.
+fn seed_history_messages(
+    system_msg: ChatMessage,
+    prior_rows: &[ironhermes_state::StoredMessage],
+    mut user_msg: ChatMessage,
+) -> Vec<ChatMessage> {
+    // D-21's GROUP_CHAT_HISTORY_LIMIT (plugin.js:3297), ported verbatim: a
+    // content-shape rule bounding how much prior conversation is re-fed to
+    // the model, not a runtime-cost rule — 24 carries unchanged. The window
+    // still selects the most recent rows BEFORE folding.
+    let start = prior_rows.len().saturating_sub(BOT_SESSION_HISTORY_LIMIT);
+    let mut messages = vec![system_msg];
+    messages.extend(fold_seeded_history(&prior_rows[start..]));
+
+    if matches!(user_msg.content, Some(MessageContent::Parts(_))) {
+        // Multipart branch (CR-01): never reconstruct from `as_text` — pop
+        // the fold's trailing user row (if any) and merge its text INTO the
+        // new message's parts instead, so every non-text part survives.
+        let carried = match messages.last() {
+            Some(last) if last.role == Role::User => {
+                let text = last
+                    .content
+                    .as_ref()
+                    .and_then(|c| c.as_text())
+                    .unwrap_or("")
+                    .to_string();
+                messages.pop();
+                text
+            }
+            _ => String::new(),
+        };
+        if let Some(MessageContent::Parts(parts)) = user_msg.content.as_mut() {
+            merge_seeded_text_into_parts(parts, &carried);
+        }
+        messages.push(user_msg);
+        return messages;
+    }
+
+    let new_user_text = user_msg
+        .content
+        .as_ref()
+        .and_then(|c| c.as_text())
+        .unwrap_or("")
+        .to_string();
+    if let Some(last) = messages.last_mut()
+        && last.role == Role::User
+    {
+        let existing = last
+            .content
+            .as_ref()
+            .and_then(|c| c.as_text())
+            .unwrap_or("")
+            .to_string();
+        if existing != new_user_text {
+            let merged = if existing.is_empty() {
+                new_user_text
+            } else {
+                format!("{existing}\n\n{new_user_text}")
+            };
+            last.content = Some(MessageContent::Text(merged));
+        }
+    } else {
+        messages.push(ChatMessage::user(new_user_text));
+    }
+    messages
+}
+
 /// Run a single prompt and exit.
-async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()> {
+async fn run_single(
+    cli: &Cli,
+    prompt: String,
+    cli_yolo_flag: bool,
+    session_title: Option<String>,
+) -> Result<()> {
     let (client, mut config, resolver) = build_client(cli).await?;
 
     // Phase 36.3.7.13 D-F1: clamp inner-loop iteration cap for goal-mode workers.
@@ -2393,25 +2820,28 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         .map(Arc::new);
 
     // Per D-03: CLI shares the same state.db; per D-11: CLI uses its own Connection
-    let mut state_store =
+    let state_store =
         ironhermes_state::StateStore::open_default().context("failed to open state.db for CLI")?;
-    let session_id = uuid::Uuid::new_v4().to_string();
+    // Phase 25 fix: wrap in Arc<Mutex> so with_intercepts can share access with
+    // the session_search intercept handler (D-07 / session_search regression fix).
+    // Phase 50.2 Plan 02 (D-21): wrapped BEFORE session acquisition (not after,
+    // as pre-50.2) so resolve_or_create_titled_session can share the same
+    // Arc<Mutex> handle for its resolve-or-create-by-title lookup.
+    let state_store = std::sync::Arc::new(std::sync::Mutex::new(state_store));
     // Phase 25.3-16 CR-03: canonical_root_string for non-UTF-8 parity with the
     // prompt-line and /sessions --workspace filter (single source of truth).
     let workspace_root_canon = workspace.as_ref().map(|ws| ws.canonical_root_string());
-    state_store
-        .create_session(
-            &session_id,
-            "cli",
-            Some(client.model()),
-            None,
-            None,
-            workspace_root_canon.as_deref(),
-        )
-        .context("failed to create CLI session")?;
-    // Phase 25 fix: wrap in Arc<Mutex> so with_intercepts can share access with
-    // the session_search intercept handler (D-07 / session_search regression fix).
-    let state_store = std::sync::Arc::new(std::sync::Mutex::new(state_store));
+    // Phase 50.2 Plan 02 (D-21): resolve-or-create the session by title when
+    // `--session` was supplied; `None` reproduces the pre-50.2 fresh-uuid
+    // `create_session` call byte-for-byte. `is_resumed_session` lets the
+    // history-seeding step below skip the read entirely on a fresh session.
+    let (session_id, is_resumed_session) = resolve_or_create_titled_session(
+        &state_store,
+        Some(client.model()),
+        workspace_root_canon.as_deref(),
+        session_title.as_deref(),
+    )
+    .context("failed to resolve or create CLI session")?;
 
     // Phase 25.3 D-T-2 / D-T-3: open TrajectoryWriter at workspace-scoped or global
     // path. Path = <workspace>/.ironhermes/sessions/<id>/trajectories.jsonl when a
@@ -2621,12 +3051,26 @@ async fn run_single(cli: &Cli, prompt: String, cli_yolo_flag: bool) -> Result<()
         // unchanged non-worker / zero-image path.
         ChatMessage::user(prompt)
     };
+    // Phase 50.2 Plan 02 (D-21): read prior history BEFORE add_message appends
+    // this turn's user message below, so the new message is never duplicated
+    // into the seeded history. Skipped entirely on a fresh (non-resumed)
+    // session — seed_history_messages then degrades to the pre-50.2
+    // exact-two-element vector.
+    let prior_rows: Vec<ironhermes_state::StoredMessage> = if is_resumed_session {
+        state_store
+            .lock()
+            .unwrap()
+            .get_messages(&session_id)
+            .context("failed to read prior session history for seeding")?
+    } else {
+        Vec::new()
+    };
     state_store
         .lock()
         .unwrap()
         .add_message(&session_id, &user_msg)
         .context("failed to persist user message")?;
-    let messages = vec![system_msg, user_msg];
+    let messages = seed_history_messages(system_msg, &prior_rows, user_msg);
 
     // Phase 34a MEM-READ-05: scrub <memory-context> fence tags from streaming deltas.
     let scrubber_single = std::sync::Arc::new(std::sync::Mutex::new(
@@ -4705,6 +5149,16 @@ async fn run_agent_turn(
 }
 
 /// Start the Telegram gateway bot.
+/// Phase 36.8 (D-07): resolve config + provider resolver exactly as `run_gateway` does,
+/// then hand off to the ACP crate's stdio server entry point. By the time this runs, the
+/// `is_acp` subscriber branch above has already installed the stderr-only tracing
+/// subscriber, so nothing here (including `build_client`'s own `info!` call) can reach
+/// stdout.
+async fn run_acp_command(cli: &Cli) -> Result<()> {
+    let (_, config, resolver) = build_client(cli).await?;
+    ironhermes_acp::entry::run_acp(Arc::new(config), Arc::new(resolver)).await
+}
+
 async fn run_gateway(cli: &Cli, token_override: Option<String>) -> Result<()> {
     let (_, mut config, resolver) = build_client(cli).await?;
     // Phase 21.7 Plan 08 (D-12 / INV-21.7-05): gateway reads yolo from the
@@ -5806,6 +6260,922 @@ mod nf1_rusty_vault_log_silence_46_8_gap {
             events.iter().any(|e| e.starts_with("ironhermes::")),
             "sanity check failed: the filter suppressed everything, not just the \
              rusty_vault target: {events:?}"
+        );
+    }
+}
+
+/// Phase 50.2 Plan 02 (D-21): tests for the `--session <title>` resolve-or-create
+/// primitive, its title-namespace validator, and the pure history-seeding
+/// assembly. Module name is the `session_title` nextest filter target.
+#[cfg(test)]
+mod session_title_tests {
+    use super::*;
+
+    // -----------------------------------------------------------------
+    // validate_bot_session_title
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn validate_bot_session_title_accepts_bot_chat() {
+        assert_eq!(
+            validate_bot_session_title("Bot Chat").expect("literal Bot Chat must be accepted"),
+            "Bot Chat"
+        );
+    }
+
+    #[test]
+    fn validate_bot_session_title_accepts_group_shape() {
+        assert_eq!(
+            validate_bot_session_title("Group: standup").expect("Group: <name> must be accepted"),
+            "Group: standup"
+        );
+    }
+
+    #[test]
+    fn validate_bot_session_title_rejects_empty() {
+        assert!(validate_bot_session_title("").is_err());
+    }
+
+    #[test]
+    fn validate_bot_session_title_rejects_unrecognized_prefix() {
+        assert!(validate_bot_session_title("arbitrary operator title").is_err());
+    }
+
+    #[test]
+    fn validate_bot_session_title_rejects_invalid_group_name_chars() {
+        // Same character rules group_chat_store::validate_group_room_name
+        // enforces: no path-traversal shapes, no shell-variable shapes, no
+        // empty name half.
+        assert!(validate_bot_session_title("Group: ../../etc").is_err());
+        assert!(validate_bot_session_title("Group: $HOME").is_err());
+        assert!(validate_bot_session_title("Group: a/b").is_err());
+        assert!(validate_bot_session_title("Group: ").is_err());
+    }
+
+    #[test]
+    fn validate_bot_session_title_rejection_does_not_echo_input() {
+        let raw = "SUPER-SECRET-UNRECOGNIZED-TITLE";
+        let err = validate_bot_session_title(raw).unwrap_err();
+        assert!(
+            !err.contains(raw),
+            "rejection message must not echo the rejected input verbatim: {err}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // resolve_or_create_titled_session
+    // -----------------------------------------------------------------
+
+    fn temp_store()
+    -> (tempfile::TempDir, std::sync::Arc<std::sync::Mutex<ironhermes_state::StateStore>>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ironhermes_state::StateStore::new(tmp.path().join("state.db")).unwrap();
+        (tmp, std::sync::Arc::new(std::sync::Mutex::new(store)))
+    }
+
+    #[test]
+    fn resolve_or_create_titled_session_same_title_returns_same_id() {
+        let _lock = crate::test_env_lock();
+        let (_tmp, store) = temp_store();
+        let (id1, resumed1) =
+            resolve_or_create_titled_session(&store, Some("gpt"), None, Some("Bot Chat"))
+                .unwrap();
+        assert!(!resumed1, "first call must create, not resume");
+        let (id2, resumed2) =
+            resolve_or_create_titled_session(&store, Some("gpt"), None, Some("Bot Chat"))
+                .unwrap();
+        assert_eq!(
+            id1, id2,
+            "two resolve_or_create_titled_session calls with the title `Bot Chat` must \
+             return the SAME session id"
+        );
+        assert!(resumed2, "second call with the same title must be a resume");
+
+        let hit = store
+            .lock()
+            .unwrap()
+            .get_session_by_title("Bot Chat")
+            .unwrap();
+        assert!(
+            hit.is_some(),
+            "get_session_by_title(\"Bot Chat\") must find exactly one row"
+        );
+        assert_eq!(hit.unwrap().id, id1);
+    }
+
+    #[test]
+    fn resolve_or_create_titled_session_different_title_returns_different_id() {
+        let _lock = crate::test_env_lock();
+        let (_tmp, store) = temp_store();
+        let (id1, _) =
+            resolve_or_create_titled_session(&store, Some("gpt"), None, Some("Bot Chat"))
+                .unwrap();
+        let (id2, _) =
+            resolve_or_create_titled_session(&store, Some("gpt"), None, Some("Group: standup"))
+                .unwrap();
+        assert_ne!(
+            id1, id2,
+            "a different title must resolve to a DIFFERENT session id"
+        );
+    }
+
+    #[test]
+    fn resolve_or_create_titled_session_none_matches_pre_50_2_behavior() {
+        let _lock = crate::test_env_lock();
+        let (_tmp, store) = temp_store();
+        let (id1, resumed1) =
+            resolve_or_create_titled_session(&store, Some("gpt"), None, None).unwrap();
+        let (id2, resumed2) =
+            resolve_or_create_titled_session(&store, Some("gpt"), None, None).unwrap();
+        assert!(
+            !resumed1 && !resumed2,
+            "no --session title must never report a resume"
+        );
+        assert_ne!(
+            id1, id2,
+            "no --session title must create a fresh uuid session on every call, \
+             matching pre-50.2 behavior byte for byte"
+        );
+    }
+
+    #[test]
+    fn resolve_or_create_titled_session_rejects_invalid_title_before_lookup() {
+        let _lock = crate::test_env_lock();
+        let (_tmp, store) = temp_store();
+        let result =
+            resolve_or_create_titled_session(&store, Some("gpt"), None, Some("unnamespaced"));
+        assert!(
+            result.is_err(),
+            "an unnamespaced title must be rejected before it ever reaches \
+             get_session_by_title (RESEARCH Security V3)"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // seed_history_messages
+    // -----------------------------------------------------------------
+
+    fn plain_system_msg() -> ChatMessage {
+        ChatMessage {
+            role: Role::System,
+            content: Some(MessageContent::Text("sys".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            is_recall_context: false,
+        }
+    }
+
+    fn stored_row(id: i64, role: &str, content: &str) -> ironhermes_state::StoredMessage {
+        ironhermes_state::StoredMessage {
+            id,
+            session_id: "s".to_string(),
+            role: role.to_string(),
+            content: Some(content.to_string()),
+            tool_call_id: None,
+            tool_calls: None,
+            tool_name: None,
+            timestamp: 0.0,
+            token_count: None,
+            finish_reason: None,
+        }
+    }
+
+    /// Phase 50.2 Plan 10 (G-1 gap closure, D-24 mutation bar): asserts every
+    /// post-condition a strict provider (MiniMax-M3, per the UAT) requires of
+    /// the assembled vector. Called from EVERY test in this block, including
+    /// the ones that predate this plan, so a reverted fold turns every one of
+    /// them red rather than only the tests written for this gap.
+    /// `pub(super)` so Task 2's real-`StateStore` regression test in the
+    /// sibling `session_continuity_tests` module can reuse it rather than
+    /// writing a second copy.
+    pub(super) fn assert_provider_valid_seed_shape(messages: &[ChatMessage]) {
+        assert!(!messages.is_empty(), "assembled vector must be non-empty");
+        assert_eq!(
+            messages[0].role,
+            Role::System,
+            "element 0 must be the system message"
+        );
+        let mut expected_role = Role::User;
+        for (i, m) in messages.iter().enumerate().skip(1) {
+            assert_eq!(
+                m.role, expected_role,
+                "message {i} must be {expected_role:?} — strict alternation broken \
+                 (a strict provider rejects two consecutive same-role turns)"
+            );
+            let text = m.content.as_ref().and_then(|c| c.as_text()).unwrap_or("");
+            assert!(
+                !text.trim().is_empty(),
+                "message {i} has empty or whitespace-only content — a raw \
+                 reasoning-only row must never be seeded as an empty turn"
+            );
+            assert!(
+                !text.contains("<think>") && !text.contains("</think>"),
+                "message {i} still carries a reasoning tag — think blocks must be \
+                 stripped before a row is seeded"
+            );
+            assert!(
+                m.tool_calls.is_none(),
+                "message {i} carries tool_calls — seeded history must be prose-only"
+            );
+            assert!(
+                m.tool_call_id.is_none(),
+                "message {i} carries a dangling tool_call_id — seeded history must be prose-only"
+            );
+            assert!(
+                m.name.is_none(),
+                "message {i} carries a tool name — seeded history must be prose-only"
+            );
+            expected_role = match expected_role {
+                Role::User => Role::Assistant,
+                Role::Assistant => Role::User,
+                _ => unreachable!("expected_role only ever cycles User/Assistant"),
+            };
+        }
+        assert_eq!(
+            messages.last().unwrap().role,
+            Role::User,
+            "the seeded vector must end on the new user message"
+        );
+    }
+
+    #[test]
+    fn seed_history_messages_no_prior_rows_matches_pre_50_2_two_element_vector() {
+        let messages = seed_history_messages(plain_system_msg(), &[], ChatMessage::user("hi"));
+        assert_provider_valid_seed_shape(&messages);
+        assert_eq!(
+            messages.len(),
+            2,
+            "with no prior rows the assembled vector must have exactly 2 elements, \
+             proving the pre-existing (no --session) path is unchanged"
+        );
+    }
+
+    #[test]
+    fn seed_history_messages_seeds_prior_exchange_ahead_of_new_user_message() {
+        let prior = vec![
+            stored_row(1, "user", "first question"),
+            stored_row(2, "assistant", "first reply"),
+        ];
+        let messages = seed_history_messages(
+            plain_system_msg(),
+            &prior,
+            ChatMessage::user("second question"),
+        );
+        assert_provider_valid_seed_shape(&messages);
+        assert_eq!(messages.len(), 4, "system + 2 prior rows + new user message");
+        assert_eq!(messages[0].role, Role::System);
+        assert_eq!(messages[1].role, Role::User);
+        assert_eq!(messages[2].role, Role::Assistant);
+        assert_eq!(messages[3].role, Role::User);
+        assert_eq!(
+            messages[1].content.as_ref().and_then(|c| c.as_text()),
+            Some("first question"),
+            "seeded vector must contain the prior user message ahead of the new one"
+        );
+        assert_eq!(
+            messages[2].content.as_ref().and_then(|c| c.as_text()),
+            Some("first reply"),
+            "seeded vector must contain the prior assistant reply — this is the assertion \
+             that fails if the seeding half is reverted while resume is kept"
+        );
+        assert_eq!(
+            messages[3].content.as_ref().and_then(|c| c.as_text()),
+            Some("second question")
+        );
+    }
+
+    #[test]
+    fn seed_history_messages_drops_stored_system_role_rows() {
+        let prior = vec![stored_row(1, "system", "should not duplicate")];
+        let messages =
+            seed_history_messages(plain_system_msg(), &prior, ChatMessage::user("q"));
+        assert_provider_valid_seed_shape(&messages);
+        assert_eq!(
+            messages.len(),
+            2,
+            "a stored system-role row must not be seeded a second time alongside system_msg"
+        );
+    }
+
+    /// Rewritten for G-1 (was `..._maps_every_valid_role_and_drops_unknown`,
+    /// which asserted a `tool` row SURVIVED at index 3 with length 5 — that
+    /// assertion encoded the pre-fix defect. A strict provider rejects an
+    /// orphaned tool row with no paired call, so `fold_seeded_history` now
+    /// drops `Role::Tool` the same way it already dropped `Role::System`;
+    /// only the unknown `bogus-role` row (which `chat_message_from_stored`
+    /// already returned `None` for) and the tool row are gone from the
+    /// seeded vector.
+    #[test]
+    fn seed_history_messages_maps_every_valid_role_and_drops_tool_and_unknown() {
+        let prior = vec![
+            stored_row(1, "user", "u"),
+            stored_row(2, "assistant", "a"),
+            stored_row(3, "tool", "t"),
+            stored_row(4, "bogus-role", "dropped"),
+        ];
+        let messages = seed_history_messages(plain_system_msg(), &prior, ChatMessage::user("q"));
+        assert_provider_valid_seed_shape(&messages);
+        // system + user + assistant + new user == 4 (tool row AND bogus-role
+        // both dropped — the tool row is the G-1 fix, not the pre-fix defect
+        // this test used to encode).
+        assert_eq!(
+            messages.len(),
+            4,
+            "a tool-role row must be DROPPED from the seeded vector — an orphaned tool \
+             row with no paired call is rejected by a strict provider (G-1)"
+        );
+        assert_eq!(messages[1].role, Role::User);
+        assert_eq!(messages[2].role, Role::Assistant);
+        assert_eq!(
+            messages[3].role,
+            Role::User,
+            "the tool row must not survive between the assistant reply and the new user turn"
+        );
+    }
+
+    /// Rewritten for G-1 (was `..._bounds_to_history_limit_taking_most_recent`).
+    /// The window still opens on `msg-5` (an assistant row, since the fixture
+    /// alternates starting on `user` at index 0), but step 6's user-first
+    /// rule now drops that leading assistant row, shortening the folded
+    /// count by one; the window's OWN LAST row (`msg-28`, a user row, since
+    /// an odd-length window flips role by the end) then merges with the new
+    /// user message via the same trailing same-role merge rule — shortening
+    /// the total by one more. The real point of the test (the window takes
+    /// the MOST RECENT rows, never the oldest) is preserved: the surviving
+    /// vector starts on `msg-6`.
+    #[test]
+    fn seed_history_messages_bounds_to_history_limit_taking_most_recent() {
+        let mut prior = Vec::new();
+        for i in 0..(BOT_SESSION_HISTORY_LIMIT + 5) {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            prior.push(stored_row(i as i64, role, &format!("msg-{i}")));
+        }
+        let messages = seed_history_messages(plain_system_msg(), &prior, ChatMessage::user("new"));
+        assert_provider_valid_seed_shape(&messages);
+        // system + (BOT_SESSION_HISTORY_LIMIT - 1) folded rows (the window's
+        // leading assistant row, msg-5, is dropped by the user-first rule);
+        // the new user message then merges into the folded vector's own
+        // trailing user row (msg-28) rather than adding a 25th element.
+        assert_eq!(messages.len(), BOT_SESSION_HISTORY_LIMIT);
+        // The oldest 6 rows (msg-0..msg-5) must have been dropped — only the
+        // most recent BOT_SESSION_HISTORY_LIMIT rows entered the window, and
+        // the window's own leading assistant row (msg-5) is then dropped by
+        // the user-first rule, so the first surviving row is msg-6.
+        assert_eq!(
+            messages[1].content.as_ref().and_then(|c| c.as_text()),
+            Some("msg-6"),
+            "seeded history must take the MOST RECENT rows, not the oldest, and the \
+             window's own leading assistant row must be dropped by the user-first rule"
+        );
+        let last_text = messages.last().and_then(|m| m.content.as_ref()).and_then(|c| c.as_text()).unwrap_or("");
+        assert!(
+            last_text.contains("msg-28") && last_text.contains("new"),
+            "the new user message must merge with the window's own trailing user row \
+             (msg-28) rather than appear as a separate consecutive user turn: {last_text}"
+        );
+    }
+
+    #[test]
+    fn seed_history_messages_folds_consecutive_same_role_different_text_into_one_message() {
+        let prior = vec![
+            stored_row(1, "user", "part one"),
+            stored_row(2, "user", "part two"),
+            stored_row(3, "assistant", "reply"),
+        ];
+        let messages = seed_history_messages(plain_system_msg(), &prior, ChatMessage::user("q"));
+        assert_provider_valid_seed_shape(&messages);
+        assert_eq!(
+            messages.len(),
+            4,
+            "system + 1 folded user message (both segments) + assistant + new user"
+        );
+        let folded_text = messages[1].content.as_ref().and_then(|c| c.as_text()).unwrap_or("");
+        assert!(
+            folded_text.contains("part one") && folded_text.contains("part two"),
+            "consecutive same-role rows with DIFFERENT text must fold into one message \
+             carrying both segments: {folded_text}"
+        );
+    }
+
+    #[test]
+    fn seed_history_messages_folds_consecutive_identical_user_rows_into_one_occurrence() {
+        let fixture = "identical wrapper text";
+        let prior = vec![
+            stored_row(1, "user", fixture),
+            stored_row(2, "user", fixture),
+            stored_row(3, "user", fixture),
+        ];
+        let messages =
+            seed_history_messages(plain_system_msg(), &prior, ChatMessage::user("new query"));
+        assert_provider_valid_seed_shape(&messages);
+        let text = messages[1].content.as_ref().and_then(|c| c.as_text()).unwrap_or("");
+        assert_eq!(
+            text.matches(fixture).count(),
+            1,
+            "3 consecutive identical user rows must dedupe to ONE occurrence of the text, \
+             not be concatenated 3 times: {text}"
+        );
+    }
+
+    #[test]
+    fn seed_history_messages_strips_reasoning_block_keeps_prose_from_mixed_assistant_row() {
+        let prior = vec![
+            stored_row(1, "user", "question"),
+            stored_row(
+                2,
+                "assistant",
+                "<think>internal deliberation, never seeded</think>the real answer",
+            ),
+        ];
+        let messages = seed_history_messages(plain_system_msg(), &prior, ChatMessage::user("q"));
+        assert_provider_valid_seed_shape(&messages);
+        let text = messages[2].content.as_ref().and_then(|c| c.as_text()).unwrap_or("");
+        assert_eq!(
+            text, "the real answer",
+            "an assistant row mixing a reasoning block with real prose must seed with \
+             the prose only: got {text:?}"
+        );
+    }
+
+    #[test]
+    fn seed_history_messages_drops_a_row_that_strips_to_empty() {
+        // The empty-stripping assistant row sits between a user row and
+        // ANOTHER assistant row (not another user row), so its removal is
+        // observable independent of the same-role merge rule: if it were
+        // seeded as an empty turn, the vector would break strict
+        // alternation (two assistant-shaped elements back to back); dropped
+        // correctly, the surviving assistant row simply merges forward with
+        // the later real-prose assistant row like any same-role run would.
+        let prior = vec![
+            stored_row(1, "user", "first question"),
+            stored_row(2, "assistant", "<think>only reasoning, nothing else</think>"),
+            stored_row(3, "assistant", "real answer"),
+        ];
+        let messages = seed_history_messages(plain_system_msg(), &prior, ChatMessage::user("q"));
+        assert_provider_valid_seed_shape(&messages);
+        assert_eq!(
+            messages.len(),
+            4,
+            "a row that strips to empty must be DROPPED entirely, not seeded as an \
+             empty turn: system + user(first question) + assistant(real answer, the \
+             empty row contributes nothing) + new user(q)"
+        );
+        let text = messages[2].content.as_ref().and_then(|c| c.as_text()).unwrap_or("");
+        assert_eq!(
+            text, "real answer",
+            "the empty-stripping row must contribute nothing to the surviving \
+             assistant message: got {text:?}"
+        );
+    }
+
+    #[test]
+    fn seed_history_messages_window_opening_on_assistant_row_seeds_user_first() {
+        // The dropped leading assistant row is followed by a user row and
+        // THEN an assistant reply (not directly by the new user message),
+        // so the assertion on the surviving user row's exact text is
+        // observable independent of the trailing same-role merge rule.
+        let prior = vec![
+            stored_row(1, "assistant", "leading assistant row, window opens here"),
+            stored_row(2, "user", "first surviving row"),
+            stored_row(3, "assistant", "assistant reply"),
+        ];
+        let messages = seed_history_messages(plain_system_msg(), &prior, ChatMessage::user("q"));
+        assert_provider_valid_seed_shape(&messages);
+        assert_eq!(
+            messages[1].role,
+            Role::User,
+            "a window opening on an assistant row must drop that leading row so the \
+             first message after the system message is always a user message"
+        );
+        assert_eq!(
+            messages[1].content.as_ref().and_then(|c| c.as_text()),
+            Some("first surviving row"),
+            "the leading assistant row must be dropped entirely, not merged forward"
+        );
+    }
+
+    /// Phase 50.2 Plan 10 (G-1 gap closure, D-24 mutation bar): reproduces the
+    /// exact persisted row shape from `profiles/zig/state.db`, session
+    /// `29cb77f4-a224-470a-bc8c-e179c2608395` (50.2-UAT-EVIDENCE.md §4 F-1) —
+    /// 8 consecutive assistant rows that are raw `<think>` streaming
+    /// segments, followed by 4 consecutive user rows carrying the same
+    /// room-prompt wrapper verbatim. MiniMax-M3 rejected this non-alternating,
+    /// think-only history outright; this test is RED against the pre-fix
+    /// `seed_history_messages` (verbatim role-filter only) and GREEN once
+    /// `fold_seeded_history` folds it.
+    #[test]
+    fn seed_history_messages_uat_29cb77f4_folds_reasoning_and_repeated_wrapper_to_two_elements()
+     {
+        let wrapper = "Room: zigs-of-ziggy\n\nzig-judge: what's the verdict?";
+        let mut prior = Vec::new();
+        for i in 0..8 {
+            prior.push(stored_row(
+                i,
+                "assistant",
+                &format!("<think>reasoning segment {i} — never real prose</think>"),
+            ));
+        }
+        for i in 8..12 {
+            prior.push(stored_row(i, "user", wrapper));
+        }
+        let messages =
+            seed_history_messages(plain_system_msg(), &prior, ChatMessage::user(wrapper));
+        assert_provider_valid_seed_shape(&messages);
+        assert_eq!(
+            messages.len(),
+            2,
+            "UAT session 29cb77f4-a224-470a-bc8c-e179c2608395: all 8 reasoning-only \
+             assistant rows must strip to empty and drop, and the 4 identical wrapper \
+             rows must dedupe/merge with the new user message into ONE element — result \
+             must be exactly [system, user]"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // seed_history_messages — CR-01 (Phase 50.2 Plan 12): the image-part
+    // data-loss regression the G-1 fix introduced. `seed_history_messages`
+    // reconstructed the new user message from `MessageContent::as_text`,
+    // which keeps only the first `ContentPart::Text` segment of a `Parts`
+    // value — every `ContentPart::ImageUrl` was silently discarded. These
+    // three tests assert the resulting message SHAPE (including the
+    // surviving image part), per D-24's mutation bar, and were shown RED
+    // against the pre-fix body before the fix landed.
+    // -----------------------------------------------------------------
+
+    fn image_user_msg(prompt: &str) -> ChatMessage {
+        build_worker_turn_with_images(
+            prompt,
+            &[(
+                vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+                "cat.png".to_string(),
+            )],
+        )
+    }
+
+    #[test]
+    fn seed_history_messages_preserves_image_parts_on_a_fresh_worker_turn() {
+        let messages =
+            seed_history_messages(plain_system_msg(), &[], image_user_msg("describe this"));
+        assert_eq!(
+            messages.len(),
+            2,
+            "fresh (zero prior rows) path must return exactly [system_msg, user_msg]"
+        );
+        assert_eq!(messages[1].role, Role::User);
+        let parts = match messages[1].content.as_ref() {
+            Some(MessageContent::Parts(parts)) => parts,
+            other => panic!("expected MessageContent::Parts, got {other:?}"),
+        };
+        let has_image = parts.iter().any(|p| match p {
+            ContentPart::ImageUrl { image_url } => {
+                assert!(
+                    image_url.url.starts_with("data:image/png;base64,"),
+                    "image url must start with data:image/png;base64, got {}",
+                    image_url.url
+                );
+                true
+            }
+            _ => false,
+        });
+        assert!(
+            has_image,
+            "expected at least one ContentPart::ImageUrl to survive"
+        );
+        let first_text = parts.iter().find_map(|p| match p {
+            ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        });
+        assert_eq!(
+            first_text,
+            Some("describe this"),
+            "the first ContentPart::Text part's text must be exactly the prompt, untouched"
+        );
+    }
+
+    #[test]
+    fn seed_history_messages_merges_trailing_user_row_into_an_image_turn_without_dropping_the_image()
+     {
+        let prior = vec![
+            stored_row(1, "user", "first question"),
+            stored_row(2, "assistant", "first reply"),
+            stored_row(3, "user", "room wrapper"),
+        ];
+        let messages =
+            seed_history_messages(plain_system_msg(), &prior, image_user_msg("describe this"));
+        assert_provider_valid_seed_shape(&messages);
+        assert_eq!(
+            messages.len(),
+            4,
+            "trailing seeded user row must MERGE into the image turn, not produce two \
+             consecutive user turns — expected [system, user, assistant, user]"
+        );
+        for (i, m) in messages.iter().enumerate() {
+            if i == messages.len() - 1 {
+                continue;
+            }
+            assert!(
+                !matches!(m.content, Some(MessageContent::Parts(_))),
+                "message {i} must not carry MessageContent::Parts — only the last (new user) \
+                 message may carry parts"
+            );
+        }
+        let last = messages.last().unwrap();
+        let parts = match last.content.as_ref() {
+            Some(MessageContent::Parts(parts)) => parts,
+            other => panic!(
+                "expected the last message to carry MessageContent::Parts, got {other:?}"
+            ),
+        };
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, ContentPart::ImageUrl { .. })),
+            "the ContentPart::ImageUrl must survive the merge"
+        );
+        let first_text = parts.iter().find_map(|p| match p {
+            ContentPart::Text { text } => Some(text.as_str()),
+            _ => None,
+        });
+        assert_eq!(
+            first_text,
+            Some("room wrapper\n\ndescribe this"),
+            "the seeded trailing user row's text must be merged ahead of the prompt, \
+             joined by a blank line, matching the existing text-path join"
+        );
+    }
+
+    #[test]
+    fn seed_history_messages_image_only_parts_turn_still_carries_the_seeded_user_text() {
+        let image_only_msg = ChatMessage {
+            role: Role::User,
+            content: Some(MessageContent::Parts(vec![ContentPart::ImageUrl {
+                image_url: ImageUrl {
+                    url: "data:image/png;base64,AAAA".to_string(),
+                    detail: None,
+                },
+            }])),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            is_recall_context: false,
+        };
+        let prior = vec![stored_row(1, "user", "room wrapper")];
+        let messages = seed_history_messages(plain_system_msg(), &prior, image_only_msg);
+        assert_provider_valid_seed_shape(&messages);
+        let last = messages.last().unwrap();
+        let parts = match last.content.as_ref() {
+            Some(MessageContent::Parts(parts)) => parts,
+            other => panic!(
+                "expected the last message to carry MessageContent::Parts, got {other:?}"
+            ),
+        };
+        assert!(
+            parts
+                .iter()
+                .any(|p| matches!(p, ContentPart::ImageUrl { .. })),
+            "the ContentPart::ImageUrl must survive"
+        );
+    }
+}
+
+/// Phase 50.2 Plan 02 (D-21) Task 3: an end-to-end regression test that would
+/// have caught the exact failure mode this plan exists to prevent — a resume
+/// that persists rows but shows the model nothing. Drives
+/// `resolve_or_create_titled_session` and `seed_history_messages` against a
+/// REAL temp-dir `StateStore` (never a stub) across two simulated turns with
+/// the title `Group: standup`, exactly the shape `dispatch_group_round_impl`
+/// spawns for a room. Module name is the `session_continuity` nextest
+/// filter target.
+#[cfg(test)]
+mod session_continuity_tests {
+    use super::*;
+
+    /// The named contract this test protects: a resumed session's prior
+    /// exchange must reach the SECOND turn's assembled message vector, not
+    /// merely accumulate as rows in `state.db`. Three independent
+    /// assertions, each naming which half broke if it fails.
+    #[test]
+    fn resumed_group_session_seeds_prior_exchange_into_the_next_turns_prompt() {
+        let _lock = crate::test_env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let store =
+            ironhermes_state::StateStore::new(tmp.path().join("state.db")).unwrap();
+        let store = std::sync::Arc::new(std::sync::Mutex::new(store));
+        let title = "Group: standup";
+
+        // --- Turn 1: resolve-or-create (a miss -> fresh session), record a
+        // user message and an assistant reply, exactly what run_single does
+        // around the child's own two-message chat -q reply cycle. ---
+        let (session_id_1, resumed_1) =
+            resolve_or_create_titled_session(&store, Some("gpt"), None, Some(title)).unwrap();
+        assert!(!resumed_1, "turn 1 must create, not resume — no prior row exists yet");
+        {
+            let mut guard = store.lock().unwrap();
+            guard
+                .add_message(&session_id_1, &ChatMessage::user("what's the plan?"))
+                .unwrap();
+            guard
+                .add_message(&session_id_1, &ChatMessage::assistant("ship the tracer first"))
+                .unwrap();
+        }
+
+        // --- Turn 2: resolve the SAME title, read prior history, assemble
+        // the next turn's message vector — mirroring run_single's own
+        // read-then-add_message-then-seed_history_messages ordering. ---
+        let (session_id_2, resumed_2) =
+            resolve_or_create_titled_session(&store, Some("gpt"), None, Some(title)).unwrap();
+        let prior_rows = store.lock().unwrap().get_messages(&session_id_2).unwrap();
+        let turn_2_user_msg = ChatMessage::user("did it ship?");
+        let messages = seed_history_messages(plain_system_msg(), &prior_rows, turn_2_user_msg);
+
+        // Assertion 1: exactly one session row carries the title — proves
+        // the resolve-or-create half (not a second, competing session).
+        assert_eq!(
+            session_id_1, session_id_2,
+            "ASSERTION 1 (resolve-or-create half broken): two resolve_or_create_titled_session \
+             calls with the same title must return the SAME session id"
+        );
+        assert!(resumed_2, "turn 2 must be a resume — turn 1's session row already exists");
+        let all_rows_for_title = {
+            let guard = store.lock().unwrap();
+            guard.get_session_by_title(title).unwrap()
+        };
+        assert!(
+            all_rows_for_title.is_some() && all_rows_for_title.unwrap().id == session_id_1,
+            "ASSERTION 1 (resolve-or-create half broken): get_session_by_title must resolve \
+             to exactly the one session both turns share"
+        );
+
+        // Assertion 2: turn 2's assembled vector contains turn 1's user text
+        // AND turn 1's assistant text — THIS is the assertion that fails if
+        // the seeding half is ever removed while the resume half is kept
+        // (rows accumulate in state.db, but the model never sees them: the
+        // exact inert-resume failure mode this plan exists to prevent).
+        let seeded_texts: Vec<&str> = messages
+            .iter()
+            .filter_map(|m| m.content.as_ref().and_then(|c| c.as_text()))
+            .collect();
+        assert!(
+            seeded_texts.contains(&"what's the plan?"),
+            "ASSERTION 2 (seeding half broken — INERT RESUME): turn 2's assembled vector must \
+             contain turn 1's user message. Got: {seeded_texts:?}"
+        );
+        assert!(
+            seeded_texts.contains(&"ship the tracer first"),
+            "ASSERTION 2 (seeding half broken — INERT RESUME): turn 2's assembled vector must \
+             contain turn 1's assistant reply. Got: {seeded_texts:?}"
+        );
+
+        // Assertion 3: turn 2's assembled vector ends with turn 2's own new
+        // user message — proves the new turn is appended AFTER the seeded
+        // history, never interleaved or dropped.
+        let last = messages.last().expect("assembled vector must be non-empty");
+        assert_eq!(
+            last.role,
+            Role::User,
+            "ASSERTION 3 (turn ordering broken): the last message must be the new user turn"
+        );
+        assert_eq!(
+            last.content.as_ref().and_then(|c| c.as_text()),
+            Some("did it ship?"),
+            "ASSERTION 3 (turn ordering broken): the last message must be turn 2's OWN new \
+             user message, not a stale/seeded one"
+        );
+    }
+
+    fn plain_system_msg() -> ChatMessage {
+        ChatMessage {
+            role: Role::System,
+            content: Some(MessageContent::Text("sys".to_string())),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            is_recall_context: false,
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 50.2 Plan 10 (G-1 gap closure): real-StateStore regression
+    // reproducing the UAT's own forensics. The stub-worker suite that
+    // shipped this phase cannot spawn a real subprocess against a real
+    // provider, which is exactly why a fully green suite coexisted with a
+    // phase-blocking runtime failure (session 29cb77f4-a224-470a-bc8c-
+    // e179c2608395). This test reproduces the provider's own validity rule
+    // (strict role alternation, non-empty contents, no orphaned tool rows)
+    // in-process against a REAL persisted row shape, so the next regression
+    // is caught by CI rather than by an operator. Deliberately no live-
+    // provider network test: the rule enforced here is a static property of
+    // the assembled vector, and the live MiniMax round trip is re-run by
+    // the operator during the deferred UAT re-verification.
+    // -----------------------------------------------------------------
+
+    /// Persists the UAT's own recorded row shape (`50.2-UAT-EVIDENCE.md` §4
+    /// F-1, session `29cb77f4-a224-470a-bc8c-e179c2608395`, `message_count:
+    /// 14`) through a REAL `StateStore`: a genuine first exchange (user
+    /// question + assistant prose reply), then 8 assistant rows that are
+    /// nothing but a reasoning block (varied inner text so a naive dedupe
+    /// cannot mask the bug), then 4 user rows carrying the same room-prompt
+    /// wrapper verbatim — 14 rows total, matching the UAT's own
+    /// `message_count`. Reads them back with `get_messages`, then assembles
+    /// turn N+1 through `seed_history_messages` with a fresh user message,
+    /// mirroring `run_single`'s read-then-`add_message`-then-seed ordering.
+    #[test]
+    fn resumed_group_session_seeds_the_uat_shaped_history_into_a_provider_valid_vector() {
+        let _lock = crate::test_env_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let store =
+            ironhermes_state::StateStore::new(tmp.path().join("state.db")).unwrap();
+        let store = std::sync::Arc::new(std::sync::Mutex::new(store));
+        let title = "Group: standup";
+        let wrapper = "Room: zigs-of-ziggy\n\nzig-judge: what's the verdict this round?";
+        let prose_reply = "the deploy is green, ship it";
+
+        let (session_id, resumed) =
+            resolve_or_create_titled_session(&store, Some("gpt"), None, Some(title)).unwrap();
+        assert!(!resumed, "fresh session — no prior row exists yet");
+        {
+            let mut guard = store.lock().unwrap();
+            // A genuine first exchange, exactly what a working turn 1 persists.
+            guard
+                .add_message(&session_id, &ChatMessage::user("what's the plan?"))
+                .unwrap();
+            guard
+                .add_message(&session_id, &ChatMessage::assistant(prose_reply))
+                .unwrap();
+            // 8 consecutive reasoning-only assistant rows — the UAT's own
+            // forensics (each a raw <think> streaming segment, tool calls
+            // not interleaved). Inner text varies so a naive dedupe cannot
+            // mask this bug the way it would with identical text.
+            for i in 0..8 {
+                guard
+                    .add_message(
+                        &session_id,
+                        &ChatMessage::assistant(format!(
+                            "<think>reasoning segment {i} — never real prose</think>"
+                        )),
+                    )
+                    .unwrap();
+            }
+            // 4 consecutive user rows carrying the same room-prompt wrapper
+            // verbatim — the UAT's own forensics.
+            for _ in 0..4 {
+                guard.add_message(&session_id, &ChatMessage::user(wrapper)).unwrap();
+            }
+        }
+
+        let prior_rows = store.lock().unwrap().get_messages(&session_id).unwrap();
+        assert!(
+            prior_rows.len() >= 13,
+            "fixture must persist at least 13 rows (2 real exchange + 8 reasoning + 4 \
+             wrapper) to reproduce the UAT's own message_count: 14 shape; got {}",
+            prior_rows.len()
+        );
+
+        let messages = seed_history_messages(
+            plain_system_msg(),
+            &prior_rows,
+            ChatMessage::user("new round: any blockers?"),
+        );
+
+        // Assertion 1: the assembled vector satisfies the shape a strict
+        // provider (MiniMax-M3) requires.
+        super::session_title_tests::assert_provider_valid_seed_shape(&messages);
+
+        // Assertion 2: the fold actually collapsed rows — proving the fix
+        // is doing real work, not merely passing rows through.
+        assert!(
+            messages.len() < prior_rows.len(),
+            "ASSERTION 2 (fold not collapsing): the seeded vector ({} elements) must be \
+             strictly shorter than the persisted row count ({}) — the 8 reasoning-only \
+             rows must strip to empty and the 4 identical wrapper rows must dedupe",
+            messages.len(),
+            prior_rows.len()
+        );
+
+        // Assertion 3: the bot's own last real (non-reasoning) reply text
+        // survived the fold — the fold removes noise without erasing
+        // memory, which is the whole point of D-21's resume.
+        let seeded_texts: Vec<&str> = messages
+            .iter()
+            .filter_map(|m| m.content.as_ref().and_then(|c| c.as_text()))
+            .collect();
+        assert!(
+            seeded_texts.iter().any(|t| t.contains(prose_reply)),
+            "ASSERTION 3 (memory erased by the fold): the bot's own real prose reply must \
+             survive in the seeded vector. Got: {seeded_texts:?}"
+        );
+
+        // Assertion 4: the repeated room-prompt wrapper appears exactly
+        // once across the whole assembled vector — proving the dedupe
+        // collapsed 4 verbatim occurrences into 1, not 0 (erased) or 4
+        // (unfolded).
+        let concatenated: String = seeded_texts.join("\x1e");
+        assert_eq!(
+            concatenated.matches(wrapper).count(),
+            1,
+            "ASSERTION 4 (dedupe wrong): the room-prompt wrapper must appear EXACTLY ONCE \
+             across the assembled vector's texts. Got: {seeded_texts:?}"
         );
     }
 }

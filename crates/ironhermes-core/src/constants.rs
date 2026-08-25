@@ -11,7 +11,7 @@ pub const NOUS_API_CHAT_URL: &str = "https://inference-api.nousresearch.com/v1/c
 
 pub const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 
-pub const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-4";
+pub const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-5";
 // Lowered from 90 to bound the worst case when a small parent model loops on
 // failed tool calls / delegations (see runaway-delegation guard in AgentLoop).
 pub const DEFAULT_MAX_ITERATIONS: usize = 50;

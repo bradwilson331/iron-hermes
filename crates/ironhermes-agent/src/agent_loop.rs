@@ -19,7 +19,9 @@ use crate::budget::{BudgetHandle, PressureTier, advisory_text};
 use crate::client::{StreamEvent, ToolCallDelta};
 use crate::context_compressor::{ContextCompressor, estimate_messages_tokens};
 use crate::context_engine::{ContextEngine, ContextStats};
-use crate::error_classifier::{ProviderError, classify_llm_error_typed};
+use crate::error_classifier::{
+    FallbackRootCause, ProviderError, classify_llm_error_typed, describe_provider_chain_failure,
+};
 use crate::memory::MemoryManager;
 use crate::pressure_warning::PressureTracker;
 use crate::rate_limit_tracker::{RateLimitTracker, hash_api_key};
@@ -168,7 +170,14 @@ pub type ToolProgressCallback = Box<dyn Fn(&str, &str) + Send + Sync>;
 /// (success OR failure), matching the 6 fire_hook(HookEventKind::ToolCompleted)
 /// sites in execute_tool_call. Consumed by the tui_rata REPL to emit
 /// StreamEvent::ToolResult { name, ok } to the UI event loop. `bool` = success.
-pub type ToolResultCallback = Box<dyn Fn(&str, bool) + Send + Sync>;
+///
+/// Phase 36.8 Plan 05 (CLI-07): the third parameter carries the tool's real result text
+/// (the success `String` or the formatted error string on every failure/block path) so
+/// `ironhermes-acp`'s `AcpEventBridge` can render actual captured output into the ACP
+/// `tool_call_update` content instead of an opaque "it ran" signal. Existing callers that
+/// only care about the name/success pair simply ignore the new parameter — every call
+/// site already has the output string in scope where this fires.
+pub type ToolResultCallback = Box<dyn Fn(&str, bool, &str) + Send + Sync>;
 
 /// The main agent loop that orchestrates LLM calls and tool execution.
 pub struct AgentLoop {
@@ -220,6 +229,13 @@ pub struct AgentLoop {
     /// primary's. `None` when no fallback is configured or when `with_fallback`
     /// (unnamed variant) was used — leaves provider_name unchanged on failover.
     fallback_provider_name: Option<String>,
+    /// Quick task 260819-rkz (RKZ-B): identity of the primary provider's
+    /// failure that CAUSED failover, captured at failover time. `self`-scoped
+    /// (not turn-scoped) for the same reason `fallback_activated` is — the
+    /// degraded-chain state outlives a single turn, so on turn 2+ the
+    /// eventual terminal error can still attribute back to the ORIGINAL
+    /// primary failure. Written exactly once, at failover; never cleared.
+    fallback_root_cause: Option<FallbackRootCause>,
     /// Progressive subdirectory context discovery (CTX-03/CTX-04).
     /// When set, file-access tools trigger context file discovery.
     subdir_discovery: Option<Arc<std::sync::Mutex<SubdirDiscovery>>>,
@@ -340,6 +356,40 @@ pub struct AgentLoop {
     session_has_prior_turns: bool,
 }
 
+/// Maximum number of LLM-call retries for a normal (non-degraded) leg of the
+/// retry/fallback loop. Promoted out of the turn loop (quick task
+/// 260819-rkz, RKZ-A) so it is reachable from the pure, unit-testable
+/// [`leg_retry_budget`]. Value and meaning unchanged from the previous
+/// turn-local `const MAX_RETRIES: usize = 3;`.
+const NORMAL_LLM_CALL_MAX_RETRIES: usize = 3;
+
+/// Reduced retry budget applied to the fallback leg after failover was
+/// caused by a non-retryable primary failure (quick task 260819-rkz, RKZ-A,
+/// D-05).
+///
+/// The chain is already known-broken and its error is about to be reported
+/// to the operator — a second and third retry against the SAME already-known
+/// non-retryable failure class can only buy delay in front of a message the
+/// operator must act on. One retry is kept (not zero) because the fallback
+/// is a *different* endpoint that has not yet had a chance to show a
+/// transient blip of its own: "primary key expired, secondary provider
+/// healthy but momentarily 503" deserves one cheap retry before giving up.
+const FALLBACK_AFTER_TERMINAL_MAX_RETRIES: usize = 1;
+
+/// Pure, side-effect-free retry-budget selector (quick task 260819-rkz,
+/// RKZ-A). Returns [`FALLBACK_AFTER_TERMINAL_MAX_RETRIES`] when
+/// `root_is_terminal` (the fallback leg is running after a non-retryable
+/// primary failure), otherwise [`NORMAL_LLM_CALL_MAX_RETRIES`] — the
+/// unchanged normal maximum, preserving today's behavior exactly for
+/// genuinely-transient primary failures (D-06).
+fn leg_retry_budget(root_is_terminal: bool) -> usize {
+    if root_is_terminal {
+        FALLBACK_AFTER_TERMINAL_MAX_RETRIES
+    } else {
+        NORMAL_LLM_CALL_MAX_RETRIES
+    }
+}
+
 impl AgentLoop {
     pub fn new(
         client: AnyClient,
@@ -369,6 +419,7 @@ impl AgentLoop {
             fallback_client: None,
             fallback_activated: false,
             fallback_provider_name: None,
+            fallback_root_cause: None,
             subdir_discovery: None,
             state_store: None,
             context_engine: None,
@@ -1077,6 +1128,53 @@ impl AgentLoop {
         crate::error_classifier::classify_llm_error_typed(err).into()
     }
 
+    /// Quick task 260819-rkz (RKZ-A/RKZ-B): is the recorded fallback root
+    /// cause a NON-retryable primary failure?
+    ///
+    /// True only when a root cause has been recorded AND that root cause's
+    /// `should_retry()` is `false` (e.g. `Auth`, `Billing`, `ModelNotFound`,
+    /// `SchemaInvalid`, `ContextLength`). This is the single predicate that
+    /// gates both halves of the RKZ fix: whether the fallback leg gets a
+    /// reduced retry budget (`leg_retry_budget`, quick task 260819-rkz Task
+    /// 2) and whether the terminal error is rewrapped to lead with the root
+    /// cause (`attribute_chain_failure`, below). A `RateLimited` or `Server`
+    /// root leaves both untouched — genuinely-transient primary failures
+    /// keep today's behavior byte-identical.
+    fn fallback_root_is_terminal(&self) -> bool {
+        self.fallback_root_cause
+            .as_ref()
+            .is_some_and(|root| !root.kind.should_retry())
+    }
+
+    /// Quick task 260819-rkz (RKZ-B): rewrap the terminal error returned
+    /// from `run()` so its `{:#}` rendering leads with the ROOT cause
+    /// instead of the fallback's own (often more confusing) symptom.
+    ///
+    /// Returns `err` completely untouched unless `fallback_root_is_terminal()`
+    /// is true. Otherwise emits one `warn!` carrying only the root kind
+    /// (`variant_name()`, a bounded compile-time string) and the root
+    /// provider name — never the detail, which may embed provider response
+    /// text — then returns `err.context(describe_provider_chain_failure(..))`.
+    /// `.context` is chosen because `anyhow::Error::context` makes the new
+    /// message the OUTERMOST frame, which is exactly what `{:#}` (alternate
+    /// Display, walks the chain outermost-first) renders first at
+    /// `iron_hermes_ui/src/server/ws.rs:1773`.
+    fn attribute_chain_failure(&self, err: anyhow::Error) -> anyhow::Error {
+        if !self.fallback_root_is_terminal() {
+            return err;
+        }
+        let Some(root) = self.fallback_root_cause.as_ref() else {
+            return err;
+        };
+        warn!(
+            root_kind = root.kind.variant_name(),
+            root_provider = %root.provider,
+            "Provider chain exhausted after a non-retryable primary failure; \
+             rewrapping terminal error to lead with the root cause"
+        );
+        err.context(describe_provider_chain_failure(root, &self.provider_name))
+    }
+
     /// Phase 36.2 Plan 07: post-LLM-call success write path.
     ///
     /// Computes Anthropic's three-input billable cost (input_tokens +
@@ -1688,8 +1786,13 @@ impl AgentLoop {
             // the cron runner's inactivity poller fires.
             self.mark_activity(ActivityKind::ApiCall, None);
 
-            // Call LLM with retry and fallback support
-            const MAX_RETRIES: usize = 3;
+            // Call LLM with retry and fallback support. Quick task 260819-rkz
+            // (RKZ-A): the retry budget is no longer a fixed const here — it is
+            // module-scope (NORMAL_LLM_CALL_MAX_RETRIES /
+            // FALLBACK_AFTER_TERMINAL_MAX_RETRIES) and resolved per-attempt via
+            // leg_retry_budget(self.fallback_root_is_terminal()) at the retry
+            // guard below, so the fallback leg gets a reduced budget after a
+            // non-retryable primary failure.
             let mut retry_count = 0;
 
             let (assistant_message, usage) = loop {
@@ -1769,6 +1872,17 @@ impl AgentLoop {
                                 error_kind = provider_error.variant_name(),
                                 "Primary LLM failed, activating fallback provider: {err:#}"
                             );
+                            // Quick task 260819-rkz (RKZ-B): capture the root cause
+                            // BEFORE `self.provider_name` is overwritten with the
+                            // fallback's name a few lines below. Capturing after
+                            // that reassignment would silently attribute the root
+                            // cause to the fallback provider instead of the
+                            // primary — defeating this fix entirely.
+                            self.fallback_root_cause = Some(FallbackRootCause {
+                                kind: provider_error.clone(),
+                                provider: self.provider_name.clone(),
+                                detail: format!("{err:#}"),
+                            });
                             self.client = fallback;
                             // Cause E fix: update provider_name to the fallback's
                             // canonical name so usage_events rows after failover
@@ -1777,14 +1891,30 @@ impl AgentLoop {
                                 self.provider_name = name;
                             }
                             self.fallback_activated = true;
+                            // Quick task 260819-rkz (RKZ-A), CORRECTED premise 11:
+                            // the fallback branch is evaluated BEFORE the retry
+                            // branch, so retry_count is already 0 on a turn's
+                            // first failure when failover fires — this reset is a
+                            // no-op on the reported path and would not by itself
+                            // have fixed the wasted-retry-budget symptom. The cap
+                            // applied at the retry guard below (leg_retry_budget)
+                            // is what actually bounds the fallback leg's budget.
                             retry_count = 0;
                             continue;
                         }
 
-                        // Retry transient errors with backoff
-                        if should_retry && retry_count < MAX_RETRIES {
+                        // Retry transient errors with backoff. Quick task
+                        // 260819-rkz (RKZ-A): the budget is chain-aware — reduced
+                        // to FALLBACK_AFTER_TERMINAL_MAX_RETRIES when this leg is
+                        // running after a non-retryable primary failure,
+                        // otherwise the unchanged NORMAL_LLM_CALL_MAX_RETRIES.
+                        let retry_budget = leg_retry_budget(self.fallback_root_is_terminal());
+                        if should_retry && retry_count < retry_budget {
                             retry_count += 1;
-                            warn!(retry = retry_count, "LLM call failed, retrying: {err:#}");
+                            warn!(
+                                retry = retry_count,
+                                retry_budget, "LLM call failed, retrying: {err:#}"
+                            );
                             tokio::time::sleep(tokio::time::Duration::from_millis(
                                 500 * retry_count as u64,
                             ))
@@ -1792,8 +1922,12 @@ impl AgentLoop {
                             continue;
                         }
 
-                        // Exhausted retries and fallback
-                        return Err(err);
+                        // Exhausted retries and fallback. Quick task 260819-rkz
+                        // (RKZ-B): route through attribute_chain_failure so a
+                        // terminal error rooted in a non-retryable primary
+                        // failure leads with that root cause instead of the
+                        // fallback's own downstream symptom.
+                        return Err(self.attribute_chain_failure(err));
                     }
                 }
             };
@@ -2237,7 +2371,7 @@ impl AgentLoop {
                     duration_ms,
                 });
                 if let Some(ref cb) = self.tool_result_callback {
-                    cb(name, true);
+                    cb(name, true, &result);
                 }
 
                 // CTX-03/CTX-04: progressive subdirectory discovery for file-access tools
@@ -2322,7 +2456,7 @@ impl AgentLoop {
                     duration_ms,
                 });
                 if let Some(ref cb) = self.tool_result_callback {
-                    cb(name, false);
+                    cb(name, false, &err_msg);
                 }
 
                 // Phase 39.2: emit tool_completed for main dispatch failure path.
@@ -2352,16 +2486,16 @@ impl AgentLoop {
         let args_str = &tool_call.function.arguments;
 
         if let Some(ref cb) = self.tool_progress_callback {
-            let preview = if args_str.len() > 100 {
-                let mut end = 100;
-                while !args_str.is_char_boundary(end) {
-                    end -= 1;
-                }
-                format!("{}...", &args_str[..end])
-            } else {
-                args_str.clone()
-            };
-            cb(name, &preview);
+            // Phase 36.8 Plan 05 (CLI-07): pass the FULL, untruncated raw JSON arguments
+            // string rather than a pre-truncated 100-char preview. `ironhermes-acp`'s
+            // `AcpEventBridge` parses this as JSON (`tool_render::render_call_content`) to
+            // render a `write_file`/`patch` call as a diff — a pre-truncated string is
+            // frequently invalid JSON (cut mid-field, especially for any tool whose args
+            // exceed 100 chars, which is the common case for file-edit content), silently
+            // degrading every such call to a raw-text fallback. Callers that want a
+            // bounded preview (e.g. a UI event) now do their own bounding on the full
+            // string — no existing test asserted on the previous 100-char cap.
+            cb(name, args_str);
         }
 
         debug!(tool = %name, "Executing tool call");
@@ -2454,7 +2588,7 @@ impl AgentLoop {
                         duration_ms: 0,
                     });
                     if let Some(ref cb) = self.tool_result_callback {
-                        cb(name, false);
+                        cb(name, false, &err_msg);
                     }
 
                     // Phase 39.2: emit tool_completed for skill-enforcement block.
@@ -2504,7 +2638,7 @@ impl AgentLoop {
                     duration_ms: 0,
                 });
                 if let Some(ref cb) = self.tool_result_callback {
-                    cb(name, false);
+                    cb(name, false, &err_msg);
                 }
 
                 // Phase 39.2: emit tool_completed for guardrail-block exit.
@@ -2590,7 +2724,22 @@ impl AgentLoop {
                     let reg = self.registry.read().await;
                     let sid = self.resolved_session_id();
                     if let Some(result) = reg.dispatch_intercepts(name, &sid, args.clone()).await {
-                        // Phase 39.2: emit tool_completed for intercept path.
+                        // Phase 36.8 plan 04 (D-18) fix: this branch previously returned
+                        // straight after the bb_recorder block below, WITHOUT ever calling
+                        // `fire_hook(ToolCompleted)`, `tool_result_callback`, or appending a
+                        // trajectory entry — the three things every OTHER dispatch path
+                        // (`execute_allowed_tool`, the memory-provider intercept, and the
+                        // main registry-dispatch success/error arms) fires unconditionally.
+                        // An intercepted tool call (session_search, and now ACP's gated
+                        // `terminal`/`execute_code`) was structurally invisible to the
+                        // trajectory ledger and to any surface's `tool_result` callback —
+                        // for ACP specifically, that is the `AcpEventBridge`'s
+                        // `session/update` `ToolCallUpdate` stream, which never fired at
+                        // all for an intercepted tool before this fix. Latent since Phase
+                        // 25 D-12; surfaced by Phase 36.8 plan 04's ACP terminal/execute_code
+                        // gating, the first caller to need both trajectory append AND the
+                        // tool_result callback to fire on an intercepted call.
+                        let success = result.is_ok();
                         let intercept_result_str = match result {
                             Ok(s) => s,
                             Err(e) => format!(
@@ -2598,6 +2747,66 @@ impl AgentLoop {
                                 e.to_string().replace('"', "'")
                             ),
                         };
+                        let intercept_duration_ms = bb_tool_start.elapsed().as_millis() as u64;
+
+                        if let Some(ref handle) = self.trajectory_writer {
+                            let redacted = {
+                                let registry_guard = self.registry.read().await;
+                                if let Some(t) = registry_guard.get(name) {
+                                    t.redact_args(&args)
+                                } else {
+                                    args.clone()
+                                }
+                            };
+                            let entry = if success {
+                                TrajectoryEntry::success(
+                                    name,
+                                    redacted,
+                                    intercept_result_str.clone(),
+                                    intercept_duration_ms,
+                                    classify_impact_level(name),
+                                    self.turn_index.load(std::sync::atomic::Ordering::Relaxed),
+                                    tool_call.id.to_string(),
+                                )
+                            } else {
+                                TrajectoryEntry::failure(
+                                    name,
+                                    redacted,
+                                    intercept_result_str.clone(),
+                                    intercept_duration_ms,
+                                    classify_impact_level(name),
+                                    self.turn_index.load(std::sync::atomic::Ordering::Relaxed),
+                                    tool_call.id.to_string(),
+                                )
+                            };
+                            match serde_json::to_string(&entry) {
+                                Ok(line) => {
+                                    if let Err(e) = handle.append_json_line(&line) {
+                                        tracing::warn!(error = %e, tool = %name,
+                                            "Phase 36.8: trajectory append failed for intercepted tool call");
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(error = %e, tool = %name,
+                                        "Phase 36.8: trajectory entry serialize failed for intercepted tool call");
+                                }
+                            }
+                        }
+
+                        self.fire_hook(HookEventKind::ToolCompleted {
+                            tool_name: name.to_string(),
+                            success,
+                            result_preview: ironhermes_hooks::event::preview(
+                                &intercept_result_str,
+                                200,
+                            ),
+                            duration_ms: intercept_duration_ms,
+                        });
+                        if let Some(ref cb) = self.tool_result_callback {
+                            cb(name, success, &intercept_result_str);
+                        }
+
+                        // Phase 39.2: emit tool_completed for intercept path.
                         if let Some(ref rec) = self.bb_recorder {
                             let result_hash = {
                                 use sha2::Digest;
@@ -2614,10 +2823,10 @@ impl AgentLoop {
                                 serde_json::json!({
                                     "tool_name": name,
                                     "call_id": &tool_call.id,
-                                    "success": true,
+                                    "success": success,
                                     "result_hash": result_hash,
                                     "via": "intercept",
-                                    "latency_ms": bb_tool_start.elapsed().as_millis() as u64,
+                                    "latency_ms": intercept_duration_ms,
                                 }),
                             ));
                         }
@@ -2680,7 +2889,7 @@ impl AgentLoop {
                                     duration_ms: tool_duration,
                                 });
                                 if let Some(ref cb) = self.tool_result_callback {
-                                    cb(name, true);
+                                    cb(name, true, &s);
                                 }
                                 // Phase 39.2: emit tool_completed for memory-provider Ok path.
                                 if let Some(ref rec) = self.bb_recorder {
@@ -2713,7 +2922,7 @@ impl AgentLoop {
                                     duration_ms: tool_duration,
                                 });
                                 if let Some(ref cb) = self.tool_result_callback {
-                                    cb(name, false);
+                                    cb(name, false, &e);
                                 }
                                 // Phase 39.2: emit tool_completed for memory-provider Err path.
                                 if let Some(ref rec) = self.bb_recorder {
@@ -4067,6 +4276,180 @@ mod fallback_tests {
         assert!(
             !should_fallback,
             "phase 36.14 PROV-07: unknown code SSE error — safe conservative default"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Quick task 260819-rkz: chain-failure attribution (RKZ-B) and, once Task 2
+// lands, the reduced fallback-leg retry budget (RKZ-A). Deliberately NOT
+// added to `mod fallback_tests` above — that module is a truth-table pin and
+// must stay single-purpose.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod fallback_chain_tests {
+    use super::*;
+    use anyhow::anyhow;
+
+    fn make_agent() -> AgentLoop {
+        let client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost".to_string(),
+            "".to_string(),
+            "test",
+        ));
+        let registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
+        AgentLoop::new(client, registry, 10)
+    }
+
+    #[test]
+    fn fallback_root_is_terminal_false_on_fresh_agent() {
+        let agent = make_agent();
+        assert!(
+            !agent.fallback_root_is_terminal(),
+            "a freshly constructed AgentLoop has recorded no root cause, so \
+             fallback_root_is_terminal() must be false"
+        );
+    }
+
+    #[test]
+    fn attribute_chain_failure_unchanged_with_no_root_cause() {
+        let agent = make_agent();
+        let err = anyhow!("tcp connect error: Connection refused (os error 61)");
+        let original = format!("{err:#}");
+        let result = agent.attribute_chain_failure(err);
+        assert_eq!(
+            format!("{result:#}"),
+            original,
+            "with no root cause recorded, attribute_chain_failure must return the \
+             error completely unchanged"
+        );
+    }
+
+    #[test]
+    fn attribute_chain_failure_rewraps_on_terminal_root() {
+        let mut agent = make_agent();
+        agent.provider_name = "ollama".to_string();
+        agent.fallback_root_cause = Some(FallbackRootCause {
+            kind: ProviderError::Auth,
+            provider: "openrouter".to_string(),
+            detail: "401 Unauthorized".to_string(),
+        });
+        let err = anyhow!(
+            "error sending request for url (http://localhost:11434/v1/chat/completions): \
+             tcp connect error: Connection refused (os error 61)"
+        );
+        let original = format!("{err:#}");
+        let composed = describe_provider_chain_failure(
+            agent.fallback_root_cause.as_ref().expect("just set above"),
+            &agent.provider_name,
+        );
+        let result = agent.attribute_chain_failure(err);
+        let rendered = format!("{result:#}");
+        assert!(
+            rendered.starts_with(&composed),
+            "a terminal (Auth) root cause must make {{e:#}} START WITH the composed \
+             root-cause text: {rendered}"
+        );
+        assert!(
+            rendered.contains(&original),
+            "the fallback's own original error text must still be present, chain \
+             preserved: {rendered}"
+        );
+    }
+
+    #[test]
+    fn attribute_chain_failure_unchanged_on_retryable_root() {
+        let mut agent = make_agent();
+        agent.provider_name = "ollama".to_string();
+        agent.fallback_root_cause = Some(FallbackRootCause {
+            kind: ProviderError::RateLimited { retry_after: None },
+            provider: "openrouter".to_string(),
+            detail: "429 Too Many Requests".to_string(),
+        });
+        let err = anyhow!("tcp connect error: Connection refused (os error 61)");
+        let original = format!("{err:#}");
+        let result = agent.attribute_chain_failure(err);
+        assert_eq!(
+            format!("{result:#}"),
+            original,
+            "D-06 regression guard: a retryable (RateLimited) root cause must leave \
+             the returned error object completely unchanged"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Task 2 (RKZ-A): leg_retry_budget contract. Assertions are inequalities,
+    // not magic numbers (AGENTS.md: no change-detector tests).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn leg_retry_budget_non_terminal_equals_normal_maximum() {
+        assert_eq!(
+            leg_retry_budget(false),
+            NORMAL_LLM_CALL_MAX_RETRIES,
+            "a non-terminal chain must keep the full normal retry budget — existing \
+             behavior for transient failures is preserved exactly"
+        );
+    }
+
+    #[test]
+    fn leg_retry_budget_terminal_strictly_less_than_normal() {
+        assert!(
+            leg_retry_budget(true) < leg_retry_budget(false),
+            "a terminal chain's budget must be STRICTLY LESS than the normal \
+             maximum — this is the assertion that would have failed before this \
+             fix, when the fallback endpoint was handed a full fresh budget"
+        );
+    }
+
+    #[test]
+    fn leg_retry_budget_terminal_is_at_least_one() {
+        assert!(
+            leg_retry_budget(true) >= 1,
+            "D-05: one blip on a healthy fallback must still be tolerated — a \
+             future edit to zero must break this test and be a deliberate decision"
+        );
+    }
+
+    #[test]
+    fn fallback_root_is_terminal_true_for_auth() {
+        let mut agent = make_agent();
+        agent.fallback_root_cause = Some(FallbackRootCause {
+            kind: ProviderError::Auth,
+            provider: "openrouter".to_string(),
+            detail: "401 Unauthorized".to_string(),
+        });
+        assert!(agent.fallback_root_is_terminal());
+    }
+
+    #[test]
+    fn fallback_root_is_terminal_false_for_rate_limited() {
+        let mut agent = make_agent();
+        agent.fallback_root_cause = Some(FallbackRootCause {
+            kind: ProviderError::RateLimited { retry_after: None },
+            provider: "openrouter".to_string(),
+            detail: "429 Too Many Requests".to_string(),
+        });
+        assert!(
+            !agent.fallback_root_is_terminal(),
+            "D-06: a RateLimited root cause must NOT be treated as terminal — \
+             transient primary failures preserve the normal retry budget"
+        );
+    }
+
+    #[test]
+    fn fallback_root_is_terminal_false_for_server() {
+        let mut agent = make_agent();
+        agent.fallback_root_cause = Some(FallbackRootCause {
+            kind: ProviderError::Server { status: 503 },
+            provider: "openrouter".to_string(),
+            detail: "503 Service Unavailable".to_string(),
+        });
+        assert!(
+            !agent.fallback_root_is_terminal(),
+            "D-06: a Server root cause must NOT be treated as terminal — transient \
+             primary failures preserve the normal retry budget"
         );
     }
 }

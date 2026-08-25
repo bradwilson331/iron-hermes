@@ -155,6 +155,114 @@ pub fn sanitize_error(text: &str) -> String {
         .into_owned()
 }
 
+/// Fixed markers a `run_server_task` failure reason carries when the failure
+/// is auth-caused — a stored OAuth credential exists but cannot be used
+/// (refresh failed, scope insufficient, or a bounded 401-retry was
+/// exhausted) — as opposed to a genuine transport/spawn failure unrelated to
+/// authorization.
+///
+/// Each marker is the fixed, sanitize-error-surviving prefix or substring a
+/// call site in this crate already produces for exactly one such case:
+/// - `"Get access token: "` — `transport::connect_http_oauth`'s hot path
+///   (cached token present, `get_access_token()` failed: the refresh call
+///   itself errored, e.g. the authorization server returned `invalid_grant`).
+/// - `"OAuth insufficient_scope"` / `"OAuth token refresh + 1-retry both
+///   returned 401"` — the two `McpOAuthError` variants' `Display` text
+///   (`server_task.rs`), both explicitly documented as requiring
+///   re-authorization.
+/// - `"OAuth 401 at discovery"` — the transient 401-at-discovery message
+///   that triggers `server_task`'s one-shot forced refresh; treated as
+///   auth-caused because its only two outcomes are a successful reconnect
+///   (this reason is superseded) or one of the two `McpOAuthError` markers
+///   above.
+const OAUTH_REAUTH_MARKERS: &[&str] = &[
+    "Get access token: ",
+    "OAuth insufficient_scope",
+    "OAuth token refresh + 1-retry both returned 401",
+    "OAuth 401 at discovery",
+];
+
+/// `true` when a `run_server_task`/`ServerTaskResult` failure reason
+/// indicates the stored OAuth credential is unusable and the operator must
+/// re-authorize, rather than a genuine spawn/transport failure unrelated to
+/// authorization.
+///
+/// Pure substring match against [`OAUTH_REAUTH_MARKERS`] — no I/O, no
+/// credential-bearing input. Callers (the web admin API's live status
+/// classifier) use this to decide whether a not-connected OAuth server with
+/// a present-but-dead token should present as needing (re)authorization
+/// instead of as a generic failure.
+pub fn is_oauth_reauthorization_required(reason: &str) -> bool {
+    OAUTH_REAUTH_MARKERS
+        .iter()
+        .any(|marker| reason.contains(marker))
+}
+
+/// Maximum allowed length, in bytes, for a `web_redirect_base_url` input to
+/// [`validate_web_redirect_base`]. Prevents pathological inputs from ever
+/// reaching `url::Url::parse` or the error path.
+const WEB_REDIRECT_BASE_MAX_LEN: usize = 255;
+
+/// Phase 48.2 Plan 08 (D-13/T-48.2-08-02): validate an operator- or
+/// caller-supplied absolute origin intended for `Config.mcp_oauth.web_redirect_base_url`
+/// or an equivalent caller-supplied redirect base.
+///
+/// Pure (no I/O) so it is trivially unit-testable and safely callable from
+/// `iron_hermes_ui`. Parses `base` with [`url::Url`] and rejects:
+/// - a scheme other than `http` or `https`
+/// - an absent or empty host
+/// - a non-empty username, or any password (userinfo)
+/// - a path other than empty or a single slash
+/// - any query string
+/// - any fragment
+/// - an input longer than [`WEB_REDIRECT_BASE_MAX_LEN`] bytes
+///
+/// Every rejection returns its own FIXED message that never echoes the input
+/// value — the same "never echo an input field" discipline `sanitize_error`
+/// enforces elsewhere in this module.
+///
+/// On success, returns the normalized origin via `Url::origin().ascii_serialization()`
+/// (`scheme://host[:port]`, default ports elided, no trailing slash).
+pub fn validate_web_redirect_base(base: &str) -> Result<String, String> {
+    if base.len() > WEB_REDIRECT_BASE_MAX_LEN {
+        return Err(format!(
+            "web redirect base rejected: input exceeds {WEB_REDIRECT_BASE_MAX_LEN} bytes"
+        ));
+    }
+
+    let parsed = url::Url::parse(base)
+        .map_err(|_| "web redirect base rejected: not a valid URL".to_string())?;
+
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err("web redirect base rejected: scheme must be http or https".to_string());
+    }
+
+    match parsed.host_str() {
+        Some(h) if !h.is_empty() => {}
+        _ => return Err("web redirect base rejected: URL must have a non-empty host".to_string()),
+    }
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("web redirect base rejected: URL must not contain userinfo".to_string());
+    }
+
+    if !parsed.path().is_empty() && parsed.path() != "/" {
+        return Err(
+            "web redirect base rejected: URL must not contain a path beyond '/'".to_string(),
+        );
+    }
+
+    if parsed.query().is_some() {
+        return Err("web redirect base rejected: URL must not contain a query string".to_string());
+    }
+
+    if parsed.fragment().is_some() {
+        return Err("web redirect base rejected: URL must not contain a fragment".to_string());
+    }
+
+    Ok(parsed.origin().ascii_serialization())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,6 +492,75 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // is_oauth_reauthorization_required tests (warm-but-revoked follow-up fix)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_is_oauth_reauthorization_required_matches_get_access_token_prefix() {
+        // The exact text transport.rs's hot path produces when a cached token's
+        // refresh call fails (e.g. the AS returns invalid_grant).
+        let reason = "Get access token: token refresh failed: invalid_grant: Grant not found";
+        assert!(is_oauth_reauthorization_required(reason));
+    }
+
+    #[test]
+    fn test_is_oauth_reauthorization_required_matches_insufficient_scope_display() {
+        let reason = McpOAuthErrorDisplayFixture::insufficient_scope();
+        assert!(is_oauth_reauthorization_required(&reason));
+    }
+
+    #[test]
+    fn test_is_oauth_reauthorization_required_matches_invalid_token_retry_exhausted_display() {
+        let reason = McpOAuthErrorDisplayFixture::invalid_token_retry_exhausted();
+        assert!(is_oauth_reauthorization_required(&reason));
+    }
+
+    #[test]
+    fn test_is_oauth_reauthorization_required_matches_401_at_discovery() {
+        let reason = "OAuth 401 at discovery — invalid_token";
+        assert!(is_oauth_reauthorization_required(reason));
+    }
+
+    #[test]
+    fn test_is_oauth_reauthorization_required_false_for_genuine_transport_failure() {
+        for reason in [
+            "connection refused",
+            "connection failed after retries",
+            "MCP tool call timed out after 30s",
+            "Failed to accept loopback callback: os error 24",
+        ] {
+            assert!(
+                !is_oauth_reauthorization_required(reason),
+                "expected {reason:?} to NOT classify as auth-caused"
+            );
+        }
+    }
+
+    #[test]
+    fn test_is_oauth_reauthorization_required_false_for_empty_string() {
+        assert!(!is_oauth_reauthorization_required(""));
+    }
+
+    /// Fixture reproducing the exact `Display` text of the two `McpOAuthError`
+    /// variants (`server_task.rs`) without creating a circular dev-dependency
+    /// on that module's private construction — the strings are copied
+    /// verbatim from `server_task.rs`'s `impl std::fmt::Display for
+    /// McpOAuthError` and must be kept in sync if that text ever changes.
+    struct McpOAuthErrorDisplayFixture;
+    impl McpOAuthErrorDisplayFixture {
+        fn insufficient_scope() -> String {
+            "MCP server 'srv': OAuth insufficient_scope (permanent — \
+             run `hermes mcp connect srv` to re-authorize with correct scopes)"
+                .to_string()
+        }
+        fn invalid_token_retry_exhausted() -> String {
+            "MCP server 'srv': OAuth token refresh + 1-retry both returned 401 \
+             (permanent — run `hermes mcp connect srv` to re-authorize)"
+                .to_string()
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // validate_prm_issuer tests (B-4, D-07, D-01)
     // -------------------------------------------------------------------------
 
@@ -589,5 +766,106 @@ mod tests {
     fn test_is_baseline_issuer_false_for_non_baseline() {
         assert!(!is_baseline_issuer("https://github.com/x"));
         assert!(!is_baseline_issuer("not a url"));
+    }
+
+    // -------------------------------------------------------------------------
+    // validate_web_redirect_base tests (D-13 / T-48.2-08-02)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_validate_web_redirect_base_accepts_bare_https_origin() {
+        let result = validate_web_redirect_base("https://hermes.example.com");
+        assert_eq!(result, Ok("https://hermes.example.com".to_string()));
+    }
+
+    #[test]
+    fn test_validate_web_redirect_base_accepts_bare_https_origin_with_trailing_slash() {
+        let result = validate_web_redirect_base("https://hermes.example.com/");
+        assert_eq!(result, Ok("https://hermes.example.com".to_string()));
+    }
+
+    #[test]
+    fn test_validate_web_redirect_base_accepts_http_origin_with_explicit_port() {
+        let result = validate_web_redirect_base("http://192.0.2.10:8080");
+        assert_eq!(result, Ok("http://192.0.2.10:8080".to_string()));
+    }
+
+    #[test]
+    fn test_validate_web_redirect_base_rejects_non_http_scheme() {
+        assert!(validate_web_redirect_base("ftp://hermes.example.com").is_err());
+        assert!(validate_web_redirect_base("javascript://hermes.example.com").is_err());
+    }
+
+    #[test]
+    fn test_validate_web_redirect_base_rejects_absent_or_empty_host() {
+        // "https://" has no authority at all — host_str() is None.
+        assert!(validate_web_redirect_base("https://").is_err());
+        assert!(validate_web_redirect_base("not a url").is_err());
+    }
+
+    #[test]
+    fn test_validate_web_redirect_base_rejects_userinfo() {
+        assert!(validate_web_redirect_base("https://user@hermes.example.com").is_err());
+        assert!(validate_web_redirect_base("https://user:pass@hermes.example.com").is_err());
+    }
+
+    #[test]
+    fn test_validate_web_redirect_base_rejects_non_root_path() {
+        assert!(validate_web_redirect_base("https://hermes.example.com/oauth").is_err());
+    }
+
+    #[test]
+    fn test_validate_web_redirect_base_rejects_query_string() {
+        assert!(validate_web_redirect_base("https://hermes.example.com?x=1").is_err());
+    }
+
+    #[test]
+    fn test_validate_web_redirect_base_rejects_fragment() {
+        assert!(validate_web_redirect_base("https://hermes.example.com#frag").is_err());
+    }
+
+    #[test]
+    fn test_validate_web_redirect_base_rejects_over_length_input() {
+        let long_host = "a".repeat(300);
+        let input = format!("https://{long_host}.example.com");
+        assert!(validate_web_redirect_base(&input).is_err());
+    }
+
+    /// Phase 48.2 Plan 08 Task 2: every rejection class must produce a FIXED
+    /// error message that never echoes any part of the input — the same
+    /// "never echo an input field" discipline `perform_oauth_connect`'s doc
+    /// comment states for the web layer, and `sanitize_error` enforces
+    /// elsewhere in this module.
+    #[test]
+    fn test_validate_web_redirect_base_errors_never_echo_input() {
+        let marker = "UNIQUE_MARKER_ZzQ7f3";
+
+        // One case per rejection class from validate_web_redirect_base's doc
+        // comment, each carrying `marker` somewhere an echoing implementation
+        // would leak it.
+        let cases: Vec<String> = vec![
+            format!("ftp://{marker}.example.com"), // non-http(s) scheme
+            format!("not a url {marker}"),         // malformed / no host
+            format!("https://{marker}@hermes.example.com"), // userinfo (username)
+            format!("https://user:{marker}@hermes.example.com"), // userinfo (password)
+            format!("https://hermes.example.com/{marker}"), // non-root path
+            format!("https://hermes.example.com?x={marker}"), // query string
+            format!("https://hermes.example.com#{marker}"), // fragment
+            format!("https://{marker}{}.example.com", "a".repeat(300)), // over-length
+        ];
+
+        for input in &cases {
+            let result = validate_web_redirect_base(input);
+            assert!(
+                result.is_err(),
+                "expected validate_web_redirect_base to reject input={input:?}"
+            );
+            let err = result.unwrap_err();
+            assert!(
+                !err.contains(marker),
+                "validate_web_redirect_base error message must never echo the input value; \
+                 got err={err:?} for input={input:?}"
+            );
+        }
     }
 }

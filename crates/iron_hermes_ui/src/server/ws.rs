@@ -1496,7 +1496,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
 
                                 let tx_tool_result = tx.clone();
                                 let tool_result_callback: ironhermes_agent::agent_loop::ToolResultCallback =
-                                    Box::new(move |name: &str, success: bool| {
+                                    Box::new(move |name: &str, success: bool, _output: &str| {
                                         let _ = tx_tool_result.send(ChatStreamEvent::ToolCallEnd { turn_id: tid,
                                             name: name.to_string(),
                                             success,
@@ -1938,7 +1938,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                 });
                                             let tx_tool_result = tx_s.clone();
                                             let tool_result_callback: ironhermes_agent::agent_loop::ToolResultCallback =
-                                                Box::new(move |name: &str, success: bool| {
+                                                Box::new(move |name: &str, success: bool, _output: &str| {
                                                     let _ = tx_tool_result.send(
                                                         ChatStreamEvent::ToolCallEnd { turn_id: tid_s,
                                                             name: name.to_string(),
@@ -2183,7 +2183,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                             });
                                                         let tx_tool_result = tx_drain.clone();
                                                         let tool_result_callback: ironhermes_agent::agent_loop::ToolResultCallback =
-                                                            Box::new(move |name: &str, success: bool| {
+                                                            Box::new(move |name: &str, success: bool, _output: &str| {
                                                                 let _ = tx_tool_result.send(ChatStreamEvent::ToolCallEnd { turn_id: tid_drain, name: name.to_string(), success });
                                                             });
                                                         let tx_subagent = tx_drain.clone();
@@ -2410,7 +2410,12 @@ fn undelivered_tool_result_media(
 /// the `Finished` event from being sent (the turn completed successfully).
 /// Phase 40.5 Plan 08 (D-11): `active_identity` selects the per-identity TTS provider/voice
 /// via `Config::effective_tts_config_for_identity`. Pass `None` to use the global TTS config.
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// Gated on `feature = "server"` as well as the target: the
+/// `crate::server::web_audio_dispatcher` module in this signature is
+/// `#[cfg(feature = "server")]`, so a target-only gate left this function
+/// compiled without its dependency under native + default features.
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 async fn auto_speak_reply(
     text: &str,
     dispatcher: &crate::server::web_audio_dispatcher::WebAudioDispatcher,

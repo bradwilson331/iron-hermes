@@ -23,6 +23,7 @@
 use std::time::Duration;
 
 use crate::agent_loop::AgentLoop;
+use ironhermes_core::provider::canonical_api_key_env_name;
 
 /// Typed provider-error taxonomy (D-ERR-01).
 ///
@@ -137,6 +138,144 @@ impl From<ProviderError> for (bool, bool) {
     fn from(e: ProviderError) -> Self {
         (e.should_retry(), e.should_fallback())
     }
+}
+
+/// Identity of the failure that CAUSED the agent loop to fail over to its
+/// fallback provider (quick task 260819-rkz, RKZ-B).
+///
+/// Captured at failover time because both the primary error value and
+/// `AgentLoop::provider_name` are gone by the time the fallback chain
+/// eventually gives up too: `err` is dropped when the retry/fallback loop
+/// `continue`s past the failover branch, and `provider_name` is overwritten
+/// with the fallback's own name a few lines after failover fires. Without
+/// this capture, a terminal report can only describe the LAST (fallback)
+/// failure, laundering the real root cause into an unrelated symptom (e.g.
+/// "connection refused" against a fallback endpoint, when the actual cause
+/// was a missing primary API key).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FallbackRootCause {
+    /// Typed classification of the primary provider's failure.
+    pub kind: ProviderError,
+    /// Canonical name of the provider that produced the primary failure.
+    pub provider: String,
+    /// The primary error rendered with alternate (`{:#}`) `Display` — the
+    /// full anyhow context chain joined with `": "`.
+    pub detail: String,
+}
+
+/// Upper bound, in `char`s (never bytes — provider error bodies may contain
+/// multi-byte text), on how much of a [`FallbackRootCause::detail`] is
+/// echoed into a composed chain-failure message.
+///
+/// The composed string reaches a user-visible chat bubble via
+/// `iron_hermes_ui/src/server/ws.rs`'s `Agent error: {e:#}` rendering, so an
+/// unbounded provider response body must never be pasted there verbatim
+/// (T-RKZ-02).
+const ROOT_CAUSE_DETAIL_CHAR_BUDGET: usize = 400;
+
+/// Placeholder rendered in place of a blank-or-whitespace provider name so
+/// the composed message never contains a bare empty pair of quotes.
+const BLANK_PROVIDER_PLACEHOLDER: &str = "<unknown provider>";
+
+/// Appended to a truncated detail so the reader knows text was cut, rather
+/// than believing the primary error was that short.
+const DETAIL_TRUNCATION_MARKER: &str = " …[truncated]";
+
+/// Truncate `s` to at most `max_chars` **characters** (never a byte index —
+/// a byte-index cut of multi-byte text panics), appending
+/// [`DETAIL_TRUNCATION_MARKER`] only when truncation actually occurred.
+fn truncate_chars_with_marker(s: &str, max_chars: usize) -> String {
+    let mut out: String = s.chars().take(max_chars).collect();
+    if s.chars().count() > max_chars {
+        out.push_str(DETAIL_TRUNCATION_MARKER);
+    }
+    out
+}
+
+fn provider_display_name(name: &str) -> &str {
+    if name.trim().is_empty() {
+        BLANK_PROVIDER_PLACEHOLDER
+    } else {
+        name
+    }
+}
+
+/// Token that introduces a remediation-hint parenthetical in the composed
+/// chain-failure message. Tests assert its ABSENCE to prove a root kind with
+/// no hint (e.g. `SchemaInvalid`) produces no remediation segment at all —
+/// not an empty-but-punctuated one.
+const REMEDIATION_HINT_INTRODUCER: &str = "fix:";
+
+/// Build an operator-facing remediation hint for a root-cause kind (quick
+/// task 260819-rkz, RKZ-B enrichment). Returns `Some` for exactly three
+/// kinds where a concrete, actionable next step exists; `None` for
+/// everything else (including `RateLimited`/`Server`/`Transport`, which
+/// resolve themselves, and `SchemaInvalid`/`ContextLength`/`ToolError`/
+/// `PayloadTooLarge`/`Unknown`, which have no single fix to name).
+///
+/// Security constraint (T-RKZ-01, non-negotiable): built EXCLUSIVELY from
+/// the provider NAME and a compile-time `&'static str` env-var NAME from
+/// [`ironhermes_core::provider::canonical_api_key_env_name`]. Never reads
+/// `std::env` and never touches `api_key`, `api_key_for_usage_tracking`, or
+/// any resolved key value.
+fn remediation_hint(kind: &ProviderError, provider: &str) -> Option<String> {
+    match kind {
+        ProviderError::Auth => Some(match canonical_api_key_env_name(provider) {
+            Some(env_name) => format!(
+                "set {env_name} in the .env file under the IronHermes home directory \
+                 (or configure providers.{provider}.api_key_env)"
+            ),
+            None => format!(
+                "declare providers.{provider}.api_key_env in config.yaml and supply that \
+                 environment variable — '{provider}' is not a built-in provider, so no \
+                 canonical variable name is known"
+            ),
+        }),
+        ProviderError::Billing => Some(format!(
+            "the '{provider}' account has no remaining credit — add funds or switch providers"
+        )),
+        ProviderError::ModelNotFound => Some(format!(
+            "the model id configured for '{provider}' was rejected by that provider — check \
+             providers.{provider}.default_model"
+        )),
+        _ => None,
+    }
+}
+
+/// Compose a single-line description of a provider-chain failure whose
+/// FIRST named entity is the ROOT cause (the primary provider's failure),
+/// not the fallback's own — usually more confusing — symptom. This is the
+/// literal fix for RKZ-B: today the fallback's own error leads and the
+/// primary's non-retryable failure is discarded entirely.
+///
+/// Pure: no logging, no env reads, no I/O, no `self`. Segment order: a
+/// fixed lead-in identifying this as a provider-chain failure; the root
+/// cause's [`ProviderError::variant_name`]; the primary provider name in
+/// quotes; an optional remediation-hint parenthetical from
+/// [`remediation_hint`] (nothing at all when the kind has no hint — no
+/// stray separator, no empty parentheses); the char-truncated primary
+/// detail; and only then the current (fallback) provider name, framed as
+/// the secondary failure whose own error follows via the caller's
+/// `anyhow::Context::context` wrapping.
+pub fn describe_provider_chain_failure(root: &FallbackRootCause, current_provider: &str) -> String {
+    let primary_name = provider_display_name(&root.provider);
+    let current_name = provider_display_name(current_provider);
+    let truncated_detail = truncate_chars_with_marker(&root.detail, ROOT_CAUSE_DETAIL_CHAR_BUDGET);
+
+    let hint_segment = remediation_hint(&root.kind, primary_name)
+        .map(|hint| format!(" ({REMEDIATION_HINT_INTRODUCER} {hint})"))
+        .unwrap_or_default();
+
+    format!(
+        "provider chain failed: primary provider '{primary}' failed with \
+         {kind}{hint} — {detail} — failover then activated fallback \
+         provider '{current}', which also failed",
+        primary = primary_name,
+        kind = root.kind.variant_name(),
+        hint = hint_segment,
+        detail = truncated_detail,
+        current = current_name,
+    )
 }
 
 /// Canonical typed classifier (D-ERR-03).
@@ -531,5 +670,164 @@ mod tests {
     fn from_provider_error_for_tuple_round_trip() {
         let (r, f): (bool, bool) = ProviderError::RateLimited { retry_after: None }.into();
         assert_eq!((r, f), (true, true));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Quick task 260819-rkz: FallbackRootCause / describe_provider_chain_failure
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod chain_failure_tests {
+    use super::*;
+
+    fn root(kind: ProviderError, provider: &str, detail: &str) -> FallbackRootCause {
+        FallbackRootCause {
+            kind,
+            provider: provider.to_string(),
+            detail: detail.to_string(),
+        }
+    }
+
+    #[test]
+    fn root_leads_ahead_of_current_provider() {
+        let r = root(ProviderError::Auth, "openrouter", "401 Unauthorized");
+        let msg = describe_provider_chain_failure(&r, "ollama");
+        let primary_pos = msg
+            .find("openrouter")
+            .expect("composed message must mention the primary provider");
+        let current_pos = msg
+            .find("ollama")
+            .expect("composed message must mention the current (fallback) provider");
+        assert!(
+            primary_pos < current_pos,
+            "root cause provider must lead the fallback provider in the composed \
+             message; got primary at {primary_pos}, current at {current_pos}: {msg}"
+        );
+    }
+
+    #[test]
+    fn kind_is_named_via_variant_name() {
+        let r = root(ProviderError::Auth, "openrouter", "401 Unauthorized");
+        let msg = describe_provider_chain_failure(&r, "ollama");
+        assert!(
+            msg.contains(ProviderError::Auth.variant_name()),
+            "composed message must name the root kind via variant_name(): {msg}"
+        );
+    }
+
+    #[test]
+    fn blank_provider_names_degrade_gracefully() {
+        let r = root(ProviderError::Auth, "", "401 Unauthorized");
+        let msg = describe_provider_chain_failure(&r, "");
+        assert!(
+            !msg.contains("''"),
+            "blank provider names must not render as an empty quoted string: {msg}"
+        );
+        assert!(
+            msg.matches(BLANK_PROVIDER_PLACEHOLDER).count() >= 2,
+            "both blank primary and blank current provider names must render as the \
+             placeholder token: {msg}"
+        );
+    }
+
+    #[test]
+    fn detail_is_bounded_and_multibyte_safe() {
+        let long_detail = "x".repeat(5000);
+        let r = root(ProviderError::Auth, "openrouter", &long_detail);
+        let msg = describe_provider_chain_failure(&r, "ollama");
+        assert!(
+            msg.len() < 5000,
+            "composed message must be materially shorter than an unbounded 5000-char \
+             detail: got {} chars",
+            msg.len()
+        );
+
+        // Multi-byte characters must not panic on truncation (byte-index cuts of
+        // multi-byte UTF-8 panic; char-based truncation does not).
+        let multibyte_detail = "é".repeat(5000);
+        let r = root(ProviderError::Auth, "openrouter", &multibyte_detail);
+        let _ = describe_provider_chain_failure(&r, "ollama");
+
+        let multibyte_detail_cjk = "日".repeat(5000);
+        let r = root(ProviderError::Auth, "openrouter", &multibyte_detail_cjk);
+        let _ = describe_provider_chain_failure(&r, "ollama");
+    }
+
+    #[test]
+    fn original_detail_survives_in_composed_message() {
+        let detail = "connection refused while contacting openrouter.ai endpoint, retry later";
+        let r = root(ProviderError::Auth, "openrouter", detail);
+        let msg = describe_provider_chain_failure(&r, "ollama");
+        let prefix: String = detail.chars().take(50).collect();
+        assert!(
+            msg.contains(&prefix),
+            "composed message must retain the primary detail's own text, not just a \
+             label: expected prefix {prefix:?} in {msg}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Task 3 (RKZ-B enrichment): remediation hint.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn auth_root_from_canonical_provider_names_its_env_var() {
+        let r = root(ProviderError::Auth, "openrouter", "401 Unauthorized");
+        let msg = describe_provider_chain_failure(&r, "ollama");
+        assert!(
+            msg.contains("OPENROUTER_API_KEY"),
+            "an Auth root from a canonical provider must name that provider's \
+             canonical env var: {msg}"
+        );
+    }
+
+    #[test]
+    fn auth_root_from_custom_provider_points_at_config_key_not_a_guessed_var() {
+        let r = root(ProviderError::Auth, "my-custom-llm", "401 Unauthorized");
+        let msg = describe_provider_chain_failure(&r, "ollama");
+        assert!(
+            msg.contains("my-custom-llm"),
+            "the composed message must still name the custom provider: {msg}"
+        );
+        assert!(
+            msg.contains("api_key_env"),
+            "an Auth root from an unrecognized custom provider must point the \
+             operator at the per-provider config key, not a guessed env var \
+             name: {msg}"
+        );
+    }
+
+    #[test]
+    fn schema_invalid_root_has_no_remediation_segment() {
+        let r = root(
+            ProviderError::SchemaInvalid,
+            "openrouter",
+            "400 Bad Request",
+        );
+        let msg = describe_provider_chain_failure(&r, "ollama");
+        assert!(
+            !msg.contains(REMEDIATION_HINT_INTRODUCER),
+            "a SchemaInvalid root must produce NO remediation segment — the \
+             introducer token must be entirely absent, not empty-but-punctuated: {msg}"
+        );
+    }
+
+    #[test]
+    fn root_leads_ordering_holds_with_hint_present() {
+        let r = root(ProviderError::Auth, "openrouter", "401 Unauthorized");
+        let msg = describe_provider_chain_failure(&r, "ollama");
+        let primary_pos = msg
+            .find("openrouter")
+            .expect("composed message must mention the primary provider");
+        let current_pos = msg
+            .find("ollama")
+            .expect("composed message must mention the current (fallback) provider");
+        assert!(
+            primary_pos < current_pos,
+            "the root-leads ordering guarantee must still hold once the \
+             remediation hint is present: primary at {primary_pos}, current at \
+             {current_pos}: {msg}"
+        );
     }
 }

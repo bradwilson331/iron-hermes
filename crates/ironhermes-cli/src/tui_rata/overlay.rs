@@ -22,7 +22,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Clear, Paragraph, Wrap};
 
-use crate::tui_rata::app::App;
+use crate::tui_rata::app::{App, word_wrapped_line_count};
 
 // ── OverlayKind ────────────────────────────────────────────────────────────────
 
@@ -91,6 +91,21 @@ pub enum OverlayKind {
         /// The `PendingClarifyRegistry` key — threaded through to
         /// `App::answer_clarify`/`cancel_clarify` on Enter/Esc.
         clarify_id: String,
+    },
+    /// The image viewer (Phase 36.6.4 Plan 05, D-12/D-13, TUI-IMG-01) — a
+    /// clicked image chip (either D-12 trigger: `<MEDIA:>` tag extraction or
+    /// `/image <path>`) opens this. `label` is the SAME (truncated) label
+    /// the chip itself rendered; `source` is what `App::trigger_image_decode`
+    /// reads from. The decode/protocol-build state lives separately on
+    /// `App.image_decode` (NOT here) — `OverlayKind` variants must stay
+    /// `PartialEq`/`Eq`-derivable, which a decoded `Protocol` payload isn't
+    /// guaranteed to be cheaply comparable for.
+    ImageViewer {
+        /// The image label (chip's label, untruncated here — the render fn
+        /// truncates for the title the same way the chip did for itself).
+        label: String,
+        /// The media reference the decode step reads from.
+        source: ironhermes_gateway::media_tag::MediaRef,
     },
 }
 
@@ -199,6 +214,9 @@ pub fn render(frame: &mut Frame, app: &App) {
         Some(OverlayKind::Help) => render_help(frame, app, area),
         Some(OverlayKind::ModelPicker { .. }) => render_model_picker(frame, app, area),
         Some(OverlayKind::Clarify { .. }) => render_clarify(frame, app),
+        Some(OverlayKind::ImageViewer { label, source }) => {
+            render_image_viewer(frame, app, area, label, source)
+        }
         None => {}
     }
 }
@@ -646,6 +664,126 @@ fn render_clarify(frame: &mut Frame, app: &App) {
     }
 }
 
+// ── Image viewer (Phase 36.6.4 Plan 05, D-12/D-13, TUI-IMG-01) ─────────────
+
+/// `OverlayKind::ImageViewer` renderer. A structural clone of
+/// `render_skills_hub`'s chrome/sizing recipe — same
+/// Double/Yellow/BOLD/Clear-then-render ordering, same
+/// `Percentage(80) x Percentage(70)` `centered_rect` (UI-SPEC §5: "bigger
+/// surfaces get the larger rect", same rule SkillsHub/ModelPicker use).
+/// Two titles per UI-SPEC §5: the image label on the left, the close hint
+/// on the right.
+fn render_image_viewer(
+    frame: &mut Frame,
+    app: &App,
+    area: Rect,
+    label: &str,
+    source: &ironhermes_gateway::media_tag::MediaRef,
+) {
+    let modal_height = ((area.height as u32) * 70 / 100) as u16;
+    let rect = centered_rect(80, modal_height.max(5), area);
+    frame.render_widget(Clear, rect);
+
+    let outer = Block::bordered()
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(
+            Line::from(Span::styled(
+                format!(" Image — {label} "),
+                Style::default().add_modifier(Modifier::BOLD),
+            ))
+            .left_aligned(),
+        )
+        .title(
+            Line::from(Span::styled(
+                " Esc close ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ))
+            .right_aligned(),
+        );
+    let inner = outer.inner(rect);
+    frame.render_widget(outer, rect);
+
+    // TOO SMALL (UI-SPEC §5, author-added row): a zero-size content rect
+    // must never reach `Image::new` — a zero-size rect risks a panic or
+    // garbage render. At this degenerate size `inner` (content area,
+    // AFTER the border) has NO room at all by definition — so the
+    // placeholder renders into the OUTER modal `rect` instead (still
+    // border-bounded, may overlay part of the border chrome on an
+    // extremely tiny terminal, which is an acceptable degraded outcome:
+    // informative text beats a blank/garbage widget). `Paragraph` renders
+    // gracefully into a zero-size `Rect` too (never panics), so this stays
+    // safe even at the most extreme sizes.
+    if inner.width == 0 || inner.height == 0 {
+        render_image_placeholder(
+            frame,
+            rect,
+            "Terminal too small to display image.",
+            Style::default().add_modifier(Modifier::DIM),
+        );
+        return;
+    }
+
+    // Trigger the ONE-TIME decode on first observation of this overlay —
+    // `image_decode` is `None` right after a fresh chip click (handle_mouse
+    // clears it) or after Esc-close (also cleared). Never re-triggers while
+    // Decoding/Ready/Failed.
+    let needs_trigger = app
+        .image_decode
+        .lock()
+        .map(|guard| guard.is_none())
+        .unwrap_or(false);
+    if needs_trigger {
+        app.trigger_image_decode(source.clone(), inner);
+    }
+
+    let state = app.image_decode.lock().ok().and_then(|g| g.clone());
+    match state {
+        None | Some(crate::tui_rata::app::ImageDecodeState::Decoding) => {
+            render_image_placeholder(
+                frame,
+                inner,
+                "Decoding image…",
+                Style::default().add_modifier(Modifier::DIM),
+            );
+        }
+        Some(crate::tui_rata::app::ImageDecodeState::Failed(reason)) => {
+            render_image_placeholder(
+                frame,
+                inner,
+                &format!("Could not open image: {reason}."),
+                Style::default().fg(Color::Red),
+            );
+        }
+        Some(crate::tui_rata::app::ImageDecodeState::Ready(protocol)) => {
+            let image = ratatui_image::Image::new(protocol.as_ref()).allow_clipping(true);
+            frame.render_widget(image, inner);
+        }
+    }
+}
+
+/// Single centred placeholder line, rendered directly into `content_rect`
+/// (the overlay's OWN content area — already inside the Double border,
+/// which the caller renders separately; this fn draws no border of its
+/// own). Used for UI-SPEC §5's `Decoding image…` / `Could not open image:
+/// {reason}.` / `Terminal too small to display image.` states — all three
+/// share this one-line-centred layout (reuses the 36.6.2 thinking-panel
+/// idle-placeholder convention). `Paragraph` renders gracefully into a
+/// zero-size `Rect` (never panics), so this is safe to call for the
+/// TOO-SMALL case too.
+fn render_image_placeholder(frame: &mut Frame, content_rect: Rect, text: &str, style: Style) {
+    let y = content_rect.y + content_rect.height / 2;
+    let line_rect = Rect {
+        x: content_rect.x,
+        y,
+        width: content_rect.width,
+        height: content_rect.height.min(1),
+    };
+    let para = Paragraph::new(Line::from(Span::styled(text.to_string(), style)))
+        .alignment(ratatui::layout::Alignment::Center);
+    frame.render_widget(para, line_rect);
+}
+
 // ── Help overlay (TUI-02, D-08/D-09, UI-SPEC §4) ────────────────────────────────
 
 /// Renders the `?` Help overlay: centered `Percentage(60)` x `Percentage(50)`,
@@ -655,23 +793,13 @@ fn render_clarify(frame: &mut Frame, app: &App) {
 /// `app.help_scroll` (clamped so `PageDown` past the end never scrolls into
 /// blank space).
 fn render_help(frame: &mut Frame, app: &App, area: Rect) {
-    let modal_height = ((area.height as u32) * 50 / 100) as u16;
-    let rect = centered_rect(60, modal_height.max(5), area);
-    frame.render_widget(Clear, rect);
-
-    let outer = Block::bordered()
-        .border_type(BorderType::Double)
-        .border_style(Style::default().fg(Color::Yellow))
-        .title(Line::from(Span::styled(
-            " Help — Keybindings ",
-            Style::default().add_modifier(Modifier::BOLD),
-        )));
-    let inner = outer.inner(rect);
-    frame.render_widget(outer, rect);
-
     let registry = crate::tui_rata::keybindings::build_help_registry();
     let entries = registry.help_entries();
 
+    let plain_lines: Vec<String> = entries
+        .iter()
+        .map(|(key_display, description, _ctx)| format!("{key_display}  —  {description}"))
+        .collect();
     let lines: Vec<Line> = entries
         .iter()
         .map(|(key_display, description, _ctx)| {
@@ -683,8 +811,63 @@ fn render_help(frame: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
-    let max_scroll = (lines.len() as u16).saturating_sub(inner.height);
+    // Size the modal to fit every WRAPPED line, not a fixed fraction of the
+    // frame. The previous `area.height * 50 / 100` height was computed
+    // entirely independently of `entries.len()` — on the operator's real
+    // 39-row terminal that fraction produced a 17-row inner viewport, so the
+    // registry's last two rows (the newest-pushed `!` and `/image` entries,
+    // Phase 36.6.4 Plan 06) silently scrolled out of the initial view with
+    // no scrollbar or "more below" indicator (T-36.6.4-DISC-02 regression;
+    // `help_registry_includes_new_phase_affordances` in `keybindings.rs`
+    // only ever asserted on the registry `Vec` and passed throughout — a
+    // fresh instance of this phase's G-05 UAT finding). Measure with
+    // `word_wrapped_line_count` at the modal's actual inner width — the same
+    // ratatui-`WordWrapper`-mirroring helper `ui.rs::render_thinking_panel`
+    // already uses for this exact "how many rows will this Paragraph
+    // actually occupy" question (memory: wrap math must use the INNER width,
+    // recomputed every render, never cached) — rather than the unstable,
+    // feature-gated `Paragraph::line_count` this workspace does not enable.
+    let probe_rect = centered_rect(60, area.height.max(5), area);
+    let probe_inner_width = probe_rect.width.saturating_sub(2) as usize;
+    let wrapped_line_count: usize = plain_lines
+        .iter()
+        .map(|line| word_wrapped_line_count(line, probe_inner_width))
+        .sum();
+    let content_height = (wrapped_line_count as u16).saturating_add(2);
+    let modal_height = content_height.min(area.height).max(5);
+    let rect = centered_rect(60, modal_height, area);
+
+    let mut outer = Block::bordered()
+        .border_type(BorderType::Double)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(Line::from(Span::styled(
+            " Help — Keybindings ",
+            Style::default().add_modifier(Modifier::BOLD),
+        )));
+    let inner = outer.inner(rect);
+
+    let max_scroll = (wrapped_line_count as u16).saturating_sub(inner.height);
     let scroll = app.help_scroll.min(max_scroll);
+
+    // Even sized-to-content, a genuinely short terminal can still be shorter
+    // than every entry needs — the modal is capped to `area.height` above so
+    // it never overflows the screen. For that residual case, tell the
+    // operator scrolling exists rather than leaving the cut silent (the
+    // defect this fix targets in the first place): a right-aligned title,
+    // the same convention `render_skills_hub`'s " Ctrl+K / Esc close " title
+    // and the image viewer's caption already use in this module.
+    if max_scroll > 0 {
+        outer = outer.title(
+            Line::from(Span::styled(
+                " ↓ more (PageDown) ",
+                Style::default().add_modifier(Modifier::DIM),
+            ))
+            .right_aligned(),
+        );
+    }
+
+    frame.render_widget(Clear, rect);
+    frame.render_widget(outer, rect);
 
     frame.render_widget(
         Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((scroll, 0)),
@@ -1414,21 +1597,38 @@ mod tests {
 
     // ── Task 1: Help overlay ────────────────────────────────────────────────
 
+    /// Round 7 UAT adjudication (T-36.6.4-DISC-02): this test's ORIGINAL body
+    /// only asserted 4 spot-checked bindings (`Ctrl+T`/`Ctrl+K`/`Ctrl+B`/
+    /// `Esc`) at a 100x30 frame — a ~13-row inner viewport against a
+    /// (now-)19-entry registry. Every one of those 4 happens to sit in the
+    /// first 13 rows, so the name "lists_all_registered_keybindings" was
+    /// false assurance: this test would stay green even if every entry past
+    /// row 13 (including all 4 of this plan's new affordances) silently fell
+    /// off the bottom, which is exactly what happened in production. Now
+    /// that `render_help` sizes the modal to its wrapped content, this test
+    /// is rewritten to genuinely assert every registered entry's description
+    /// is present in the rendered buffer — driven live from
+    /// `build_help_registry()`, not a hand-picked subset — at the operator's
+    /// real 210x39 geometry, so a future regression here fails for real.
     #[test]
     fn help_overlay_lists_all_registered_keybindings() {
         let mut app = App::new_test_empty();
         app.active_overlay = Some(OverlayKind::Help);
 
-        let text = render_to_text(100, 30, |f| {
+        let text = render_to_text(210, 39, |f| {
             crate::tui_rata::ui::ui(f, &app);
             render(f, &app);
         });
 
         assert!(text.contains("Help"), "help title missing:\n{text}");
-        assert!(text.contains("Ctrl+T"), "Ctrl+T missing from help:\n{text}");
-        assert!(text.contains("Ctrl+K"), "Ctrl+K missing from help:\n{text}");
-        assert!(text.contains("Ctrl+B"), "existing Ctrl+B binding missing:\n{text}");
-        assert!(text.contains("Esc"), "existing Esc binding missing:\n{text}");
+
+        let registry = crate::tui_rata::keybindings::build_help_registry();
+        for (key_display, description, _ctx) in registry.help_entries() {
+            assert!(
+                text.contains(description),
+                "entry {key_display:?} ({description:?}) missing from rendered help overlay:\n{text}"
+            );
+        }
     }
 
     /// Phase 36.6.3 Plan 04 (D-08): the `?` Help overlay lists the 2 new
@@ -1442,13 +1642,18 @@ mod tests {
         let mut app = App::new_test_empty();
         app.active_overlay = Some(OverlayKind::Help);
 
-        // A taller frame than `help_overlay_lists_all_registered_keybindings`
-        // (100x30) — the modal's inner height is `area.height * 50 / 100`
-        // minus borders, and the 2 new entries are the LAST rows in the
-        // registry, so they scroll out of view on a 30-row frame. 40 rows
-        // gives an 18-row inner viewport, comfortably fitting all 15 entries
-        // unscrolled.
-        let text = render_to_text(100, 40, |f| {
+        // Historical note (Round 7 UAT regression, T-36.6.4-DISC-02): this
+        // comment used to justify "40 rows" as the frame height needed to
+        // keep the (then 2, now 4) newest registry rows from scrolling out
+        // of view under the OLD `area.height * 50 / 100` sizing — tuning the
+        // test's frame to the bug rather than fixing it, which is exactly
+        // why the real overlay still failed on the operator's 39-row
+        // terminal despite this test staying green. `render_help` now sizes
+        // the modal to its actual wrapped content (capped to the frame), so
+        // the tuned height is no longer load-bearing — reduced to the
+        // operator's own real 39-row geometry, which is now realistic
+        // rather than hand-picked to dodge the bug.
+        let text = render_to_text(100, 39, |f| {
             crate::tui_rata::ui::ui(f, &app);
             render(f, &app);
         });
@@ -1484,6 +1689,70 @@ mod tests {
         assert!(
             text.contains("Help"),
             "help overlay must still render its chrome with an out-of-range scroll:\n{text}"
+        );
+    }
+
+    /// Round 7 UAT regression (T-36.6.4-DISC-02, operator FAIL on item 1a):
+    /// on a real 210x39 terminal, the Help overlay's `!` and `/image` entries
+    /// never rendered — `render_help`'s modal height was a fixed
+    /// `area.height * 50 / 100` fraction, computed independently of
+    /// `entries.len()`. At 39 rows that fraction produced a 17-row inner
+    /// viewport, so the registry's LAST two rows (the newest-pushed `!` and
+    /// `/image` entries) silently scrolled out of the initial view with no
+    /// scrollbar or "more below" indicator. `help_registry_includes_new_phase_affordances`
+    /// in `keybindings.rs` asserted only on the registry `Vec` and passed
+    /// throughout — a fresh instance of this phase's G-05 UAT finding (the
+    /// headless harness passes while the app is broken). This test renders
+    /// the ACTUAL overlay into a `TestBackend` buffer at the operator's exact
+    /// terminal size and asserts the buffer contents, not the registry.
+    #[test]
+    fn help_overlay_renders_all_four_new_affordances_at_operator_terminal_size() {
+        let mut app = App::new_test_empty();
+        app.active_overlay = Some(OverlayKind::Help);
+
+        // The operator's real Terminal.app session: 210x39.
+        let text = render_to_text(210, 39, |f| {
+            crate::tui_rata::ui::ui(f, &app);
+            render(f, &app);
+        });
+
+        assert!(
+            text.contains("requires terminal or tmux OSC52 support"),
+            "yank binding entry (with its OSC52 caveat) missing from rendered help overlay:\n{text}"
+        );
+        assert!(
+            text.contains("Start visual selection"),
+            "visual-mode entry missing from rendered help overlay:\n{text}"
+        );
+        assert!(
+            text.contains("output enters the conversation"),
+            "`!` shell-prefix entry missing from rendered help overlay:\n{text}"
+        );
+        assert!(
+            text.contains("image file"),
+            "`/image` entry missing from rendered help overlay:\n{text}"
+        );
+    }
+
+    /// Companion to the fix above: on a terminal genuinely too short to fit
+    /// every entry even at content-sized height (the modal is capped to
+    /// `area.height` so it never overflows the frame), the operator must be
+    /// TOLD scrolling is available rather than silently losing rows — the
+    /// exact discoverability failure this whole regression is about, now
+    /// pushed down to the residual case the height fix cannot eliminate.
+    #[test]
+    fn help_overlay_shows_more_indicator_when_terminal_too_short_for_all_entries() {
+        let mut app = App::new_test_empty();
+        app.active_overlay = Some(OverlayKind::Help);
+
+        let text = render_to_text(100, 12, |f| {
+            crate::tui_rata::ui::ui(f, &app);
+            render(f, &app);
+        });
+
+        assert!(
+            text.contains("more") && text.contains("PageDown"),
+            "expected a scroll-more indicator when the registry doesn't fit the frame:\n{text}"
         );
     }
 
@@ -1683,6 +1952,168 @@ mod tests {
         assert!(
             text.contains("more — narrow your filter"),
             "expected overflow hint in buffer:\n{text}"
+        );
+    }
+
+    // ── Phase 36.6.4 Plan 05 Task 2 `<behavior>` tests (D-13, TUI-IMG-01) ────
+
+    fn image_viewer_overlay(label: &str) -> OverlayKind {
+        OverlayKind::ImageViewer {
+            label: label.to_string(),
+            source: ironhermes_gateway::media_tag::MediaRef {
+                source: ironhermes_gateway::media_tag::MediaSource::Path(
+                    std::path::PathBuf::from(format!("/tmp/{label}")),
+                ),
+                kind: ironhermes_gateway::media_tag::MediaKind::Photo,
+                original_tag_text: String::new(),
+            },
+        }
+    }
+
+    /// Test 1: the viewer's border type, colour, and two-title layout
+    /// match the Skills Hub's.
+    #[test]
+    fn image_overlay_uses_double_yellow_chrome_matching_other_overlays() {
+        let mut app = App::new_test_empty();
+        app.active_overlay = Some(image_viewer_overlay("photo.png"));
+        // Pre-seed Decoding so the render doesn't attempt a real
+        // spawn_blocking decode (this test asserts chrome only).
+        *app.image_decode.lock().unwrap() = Some(crate::tui_rata::app::ImageDecodeState::Decoding);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+
+        let mut text = String::new();
+        let mut found_double_yellow_corner = false;
+        for y in 0..24u16 {
+            for x in 0..80u16 {
+                if let Some(cell) = buf.cell((x, y)) {
+                    text.push_str(cell.symbol());
+                    if cell.symbol() == "╔" && cell.style().fg == Some(Color::Yellow) {
+                        found_double_yellow_corner = true;
+                    }
+                }
+            }
+            text.push('\n');
+        }
+
+        assert!(
+            found_double_yellow_corner,
+            "expected a Double-border Yellow top-left corner glyph — same chrome \
+             as SkillsHub/Help/ModelPicker; buffer:\n{text}"
+        );
+        assert!(
+            text.contains("Image — photo.png"),
+            "expected the left title ' Image — {{label}} '; buffer:\n{text}"
+        );
+        assert!(
+            text.contains("Esc close"),
+            "expected the right title ' Esc close '; buffer:\n{text}"
+        );
+    }
+
+    /// Test 2: before the decode completes, the content area holds a
+    /// single centred DIM line.
+    #[test]
+    fn image_overlay_decoding_state_shows_dim_placeholder() {
+        let mut app = App::new_test_empty();
+        app.active_overlay = Some(image_viewer_overlay("photo.png"));
+        *app.image_decode.lock().unwrap() = Some(crate::tui_rata::app::ImageDecodeState::Decoding);
+
+        let text = render_to_text(80, 24, |f| render(f, &app));
+
+        assert!(
+            text.contains("Decoding image…"),
+            "expected the DIM decoding placeholder; buffer:\n{text}"
+        );
+    }
+
+    /// Test 3: a sub-ten-row backend renders the too-small placeholder and
+    /// does not panic.
+    #[test]
+    fn image_overlay_too_small_shows_fallback_text_not_panic() {
+        let mut app = App::new_test_empty();
+        app.active_overlay = Some(image_viewer_overlay("photo.png"));
+
+        // height=2: centered_rect's Length(modal_height.max(5)) constraint
+        // cannot fit inside a 2-row frame, so ratatui's Layout solver
+        // shrinks the modal rect to at most 2 rows — after the 2-row
+        // Double border, the content rect's height rounds to 0.
+        let text = render_to_text(80, 2, |f| render(f, &app));
+
+        assert!(
+            text.contains("Terminal too small to display image."),
+            "expected the too-small fallback text (and no panic); buffer:\n{text}"
+        );
+    }
+
+    /// Test 4: an undecodable source renders the red failure message with
+    /// the close footer and no retry affordance.
+    #[test]
+    fn image_overlay_decode_failure_shows_red_message_and_esc_footer() {
+        let mut app = App::new_test_empty();
+        app.active_overlay = Some(image_viewer_overlay("photo.png"));
+        *app.image_decode.lock().unwrap() = Some(
+            crate::tui_rata::app::ImageDecodeState::Failed("unsupported format".to_string()),
+        );
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+
+        let mut text = String::new();
+        let mut found_red_cell = false;
+        for y in 0..24u16 {
+            for x in 0..80u16 {
+                if let Some(cell) = buf.cell((x, y)) {
+                    text.push_str(cell.symbol());
+                    if cell.symbol() == "C" && cell.style().fg == Some(Color::Red) {
+                        // First 'C' of "Could not open image..." — cheap
+                        // proxy for "the message IS styled Red", without
+                        // re-deriving the exact centered rect math here.
+                        found_red_cell = true;
+                    }
+                }
+            }
+            text.push('\n');
+        }
+
+        assert!(
+            text.contains("Could not open image: unsupported format."),
+            "expected the decode-failure message; buffer:\n{text}"
+        );
+        assert!(found_red_cell, "expected the failure message styled Color::Red");
+        assert!(
+            text.contains("Esc close"),
+            "footer must stay '[Esc] close' only — no retry affordance; buffer:\n{text}"
+        );
+        assert!(
+            !text.to_lowercase().contains("retry"),
+            "no retry affordance this phase; buffer:\n{text}"
+        );
+    }
+
+    /// Test 5: Esc clears the active overlay through the existing uniform
+    /// precedence chain — mirrors `esc_with_no_overlay_still_clears_textarea`'s
+    /// sibling tests for Help/SkillsHub.
+    #[test]
+    fn image_overlay_esc_closes_like_every_other_overlay() {
+        let mut app = App::new_test_empty();
+        app.active_overlay = Some(image_viewer_overlay("photo.png"));
+        *app.image_decode.lock().unwrap() = Some(crate::tui_rata::app::ImageDecodeState::Decoding);
+
+        app.handle_key(press(crossterm::event::KeyCode::Esc));
+
+        assert!(
+            app.active_overlay.is_none(),
+            "Esc must close the image viewer overlay"
+        );
+        assert!(
+            app.image_decode.lock().unwrap().is_none(),
+            "Esc must clear decode state so a future open re-decodes fresh"
         );
     }
 }

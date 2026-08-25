@@ -97,13 +97,55 @@ The shipped `Dockerfile` does not build with the `rusty-vault` cargo feature. To
 podman build -t ironhermes .
 #   equivalently: docker build -t ironhermes .
 
-# Run with a named volume for persistent data
+# STEP 1 — start once, on the image's default loopback bind, to get a password.
+# A provider API key is required: iron_hermes_ui refuses to start when the main
+# provider has no resolvable key, rather than coming up and failing every turn.
+# The var name follows providers.<main>.api_key_env in config.yaml
+# (OPENROUTER_API_KEY by default, since model.provider defaults to openrouter).
 podman run -d \
   --name ironhermes \
   -v ironhermes-data:/opt/data \
   -p 8080:8080 \
+  -e OPENROUTER_API_KEY=sk-or-... \
+  ironhermes
+
+# STEP 2 — read the generated password (printed once, hash stored in the volume)
+podman logs ironhermes
+
+# STEP 3 — expose it, explicitly. -e IP=0.0.0.0 is the opt-in to being reachable.
+podman rm -f ironhermes
+podman run -d \
+  --name ironhermes \
+  -v ironhermes-data:/opt/data \
+  -p 8080:8080 \
+  -e IP=0.0.0.0 \
+  -e OPENROUTER_API_KEY=sk-or-... \
   ironhermes
 ```
+
+**Why two steps.** The image sets `ENV IP=127.0.0.1`, so the first start binds
+loopback *inside* the container. A loopback listener ignores `-p 8080:8080`
+(port publishing forwards to the container's external interface), so the UI is
+genuinely unreachable until step 3 — which is the point: a freshly generated
+password is never on the network. Exposure is always an explicit act.
+
+**Bringing your own password.** Mint a hash first — the image already contains
+the CLI:
+
+```bash
+podman run --rm -it --entrypoint ironhermes ironhermes web set-password
+```
+
+Pass it as `-e IRONHERMES_WEB_PASSWORD_HASH='<hash>'` (**single-quote it**;
+argon2id strings contain `$`). Nothing is generated or printed when it is set,
+and you can pass `-e IP=0.0.0.0` on the very first run.
+
+> **`-e IP=0.0.0.0` with no password hash is a hard refusal**, not a downgrade
+> to loopback — the container exits within seconds, and under
+> `--restart=always` that presents as a restart loop. The same is true when the
+> provider key is missing. Both guards are deliberate: failing fast beats
+> serving a broken agent, and silently binding loopback when you asked for
+> `0.0.0.0` would leave you believing you were exposed when you were not.
 
 **Volume:** `/opt/data` is the container's `IRONHERMES_HOME`. Mount a named volume here to persist sessions, memories, config, and logs across container restarts.
 
@@ -111,15 +153,43 @@ podman run -d \
 
 ### Container Environment Variables
 
-The entrypoint (`docker/entrypoint.sh`) seeds config templates on first run, drops privileges from root to the `ironhermes` user (UID 10000), and respects the following runtime overrides:
+The image ships two entrypoints and `Dockerfile:154` selects the web one by
+default:
+
+| Entrypoint | Execs | When |
+|---|---|---|
+| `docker/web-entrypoint.sh` | `iron_hermes_ui` (fullstack web server, `0.0.0.0:8080`, foreground/PID 1) + `ironhermes gateway --non-interactive` (background, best-effort) | **Default** — the image's `ENTRYPOINT` |
+| `docker/entrypoint.sh` | `ironhermes` CLI with your args | Override with `--entrypoint` for management/one-shot use |
+
+Both seed config templates on first run (**only if absent**, so your edits
+survive container recreation), drop privileges from root to the `ironhermes`
+user (UID 10000), and respect the following runtime overrides:
 
 | Variable | Description |
 |---|---|
 | `IRONHERMES_HOME` | Data directory inside the container. Default: `/opt/data` |
 | `IRONHERMES_UID` | Override the runtime UID (for volume ownership compatibility with host) |
 | `IRONHERMES_GID` | Override the runtime GID |
+| `IRONHERMES_GATEWAY` | Launch `ironhermes gateway` in the background alongside the web UI. Default: `1`. Set to `0`/`false`/`no`/`off` to run the web UI alone. |
 
-Pass provider API keys and gateway tokens via `podman run -e` (or `docker run -e`) or a `--env-file`:
+Pass provider API keys and gateway tokens via `podman run -e` (or `docker run -e`)
+or a `--env-file`. Name the variable via `providers.<name>.api_key_env` in
+`config.yaml` — that is the supported form, and it keeps the secret in the
+environment rather than in the config file:
+
+```yaml
+providers:
+  openrouter:
+    api_key_env: OPENROUTER_API_KEY    # secret stays in .env / -e
+```
+
+Inline `providers.<name>.api_key` literals still resolve (they are precedence
+#1), but they are deprecated: they put the secret in `config.yaml`, they mask
+the vault backend, and the CLI's startup "runnable LLM" probe does not see them
+— so an interactive `hermes chat` on a config using only an inline literal
+re-launches the setup wizard on every start even though the config works. Use
+`api_key_env`.
+
 
 ```bash
 podman run -d \
@@ -130,6 +200,69 @@ podman run -d \
   -e TELEGRAM_BOT_TOKEN=... \
   ironhermes
 ```
+
+---
+
+## Combined Gateway and Web Update
+
+`scripts/deploy/update.sh` replaces the four-step manual redeploy dance
+(`cargo build --release` → `install.sh` → `web-build.sh` → `web-install.sh`)
+with a single command. Run it with no arguments to rebuild and redeploy
+**both** the gateway binary and the web bundle, restarting both services:
+
+```bash
+scripts/deploy/update.sh
+```
+
+### Flags
+
+| Flag | Effect |
+|---|---|
+| (none) | Build, install, and restart both the gateway and the web UI |
+| `--gateway-only` | Restrict the run to the gateway. Mutually exclusive with `--web-only` (exit 2) |
+| `--web-only` | Restrict the run to the web UI. Mutually exclusive with `--gateway-only` and `--cron` (exit 2) |
+| `--skip-build` | Deploy the artifacts already on disk; skip both build steps |
+| `--no-start` | Forwarded to both installers (register without starting); also skips the post-restart health probe |
+| `--force` | Forwarded to both installers (overwrite existing service registration) |
+| `--skip-wasm-check` | Forwarded to `web-build.sh` — skip the wasm32 type-check gate |
+| `--cron` | Forwarded to `install.sh` — install the gateway watchdog cron entry instead of a native service. Gateway-only deployment model, so it cannot be combined with `--web-only` |
+| `--dry-run` | Print every step that would run, prefixed `[update] DRY-RUN: `, and mutate nothing |
+| `-h`, `--help` | Print usage and exit |
+
+### Ordering guarantee
+
+The script runs four strictly ordered phases: **preflight → build → install +
+restart → health probe**. Both components are *built* before either one is
+*installed*, so a failed build (gateway or web) aborts the whole run before
+any installer runs and before any live service is touched — a broken build
+can never take down a running service. Within the install + restart phase,
+the gateway installs first so `install.sh`'s `ironhermes doctor` sanity check
+runs before the web bundle is staged.
+
+`update.sh` performs no restart logic of its own — the actual `systemctl
+--user restart` / `launchctl kickstart -k` calls live in the delegated
+`install.sh` and `web-install.sh` scripts (see
+[Gateway Service Setup](#gateway-service-setup) and
+[Web UI Deployment](#web-ui-deployment-iron_hermes_ui) below for what those
+restarts do on each platform).
+
+### Health probe
+
+Unless skipped by `--no-start` or `--dry-run`, after the restart phase the
+script probes each component it just restarted (`systemctl --user is-active`
+on Linux, `launchctl print` on macOS, or a `kill -0` against the recorded pid
+for a `--cron` gateway), retrying for up to 10 seconds to absorb normal
+startup latency. If any component is not running afterward, the script
+prints the matching log-inspection command
+(`journalctl --user -u <unit> -n 50` on Linux, `tail -n 50
+~/.ironhermes/logs/<name>.err.log` on macOS) and exits non-zero — a deploy
+that leaves a service down is never reported as a success.
+
+### No debug web build
+
+`update.sh` deliberately does not offer a debug/non-release web build option.
+`web-install.sh` always stages `target/dx/iron_hermes_ui/release/web`, so a
+debug bundle would be silently ignored in favor of a stale release bundle.
 
 ---
 
@@ -231,6 +364,16 @@ The command never writes `config.yaml` itself — paste the printed PHC string i
 
 Because of the bind guard above, every script below still defaults to a loopback (`127.0.0.1`) bind and refuses any other address unless you explicitly set `IRONHERMES_WEB_ALLOW_PUBLIC_BIND=1` — that shell-script gate is now an earlier, friendlier warning layered in front of the binary's own real guarantee, not the only line of defense.
 
+### MCP OAuth redirect origin (`mcp_oauth.web_redirect_base_url`)
+
+`mcp_oauth.web_redirect_base_url` (config.yaml, sibling to `mcp_oauth.issuer_allowlist`) is the **public origin** an MCP authorization server redirects the browser back to when the web UI drives an MCP CONNECT authorization (`McpManager::begin_oauth`/`complete_oauth`). It is combined with the fixed `/oauth/mcp/callback` path to build the `redirect_uri` argument passed into that flow — an operator never sets the callback path itself, only the origin it hangs off of.
+
+**When it is required:** any deployment where the browser's own origin differs from what the process can infer from the address it binds to — a reverse proxy that rewrites `Host`, a TLS terminator in front of a plain-HTTP backend, or a container/VPS published on a different hostname or port than the bind address above. Set it to the exact origin operators' browsers see, e.g. `https://hermes.example.com`.
+
+**When it is unset (the default):** the browser's own request origin is used to build the redirect URI instead, subject to the same validation rules below. This is correct for the common case (no reverse proxy, or a proxy that preserves `Host` faithfully) and requires no configuration.
+
+**Validation:** the value is checked by `ironhermes_mcp::security::validate_web_redirect_base` — a pure function also callable directly from `iron_hermes_ui` — before it is used for anything. It must be an absolute `http` or `https` origin with **no** userinfo, path beyond a bare `/`, query string, or fragment (and no longer than 255 bytes). A malformed value is rejected with a fixed error message that never echoes the input back, matching this crate's existing credential-handling discipline (see `security::sanitize_error` above). This key is orthogonal to the `web_ui.auth.*` table above — it does not gate login, only where an MCP authorization server is told to send its browser redirect.
+
 ### Build
 
 ```bash
@@ -328,7 +471,7 @@ Refer to [CONFIGURATION.md](CONFIGURATION.md) for the complete environment varia
 
 | Variable | Required for |
 |---|---|
-| `OPENROUTER_API_KEY` (or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`) | LLM provider — at least one is required |
+| `OPENROUTER_API_KEY` (or `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`, matching `model.provider`) | LLM provider — required for the main provider (see `providers.<name>.api_key_env` to point at a differently-named variable). `iron_hermes_ui` fails closed on this: with no resolvable key and a non-loopback provider `base_url`, the web server exits non-zero at startup instead of coming up and burning a retry storm on the first turn. |
 | `TELEGRAM_BOT_TOKEN` | Telegram gateway mode |
 | `TELEGRAM_ALLOWED_USERS` | Restrict gateway access to specific chat IDs |
 

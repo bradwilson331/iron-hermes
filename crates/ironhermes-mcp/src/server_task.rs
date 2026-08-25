@@ -97,7 +97,7 @@ pub struct ServerTaskResult {
 ///
 /// The returned `ServerTaskResult.failure_reason` is `None` on clean shutdown,
 /// and `Some(sanitized_error)` when retries are exhausted (D-12 data contract).
-#[allow(clippy::too_many_arguments)] // 8 args required: name, config, registry, cancel, connected, child_slot, auth_store, global_issuer_allowlist
+#[allow(clippy::too_many_arguments)] // 9 args required: name, config, registry, cancel, connected, child_slot, auth_store, global_issuer_allowlist, last_failure
 pub async fn run_server_task(
     name: String,
     mut config: McpServerConfig,
@@ -107,6 +107,12 @@ pub async fn run_server_task(
     child_slot: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
     auth_store: Option<Arc<AuthStore>>,
     global_issuer_allowlist: Vec<String>,
+    // Warm-but-revoked follow-up fix: a live, per-server cell mirroring the
+    // eventual `ServerTaskResult.failure_reason` but updated on EVERY
+    // connect/serve error (not only at final retry exhaustion) and cleared
+    // on a successful (re)connect — so `McpManager::last_failure_reason` can
+    // answer without waiting for this task to exit or for a reload.
+    last_failure: Arc<std::sync::Mutex<Option<String>>>,
 ) -> ServerTaskResult {
     // D-18: interpolate ${ENV_VAR} placeholders in config fields
     crate::config::interpolate_config(&mut config);
@@ -137,6 +143,13 @@ pub async fn run_server_task(
             Ok(names) => {
                 registered_names = names;
                 failure_reason = None; // connected successfully; clean exit
+                // Warm-but-revoked follow-up fix: a successful (re)connect
+                // means whatever the server was last failing on no longer
+                // applies — clear the live cell so a stale auth-required
+                // reason doesn't outlive its cause.
+                if let Ok(mut cell) = last_failure.lock() {
+                    *cell = None;
+                }
                 break;
             }
             Err(_) if cancel_token.is_cancelled() => break,
@@ -153,7 +166,10 @@ pub async fn run_server_task(
                         "MCP server OAuth permanent error — not retrying"
                     );
                     connected.store(false, Ordering::SeqCst);
-                    failure_reason = Some(sanitized);
+                    failure_reason = Some(sanitized.clone());
+                    if let Ok(mut cell) = last_failure.lock() {
+                        *cell = Some(sanitized);
+                    }
                     break;
                 }
 
@@ -183,7 +199,10 @@ pub async fn run_server_task(
                     // signal consulted by McpManager::connected_server_names().
                     connected.store(false, Ordering::SeqCst);
                     // D-12: capture failure reason for reload reporting
-                    failure_reason = Some(sanitized);
+                    failure_reason = Some(sanitized.clone());
+                    if let Ok(mut cell) = last_failure.lock() {
+                        *cell = Some(sanitized);
+                    }
                     break;
                 }
                 tracing::warn!(
@@ -194,6 +213,12 @@ pub async fn run_server_task(
                     error = %sanitized,
                     "MCP server disconnected, retrying"
                 );
+                // Warm-but-revoked follow-up fix: record the reason live, mid-
+                // retry — a still-retrying server's status should not have to
+                // wait for MAX_RETRIES exhaustion to stop lying as SpawnFailed.
+                if let Ok(mut cell) = last_failure.lock() {
+                    *cell = Some(sanitized);
+                }
                 tokio::select! {
                     _ = tokio::time::sleep(backoff) => {}
                     _ = cancel_token.cancelled() => break,

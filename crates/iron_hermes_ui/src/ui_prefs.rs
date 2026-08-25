@@ -142,6 +142,66 @@ impl Default for AvatarPrefs {
 }
 
 // ---------------------------------------------------------------------------
+// ToolFavorites (Phase 48.2 Plan 06, D-15)
+// ---------------------------------------------------------------------------
+
+/// localStorage key for the serialised [`ToolFavorites`] blob. Namespaced
+/// under `ih.ui.*` like every other key in this module.
+pub const TOOL_FAVORITES_KEY: &str = "ih.ui.tool_favorites";
+
+/// Per-browser pinned-tool set for the Tools page search/favorites toolbar
+/// (D-15). A `BTreeSet` gives sorted, de-duplicated membership for free —
+/// serializing it as JSON always produces a sorted array, and inserting an
+/// already-present name is a no-op. Favorites are a UI preference only:
+/// nothing here ever touches `config.yaml`, and no `#[server]` fn is
+/// involved (must_haves: "Favorites pin state is never written to
+/// config.yaml").
+#[derive(Clone, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct ToolFavorites(pub std::collections::BTreeSet<String>);
+
+impl ToolFavorites {
+    /// True when `name` is currently pinned.
+    pub fn is_pinned(&self, name: &str) -> bool {
+        self.0.contains(name)
+    }
+
+    /// Pin `name`. Idempotent — pinning an already-pinned tool leaves the
+    /// set unchanged (stored once, not duplicated).
+    pub fn pin(&mut self, name: &str) {
+        self.0.insert(name.to_string());
+    }
+
+    /// Unpin `name`. A no-op when `name` was never pinned.
+    pub fn unpin(&mut self, name: &str) {
+        self.0.remove(name);
+    }
+}
+
+/// Read the pinned-tool set. `None` stored (nothing ever pinned), a
+/// non-browser host, or a corrupt blob all resolve to
+/// `ToolFavorites::default()` (empty set) rather than an error — mirrors
+/// every other read helper in this module.
+#[cfg(target_arch = "wasm32")]
+pub fn read_tool_favorites() -> ToolFavorites {
+    read_json(TOOL_FAVORITES_KEY).unwrap_or_default()
+}
+
+/// Persist the pinned-tool set. Silently no-ops on write failure (quota
+/// exceeded / storage disabled), same as `write_json`.
+#[cfg(target_arch = "wasm32")]
+pub fn write_tool_favorites(favorites: &ToolFavorites) {
+    write_json(TOOL_FAVORITES_KEY, favorites);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_tool_favorites() -> ToolFavorites {
+    ToolFavorites::default()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_tool_favorites(_favorites: &ToolFavorites) {}
+
+// ---------------------------------------------------------------------------
 // AccentColor (D-13)
 // ---------------------------------------------------------------------------
 
@@ -528,5 +588,68 @@ mod tests {
             result.is_err(),
             "partial AvatarPrefs JSON (missing head_id) must fail deserialization; got {result:?}"
         );
+    }
+
+    // --- Phase 48.2 Plan 06 Task 1: ToolFavorites tests (RED) ---
+
+    /// TOOL_FAVORITES_KEY is namespaced under `ih.ui.*` like every other key.
+    #[test]
+    fn tool_favorites_key_is_namespaced_under_ih_ui() {
+        assert_eq!(TOOL_FAVORITES_KEY, "ih.ui.tool_favorites");
+    }
+
+    /// Behavior: `read_tool_favorites` on a browser with nothing stored
+    /// returns an empty set rather than an error. Exercised at the host-stub
+    /// level, mirroring the existing `host_target_stubs_are_no_ops` pattern
+    /// — the stub branch always returns `ToolFavorites::default()`.
+    #[test]
+    fn read_tool_favorites_with_nothing_stored_returns_empty_set() {
+        let favorites = read_tool_favorites();
+        assert!(favorites.0.is_empty());
+    }
+
+    /// Behavior: a pin followed by an unpin leaves the stored set empty.
+    #[test]
+    fn pin_then_unpin_leaves_the_set_empty() {
+        let mut favorites = ToolFavorites::default();
+        favorites.pin("web_search");
+        assert!(favorites.is_pinned("web_search"));
+        favorites.unpin("web_search");
+        assert!(!favorites.is_pinned("web_search"));
+        assert!(favorites.0.is_empty());
+    }
+
+    /// Behavior: pinning the same tool twice stores it once (idempotent
+    /// insert, no duplicate — `BTreeSet` semantics).
+    #[test]
+    fn pinning_the_same_tool_twice_stores_it_once() {
+        let mut favorites = ToolFavorites::default();
+        favorites.pin("web_search");
+        favorites.pin("web_search");
+        assert_eq!(favorites.0.len(), 1);
+        assert!(favorites.is_pinned("web_search"));
+    }
+
+    /// `ToolFavorites` round-trips through serde_json, and the JSON array is
+    /// sorted (BTreeSet's serialization order).
+    #[test]
+    fn tool_favorites_round_trips_and_serializes_sorted() {
+        let mut favorites = ToolFavorites::default();
+        favorites.pin("zebra_tool");
+        favorites.pin("alpha_tool");
+        let json = serde_json::to_string(&favorites).expect("serialize ToolFavorites");
+        assert_eq!(json, r#"["alpha_tool","zebra_tool"]"#);
+        let parsed: ToolFavorites = serde_json::from_str(&json).expect("deserialize ToolFavorites");
+        assert_eq!(parsed, favorites);
+    }
+
+    /// Host (non-wasm) target stubs are no-ops — same shape as
+    /// `host_target_stubs_are_no_ops` above.
+    #[test]
+    fn tool_favorites_host_target_stubs_are_no_ops() {
+        let mut favorites = ToolFavorites::default();
+        favorites.pin("web_search");
+        write_tool_favorites(&favorites);
+        assert!(read_tool_favorites().0.is_empty());
     }
 }

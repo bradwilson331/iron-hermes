@@ -357,6 +357,12 @@ pub async fn dispatch_slash(app: &mut App, input: &str) -> SlashOutcome {
                         // "attach" arm (falls through to `todo_stub`,
                         // whose result is discarded here).
                         "attach" => handle_attach_slash(app, args_str),
+                        // Phase 36.6.4 Plan 05 (D-12/D-13, TUI-IMG-01):
+                        // `/image <path>` needs App-side state (the image
+                        // chip collection) that CommandContext doesn't
+                        // carry — same App-side-handler pattern as
+                        // `/attach` above.
+                        "image" => handle_image_slash(app, args_str),
                         // Phase 36.17.8 (D-08/D-11): `/voice` runtime state (enabled /
                         // recording / auto_tts) lives in `App::voice` AtomicBools, so the
                         // toggle + status must be driven App-side, not from the core
@@ -543,6 +549,55 @@ fn handle_attach_slash(app: &mut App, arg: &str) -> SlashOutcome {
         Err((display_name, reason)) => {
             SlashOutcome::Handled(format!("Could not attach {display_name}: {reason}"))
         }
+    }
+}
+
+// ── Phase 36.6.4 Plan 05: /image <path> (D-12/D-13, TUI-IMG-01) ─────────────
+
+/// `/image <path>` — the second D-12 trigger (alongside `<MEDIA:>` tag
+/// extraction at turn-commit). Resolves `path` against the operator's real
+/// CWD, bounded-read-checks it (T-36.6.4-IMG-01 — never reads file bytes
+/// past the cap, and never attempts a decode here at all; decode is Task
+/// 2's overlay-open concern), and on success appends an image chip
+/// directly to `app.image_chips` — the chip itself IS the visible
+/// feedback, so this returns `SlashOutcome::Silent` (mirrors how a
+/// successful action needs no separate transcript line once its own chip
+/// is visible). A missing/oversized/unreadable path renders NO chip and
+/// instead a single System-role transcript line via `SlashOutcome::Handled`
+/// (UI-SPEC §5 E5/error, `apply_slash_outcome`'s `Handled` arm already
+/// pushes `Role::System`).
+fn handle_image_slash(app: &mut App, arg: &str) -> SlashOutcome {
+    let path_str = arg.trim();
+    if path_str.is_empty() {
+        return SlashOutcome::Unknown {
+            input: "/image".to_string(),
+            hint: "Usage: /image <path>".to_string(),
+        };
+    }
+    let path = std::path::PathBuf::from(path_str);
+    match crate::tui_rata::app::check_image_path_bounded(&path) {
+        Ok(()) => {
+            let label = crate::tui_rata::app::image_chip_label_for_path(&path);
+            // Phase 36.6.4 Plan 12 (G-09 closure): `/image` pushes nothing
+            // into `history` itself, so `app.history.len()` at this point IS
+            // "after everything said so far" — the chip's chronological
+            // anchor.
+            app.image_chips.push(crate::tui_rata::app::ImageChip {
+                label,
+                source: ironhermes_gateway::media_tag::MediaRef {
+                    source: ironhermes_gateway::media_tag::MediaSource::Path(path),
+                    kind: ironhermes_gateway::media_tag::MediaKind::Photo,
+                    original_tag_text: String::new(),
+                },
+                history_anchor: app.history.len(),
+            });
+            app.scroll_to_bottom();
+            SlashOutcome::Silent
+        }
+        Err(reason) => SlashOutcome::Handled(format!(
+            "Could not load image: {} — {reason}.",
+            path.display()
+        )),
     }
 }
 

@@ -63,7 +63,20 @@ pub struct StatusLineState {
     /// `None` = voice mode off (pill hidden); `Some(phase)` = show pill.
     /// Populated per frame in `ui.rs` from `app.voice`.
     pub voice_phase: Option<VoicePillPhase>,
+
+    /// Phase 36.6.4 Plan 02 (D-05, UI-SPEC §2 Visual-mode indicator): when
+    /// `true`, the hint slot shows `VISUAL_MODE_HINT` instead of
+    /// `state.hint` — same slot, same DIM style, no new widget. Populated
+    /// per frame in `ui.rs` from `app.selection_mode ==
+    /// SelectionMode::Visual` (mirrors `voice_phase`'s per-frame-populated-
+    /// live discipline). Reverts to the normal hint the moment visual mode
+    /// ends (yank or cancel), since this is level-triggered, not timed.
+    pub visual_mode_active: bool,
 }
+
+/// The visual-mode status-line hint (UI-SPEC §2, D-05) — vim modal-editor
+/// convention: `hjkl`/arrows move the cursor, `y` yanks, `Esc` cancels.
+pub const VISUAL_MODE_HINT: &str = "-- VISUAL -- hjkl move · y yank · Esc cancel";
 
 /// Recording phase for the voice status pill (mirrors RecordPhase in voice_state.rs
 /// but lives here so status_line.rs has no dep on the cli crate's voice_state module).
@@ -91,10 +104,18 @@ impl Default for StatusLineState {
             // replaced with the palette (`/ commands`) + `/model` picker
             // (`/model switch`) mentions, appended LAST so they truncate
             // first on a narrow terminal (UI-SPEC E4 overflow backstop).
+            // Phase 36.6.4 Plan 06 (T-36.6.4-DISC-01/02): `Ctrl+Y copy` and
+            // `! shell` segments inserted immediately after the always-
+            // critical `ctrl+c cancel` segment (not appended at the end) so
+            // they survive the narrow-terminal right-clip truncation the
+            // 36.6.3 contract already accepted as a backstop, ahead of the
+            // less time-critical existing segments.
             // DUPLICATED at event_loop.rs's runtime-constructed
             // `StatusLineState` default — both sites MUST change together
-            // (RESEARCH Pitfall 3).
-            hint: "ctrl+c cancel · Ctrl+T thinking · Ctrl+K skills · ? help · / commands · /model switch"
+            // (RESEARCH Pitfall 3). A test in event_loop.rs's own test
+            // module (`status_hint_identical_at_both_construction_sites`)
+            // keeps the two from silently diverging.
+            hint: "ctrl+c cancel · Ctrl+Y copy · ! shell · Ctrl+T thinking · Ctrl+K skills · ? help · / commands · /model switch"
                 .to_string(),
             active_subagents: 0,
             max_subagents: 0,
@@ -108,6 +129,9 @@ impl Default for StatusLineState {
             queue_paused: false,
             // Phase 36.17.8 (D-08): voice pill hidden at session start.
             voice_phase: None,
+            // Phase 36.6.4 Plan 02: no keyboard selection in progress at
+            // session start.
+            visual_mode_active: false,
         }
     }
 }
@@ -238,7 +262,14 @@ fn build_pills(state: &StatusLineState) -> (Vec<PillEntry>, Option<String>) {
         pills.push(PillEntry::colored(label, color));
     }
 
-    let hint = if state.hint.is_empty() {
+    // Phase 36.6.4 Plan 02 (D-05, UI-SPEC §2): the visual-mode indicator
+    // temporarily REPLACES the hint slot's content while active — same
+    // slot, same DIM style as the normal hint below, no new widget. Reverts
+    // to the normal hint (or no hint, if empty) the instant `visual_mode_
+    // active` goes false, since `App` clears it on both yank and cancel.
+    let hint = if state.visual_mode_active {
+        Some(VISUAL_MODE_HINT.to_string())
+    } else if state.hint.is_empty() {
         None
     } else {
         Some(state.hint.clone())
@@ -494,6 +525,40 @@ mod tests {
             has_agents,
             "D-04: agents pill must render as 'agents: N/M' when active_subagents > 0"
         );
+    }
+
+    // — Phase 36.6.4 Plan 02 (D-05): visual-mode indicator ─────────────────
+
+    #[test]
+    fn visual_mode_active_replaces_hint_with_visual_mode_hint() {
+        let state = StatusLineState {
+            hint: "ctrl+c cancel · Ctrl+Y copy".to_string(),
+            visual_mode_active: true,
+            ..StatusLineState::default()
+        };
+        let line = render_status_line_ratatui(&state);
+        let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            rendered.contains(VISUAL_MODE_HINT),
+            "visual_mode_active must replace the hint slot with the VISUAL mode string; got: {rendered:?}"
+        );
+        assert!(
+            !rendered.contains("ctrl+c cancel"),
+            "the normal hint must NOT also appear while visual mode is active; got: {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn visual_mode_inactive_shows_normal_hint() {
+        let state = StatusLineState {
+            hint: "ctrl+c cancel".to_string(),
+            visual_mode_active: false,
+            ..StatusLineState::default()
+        };
+        let line = render_status_line_ratatui(&state);
+        let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(rendered.contains("ctrl+c cancel"));
+        assert!(!rendered.contains(VISUAL_MODE_HINT));
     }
 
     #[test]

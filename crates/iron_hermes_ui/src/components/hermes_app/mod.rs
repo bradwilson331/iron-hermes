@@ -98,6 +98,10 @@ pub mod voice_loop;
 pub mod voice_settings;
 pub mod wheel;
 pub mod wheel_rail;
+// Phase 50.1 Plan 04 (D-12): shared presentational widgets — BotFace, the
+// deterministic geometric avatar renderer. Declares no context provider
+// (see widgets.rs's own module doc).
+pub mod widgets;
 
 /// Root component of the Phase 26.2.1 wheel-driven shell.
 ///
@@ -112,6 +116,10 @@ pub fn HermesApp() -> Element {
     let mut theme = use_signal(|| "slate-dark".to_string());
     let mut wheel_state = use_signal(WheelState::default);
     let active_screen = use_signal(|| Screen::Chat);
+    // Phase 50.1 Plan 08 (D-22): the routines deep-link's prefill seam —
+    // see `ScheduleNamePrefillCtx`'s own doc comment (state.rs) for the
+    // full contract.
+    let schedule_name_prefill: Signal<Option<String>> = use_signal(|| None);
     let mut hydrated = use_signal(|| false);
     // Phase 47.3 Plan 06 (D-17): starts authenticated — see AuthedContext's
     // doc comment above for why. Only the D-17 expiry redirect and /logout
@@ -208,6 +216,10 @@ pub fn HermesApp() -> Element {
     use_context_provider(|| crate::state::ThemeContext(theme));
     use_context_provider(|| wheel_state);
     use_context_provider(|| active_screen);
+    // Phase 50.1 Plan 08 (D-22): the ONE legal home for this provider —
+    // declaring it in a child screen/component compiles clean and panics
+    // every consumer at runtime (this file's own module doc / D-10).
+    use_context_provider(|| crate::state::ScheduleNamePrefillCtx(schedule_name_prefill));
 
     // Suppress unused-variable warnings on the wrapper read path — the
     // ThemeContext newtype constructor uses the `theme` signal by move,
@@ -321,6 +333,12 @@ pub fn HermesApp() -> Element {
 
     let mut bubbles = use_signal(Vec::<ChatBubble>::new);
     let mut streaming_id = use_signal(|| Option::<u64>::None);
+    // Phase 50.2 Plan 07 (D-20): the roster's bot names — the send
+    // closure's `@mention` detection (below) reads this via call syntax
+    // (a plain synchronous read, never held across an `.await`) so a
+    // mention target list is known BEFORE the outbound WS send.
+    let roster_names_resource =
+        use_resource(move || async move { crate::server::profile_api::list_profiles().await });
     let mut next_id = use_signal(|| 1u64);
     let mut session_id = use_signal(|| "pending".to_string());
     // Phase 46.9 Plan 03 (D-08/D-09): denominator starts at 0 (pre-resolve
@@ -834,6 +852,72 @@ pub fn HermesApp() -> Element {
                 trimmed.clone(),
                 attachments.clone(),
             ));
+            // Phase 50.2 Plan 07 (D-20): `@mention` handoff detection — the
+            // SINGLE wiring point `ChatSendHandler`'s own doc comment
+            // names, before the outbound text goes to the WebSocket. A
+            // pending block is appended for EACH target, then every
+            // target is dispatched in PARALLEL (2026-08-19 operator
+            // ruling), independently of the live turn's own WS round trip.
+            let roster_names: Vec<String> = roster_names_resource()
+                .and_then(|r| r.ok())
+                .map(|rows| rows.into_iter().map(|p| p.name).collect())
+                .unwrap_or_default();
+            let mention_targets = crate::server::mention_handoff_api::resolve_roster_mentions_client(
+                &trimmed,
+                &roster_names,
+                "operator",
+            );
+            for target in &mention_targets {
+                let mention_id = {
+                    let n = *next_id.read();
+                    next_id.set(n + 1);
+                    n
+                };
+                bubbles.write().push(ChatBubble::mention_handoff(
+                    mention_id,
+                    target.clone(),
+                    trimmed.clone(),
+                    crate::protocol::MentionHandoffState::Pending,
+                ));
+            }
+            for target in mention_targets {
+                let message = trimmed.clone();
+                let mut bubbles_for_mention = bubbles;
+                spawn(async move {
+                    let outcome = crate::server::mention_handoff_api::dispatch_mention_handoff(
+                        crate::protocol::MentionHandoffRequest {
+                            target: target.clone(),
+                            message,
+                        },
+                    )
+                    .await;
+                    let mut list = bubbles_for_mention.write();
+                    if let Some(bubble) = list.iter_mut().rev().find(|b| {
+                        b.kind
+                            == crate::components::hermes_app::screens::chat::ChatBubbleKind::MentionHandoff
+                            && b.mention_target.as_deref() == Some(target.as_str())
+                            && matches!(
+                                b.mention_state,
+                                Some(crate::protocol::MentionHandoffState::Pending)
+                            )
+                    }) {
+                        match outcome {
+                            Ok(res) => {
+                                bubble.mention_state =
+                                    Some(crate::protocol::MentionHandoffState::Resolved);
+                                bubble.mention_reply = Some(res.reply);
+                            }
+                            Err(e) => {
+                                bubble.mention_state = Some(
+                                    crate::protocol::MentionHandoffState::Failed {
+                                        reason: e.to_string(),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                });
+            }
             // Phase 40.5 Plan 08 (D-17): read active identity (Pattern B — owned local,
             // borrow dropped before the spawn so no GenerationalRef crosses async).
             let active_ident: Option<String> = {

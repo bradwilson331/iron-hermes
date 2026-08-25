@@ -62,6 +62,36 @@ impl Prerequisite {
             group: Some(group.into()),
         }
     }
+
+    /// Phase 48.2 Plan 10 (D-16/G-48.2-3): a runtime-condition prerequisite constructor.
+    ///
+    /// `env_var` and `config_field` are STATIC declarations whose satisfaction is looked
+    /// up (an env var either is or is not set; a config field either is or is not
+    /// present) — a tool can safely declare them unconditionally and let
+    /// `prerequisite_satisfied` decide. A `runtime` prerequisite is the opposite shape:
+    /// it is a declaration that a condition the PROCESS ITSELF controls (a dispatcher
+    /// wired for this session, a platform capability, …) is CURRENTLY unmet, and
+    /// `prerequisite_satisfied`'s `"runtime" => false` arm answers it unconditionally
+    /// `false` with no lookup at all (see that arm's doc comment). This inverts who is
+    /// responsible for conditionality: because the kind itself never resolves to
+    /// satisfied, a tool must emit a `runtime` prerequisite ONLY when the condition it
+    /// names does not currently hold, and must return an empty `prerequisites()` list
+    /// when it does — never emit one unconditionally, or the default `is_available()`
+    /// (which ANDs every ungrouped `required: true` prerequisite) gates the tool closed
+    /// permanently, even when the tool overrides `is_available()` itself and would
+    /// otherwise report available (because `unsatisfied_prerequisites()` walks
+    /// `prerequisites()` independently of whatever `is_available()` returns). Always
+    /// `required: true` and `group: None` — a runtime cause is not optional and is
+    /// never a member of an any-of group.
+    pub fn runtime(name: impl Into<String>, description: impl Into<String>) -> Self {
+        Self {
+            kind: "runtime".to_string(),
+            name: name.into(),
+            description: description.into(),
+            required: true,
+            group: None,
+        }
+    }
 }
 
 /// D-09 (Phase 41.3): shared per-prerequisite satisfaction check, independent of a
@@ -117,6 +147,15 @@ fn prerequisite_satisfied(
             }
             satisfied
         }
+        // Phase 48.2 Plan 10: a `runtime` prerequisite is emitted by a tool ONLY when
+        // the condition it names is already unmet (see `Prerequisite::runtime`'s doc
+        // comment) — there is nothing to look up, so this arm always answers `false`.
+        // This is NOT a repurposing of the `_ => true` fallback below: that fallback
+        // exists so a genuinely UNKNOWN kind stays non-blocking (D-25), whereas
+        // `"runtime"` is a KNOWN kind whose entire contract is "unconditionally
+        // unsatisfied when present". Placed before the fallback so it is matched
+        // explicitly rather than falling through.
+        "runtime" => false,
         _ => true, // unknown kinds are non-blocking by design (D-25)
     }
 }
@@ -161,6 +200,49 @@ pub fn satisfied_group_members_with_credentials(
         .count()
 }
 
+/// Phase 48.2 Plan 01 (D-16): a group-aware INVERSE of the trait-default
+/// `Tool::is_available()` walk — returns the prerequisites that are currently
+/// UNSATISFIED for `tool`, so the Tools page can name them on an amber card.
+///
+/// Per-entry satisfaction is delegated to the same private
+/// [`prerequisite_satisfied`] helper `is_available()` uses, passing
+/// `tool.name()` and `tool.credentials()` exactly as the trait default does —
+/// there is exactly one definition of "is this prerequisite met" in this
+/// crate. The returned set is: every ungrouped `required: true` entry that is
+/// unsatisfied, plus — for each distinct `group` id — ALL of that group's
+/// members, but only when NO member of the group is satisfied (an any-of
+/// group failing entirely is reported as its full member list, mirroring
+/// `is_available()`'s any-of semantics; a group with at least one satisfied
+/// member is not a missing prerequisite at all).
+pub fn unsatisfied_prerequisites(tool: &dyn Tool) -> Vec<Prerequisite> {
+    let prereqs = tool.prerequisites();
+    let tool_name = Some(tool.name());
+    let credentials = tool.credentials();
+
+    let mut missing: Vec<Prerequisite> = prereqs
+        .iter()
+        .filter(|p| p.group.is_none() && p.required)
+        .filter(|p| !prerequisite_satisfied(tool_name, p, credentials))
+        .cloned()
+        .collect();
+
+    let mut groups: Vec<&str> = prereqs.iter().filter_map(|p| p.group.as_deref()).collect();
+    groups.sort_unstable();
+    groups.dedup();
+
+    for group in groups {
+        let members = group_members(&prereqs, group);
+        let any_satisfied = members
+            .iter()
+            .any(|p| prerequisite_satisfied(tool_name, p, credentials));
+        if !any_satisfied {
+            missing.extend(members.into_iter().cloned());
+        }
+    }
+
+    missing
+}
+
 /// Toolset sentinel reported by dynamically-discovered MCP tools (`McpTool::toolset()`).
 ///
 /// MCP tools are NOT part of the built-in toolset taxonomy (`ALL_TOOLSETS`): they are
@@ -185,6 +267,15 @@ pub const MCP_TOOLSET: &str = "mcp";
 /// the worker with no way to terminate its task, so it improvises (`kanban_show` as a shell
 /// command) and the task never completes. Visibility stays correctly scoped by `is_available()`.
 pub const KANBAN_TOOLSET: &str = "kanban";
+
+/// Phase 48.2 Plan 11 (G-48.2-6 slice a): the single stable identifier a
+/// `Tool::runtime_dependency()` override returns to name the gateway
+/// process — never spelled as a string literal at any call site. The Tools
+/// page's `iron_hermes_ui::server::tools_config_api` crate keeps a portable
+/// byte-identical duplicate of this constant (that crate is native-only, so
+/// the wasm client cannot name this crate's types directly), pinned by a
+/// native-only drift test.
+pub const GATEWAY_RUNTIME_DEPENDENCY: &str = "gateway";
 
 /// D-04/D-05/D-15 (Phase 41.3): trait-default wall-clock execution budget
 /// (seconds), returned by `Tool::timeout_secs()` when a tool does not
@@ -253,6 +344,46 @@ pub trait Tool: Send + Sync {
     /// `is_available()`'s `config_field` arm (below) reads it via
     /// `self.credentials()` rather than ever reaching for the vault directly.
     fn credentials(&self) -> Option<&crate::credentials::ToolCredentials> {
+        None
+    }
+
+    /// Phase 48.2 Plan 01 (D-20, `<assumption_delta_decision>`): a UI-facing
+    /// catalog grouping override, entirely separate from [`Tool::toolset`].
+    ///
+    /// `None` (the default) means the display group equals `toolset()` — no
+    /// behavior change for any existing tool. `Some(g)` overrides only the
+    /// Tools page's grouping — it is NEVER consulted by [`ToolRegistry::get_definitions`]
+    /// and has NO effect on which tools reach the LLM. `McpTool` overrides this
+    /// to return `mcp__{sanitized_server_name}` so the catalog can group MCP
+    /// tools per server for display while `toolset()` keeps reporting the flat
+    /// [`MCP_TOOLSET`] sentinel every LLM-facing filter still keys on.
+    fn display_group(&self) -> Option<&str> {
+        None
+    }
+
+    /// Phase 48.2 Plan 11 (G-48.2-6 slice a): the stable identifier of a
+    /// SEPARATE process that executes this tool's effects, for a tool that
+    /// still works — `is_available()` unaffected — without that process
+    /// running. `None` (the default) means no such dependency exists; every
+    /// existing `impl Tool` inherits this with zero edits, the same
+    /// zero-edit guarantee `credentials()`/`display_group()` above were
+    /// built on.
+    ///
+    /// This is DELIBERATELY not `prerequisites()`. A prerequisite that is
+    /// unsatisfied makes `is_available()` return `false`; `cronjob` with the
+    /// gateway down is genuinely available — the operator can create,
+    /// pause, or remove a schedule and it persists correctly, it just will
+    /// not FIRE until the gateway process runs again. A `required: true`
+    /// prereq here would render a false UNAVAILABLE; a `required: false`
+    /// one would never be reported at all, because
+    /// [`unsatisfied_prerequisites`] filters on `required` (see its doc
+    /// comment above). Neither is the fact this method carries — it is
+    /// additive, non-gating information about WHO executes the tool's
+    /// effects, not whether the tool can accept them right now. The next
+    /// implementer tempted to fold this into `prerequisites()` should
+    /// re-read this paragraph first: doing so reintroduces one of the two
+    /// bugs just described.
+    fn runtime_dependency(&self) -> Option<&'static str> {
         None
     }
 
@@ -372,6 +503,31 @@ pub type InterceptHandler = std::sync::Arc<
 /// masks a genuine session-lookup miss on those two names — the fail-closed guarantee
 /// holds exactly where CR-01 requires it.
 const LEGACY_GLOBAL_INTERCEPT_SESSION: &str = "__legacy_global_intercept_session__";
+
+/// Phase 48.2 Plan 01 (D-16/D-20): one row of the Tools page's UNFILTERED
+/// catalog — every registered tool, regardless of toolset-enabled state,
+/// availability, or the per-tool `disabled` list. `toolset` is the
+/// registry's LLM-facing filtering identity ([`Tool::toolset`], `"mcp"` for
+/// every MCP tool); `group` is the display identity ([`Tool::display_group`]
+/// when `Some`, otherwise equal to `toolset`). Keeping both fields is
+/// deliberate — the operator's mental model (per-server MCP groups) and the
+/// LLM's filtering axis (the flat `"mcp"` sentinel) are two different things,
+/// and collapsing them back into one field is exactly the mistake this type
+/// exists to avoid.
+#[derive(Debug, Clone)]
+pub struct ToolCatalogRow {
+    pub name: String,
+    pub description: String,
+    pub toolset: String,
+    pub group: String,
+    pub available: bool,
+    pub missing_prerequisites: Vec<Prerequisite>,
+    /// Phase 48.2 Plan 11 (G-48.2-6 slice a): [`Tool::runtime_dependency`]'s
+    /// answer, carried through unchanged. `Some(GATEWAY_RUNTIME_DEPENDENCY)`
+    /// for `cronjob`; `None` for every tool with no such dependency
+    /// (including `delegate_task`, which runs in-process).
+    pub runtime_dependency: Option<&'static str>,
+}
 
 pub struct ToolRegistry {
     /// Phase 32.1-06: changed from `Box<dyn Tool>` to `Arc<dyn Tool>` to enable
@@ -815,6 +971,40 @@ impl ToolRegistry {
         let mut v: Vec<String> = s.drain().collect();
         v.sort();
         v
+    }
+
+    /// Phase 48.2 Plan 01 (D-16/D-20, RESEARCH Pitfall 1): the UNFILTERED
+    /// tool catalog for the web Tools page — one [`ToolCatalogRow`] per
+    /// registered tool, sorted by `(group, name)`. Deliberately applies NO
+    /// toolset filter, NO availability filter, and NO per-tool disable
+    /// filter — a card the operator must fix has to reach the browser, which
+    /// is the entire reason this read path exists as a sibling to
+    /// [`Self::get_definitions`] rather than reusing it. Intercepted tools
+    /// are out of scope for this row set, matching [`Self::list_toolsets`]'s
+    /// documented limitation (no `Tool::toolset()` for intercepts).
+    pub fn catalog_rows(&self) -> Vec<ToolCatalogRow> {
+        let mut rows: Vec<ToolCatalogRow> = self
+            .tools
+            .values()
+            .map(|t| {
+                let toolset = t.toolset().to_string();
+                let group = t
+                    .display_group()
+                    .map(|g| g.to_string())
+                    .unwrap_or_else(|| toolset.clone());
+                ToolCatalogRow {
+                    name: t.name().to_string(),
+                    description: t.description().to_string(),
+                    toolset,
+                    group,
+                    available: t.is_available(),
+                    missing_prerequisites: unsatisfied_prerequisites(t.as_ref()),
+                    runtime_dependency: t.runtime_dependency(),
+                }
+            })
+            .collect();
+        rows.sort_by(|a, b| (a.group.as_str(), a.name.as_str()).cmp(&(b.group.as_str(), b.name.as_str())));
+        rows
     }
 
     /// Remove all tools whose name starts with `{server_name}__`.
@@ -2389,6 +2579,82 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------------------
+    // Phase 48.2 Plan 10 (D-16/G-48.2-3): `Prerequisite::runtime` + the "runtime"
+    // satisfaction arm.
+    // ---------------------------------------------------------------------------
+
+    /// `Prerequisite::runtime` sets `kind: "runtime"`, `required: true`,
+    /// `group: None`, and carries the given name/description through unchanged.
+    #[test]
+    fn prerequisite_runtime_constructor_field_values() {
+        let p = Prerequisite::runtime("clarify_channel", "no clarification channel available");
+        assert_eq!(p.kind, "runtime");
+        assert_eq!(p.name, "clarify_channel");
+        assert_eq!(p.description, "no clarification channel available");
+        assert!(p.required, "a runtime prerequisite is always required");
+        assert!(
+            p.group.is_none(),
+            "a runtime prerequisite is never a group member"
+        );
+    }
+
+    /// Tool with a single `runtime` prerequisite — probes the `"runtime" => false`
+    /// arm directly, independent of the unrecognised-kind fallback.
+    struct RuntimePrereqTool;
+
+    #[async_trait]
+    impl Tool for RuntimePrereqTool {
+        fn name(&self) -> &str {
+            "runtime_prereq"
+        }
+        fn toolset(&self) -> &str {
+            "test"
+        }
+        fn description(&self) -> &str {
+            "tool with a runtime prerequisite"
+        }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new(
+                "runtime_prereq",
+                "tool with a runtime prerequisite",
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Ok("ok".to_string())
+        }
+        fn prerequisites(&self) -> Vec<Prerequisite> {
+            vec![Prerequisite::runtime(
+                "runtime_probe",
+                "probe for the runtime satisfaction arm",
+            )]
+        }
+    }
+
+    /// `prerequisite_satisfied` answers `false` for `"runtime"` — via the default
+    /// `is_available()`, which ANDs every ungrouped `required: true` prerequisite.
+    #[test]
+    fn prerequisite_satisfied_runtime_kind_is_always_false() {
+        let available = RuntimePrereqTool.is_available();
+        assert!(
+            !available,
+            "a `runtime` prerequisite must gate is_available() closed (unconditional false)"
+        );
+    }
+
+    /// `prerequisite_satisfied` still answers `true` for a kind that is neither
+    /// `"env_var"`, `"config_field"`, nor `"runtime"` — the `"runtime"` arm must not
+    /// have widened the fallback (D-25 stays intact).
+    #[test]
+    fn prerequisite_satisfied_unrecognized_kind_still_true_after_runtime_arm() {
+        let available = UnknownKindPrereqTool.is_available();
+        assert!(
+            available,
+            "adding the \"runtime\" arm must not change unknown-kind non-blocking behavior (D-25)"
+        );
+    }
+
     /// D-18: the gated-closed path (Task 2's `prerequisite_satisfied` change) must
     /// log loudly — a tool vanishing from the model's schema is otherwise
     /// invisible. Asserts the captured warning names both the tool
@@ -3107,6 +3373,47 @@ mod tests {
             redacted, raw,
             "default redact_args must return input verbatim (no mutation)"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 48.2 Plan 11 (G-48.2-6 slice a): Tool::runtime_dependency default
+    // ---------------------------------------------------------------------------
+
+    /// A tool that does NOT override `runtime_dependency()` inherits the
+    /// default `None` — the zero-edit guarantee every existing `impl Tool`
+    /// block relies on. Object-safety check mirrors
+    /// `tool_redact_args_default_returns_input_verbatim` above: the default
+    /// method must be callable through the trait object `ToolRegistry`
+    /// actually stores.
+    #[test]
+    fn tool_runtime_dependency_default_is_none() {
+        struct NoDependencyMock;
+        #[async_trait]
+        impl Tool for NoDependencyMock {
+            fn name(&self) -> &str {
+                "no_dependency_mock"
+            }
+            fn toolset(&self) -> &str {
+                "test"
+            }
+            fn description(&self) -> &str {
+                "test mock for runtime_dependency default"
+            }
+            fn schema(&self) -> ToolSchema {
+                ToolSchema::new(
+                    "no_dependency_mock",
+                    "test mock for runtime_dependency default",
+                    serde_json::json!({ "type": "object", "properties": {} }),
+                )
+            }
+            async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+                Ok(String::new())
+            }
+            // runtime_dependency intentionally NOT overridden — exercises the default.
+        }
+
+        let tool: Box<dyn Tool> = Box::new(NoDependencyMock);
+        assert_eq!(tool.runtime_dependency(), None);
     }
 
     // ---------------------------------------------------------------------------
@@ -5436,5 +5743,166 @@ mod tests {
             let budget = resolve_tool_timeout(&tool, "opted_out", &cfg);
             assert_eq!(budget, None);
         }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 48.2 Plan 01: display_group / catalog_rows regression tests
+    // ---------------------------------------------------------------------------
+
+    /// Tool with a required env_var prerequisite that catalog_rows() must
+    /// surface even though it is unavailable (D-16 — the unfiltered read).
+    struct CatalogUnmetPrereqTool;
+
+    #[async_trait]
+    impl Tool for CatalogUnmetPrereqTool {
+        fn name(&self) -> &str {
+            "catalog_unmet_prereq"
+        }
+        fn toolset(&self) -> &str {
+            "test_catalog"
+        }
+        fn description(&self) -> &str {
+            "catalog test tool with an unmet required prerequisite"
+        }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new(
+                "catalog_unmet_prereq",
+                self.description(),
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Ok("ok".to_string())
+        }
+        fn prerequisites(&self) -> Vec<Prerequisite> {
+            vec![Prerequisite::env_var(
+                "CATALOG_TEST_48_2_MISSING",
+                "test-only missing env var",
+                true,
+            )]
+        }
+    }
+
+    /// Test (a): catalog_rows() contains a tool whose required prerequisite
+    /// is unmet — the unfiltered read must not hide it (D-16).
+    #[test]
+    fn catalog_rows_includes_tool_with_unmet_required_prerequisite() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var("CATALOG_TEST_48_2_MISSING") };
+        let mut registry = ToolRegistry::new();
+        registry.register(Box::new(CatalogUnmetPrereqTool));
+        let rows = registry.catalog_rows();
+        let row = rows
+            .iter()
+            .find(|r| r.name == "catalog_unmet_prereq")
+            .expect("catalog_rows() must include a tool with an unmet required prerequisite");
+        assert!(!row.available, "row must report available: false");
+        assert!(
+            row.missing_prerequisites
+                .iter()
+                .any(|p| p.name == "CATALOG_TEST_48_2_MISSING"),
+            "missing_prerequisites must name the unmet env var; got: {:?}",
+            row.missing_prerequisites
+        );
+    }
+
+    /// Tool reporting the MCP_TOOLSET sentinel from `toolset()` but a distinct
+    /// `display_group()` override — proves catalog_rows()'s `group` field
+    /// comes from display_group() while `toolset` stays exactly what
+    /// Tool::toolset() returned (the D-20 axis-separation invariant).
+    struct CatalogDisplayGroupTool {
+        group: String,
+    }
+
+    #[async_trait]
+    impl Tool for CatalogDisplayGroupTool {
+        fn name(&self) -> &str {
+            "catalog_display_group_tool"
+        }
+        fn toolset(&self) -> &str {
+            MCP_TOOLSET
+        }
+        fn description(&self) -> &str {
+            "catalog test tool with a display_group override"
+        }
+        fn schema(&self) -> ToolSchema {
+            ToolSchema::new(
+                "catalog_display_group_tool",
+                self.description(),
+                serde_json::json!({ "type": "object", "properties": {} }),
+            )
+        }
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
+            Ok("ok".to_string())
+        }
+        fn display_group(&self) -> Option<&str> {
+            Some(&self.group)
+        }
+    }
+
+    /// Test (b): a tool whose display_group() is Some(g) emits group == g in
+    /// catalog_rows() while `toolset` stays the value Tool::toolset() returned.
+    #[test]
+    fn catalog_rows_uses_display_group_for_group_but_keeps_real_toolset() {
+        let mut registry = ToolRegistry::new();
+        registry.register_dynamic(Box::new(CatalogDisplayGroupTool {
+            group: "mcp__testserver".to_string(),
+        }));
+        let rows = registry.catalog_rows();
+        let row = rows
+            .iter()
+            .find(|r| r.name == "catalog_display_group_tool")
+            .expect("catalog_rows() must include the display_group tool");
+        assert_eq!(row.group, "mcp__testserver");
+        assert_eq!(row.toolset, MCP_TOOLSET);
+    }
+
+    /// Test (c): the Phase 45 guard — a registered tool reporting MCP_TOOLSET
+    /// is still returned by get_definitions() when toolset_config is Some(cfg)
+    /// and cfg has no "mcp" entry (the exemption is intact, unmodified by this
+    /// plan's display_group addition).
+    #[test]
+    fn phase_45_guard_mcp_toolset_survives_get_definitions_with_no_mcp_config_entry() {
+        let mut registry = ToolRegistry::new();
+        registry.register_dynamic(Box::new(ToolsetMockTool {
+            tool_name: "phase_45_guard_tool",
+            toolset_name: MCP_TOOLSET,
+        }));
+        registry.set_toolset_config(Some(ironhermes_core::config::ToolsConfig::default()));
+        let names: Vec<String> = registry
+            .get_definitions(None)
+            .iter()
+            .map(|s| s.function.name.clone())
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "phase_45_guard_tool"),
+            "Phase 45 exemption must survive this plan's changes; got: {:?}",
+            names
+        );
+    }
+
+    /// Test (d): the D-20 guard — the same MCP-toolset tool IS excluded by
+    /// get_definitions() when its name is in cfg.disabled, proving the
+    /// per-tool override reaches MCP tools through filter layer 4.
+    #[test]
+    fn d20_guard_mcp_toolset_tool_excluded_when_per_tool_disabled() {
+        let mut registry = ToolRegistry::new();
+        registry.register_dynamic(Box::new(ToolsetMockTool {
+            tool_name: "d20_guard_tool",
+            toolset_name: MCP_TOOLSET,
+        }));
+        let mut cfg = ironhermes_core::config::ToolsConfig::default();
+        cfg.disabled.push("d20_guard_tool".to_string());
+        registry.set_toolset_config(Some(cfg));
+        let names: Vec<String> = registry
+            .get_definitions(None)
+            .iter()
+            .map(|s| s.function.name.clone())
+            .collect();
+        assert!(
+            !names.iter().any(|n| n == "d20_guard_tool"),
+            "per-tool disabled list must reach MCP tools (D-20); got: {:?}",
+            names
+        );
     }
 }

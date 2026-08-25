@@ -1,0 +1,1619 @@
+/* ──────────────────────────────────────────────────────────
+   Phase 48.2 — Tools page (site.css / screens.css token layer)
+
+   This screen already renders against the site.css/screens.css layer
+   (.screen, .tool-card, .tgl, .pill, .grid — rounded 8-14px radii,
+   --teal/--amber/--red/--green/--gray/--text). This file extends that
+   SAME layer in place — it never imports kanban's zero-radius ANSI chrome.
+
+   New elements here use the --sp-N spacing scale (tokens.css); existing
+   shipped chrome this phase does not restyle (.tool-card padding 16px 18px,
+   .grid gap 14px, .tgl 34x18px) keeps its inherited values verbatim.
+   ────────────────────────────────────────────────────────── */
+
+.tools-gate-banner {
+  border: 1px solid rgba(210, 153, 34, 0.45);
+  background: rgba(210, 153, 34, 0.06);
+  color: var(--amber);
+  padding: var(--sp-4);
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.tools-error-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  border: 1px solid rgba(248, 81, 73, 0.45);
+  background: rgba(248, 81, 73, 0.06);
+  color: var(--red);
+  padding: var(--sp-4);
+  border-radius: 10px;
+  font-size: 12px;
+}
+
+.tools-skeleton-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 14px;
+}
+
+.tools-skeleton-card {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.tools-sections {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-7);
+}
+
+.toolset-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.toolset-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+}
+
+.toolset-master-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.tgl--disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.toolset-mcp-note {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+/* Phase 48.2 Plan 04 Task 3 (D-20): the MCP group header's link to its row
+   in the MCP SERVERS section, and the "server disabled" note — the real
+   gate, never a paraphrased "toolset off" claim. */
+.toolset-mcp-group-link {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--teal);
+  text-decoration: none;
+}
+.toolset-mcp-group-link:hover {
+  text-decoration: underline;
+}
+
+.toolset-mcp-note--disabled {
+  color: var(--amber);
+}
+
+.tools-save-failed-chip {
+  align-self: flex-start;
+}
+
+/* Phase 48.2 Plan 01 Task 2: amber unmet-prerequisite card treatment
+   (D-16). */
+.tool-card--amber {
+  border-color: var(--amber);
+  background: rgba(210, 153, 34, 0.05);
+}
+
+/* Phase 48.2 Plan 01 Task 4 fix: a card inside a disabled toolset stays in
+   the grid (D-16) but reads as inactive — dimmed card, toggle forced OFF
+   and rendered with the shared .tgl--disabled treatment. */
+.tool-card--toolset-off {
+  opacity: 0.55;
+}
+
+/* Long-text treatment (UI-SPEC tool-card/long-text): name single-line with
+   ellipsis (title attribute carries the full name); description clamped to
+   2 lines then ellipsis. */
+.tool-name {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tool-desc {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.tool-missing-prereqs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+/* Phase 48.2 Plan 10 Task 3a (D-16/G-48.2-3): a name+description pair per
+   missing prerequisite — description is the Body-role sentence, name stays
+   the small amber identifier row above it. */
+.tool-missing-prereq {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tool-missing-prereq-desc {
+  font-size: 13px; /* Body role, UI-SPEC ## Typography */
+  line-height: 1.5;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.tool-missing-prereq-name {
+  font-size: 11px;
+  color: var(--amber);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* availability-amber-card/long-text: long env-var names step down a type
+   size before wrapping. */
+@media (max-width: 320px) {
+  .tool-missing-prereq-name {
+    font-size: 10px;
+  }
+}
+
+.tool-fix-mount {
+  min-height: 0;
+}
+
+/* Phase 48.2 Plan 10 Task 3b (D-16/G-48.2-3): explanatory (non-credential-
+   fixable) treatment for a missing prerequisite no form can satisfy —
+   Body-role text with a left rule in the amber semantic color (the card's
+   own unmet-prerequisite state), read as prose rather than a control. */
+.tool-prereq-explanations {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-top: var(--sp-1);
+}
+
+/* Phase 48.2 Plan 11 Task 3 (G-48.2-6 slice a): the gateway-down card
+   annotation — same ExplanatoryNote component/markup as
+   .tool-prereq-explanations above (warning-weight, amber left rule,
+   role="note" prose), rendered independently of the availability pill so
+   it never competes with it: subordinate spacing (margin-top only, no
+   border/background of its own) keeps it visually secondary to the pill. */
+.tool-runtime-annotation {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-top: var(--sp-2);
+}
+
+.tool-prereq-explanation {
+  font-size: 13px; /* Body role, UI-SPEC ## Typography */
+  line-height: 1.5;
+  color: var(--text-dim);
+  border-left: 2px solid var(--amber);
+  padding-left: var(--sp-2);
+}
+
+/* Phase 48.2 Plan 10 Task 3c (D-14/D-20/G-48.2-4): provenance badges — pure
+   metadata, deliberately NOT teal/amber/red (all three are reserved for
+   accent/warn/destructive states per UI-SPEC ## Color) so the badge never
+   competes visually with the availability pill above it. Label role
+   (11px/700/uppercase/0.08em) per UI-SPEC ## Typography. */
+.tool-origin-badge {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  margin-top: var(--sp-1);
+}
+
+.toolset-origin-badge {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.tool-save-failed-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.tools-empty-state {
+  padding: var(--sp-6);
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.tools-empty-heading {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text);
+  margin-bottom: var(--sp-1);
+}
+
+.tools-empty-body {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* ──────────────────────────────────────────────────────────
+   Phase 48.2 Plan 06 Task 1 (D-15) — search/favorites toolbar. Net-new
+   elements against this page's token layer; --sp-N spacing scale, Label
+   type role for the search placeholder (UI-SPEC ## Typography).
+   ────────────────────────────────────────────────────────── */
+
+.tools-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin: var(--sp-4) 0;
+}
+
+.tools-search-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-input, #11161d);
+  border: 1px solid var(--border, #2a3138);
+  border-radius: 8px;
+  color: var(--text);
+  padding: var(--sp-2) var(--sp-4);
+  font-size: 13px;
+  /* search-bar/long-text: no artificial max length, scrolls horizontally
+     per native browser behavior rather than wrapping (single-line input). */
+}
+
+.tools-search-input:focus {
+  outline: none;
+  border-color: var(--teal);
+  box-shadow: 0 0 0 2px rgba(57, 197, 207, 0.25);
+}
+
+.tools-favorites-chip {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border, #2a3138);
+  border-radius: 8px;
+  color: var(--text-dim);
+  padding: var(--sp-2) var(--sp-4);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.tools-favorites-chip.on {
+  color: var(--teal);
+  border-color: var(--teal);
+  background: rgba(57, 197, 207, 0.08);
+}
+
+/* Favorites star — icon-only touch target, 44x44 minimum floor (UI-SPEC
+   Spacing Scale exceptions). Filled/pinned uses the accent color. */
+.favorites-star {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  min-width: 44px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.favorites-star--on {
+  color: var(--teal);
+}
+
+.favorites-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-7);
+}
+
+/* ──────────────────────────────────────────────────────────
+   Phase 48.2 Plan 03 — staged tools settings panel (timeout editor +
+   provider chain lists). Net-new elements; use the declared --sp-N
+   spacing scale and the Label/Body/Heading type roles (UI-SPEC
+   `## Spacing Scale` / `## Typography`), never new hardcoded px.
+   ────────────────────────────────────────────────────────── */
+
+.tools-settings-panel {
+  border: 1px solid var(--border, #2a3138);
+  border-radius: 10px;
+  background: var(--bg-card, #161b22);
+  margin-top: var(--sp-7);
+}
+
+.tools-settings-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-4) var(--sp-6);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+}
+
+.tools-settings-title {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.tools-settings-caret {
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.tools-settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+  padding: 0 var(--sp-6) var(--sp-6);
+}
+
+.tools-settings-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.tools-settings-skeleton-row {
+  height: 32px;
+  border-radius: 8px;
+  background: var(--bg-input, #11161d);
+  opacity: 0.35;
+}
+
+.tools-settings-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.tools-settings-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.tools-settings-help {
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.tools-settings-input,
+.tools-settings-select {
+  background: var(--bg-input, #11161d);
+  border: 1px solid var(--border, #2a3138);
+  border-radius: 8px;
+  color: var(--text);
+  padding: var(--sp-2) var(--sp-4);
+  font-size: 13px;
+}
+
+.tools-settings-input--sm {
+  max-width: 120px;
+}
+
+/* Long-text treatment (staged-settings-panel/long-text): truncate visually
+   in read mode, expand to full width on focus. */
+.tools-settings-input,
+.tools-settings-select {
+  text-overflow: ellipsis;
+}
+
+.tools-settings-input:focus,
+.tools-settings-select:focus {
+  max-width: none;
+}
+
+.tools-settings-override-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.tools-settings-override-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.tools-settings-errors {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+/* ──────────────────────────────────────────────────────────
+   Phase 48.2 Plan 03 Task 3 — reorderable provider chain lists
+   (provider-chain-list / chain-entry-row). Bounded-height list with the
+   established .ih-scroll thin-scrollbar treatment (tokens.css); amber is
+   reserved for the skipped-entry note (UI-SPEC ## Color); the active drag
+   handle is one of the accent-reserved uses.
+   ────────────────────────────────────────────────────────── */
+
+.provider-chain-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.provider-chain-heading {
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.provider-chain-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.chain-entry-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--border, #2a3138);
+  border-radius: 8px;
+  background: var(--bg-input, #11161d);
+}
+
+.chain-entry-row[draggable="true"] {
+  cursor: grab;
+}
+
+.chain-entry-row--skipped {
+  border-color: var(--amber);
+  background: rgba(210, 153, 34, 0.05);
+}
+
+.chain-entry-drag-handle {
+  color: var(--teal);
+  font-size: 14px;
+  /* 44x44 touch/pointer floor for icon-only controls (UI-SPEC Spacing
+     Scale exceptions). */
+  min-width: 44px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.chain-entry-drag-handle--disabled {
+  color: var(--text-dim);
+  opacity: 0.5;
+}
+
+.chain-entry-provider {
+  font-size: 13px;
+  font-weight: 400;
+  flex: 1;
+}
+
+/* Label type role — SKIPPED note (D-21), amber per UI-SPEC ## Color. */
+.chain-entry-skipped-note {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--amber);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.chain-entry-move-controls {
+  display: flex;
+  gap: var(--sp-1);
+}
+
+.chain-entry-move-btn {
+  min-width: 44px;
+  min-height: 44px;
+}
+
+/* ──────────────────────────────────────────────────────────
+   Phase 48.2 Plan 11 (D-03/D-14/D-16, G-48.2-6 slice a) — RUNTIME section
+   (runtime-section, runtime-status-row). Mounted above MCP SERVERS. Same
+   .pill/.btn treatment reused verbatim: RUNNING reuses CONNECTED's
+   `pill teal`, NOT RUNNING reuses AUTH REQUIRED's `pill amber`, STALE
+   PIDFILE reuses the failure `pill red` — no fourth color vocabulary.
+   ────────────────────────────────────────────────────────── */
+
+.runtime-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-top: var(--sp-7);
+}
+
+.runtime-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+}
+
+.runtime-status-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.runtime-status-detail {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.runtime-status-explain {
+  font-size: 13px; /* Body role, UI-SPEC ## Typography */
+  line-height: 1.5;
+  color: var(--text-dim);
+  margin: 0;
+}
+
+/* ──────────────────────────────────────────────────────────
+   Phase 48.2 Plan 13 (G-48.2-6 slice b) — RUNTIME start/stop/restart
+   controls (runtime-controls, runtime-result-line) and their confirm
+   dialog. New selectors on this page's existing token layer
+   (--sp-N/--bg-card/--border/--text-dim), reusing .btn/.btn--danger/
+   .btn--sm/.btn--ghost verbatim (STOP and RESTART get the established
+   danger treatment via .btn--danger; START stays the plain neutral .btn —
+   never restyled here) and the EXISTING .bulk-confirm-* dialog shell
+   (bulk_confirm.rs) rather than a second, parallel dialog chrome — a
+   confirm dialog is a confirm dialog regardless of which section opened
+   it. Do not restyle shipped chrome.
+   ────────────────────────────────────────────────────────── */
+
+.runtime-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.runtime-result-line {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg-card);
+  border: 1px solid var(--border, #2a3138);
+  border-radius: 8px;
+  padding: var(--sp-2) var(--sp-3);
+}
+
+/* ──────────────────────────────────────────────────────────
+   Phase 48.2 Plan 04 Task 1 — MCP SERVERS section (mcp-servers-list,
+   mcp-server-status-badge). Same site.css/screens.css token layer as the
+   rest of the page — .pill/.btn/.tgl reused verbatim for status/actions;
+   only the row/section chrome and the REMOVE confirm dialog are net-new.
+   ────────────────────────────────────────────────────────── */
+
+.mcp-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-top: var(--sp-7);
+}
+
+.mcp-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+}
+
+.mcp-section-blast-radius-note {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+/* mcp-servers-list/overflow: scroll past ~8 rows using the established
+   thin-scrollbar treatment rather than pushing the toolset grid
+   off-screen. */
+.mcp-servers-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.mcp-server-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+}
+
+.mcp-server-row--skeleton {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+/* mcp-servers-list/long-text: mid-row ellipsis, full value on the title
+   attribute (set in the component). */
+.mcp-server-name {
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mcp-server-transport {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+
+/* mcp-servers-list/loading: dimmed pending pill until a status resolves. */
+.mcp-status-pending {
+  opacity: 0.5;
+}
+
+/* Phase 48.2 Plan 09 — AUTHORIZE pill (amber, same weight as AUTH REQUIRED)
+   and the authorize panel (link + copy control) beneath a row whose OAuth
+   CONNECT attempt produced a real authorization URL. */
+.mcp-status-authorize {
+  animation: mcp-authorize-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes mcp-authorize-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
+}
+
+.mcp-authorize-panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  margin-top: calc(-1 * var(--sp-1));
+  border: 1px solid rgba(210, 153, 34, 0.35);
+  border-radius: 10px;
+  background: rgba(210, 153, 34, 0.05);
+}
+
+.mcp-authorize-copy {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.mcp-authorize-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+.mcp-authorize-link {
+  color: var(--amber);
+  border-color: rgba(210, 153, 34, 0.45);
+  background: rgba(210, 153, 34, 0.06);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+.mcp-authorize-link:hover {
+  background: var(--amber);
+  color: var(--bg);
+  border-color: var(--amber);
+}
+
+.mcp-authorize-fallback-note {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.mcp-server-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-shrink: 0;
+}
+
+.btn--danger {
+  color: var(--red);
+  background: rgba(248, 81, 73, 0.06);
+  border-color: rgba(248, 81, 73, 0.42);
+}
+.btn--danger:hover {
+  background: var(--red);
+  color: var(--bg);
+  border-color: var(--red);
+}
+
+/* REMOVE confirmation dialog — new classes against this page's token
+   layer, never the kanban .kn-modal chrome (D-19 prohibition). */
+.mcp-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.mcp-confirm-dialog {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: var(--sp-6);
+  max-width: 420px;
+  width: calc(100% - var(--sp-6) * 2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.mcp-confirm-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.mcp-confirm-body {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.mcp-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+
+/* ──────────────────────────────────────────────────────────
+   Phase 48.2 Plan 04 Task 2 — DEFINE/VERIFY/COMMIT import wizard
+   (import-wizard, wizard-verify-results). New classes against this page's
+   token layer — the interaction shape is copied from
+   profile_shared/create_dialog.rs's kn-wizard, the CSS is not (D-19
+   prohibition: no .kn-modal/.kn-wizard classes referenced here).
+   ────────────────────────────────────────────────────────── */
+
+.mcp-wizard-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.mcp-wizard {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: min(560px, calc(100% - var(--sp-6) * 2));
+  max-height: calc(100vh - var(--sp-9) * 2);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.mcp-wizard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-6) var(--sp-6) 0;
+}
+
+.mcp-wizard-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.mcp-wizard-steps {
+  display: flex;
+  gap: var(--sp-4);
+  padding: var(--sp-4) var(--sp-6);
+  border-bottom: 1px solid var(--border);
+}
+
+.mcp-wizard-seg {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.mcp-wizard-seg--active {
+  color: var(--teal);
+}
+
+.mcp-wizard-seg--done {
+  color: var(--text);
+}
+
+.mcp-wizard-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding: var(--sp-6);
+  overflow-y: auto;
+}
+
+.mcp-wizard-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  padding: var(--sp-4) var(--sp-6);
+  border-top: 1px solid var(--border);
+}
+
+/* import-wizard/long-text: textarea scrolls internally, never grows
+   unbounded. */
+.mcp-wizard-textarea {
+  width: 100%;
+  min-height: 120px;
+  max-height: 220px;
+  overflow-y: auto;
+  resize: vertical;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: var(--sp-2) var(--sp-4);
+  font-size: 13px;
+  font-family: var(--font);
+}
+
+.mcp-wizard-textarea--sm {
+  min-height: 60px;
+  max-height: 120px;
+}
+
+.mcp-wizard-snippet-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.mcp-wizard-snippet-entry {
+  text-align: left;
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-input);
+  color: var(--text-dim);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.mcp-wizard-snippet-entry--selected {
+  border-color: var(--teal-dim, var(--teal));
+  color: var(--teal);
+}
+
+.mcp-wizard-snippet-entry--error {
+  color: var(--red);
+  cursor: default;
+}
+
+/* import-wizard/loading: scanner-style progress, no percentage. */
+.mcp-wizard-probing {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
+.mcp-wizard-probing-bar {
+  position: relative;
+  width: 120px;
+  height: 4px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.mcp-wizard-probing-bar::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 30%;
+  height: 100%;
+  background: var(--teal);
+  animation: mcp-wizard-scanner-sweep 1.1s ease-in-out infinite alternate;
+}
+
+@keyframes mcp-wizard-scanner-sweep {
+  from { left: 0%; }
+  to { left: 70%; }
+}
+
+.mcp-wizard-probe-error {
+  color: var(--red);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.mcp-wizard-probe-pass {
+  color: var(--amber);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* wizard-verify-results/overflow: bounded-height, scrolling past ~20
+   rows, rather than growing the wizard modal. */
+.mcp-wizard-tools-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.mcp-wizard-tool-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-input);
+}
+
+/* wizard-verify-results/long-text: ellipsis for the name, 1-line clamp
+   for the description; full value on the title attribute. */
+.mcp-wizard-tool-name {
+  font-size: 13px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-wizard-tool-desc {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ──────────────────────────────────────────────────────────
+   Phase 48.2 Plan 05 — profile scope bar (tools-profile-bar,
+   tools-profile-menu, tools-profile-scope-banner). Interaction pattern
+   copied from profile_shared/switcher.rs's ProfileSwitcher
+   (.kn-profile-*); these are net-new classes against THIS page's
+   site.css/screens.css token layer (UI-SPEC "Kanban-pattern reuse note",
+   D-18/D-19) — .kn-profile-* is never referenced here.
+   ────────────────────────────────────────────────────────── */
+
+.tools-profile-bar {
+  position: relative;
+}
+
+.tools-profile-trigger {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-input);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+  max-width: 220px;
+}
+
+.tools-profile-trigger-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+/* profile-selector/long-text: trigger name truncates with ellipsis; the
+   full name is on the trigger button's own title attribute. */
+.tools-profile-trigger-name {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
+}
+
+.tools-profile-trigger-caret {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+/* profile-selector/overflow: bounded max-height + scroll, reusing the
+   47.4 .kn-profile-menu min-width/scroll treatment BY VALUE, not by
+   importing its class. */
+.tools-profile-menu {
+  position: absolute;
+  top: calc(100% + var(--sp-1));
+  right: 0;
+  min-width: 220px;
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  z-index: 100;
+}
+
+.tools-profile-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.tools-profile-menu-item:hover {
+  background: var(--bg-input);
+}
+
+/* profile-selector/long-text: menu row name truncates with ellipsis; the
+   full name is on the row's own title attribute. */
+.tools-profile-menu-item-name {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.tools-profile-health-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.tools-profile-health-dot--ok {
+  background: var(--green);
+}
+
+.tools-profile-health-dot--gap {
+  background: var(--amber);
+}
+
+/* profile-selector/loading: dimmed placeholder row beneath ROOT while
+   enumeration is in flight. */
+.tools-profile-menu-loading {
+  padding: var(--sp-2) var(--sp-4);
+  font-size: 13px;
+  color: var(--text-dim);
+  opacity: 0.6;
+}
+
+/* profile-selector/error: the menu still opened with ROOT selectable
+   above — this is a constructed message, never raw filesystem/parser
+   error text (T-48.2-05-04). */
+.tools-profile-menu-error {
+  padding: var(--sp-2) var(--sp-4);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--amber);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+/* D-18/T-48.2-05-03: full-width, high-contrast, amber state-warning
+   treatment — present ONLY at profile scope, so its presence is itself
+   the signal an operator is not editing root. */
+.tools-profile-scope-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  width: 100%;
+  border: 1px solid var(--amber);
+  background: rgba(210, 153, 34, 0.1);
+  color: var(--amber);
+  padding: var(--sp-4);
+  border-radius: 10px;
+  margin-top: var(--sp-2);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.tools-profile-scope-banner-text strong {
+  font-weight: 700;
+}
+
+.tools-profile-scope-banner-return {
+  flex-shrink: 0;
+  border: 1px solid var(--amber);
+  background: transparent;
+  color: var(--amber);
+  border-radius: 8px;
+  padding: var(--sp-1) var(--sp-4);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+}
+
+.tools-profile-scope-banner-return:hover {
+  background: var(--amber);
+  color: var(--bg);
+}
+
+/* ──────────────────────────────────────────────────────────
+   Phase 48.2 Plan 06 Task 3 (D-17) — ENABLE ALL / DISABLE ALL confirm
+   dialog + post-submit result banner. New classes against this page's
+   token layer — mirrors the .mcp-confirm-* shape (D-19 prohibition: never
+   the kanban .kn-modal chrome). The confirm body intentionally has no
+   white-space/text-overflow rule so a long named-toolset list wraps onto
+   multiple lines rather than truncating (bulk-confirm-dialog/overflow).
+   ────────────────────────────────────────────────────────── */
+
+.bulk-confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+
+.bulk-confirm-dialog {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: var(--sp-6);
+  max-width: 480px;
+  width: calc(100% - var(--sp-6) * 2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+}
+
+.bulk-confirm-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.bulk-confirm-body {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+.bulk-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+
+.bulk-result-banner {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  border: 1px solid var(--border, #2a3138);
+  background: var(--bg-card);
+  border-radius: 10px;
+  padding: var(--sp-4);
+  margin: var(--sp-4) 0;
+}
+
+.bulk-result-banner--error {
+  border-color: rgba(248, 81, 73, 0.45);
+  background: rgba(248, 81, 73, 0.06);
+}
+
+.bulk-result-heading {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text);
+}
+
+.bulk-result-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+
+.bulk-result-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-2);
+  font-size: 13px;
+}
+
+.bulk-result-row--ok .bulk-result-state {
+  color: var(--teal);
+}
+
+.bulk-result-row--failed .bulk-result-state {
+  color: var(--red);
+}
+
+/* ──────────────────────────────────────────────────────────
+   Phase 48.2 Plan 07 (D-05/D-06/D-07/D-09/D-16/D-22) — the inline
+   credential form, mounted verbatim on the amber card's `.tool-fix-mount`
+   AND in the settings panel's credentials section. Amber is reserved for
+   the plaintext-credential-storage warning (D-07) and the read-only-backend
+   reason (REVIEWS finding 6) per UI-SPEC ## Color — never decorative here.
+   ────────────────────────────────────────────────────────── */
+
+.credential-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.credential-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  font-size: 12px;
+}
+
+.credential-row-key {
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.credential-row-value {
+  font-family: var(--font-mono, monospace);
+  color: var(--text);
+}
+
+/* credential-form/empty: 'Not set' is absence-of-presence-indicator, never
+   a blank masked field (D-06). */
+.credential-row-value--unset {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.credential-row-tier {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+
+.credential-row-loading {
+  color: var(--text-dim);
+}
+
+/* D-07/REVIEWS finding 6: the pre-input amber notice — plaintext warning
+   and/or the read-only-backend reason, rendered before the key input. */
+.credential-notice {
+  border: 1px solid var(--amber);
+  background: rgba(210, 153, 34, 0.1);
+  color: var(--amber);
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.credential-input-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+/* credential-form/long-text: arbitrarily long secrets scroll horizontally
+   rather than wrapping, matching native password-field behavior. */
+.credential-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-input, #11161d);
+  border: 1px solid var(--border, #2a3138);
+  border-radius: 8px;
+  color: var(--text);
+  padding: var(--sp-2) var(--sp-4);
+  font-size: 13px;
+  font-family: var(--font-mono, monospace);
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
+.credential-input:focus {
+  outline: none;
+  border-color: var(--teal);
+  box-shadow: 0 0 0 2px rgba(57, 197, 207, 0.25);
+}
+
+.tools-settings-credentials {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border, #2a3138);
+}
+
+/* ──────────────────────────────────────────────────────────
+   Phase 48.2 Plan 12 (G-48.2-7) — BUZZ section (buzz-section,
+   buzz-field-group, buzz-list-editor). Same site.css/screens.css token
+   layer as the rest of the page — .pill/.btn/.tgl reused verbatim, and the
+   deny-all warning reuses .credential-notice's amber-box treatment rather
+   than a new color (Task 2's CSS instruction).
+   ────────────────────────────────────────────────────────── */
+
+.buzz-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-top: var(--sp-7);
+}
+
+.buzz-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+}
+
+.buzz-section-skeleton {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.buzz-not-configured {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  padding: var(--sp-2) var(--sp-4);
+}
+
+.buzz-not-configured-body {
+  font-size: 13px; /* Body role, UI-SPEC ## Typography */
+  line-height: 1.5;
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.buzz-enabled-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+}
+
+.buzz-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-top: var(--sp-4);
+}
+
+.buzz-field-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+
+.buzz-field-help {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  margin: 0;
+}
+
+.buzz-list-editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+
+.buzz-list-editor-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.buzz-list-editor-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-input, #11161d);
+  border: 1px solid var(--border, #2a3138);
+  border-radius: 8px;
+  color: var(--text);
+  padding: var(--sp-2) var(--sp-4);
+  font-size: 13px;
+  font-family: var(--font-mono, monospace);
+}
+
+.buzz-list-editor-input:focus {
+  outline: none;
+  border-color: var(--teal);
+  box-shadow: 0 0 0 2px rgba(57, 197, 207, 0.25);
+}
+
+.buzz-relay-url-input {
+  width: 100%;
+  background: var(--bg-input, #11161d);
+  border: 1px solid var(--border, #2a3138);
+  border-radius: 8px;
+  color: var(--text);
+  padding: var(--sp-2) var(--sp-4);
+  font-size: 13px;
+  font-family: var(--font-mono, monospace);
+}
+
+.buzz-relay-url-input:focus {
+  outline: none;
+  border-color: var(--teal);
+  box-shadow: 0 0 0 2px rgba(57, 197, 207, 0.25);
+}
+
+/* Phase 48.2 Plan 14 (G-48.2-8) — MODEL RESOLUTION block. Visibility, not
+   alarm — same treatment rationale as .buzz-channel-trust-row below: this
+   is a fact about the running configuration, not a warning about it. */
+.buzz-model-resolution-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  margin-top: var(--sp-2);
+}
+
+.buzz-model-value {
+  font-size: 13px; /* Body role, UI-SPEC ## Typography */
+  color: var(--text);
+  font-family: var(--font-mono, monospace);
+}
+
+.buzz-model-value--unset {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.buzz-model-roles {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
+}
+
+.buzz-model-role-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+}
+
+.buzz-model-role-label {
+  font-size: 13px; /* Body role, UI-SPEC ## Typography */
+  color: var(--text-dim);
+  min-width: 140px;
+}
+
+/* Task 2c: channel_trust is DISPLAYED, never edited — read-only row plus
+   an explanatory line (never the .credential-notice warning treatment;
+   the adapter's own loud startup warning is the alarm channel for an
+   Open posture, this row is visibility, not alarm). */
+.buzz-channel-trust-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-card);
+  margin-top: var(--sp-4);
+}
+
+.buzz-channel-trust-explain {
+  font-size: 13px; /* Body role, UI-SPEC ## Typography */
+  line-height: 1.5;
+  color: var(--text-dim);
+  margin: var(--sp-1) 0 0;
+}
+
+.buzz-edit-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-4);
+}

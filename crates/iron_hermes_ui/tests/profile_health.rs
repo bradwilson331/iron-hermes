@@ -124,7 +124,7 @@ fn protocol_declares_the_full_profile_dto_contract() {
     }
 }
 
-/// Phase 47.4 Plan 11 (GAP-1): `wizard.rs`'s client-only
+/// Phase 47.4 Plan 11 (GAP-1): the create wizard's client-only
 /// `CLIENT_LLM_KEY_ALLOWLIST` (a wasm-target literal — it cannot call the
 /// server's provider-registry-derived `provider_key_env_names`) must remain
 /// a SUBSET of `profile_api.rs`'s `LLM_KEY_ALLOWLIST` compatibility floor —
@@ -133,9 +133,14 @@ fn protocol_declares_the_full_profile_dto_contract() {
 /// `#[cfg(test)]` module). A source-string assertion, mirroring this file's
 /// own established pattern, since integration tests here cannot reach
 /// either `pub(crate)` constant directly (this file's own module doc).
+///
+/// Phase 50.1 Plan 02 (D-10): the declaration relocated from
+/// `screens/kanban/wizard.rs` (now a thin re-export shim) to
+/// `screens/profile_shared/create_dialog.rs` — this test reads the new
+/// location.
 #[test]
 fn client_llm_key_allowlist_is_a_subset_of_the_server_floor() {
-    let client_src = read("src/components/hermes_app/screens/kanban/wizard.rs");
+    let client_src = read("src/components/hermes_app/screens/profile_shared/create_dialog.rs");
     let client_start = client_src
         .find("const CLIENT_LLM_KEY_ALLOWLIST: [&str; 5] = [")
         .expect("CLIENT_LLM_KEY_ALLOWLIST must be declared in wizard.rs");

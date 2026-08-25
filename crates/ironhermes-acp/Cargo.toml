@@ -1,0 +1,33 @@
+[package]
+name = "ironhermes-acp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Agent Client Protocol (ACP) stdio server for IronHermes (Phase 36.8)"
+
+[dependencies]
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+ironhermes-core = { path = "../ironhermes-core" }
+ironhermes-agent = { path = "../ironhermes-agent" }
+ironhermes-state = { path = "../ironhermes-state" }
+ironhermes-hooks = { path = "../ironhermes-hooks" }
+ironhermes-trajectory = { path = "../ironhermes-trajectory" }
+ironhermes-tools = { path = "../ironhermes-tools" }
+ironhermes-cron = { path = "../ironhermes-cron" }
+ironhermes-exec = { path = "../ironhermes-exec" }
+agent-client-protocol = "2.0"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tokio-util = { workspace = true, features = ["compat"] }
+tempfile = { workspace = true }
+futures = { workspace = true }
+wiremock = { workspace = true }

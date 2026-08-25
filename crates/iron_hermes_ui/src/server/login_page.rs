@@ -1277,6 +1277,19 @@ mod tests {
                 "/chat-attachments/{session_id}/{id}",
                 axum::routing::get(crate::server::chat_attachment_route::serve_chat_attachment),
             )
+            // Phase 50.1 Plan 04 (D-11/D-12): must mirror main.rs's route
+            // set exactly — see this fn's own doc note above.
+            .route(
+                "/bot-avatars/{name}/{image_id}",
+                axum::routing::get(crate::server::bot_avatar_route::serve_bot_avatar),
+            )
+            // Phase 48.2 Plan 09 (D-03/T-48.2-09-01): must mirror main.rs's
+            // route set exactly — same doc note (path must match
+            // `mcp_admin_api::MCP_OAUTH_CALLBACK_PATH` and `auth::is_public`).
+            .route(
+                "/oauth/mcp/callback",
+                axum::routing::get(crate::server::mcp_oauth_callback_route::serve_mcp_oauth_callback),
+            )
             .merge(auth_routes)
             .layer(axum::Extension(auth_state.clone()))
             .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
@@ -1328,6 +1341,75 @@ mod tests {
         assert!(
             !text.contains("/wasm/"),
             "unauthenticated GET / must never reference the wasm bundle path"
+        );
+    }
+
+    /// Phase 48.2 Plan 09 (T-48.2-09-01/T-48.2-09-09): the load-bearing
+    /// property in both directions — one route became public and nothing
+    /// else did. Drives the REAL assembled `test_router`, not just the
+    /// `is_public` predicate in isolation. `GET /oauth/mcp/callback` without
+    /// any session cookie must NOT be `401` (asserted as "not unauthorized"
+    /// rather than a specific code, since an unrecognized `state` legitimately
+    /// answers `404` — that IS the honest, non-leaking refusal this route is
+    /// supposed to give an unauthenticated caller). A representative data
+    /// path (`/artifacts/{id}`) without a cookie must still be `401`.
+    #[tokio::test]
+    async fn oauth_callback_is_public_and_nothing_else_became_public_with_it() {
+        let auth = auth_state_with_password("hunter2");
+        let router = test_router(auth);
+
+        let callback_req = Request::builder()
+            .method("GET")
+            .uri("/oauth/mcp/callback?code=some-code&state=never-issued-by-this-process")
+            .body(Body::empty())
+            .unwrap();
+        let callback_resp = router.clone().oneshot(callback_req).await.unwrap();
+        assert_ne!(
+            callback_resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "GET /oauth/mcp/callback must be reachable without a session — it answered 401, \
+             meaning the public arm in auth::is_public is not actually wired into this router"
+        );
+
+        let data_req = Request::builder()
+            .method("GET")
+            .uri("/artifacts/abc")
+            .body(Body::empty())
+            .unwrap();
+        let data_resp = router.oneshot(data_req).await.unwrap();
+        assert_eq!(
+            data_resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "a representative data path must still require a session — the callback route \
+             becoming public must not have widened the allowlist beyond it"
+        );
+    }
+
+    /// Phase 48.2 Plan 09 (T-48.2-09-01): static-source regression proving
+    /// this file (`test_router`) and `main.rs` mount the callback route at
+    /// the literal path string `mcp_admin_api::MCP_OAUTH_CALLBACK_PATH`
+    /// holds — the literal strings there (matching every sibling raw-route
+    /// registration's own style) and that constant (used for the
+    /// `redirect_uri` construction and `auth::is_public`'s matching arm)
+    /// must never drift apart. A future edit to either the constant or a
+    /// route registration that lets them diverge fails this test, not just
+    /// a doc comment's promise.
+    #[test]
+    fn callback_path_constant_matches_the_literal_mounted_in_main_and_test_router() {
+        let main_src = include_str!("../main.rs");
+        let this_src = include_str!("login_page.rs");
+        let needle = format!(
+            "\"{}\"",
+            crate::server::mcp_admin_api::MCP_OAUTH_CALLBACK_PATH
+        );
+        assert!(
+            main_src.contains(&needle),
+            "main.rs must mount the route at the literal MCP_OAUTH_CALLBACK_PATH spelling"
+        );
+        assert!(
+            this_src.contains(&needle),
+            "login_page.rs::test_router must mount the route at the literal \
+             MCP_OAUTH_CALLBACK_PATH spelling"
         );
     }
 

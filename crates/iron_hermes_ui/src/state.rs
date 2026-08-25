@@ -872,6 +872,20 @@ pub struct NextIdContext(pub Signal<u64>);
 pub struct SubagentEventsContext(pub Signal<u64>);
 
 // ---------------------------------------------------------------------------
+// Phase 50.1 Plan 08 (D-22): cross-screen schedule-name prefill seam. The bot
+// drawer's Routines section (`bot_roster/routines.rs`) has no prop chain to
+// the Schedules screen — its create action needs to carry a pre-filled job
+// name across a screen switch. `ScheduleNamePrefillCtx` sets `Some(prefix)`
+// and flips `active_screen` to `Screen::Schedules` in the same click;
+// `ScreenSchedules` reads it, pre-fills and opens its own inline editor, then
+// clears it back to `None` so a later visit does not reopen it. Same
+// `Clone, Copy`-only newtype discipline as `SessionIdContext` above — forces
+// disambiguation from any other `Signal<Option<String>>` provider.
+#[allow(dead_code)] // context-provider newtype; consumed via use_context::<ScheduleNamePrefillCtx>() in ScreenSchedules
+#[derive(Clone, Copy)]
+pub struct ScheduleNamePrefillCtx(pub Signal<Option<String>>);
+
+// ---------------------------------------------------------------------------
 // Phase 46.6 Plan 05 (D-07): selected-artifact context — the gallery writes
 // the clicked row's `ArtifactInfo` here before switching `active_screen` to
 // `Screen::ArtifactViewer`; the viewer reads it to render its chrome + iframe

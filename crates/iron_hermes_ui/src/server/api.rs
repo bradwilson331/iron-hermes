@@ -2247,7 +2247,16 @@ mod voice_identity_tests_40_5_03 {
 ///
 /// Called by the `cancel_turn` server fn (thin wrapper) and directly by
 /// `cancel_turn_tests` unit tests.
-#[cfg(not(target_arch = "wasm32"))]
+///
+/// The gate must name `feature = "server"`, not just a non-wasm target: the
+/// `crate::server::state` module this signature borrows from is itself
+/// `#[cfg(feature = "server")]`, and `not(target_arch = "wasm32")` is the wider
+/// predicate. Gating on the target alone left one configuration — native with
+/// default features, i.e. no `server` — where this function was compiled but
+/// `server::state` was not, failing with `E0433: cannot find state in server`.
+/// `dx` never builds that configuration (its client is wasm, its server enables
+/// the feature), but `cargo test --workspace` does.
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 fn cancel_session_logic(state: &crate::server::state::AppState, session_id: &str) {
     let key = ironhermes_core::session::SessionKey {
         platform: ironhermes_core::types::Platform::Web,
@@ -3922,7 +3931,9 @@ pub async fn realtime_save_transcript(
 // No global_app_state() needed.
 // =============================================================================
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+// See the gate note on `realtime_trajectory_wiring_tests`: `role_to_message` is
+// `#[cfg(feature = "server")]`, so this module must name the feature too.
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "server"))]
 mod realtime_save_transcript_tests {
     use super::role_to_message;
 
@@ -4019,7 +4030,10 @@ mod realtime_save_transcript_tests {
 // Phase 39.3 Plan 03: unit tests for trajectory wiring (D-04 / OQ#3)
 // =============================================================================
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+// Gate names `feature = "server"` because the item under test is itself
+// `#[cfg(feature = "server")]`; `not(target_arch = "wasm32")` alone is wider and
+// left this module compiled without its subject under native default features.
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "server"))]
 mod realtime_trajectory_wiring_tests {
     use super::log_realtime_tool_call_to_trajectory;
     use ironhermes_core::commands::context::TrajectoryWriterHandle;
@@ -4139,7 +4153,9 @@ mod realtime_trajectory_wiring_tests {
 // Tests use a synthetic PendingApproval map (no global_app_state needed).
 // =============================================================================
 
-#[cfg(all(test, not(target_arch = "wasm32")))]
+// See the gate note on `realtime_trajectory_wiring_tests`: `server::state` is
+// `#[cfg(feature = "server")]`, so this module must name the feature too.
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "server"))]
 mod realtime_approve_tests {
     use crate::server::state::PendingApproval;
     use std::collections::HashMap;

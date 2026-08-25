@@ -251,30 +251,59 @@ fn render_profile_env_verifies_its_own_output_against_the_real_parser() {
 
 /// Pins both production call sites to propagate the fallible render result
 /// rather than unwrap it, so a self-check failure always refuses the write.
+///
+/// Phase 48.2 Plan 07 (D-09 checkpoint, option b): `render_profile_env` was
+/// lifted into a thin wrapper delegating to `render_profile_env_with_stamp`
+/// (see that fn's own module doc) so the tool-credentials module can thread
+/// an extra provenance stamp through the SAME write core rather than
+/// forking it. The two write-implementation call sites this test pins are
+/// therefore split across both names now: `create_profile_impl` still calls
+/// `render_profile_env(` directly, and `save_profile_key_impl_with_stamp`
+/// (the new shared core `save_profile_key_impl` delegates to) calls
+/// `render_profile_env_with_stamp(`. The wrapper's own one-line delegation
+/// — `render_profile_env_with_stamp(name, entries, None)`, a tail
+/// expression inside `render_profile_env`'s body — is a THIRD textual hit
+/// but not a `?`-propagated call site (it has no trailing `?;`; the
+/// function's own `-> Result<String, String>` signature is what propagates
+/// it), so it is excluded from the count by exact line match, and checked
+/// separately below.
 #[test]
 fn both_write_paths_propagate_the_render_result() {
     let stripped = strip_comment_lines(&profile_api_production_src());
 
     let call_sites: Vec<&str> = stripped
         .lines()
-        .filter(|line| line.contains("render_profile_env(") && !line.contains("fn render_profile_env("))
+        .filter(|line| {
+            let trimmed = line.trim();
+            (line.contains("render_profile_env(") || line.contains("render_profile_env_with_stamp("))
+                && !line.contains("fn render_profile_env(")
+                && !line.contains("fn render_profile_env_with_stamp(")
+                && trimmed != "render_profile_env_with_stamp(name, entries, None)"
+        })
         .collect();
 
     assert_eq!(
         call_sites.len(),
         2,
-        "expected exactly 2 production call sites of render_profile_env(, found {}: {call_sites:?}",
+        "expected exactly 2 production call sites of render_profile_env(/render_profile_env_with_stamp(, found {}: {call_sites:?}",
         call_sites.len()
     );
 
     for line in &call_sites {
         assert!(
             !line.contains("unwrap()"),
-            "a render_profile_env( call site must not unwrap its Result: {line}"
+            "a render_profile_env(/render_profile_env_with_stamp( call site must not unwrap its Result: {line}"
         );
         assert!(
             line.trim_end().ends_with(")?;"),
-            "a render_profile_env( call site must propagate its Result with `?`: {line}"
+            "a render_profile_env(/render_profile_env_with_stamp( call site must propagate its Result with `?`: {line}"
         );
     }
+
+    assert!(
+        stripped.contains("render_profile_env_with_stamp(name, entries, None)\n}"),
+        "render_profile_env must delegate to render_profile_env_with_stamp as a tail \
+         expression (propagating its Result via its own return type), not unwrap or \
+         discard it"
+    );
 }

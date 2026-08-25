@@ -32,6 +32,8 @@ buzz = ["ironhermes-gateway/buzz", "dep:nostr-sdk"]
 ironhermes-core = { path = "../ironhermes-core" }
 ironhermes-agent = { path = "../ironhermes-agent" }
 ironhermes-tools = { path = "../ironhermes-tools" }
+# Phase 36.8 (D-07): `ironhermes acp` stdio server for Zed / VS Code / JetBrains editors.
+ironhermes-acp = { path = "../ironhermes-acp" }
 # Phase 46.8 Plan 05: `vault_cmd.rs` calls `open_store`/`RustyVaultStore` directly.
 ironhermes-vault = { path = "../ironhermes-vault" }
 # Plan 21.7-06 (D-29): ProcessRegistry constructor at the three main.rs call sites
@@ -66,6 +68,20 @@ ansi-to-tui = { workspace = true }
 ratatui = { workspace = true }
 tui-logger = { workspace = true }
 tui-textarea-2 = { workspace = true }
+# Phase 36.6.4 Plan 01 (D-02): transcript scroll authority.
+tui-scrollview = { workspace = true }
+# Phase 36.6.4 Plan 05 (D-13, T-36.6.4-SC): image chip + overlay viewer.
+# default-features = false + explicit "crossterm" only — RESEARCH verified
+# the crate's own defaults silently re-enable a full decoder set (via Cargo
+# feature unification on the `image` pin below) plus a chafa system-graphics
+# link this project has never needed.
+ratatui-image = { version = "11.0.6", default-features = false, features = ["crossterm"] }
+# Moved from [dev-dependencies] (Plan 01 added it there for test fixtures
+# only) — Plan 05's overlay decode now calls `image::ImageReader` from
+# production code, so it must be a real dependency. Features unchanged:
+# png + jpeg only (RESEARCH Pitfall 3 — webp/gif deliberately excluded, a
+# self-documenting runtime decode error rather than a blind feature bump).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 colored = { workspace = true }
 indicatif = { workspace = true }
 rustyline = { workspace = true }
@@ -114,7 +130,11 @@ tempfile = "3"
 # Phase 46.5.1: build oversized test-image fixtures for the kanban worker
 # image-turn tests. Runtime downscaling moved to the shared
 # ironhermes_gateway::multimodal::fit_image_for_vision (46.5.1 follow-up).
-image = { version = "0.25", default-features = false, features = ["png"] }
+# Phase 36.6.4 Plan 05: `image` moved to [dependencies] above — production
+# code (the overlay decode path) now depends on it directly, so the
+# dev-only entry that used to live here would just be a silently-shadowed
+# duplicate. Dev/test builds still see the same png+jpeg features via the
+# real dependency.
 async-trait = { workspace = true }
 wiremock = { workspace = true }
 hex = { workspace = true }

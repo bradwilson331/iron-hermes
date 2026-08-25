@@ -8,18 +8,20 @@
 //! - TextArea import uses `tui_textarea_2` (workspace alias for tui-textarea-2 0.10.2).
 //! - `dispatch_slash` is a stub in `commands.rs`; plan 22.4-07 Task 4 fills it.
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Borders};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
+use tui_scrollview::ScrollViewState;
 use tui_textarea::TextArea;
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -29,6 +31,8 @@ use crate::tui_rata::clarify_dispatcher_tui::ClarifyRequest;
 use crate::tui_rata::double_ctrl_c::{CtrlCDecision, DoubleCtrlCState};
 use crate::tui_rata::history::{DEFAULT_MAX, ReplHistory};
 use crate::tui_rata::overlay::{OverlayKind, PickerStep};
+use crate::tui_rata::selection::{self, Selection};
+use crate::tui_rata::shell_bang;
 use crate::tui_rata::status_line::StatusLineState;
 use crate::tui_rata::stream_events::StreamEvent;
 
@@ -48,6 +52,7 @@ use ironhermes_core::queue::MessageQueue;
 use ironhermes_core::session::SessionKey;
 use ironhermes_core::types::{ChatMessage, MessageContent, Platform, Role};
 use ironhermes_exec::process_registry::ProcessRegistry;
+use ironhermes_gateway::media_tag::{MediaKind, MediaRef, MediaSource, MediaTagExtractor};
 use ironhermes_hooks::HookRegistry;
 use ironhermes_mcp::McpManager;
 use ironhermes_state::StateStore;
@@ -184,6 +189,11 @@ pub struct AppDeps {
     /// `[s]ession` approval grant persists across every `spawn_turn` dispatch
     /// instead of being discarded by a fresh `ApprovalsStore::load()` per turn.
     pub approvals_store: Arc<ironhermes_core::ApprovalsStore>,
+
+    /// Phase 36.6.4 Plan 05 (D-13, T-36.6.4-IMG-04): the image `Picker`,
+    /// built ONCE by `build_app_deps` inside the narrow post-alt-screen
+    /// pre-event-stream startup window — see `App.picker`'s doc comment.
+    pub picker: ratatui_image::picker::Picker,
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
@@ -196,8 +206,30 @@ pub struct App {
     // — transcript / history ─────────────────────────────────────────────────
     pub history: Vec<ChatMessage>,
     pub textarea: TextArea<'static>,
-    pub transcript_scroll: u16,
+    /// Phase 36.6.4 Plan 01 (D-02): the SOLE authority for the transcript
+    /// scroll offset — replaces the old `transcript_scroll: u16` field.
+    /// `App` is rendered via `&App` (not `&mut App`), so this needs interior
+    /// mutability; a `Mutex` mirrors `chip_hit_test`'s existing thread-safety
+    /// posture (Phase 46.7 Plan 07 precedent) rather than introducing
+    /// `RefCell`. Read via `transcript_scroll()` / mutated via
+    /// `set_transcript_scroll()` — keeping BOTH a `u16` field AND this state
+    /// alive is precisely the silent-drift mechanism RESEARCH Pitfall 2
+    /// names (see `<assumption_delta_decision>` in the Plan 01 PLAN.md).
+    pub scroll_view_state: std::sync::Mutex<ScrollViewState>,
     pub auto_follow: bool,
+    /// Phase 36.6.4 Plan 01 (D-04/D-07): the active or most-recently-
+    /// completed mouse-drag text selection, in virtual content coordinates.
+    /// `None` = no selection. Cleared only by a fresh `Down(Left)` press (a
+    /// completed selection's highlight persists until the next click, per
+    /// D-04's X11 primary-selection model).
+    pub selection: Option<Selection>,
+    /// Phase 36.6.4 Plan 02 (D-05): vim-style keyboard selection mode — the
+    /// SSH-safe fallback for D-04's mouse-drag selection (mouse events do
+    /// not reliably survive every SSH/tmux configuration). `Idle` = no
+    /// keyboard selection in progress (`selection` above, established by a
+    /// mouse drag, is tracked independently and unaffected). `v` (textarea
+    /// empty, no overlay) enters `Visual`; `y`/`Esc` return to `Idle`.
+    pub selection_mode: selection::SelectionMode,
 
     // — streaming bridge ─────────────────────────────────────────────────────
     pub pending_rx: Option<UnboundedReceiver<StreamEvent>>,
@@ -360,6 +392,33 @@ pub struct App {
     /// transcript.
     pub sent_attachment_chips: Vec<SentAttachmentChip>,
 
+    /// Phase 36.6.4 Plan 05 (D-12/D-13, TUI-IMG-01): image chips created by
+    /// either D-12 trigger — `<MEDIA:>` tag extraction at turn-commit
+    /// (`commit_assistant_buffer`) or `/image <path>`. Flat + append-only,
+    /// mirroring `sent_attachment_chips`/`captured_artifacts`. Rendered as
+    /// `[🖼 {label}]` `Color::Cyan` chips appended to the transcript AFTER
+    /// `captured_artifacts` and BEFORE `shell_runs` — `transcript_render_text`
+    /// and `rebuild_chip_hit_test` must both walk this in the SAME order.
+    pub image_chips: Vec<ImageChip>,
+
+    /// Phase 36.6.4 Plan 05 (D-13): the image `Picker` built ONCE at startup
+    /// in the narrow post-alt-screen pre-event-stream window
+    /// (`event_loop::build_app_deps`) — never lazily on first overlay open,
+    /// so the stdio capability query's response bytes can never be consumed
+    /// by the live crossterm event stream instead of the query's own
+    /// blocking read (T-36.6.4-IMG-04).
+    pub picker: ratatui_image::picker::Picker,
+
+    /// Phase 36.6.4 Plan 05 (T-36.6.4-IMG-01): decode/protocol-build state
+    /// for the CURRENTLY open image overlay. `None` = no decode has been
+    /// triggered yet for the current overlay (a fresh chip click always
+    /// resets this to `None` before setting `active_overlay`) —
+    /// `overlay::render_image_viewer` observes `None` and triggers the
+    /// ONE-TIME `spawn_blocking` decode; it never re-triggers while
+    /// Decoding/Ready/Failed. `Arc<Mutex<>>` so the spawned task can write
+    /// the result back without `&mut App` (mirrors `captured_artifacts`).
+    pub image_decode: Arc<std::sync::Mutex<Option<ImageDecodeState>>>,
+
     /// Phase 46.7 Plan 07 (D-17): per-render chip hit-test map, rebuilt from
     /// scratch every render pass by `rebuild_chip_hit_test` (called from
     /// `ui.rs::render_transcript`) and consulted by `handle_mouse`'s
@@ -368,12 +427,68 @@ pub struct App {
     /// existing `captured_artifacts` field's thread-safety posture.
     chip_hit_test: std::sync::Mutex<Vec<(Rect, ChipAction)>>,
 
+    /// Phase 36.6.4 Plan 02: most-recently-rendered transcript pane `Rect`,
+    /// cached via interior mutability (mirrors `chip_hit_test`/
+    /// `scroll_view_state` — `App` renders through `&App`, never `&mut
+    /// App`) so `handle_key`'s keyboard-only yank/visual-mode paths (`y`,
+    /// `Ctrl+Y`, `hjkl` row-bound clamping) can reach the SAME
+    /// width/geometry `handle_mouse` receives directly as a parameter,
+    /// without threading a `Rect` through `handle_key`'s 30+ existing call
+    /// sites. Updated every render inside `rebuild_chip_hit_test` (called
+    /// once per frame from `ui.rs::render_transcript`) — one render tick of
+    /// staleness on a live resize is the same tolerance `chip_hit_test`
+    /// itself already accepts.
+    transcript_area: std::sync::Mutex<Rect>,
+
+    /// Phase 36.6.4 Plan 10 Task 2 (G-08 closure): single-entry memo behind
+    /// `transcript_measurement` — replaced (never accumulated) on every
+    /// content or width change, so memory is bounded by one
+    /// transcript-sized snapshot. Keyed on `MeasureKey`, itself derived
+    /// entirely from the SAME `transcript_render_units()` enumeration the
+    /// render walks (`transcript_content_fingerprint`) — there is no
+    /// hand-maintained dirty flag, frame counter or revision field to
+    /// forget to update. `App` renders via `&App`, so this needs interior
+    /// mutability, mirroring `chip_hit_test`/`transcript_area` above.
+    transcript_measure_cache: std::sync::Mutex<Option<(MeasureKey, Arc<TranscriptMeasurement>)>>,
+
+    /// Phase 36.6.4 Plan 02 (D-07): the last mouse press's content
+    /// position, timestamp, and the click count (1..=3, wraps to 1 at 4) it
+    /// resolved to — classified via the pure `selection::classify_click`.
+    /// `None` before the first press this session. Read-and-overwritten by
+    /// `handle_mouse`'s `Down(Left)` arm on every press; reset to `None` on
+    /// a chip-rect press (chip clicks never participate in double/
+    /// triple-click counting — see `handle_mouse`'s doc comment).
+    last_press: Option<(selection::ContentPos, Instant, u8)>,
+
+    /// Phase 36.6.4 Plan 02 (D-04, UI-SPEC §2): transient copy-confirmation
+    /// override for the status-line hint slot — `(toast_text,
+    /// expires_at_knight_rider_tick)`. `None` = no active confirmation (the
+    /// normal `status.hint` shows unmodified). Set by `yank_selection` on a
+    /// successful or truncated write; cleared by `on_tick` once
+    /// `knight_rider_tick` reaches the expiry — a one-shot window on the
+    /// EXISTING 100ms frame tick (Motion Contract: zero new animated
+    /// primitives). Never set on a write failure (that path renders a
+    /// transcript line instead, per D-04) or an empty/no-op yank.
+    copy_confirmation: Option<(String, u64)>,
+
     /// Phase 46.7 Plan 07 (D-17): browser-launch hook for
     /// `ChipAction::OpenArtifactUrl`. Defaults to the project's standard
     /// `open::that` launcher (matches the `auth_cmd.rs`/`pkce.rs` precedent).
     /// Swapped for a no-op recorder in `handle_mouse_chip_tests` so unit
     /// tests never actually launch a browser window.
     opener: BrowserOpener,
+
+    /// Phase 36.6.4 Plan 08 (gap-closure: honest clipboard feedback):
+    /// clipboard-yank hook, mirroring `opener`'s injectable pattern.
+    /// Defaults to `selection::yank` (real OSC52 write, real `pbcopy`
+    /// attempt, real environment-based capability detection). Swapped in
+    /// `visual_mode_tests` for a closure returning an explicit `Supported`
+    /// `ClipboardOutcome::Written` so the toast-wording assertions are
+    /// deterministic regardless of the test host's real `TERM_PROGRAM` or
+    /// OS (production `selection::yank` reads real env and, on macOS,
+    /// invokes real `pbcopy` — neither is a stable input to assert an
+    /// exact toast string against in CI).
+    clipboard_yank: ClipboardYankFn,
 
     /// Phase 36.3.12 Plan 10 (WR-01): see `AppDeps.approvals_store` doc — shared
     /// process-lifetime store consulted by every `spawn_turn` gating closure.
@@ -483,11 +598,232 @@ pub struct App {
     /// Argued invokes are the user's OWN typed words and are never recorded
     /// here (they render normally). Cleared whenever `self.history` is cleared.
     pub skill_run_hidden_indices: std::collections::HashSet<usize>,
+
+    /// Phase 36.6.4 Plan 03 (D-09..D-11, TUI-BANG-01): completed (or
+    /// in-flight) `!` shell-command runs. Rendered as directly-styled
+    /// transcript lines (NOT a new `Role`) via `shell_bang::shell_block_lines`
+    /// — mirrors the `sent_attachment_chips`/`captured_artifacts` chip-append
+    /// convention (`transcript_render_text` appends these AFTER the existing
+    /// chip rows). Flat + append-only.
+    pub shell_runs: Vec<shell_bang::ShellRun>,
+
+    /// Phase 36.6.4 Plan 03 (D-11/D-16 `must_haves.prohibitions`): `self.history`
+    /// indices whose content is a shell-run's captured-output text (pushed by
+    /// `apply_shell_outcome` so follow-up questions work, D-11) — rendered
+    /// EXCLUSIVELY via `shell_runs`/`shell_block_lines`'s custom Magenta/Red
+    /// styling, never via the normal per-message System/DarkGray loop in
+    /// `transcript_text` (which would double-render it). Mirrors
+    /// `skill_run_hidden_indices`'s "model-facing content, not a second
+    /// rendered bubble" precedent. Cleared whenever `self.history` is cleared.
+    pub shell_history_hidden_indices: std::collections::HashSet<usize>,
 }
 
 /// Signature for `App::opener` — factored into a type alias per
 /// `clippy::type_complexity`.
 type BrowserOpener = Box<dyn Fn(&str) -> std::io::Result<()>>;
+
+/// Signature for `App::clipboard_yank` — factored into a type alias per
+/// `clippy::type_complexity`. Mirrors `BrowserOpener`'s injectable-field
+/// pattern: production defaults to `selection::yank` (real OSC52/pbcopy
+/// I/O and real environment detection); App-level tests that need a
+/// deterministic `TerminalClipboardCaps` verdict for the toast wording
+/// swap this field, the same way `handle_mouse_chip_tests` swaps `opener`
+/// for a no-op recorder (Plan 08, gap-closure: honest clipboard feedback).
+type ClipboardYankFn = Box<dyn Fn(&str) -> selection::ClipboardOutcome>;
+
+/// Phase 36.6.4 Plan 07 (G-01/G-02/G-06 closure): the sentinel line
+/// `transcript_rendered_plain_rows` appends after the real transcript
+/// content, then locates by scanning the scratch render for it — the row it
+/// lands on IS the true rendered height above it. Plain ASCII (not a
+/// zero/ambiguous-width Unicode codepoint) so `ratatui`'s word-wrap and
+/// `unicode-width` measurement never treat it specially. Distinctive enough
+/// that a model reply or `!` shell output cannot produce it by accident. It
+/// has no whitespace, so it never SPLITS at a word boundary — but at a
+/// narrow `width` it CAN character-wrap across several rows like any other
+/// oversized word; the search below accounts for that by scanning the
+/// concatenation of rows, not a single row in isolation.
+const TRANSCRIPT_MEASURE_SENTINEL: &str = "IRONHERMES_TRANSCRIPT_MEASURE_SENTINEL_9f2b7a";
+
+// ── Phase 36.6.4 Plan 10 (G-08 closure): shipping-path work counters ───────
+//
+// THREAD-LOCAL `Cell<u64>`s, always compiled (never behind `cfg(test)` or
+// the `test-support` feature) — a performance budget asserted against a
+// differently-compiled path is the same false confidence that shipped the
+// G-08 regression. Every counter is written with exactly ONE `bump` per
+// measurement (accumulated into a plain local first), so the always-on
+// instrumentation costs a handful of thread-local cell writes per
+// measurement, never per cell.
+//
+// POST-MERGE FIX: these were process-global `AtomicU64`s until this fix,
+// which made the ten counter-asserting tests below (and in `ui.rs`) racy
+// under a default `cargo test` — any test rendering a transcript
+// concurrently mutated the SAME globals another test had just reset via
+// `reset_transcript_measure_stats()`. Design (b) from the post-merge
+// checkpoint: thread-local storage, chosen over a shared `Mutex` because it
+// requires no serialization between tests at all and needs no poisoning
+// recovery. This is safe because the TUI renders on exactly ONE thread in
+// production — `event_loop::run_app_inner`'s single event-loop task calls
+// `terminal.draw` synchronously (never across an `.await`), and nothing in
+// `measure_transcript_uncached`/`transcript_render_units`/
+// `transcript_measurement` spawns a thread — so a thread-local counter
+// observes the identical real shipping-path work a process-global one did
+// on that thread; `transcript_measure_stats()` read from the render thread
+// still reports genuine production work. Every one of the ten failing
+// tests (verified by grep) is a plain synchronous `#[test]` — never
+// `#[tokio::test]` or otherwise thread-hopping — and Rust's default test
+// harness runs each `#[test]` function to completion on its own dedicated
+// OS thread, so each test's reset/measure/read sequence now only ever
+// touches that one thread's cells: concurrent sibling tests rendering their
+// own transcripts can no longer pollute this test's counts.
+// `transcript_measure_stats()`/`reset_transcript_measure_stats()` are only
+// ever called from tests (grep confirms zero production call sites), so
+// there is no cross-thread aggregation behavior in the shipping binary this
+// change could silently alter.
+thread_local! {
+    static TRANSCRIPT_RENDERS: Cell<u64> = const { Cell::new(0) };
+    static TRANSCRIPT_SCRATCH_ROWS: Cell<u64> = const { Cell::new(0) };
+    static TRANSCRIPT_CELLS_WALKED: Cell<u64> = const { Cell::new(0) };
+    static TRANSCRIPT_ROW_LOOKUPS: Cell<u64> = const { Cell::new(0) };
+    static TRANSCRIPT_UNIT_BUILDS: Cell<u64> = const { Cell::new(0) };
+    static TRANSCRIPT_CACHE_HITS: Cell<u64> = const { Cell::new(0) };
+    static TRANSCRIPT_CACHE_MISSES: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Add `delta` to a thread-local counter cell — the `Cell<u64>` equivalent
+/// of `AtomicU64::fetch_add`, factored out so every call site stays a
+/// one-line `TRANSCRIPT_X.with(|c| bump(c, n))`.
+fn bump(cell: &Cell<u64>, delta: u64) {
+    cell.set(cell.get() + delta);
+}
+
+/// Snapshot of the transcript measurement's per-frame work counters —
+/// read off the shipping path, not a test double (Phase 36.6.4 Plan 10's
+/// performance budget is asserted against this struct's fields).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TranscriptMeasureStats {
+    pub renders: u64,
+    pub scratch_rows: u64,
+    pub cells_walked: u64,
+    pub row_lookups: u64,
+    pub unit_builds: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+}
+
+/// Read the current cumulative transcript-measurement work counters.
+pub fn transcript_measure_stats() -> TranscriptMeasureStats {
+    TranscriptMeasureStats {
+        renders: TRANSCRIPT_RENDERS.with(Cell::get),
+        scratch_rows: TRANSCRIPT_SCRATCH_ROWS.with(Cell::get),
+        cells_walked: TRANSCRIPT_CELLS_WALKED.with(Cell::get),
+        row_lookups: TRANSCRIPT_ROW_LOOKUPS.with(Cell::get),
+        unit_builds: TRANSCRIPT_UNIT_BUILDS.with(Cell::get),
+        cache_hits: TRANSCRIPT_CACHE_HITS.with(Cell::get),
+        cache_misses: TRANSCRIPT_CACHE_MISSES.with(Cell::get),
+    }
+}
+
+/// Zero every transcript-measurement work counter (on the CALLING thread —
+/// see the thread-local rationale above `TRANSCRIPT_RENDERS`) — tests call
+/// this before the window they want to measure so earlier setup work
+/// doesn't pollute the assertion.
+pub fn reset_transcript_measure_stats() {
+    TRANSCRIPT_RENDERS.with(|c| c.set(0));
+    TRANSCRIPT_SCRATCH_ROWS.with(|c| c.set(0));
+    TRANSCRIPT_CELLS_WALKED.with(|c| c.set(0));
+    TRANSCRIPT_ROW_LOOKUPS.with(|c| c.set(0));
+    TRANSCRIPT_UNIT_BUILDS.with(|c| c.set(0));
+    TRANSCRIPT_CACHE_HITS.with(|c| c.set(0));
+    TRANSCRIPT_CACHE_MISSES.with(|c| c.set(0));
+}
+
+/// The single product of one linear measurement pass — rows, per-unit
+/// offsets and content height all come from here; nothing else in this
+/// file computes any of the three independently (Phase 36.6.4 Plan 10,
+/// G-08 closure — collapses Plan 07's two sentinel renders into one).
+#[derive(Debug, Clone)]
+pub struct TranscriptMeasurement {
+    pub width: usize,
+    pub units: Vec<TranscriptUnit>,
+    pub rows: Vec<String>,
+    pub offsets: Vec<(usize, usize)>,
+}
+
+impl TranscriptMeasurement {
+    /// Content height in rows — the sole source `transcript_total_line_count`
+    /// (and through it `transcript_max_scroll`) reads.
+    pub fn height(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Rebuild the `Paragraph` text from `units` — the render path's text
+    /// source, so the drawn content and the measured content can never be
+    /// two different derivations.
+    pub fn text(&self) -> Text<'static> {
+        Text::from(self.units.iter().map(|unit| unit.line.clone()).collect::<Vec<_>>())
+    }
+}
+
+/// The memo's key (Phase 36.6.4 Plan 10, Task 2, G-08 closure). A hit
+/// requires ALL FOUR fields to agree — `fingerprint` alone (a 64-bit hash)
+/// is deliberately not trusted on its own; `unit_count`/`total_display_width`
+/// are cheap independent corroborators a collision would also have to
+/// match. `fingerprint` is computed FROM the same
+/// `transcript_render_units()` enumeration the render walks (see
+/// `transcript_content_fingerprint`), so there is no hand-maintained dirty
+/// flag, frame counter or revision field anywhere for this key to forget to
+/// update.
+#[derive(Debug, Clone, PartialEq)]
+struct MeasureKey {
+    fingerprint: u64,
+    unit_count: usize,
+    total_display_width: usize,
+    width: usize,
+}
+
+/// Sum of every unit's own rendered display width — one of `MeasureKey`'s
+/// four corroborating fields. Computed directly over `TranscriptUnit::line`
+/// (not the sentinel-interleaved text `measure_transcript_uncached` builds),
+/// so this never triggers a render of its own.
+fn transcript_units_total_display_width(units: &[TranscriptUnit]) -> usize {
+    units
+        .iter()
+        .map(|unit| {
+            unit.line
+                .spans
+                .iter()
+                .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                .sum::<usize>()
+        })
+        .sum()
+}
+
+/// The memo key's content fingerprint (Phase 36.6.4 Plan 10, Task 2, G-08
+/// closure) — hashes, in order: the unit count, then per unit its `group`
+/// discriminant, its `history_anchor` (Phase 36.6.4 Plan 12, G-09 closure),
+/// every span's `content` bytes, the `plain` field, and whether `action` is
+/// present. Computed FROM `transcript_render_units()`'s own output, so
+/// appending a sixth content group to that enumeration changes this
+/// fingerprint by construction — there is nothing else to remember to
+/// update. Hashing `history_anchor` means an enumeration that differs ONLY
+/// in unit order (same groups, same content, different anchors) produces a
+/// different fingerprint, so a reorder can never be served stale cached
+/// geometry.
+fn transcript_content_fingerprint(units: &[TranscriptUnit]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    units.len().hash(&mut hasher);
+    for unit in units {
+        unit.group.hash(&mut hasher);
+        unit.history_anchor.hash(&mut hasher);
+        for span in &unit.line.spans {
+            span.content.as_bytes().hash(&mut hasher);
+        }
+        unit.plain.hash(&mut hasher);
+        unit.action.is_some().hash(&mut hasher);
+    }
+    hasher.finish()
+}
 
 impl App {
     /// Construct App from dependency bundle. Loads REPL history from disk;
@@ -516,8 +852,10 @@ impl App {
         Self {
             history,
             textarea,
-            transcript_scroll: 0,
+            scroll_view_state: std::sync::Mutex::new(ScrollViewState::new()),
             auto_follow: true,
+            selection: None,
+            selection_mode: selection::SelectionMode::Idle,
             pending_rx: None,
             pending_tx: None,
             assistant_buffer: None,
@@ -592,8 +930,22 @@ impl App {
             last_submitted_text: String::new(),
             // Phase 46.7 Plan 07: no chips/hit-test entries at session start.
             sent_attachment_chips: Vec::new(),
+            // Phase 36.6.4 Plan 05: no image chips at session start; the
+            // Picker was built once in the startup window (deps.picker) —
+            // never lazily here.
+            image_chips: Vec::new(),
+            picker: deps.picker,
+            image_decode: Arc::new(std::sync::Mutex::new(None)),
             chip_hit_test: std::sync::Mutex::new(Vec::new()),
+            transcript_area: std::sync::Mutex::new(Rect::default()),
+            // Phase 36.6.4 Plan 10 Task 2: no measurement cached at session
+            // start — the first `transcript_measurement` call is always a
+            // cache miss.
+            transcript_measure_cache: std::sync::Mutex::new(None),
+            last_press: None,
+            copy_confirmation: None,
             opener: Box::new(|url: &str| open::that(url)),
+            clipboard_yank: Box::new(selection::yank),
             // Phase 36.3.12 Plan 10 (WR-01): forward the process-lifetime store from deps.
             approvals_store: deps.approvals_store,
             // Phase 36.6.2 Plan 01: no overlay active at session start.
@@ -631,26 +983,60 @@ impl App {
             help_scroll: 0,
             // Phase 41.1 Plan 02: no hidden synthetic skill triggers at start.
             skill_run_hidden_indices: std::collections::HashSet::new(),
+            // Phase 36.6.4 Plan 03: no `!` shell runs at session start.
+            shell_runs: Vec::new(),
+            shell_history_hidden_indices: std::collections::HashSet::new(),
         }
     }
 
-    // ── Scroll helpers (verbatim from tmon) ───────────────────────────────────
+    // ── Scroll helpers ─────────────────────────────────────────────────────────
+
+    /// Read the current vertical scroll offset. Thin accessor over
+    /// `scroll_view_state` — the SOLE offset authority (Phase 36.6.4 Plan 01,
+    /// D-02). `&self` (not `&mut self`) so render-path callers (`ui.rs`,
+    /// `scroll_indicator`) can call it through `&App`.
+    pub fn transcript_scroll(&self) -> u16 {
+        self.scroll_view_state
+            .lock()
+            .map(|guard| guard.offset().y)
+            .unwrap_or(0)
+    }
+
+    /// Set the vertical scroll offset directly. Used by the thin wrappers
+    /// below and by tests that previously poked the old `transcript_scroll`
+    /// field directly.
+    fn set_transcript_scroll(&mut self, y: u16) {
+        // `&mut self` gives direct access via `get_mut()` — no lock needed
+        // when we already hold the unique borrow; `get_mut()` still returns
+        // a `LockResult` (poison tracking survives `&mut` access), so
+        // recover via `into_inner()` on the (practically unreachable, this
+        // is a single-threaded UI struct) poisoned case.
+        let state = self
+            .scroll_view_state
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut offset = state.offset();
+        offset.y = y;
+        state.set_offset(offset);
+    }
 
     /// Disable auto-follow and scroll up by `lines` rows.
     pub fn scroll_up(&mut self, lines: u16) {
         self.auto_follow = false;
-        self.transcript_scroll = self.transcript_scroll.saturating_sub(lines);
+        let new_y = self.transcript_scroll().saturating_sub(lines);
+        self.set_transcript_scroll(new_y);
     }
 
     /// Scroll down by `lines` rows (auto-follow re-enables via `reconcile_scroll`).
     pub fn scroll_down(&mut self, lines: u16) {
-        self.transcript_scroll = self.transcript_scroll.saturating_add(lines);
+        let new_y = self.transcript_scroll().saturating_add(lines);
+        self.set_transcript_scroll(new_y);
     }
 
     /// Jump to the top of the transcript.
     pub fn scroll_to_top(&mut self) {
         self.auto_follow = false;
-        self.transcript_scroll = 0;
+        self.set_transcript_scroll(0);
     }
 
     /// Re-engage auto-follow so the viewport snaps to the newest line on
@@ -659,43 +1045,71 @@ impl App {
     /// Used by `apply_slash_outcome` so System-role messages produced by
     /// slash commands (notably `/skills reload` and SKILL-13 fallback) are
     /// visible on the same render tick. Mirrors the agent-turn reference
-    /// behavior in `submit()` (sets `auto_follow = true`); also resets
-    /// `transcript_scroll` to 0 for symmetry with `scroll_to_top`.
-    /// `reconcile_scroll` (called next render from `ui.rs`) will clamp
-    /// `transcript_scroll` to `max` because `auto_follow == true`.
+    /// behavior in `submit()` (sets `auto_follow = true`); also resets the
+    /// scroll offset to 0 for symmetry with `scroll_to_top`.
+    /// `reconcile_scroll` (called next render from `ui.rs`) will clamp the
+    /// offset to `max` because `auto_follow == true`.
     pub fn scroll_to_bottom(&mut self) {
         self.auto_follow = true;
-        self.transcript_scroll = 0;
+        self.set_transcript_scroll(0);
     }
 
     /// Human-readable scroll indicator for the border title.
     pub fn scroll_indicator(&self, area: Rect) -> String {
         let max = self.transcript_max_scroll(area);
+        self.scroll_indicator_body(max)
+    }
+
+    /// Sibling of `scroll_indicator` that takes the frame's ALREADY-COMPUTED
+    /// transcript height (Phase 36.6.4 Plan 10, G-08 closure) instead of
+    /// deriving `transcript_max_scroll` itself — so the border title never
+    /// triggers its own transcript measurement when the caller
+    /// (`ui.rs::render_transcript`) already has one for this frame.
+    pub fn scroll_indicator_for_height(&self, area: Rect, height: usize) -> String {
+        let max = self.transcript_max_scroll_from_height(area, height);
+        self.scroll_indicator_body(max)
+    }
+
+    /// Shared indicator-text body for `scroll_indicator`/
+    /// `scroll_indicator_for_height` — both compute `max` differently but
+    /// render the exact same three-way indicator from it.
+    fn scroll_indicator_body(&self, max: u16) -> String {
+        let current = self.transcript_scroll();
         if self.auto_follow {
             "live".to_string()
         } else if self.pending_rx.is_some() || self.assistant_buffer.is_some() {
             // D-11: paused indicator — derived from existing state (Option B per RESEARCH §Pattern 5).
             // n = unseen scroll units below current viewport. Resets on resize because max changes
             // with area height, which is acceptable per Claude's discretion.
-            let n = max.saturating_sub(self.transcript_scroll);
+            let n = max.saturating_sub(current);
             format!("paused ({n} new lines below)")
         } else {
-            format!("scroll {}/{}", self.transcript_scroll, max)
+            format!("scroll {}/{}", current, max)
         }
     }
 
-    /// Clamp `transcript_scroll` to `max`; re-enable auto-follow if at bottom.
+    /// Clamp the scroll offset to `max`; re-enable auto-follow if at bottom.
+    ///
+    /// Phase 36.6.4 Plan 01/02 (Pitfall 2): this is the SAME clamp discipline
+    /// as before the scrollview migration, just re-pointed at
+    /// `scroll_view_state` — a terminal resize that shrinks `max` below the
+    /// current offset snaps back to the new bottom rather than stranding the
+    /// view past it.
     pub fn reconcile_scroll(&mut self, area: Rect) {
         let max = self.transcript_max_scroll(area);
+        let current = self.transcript_scroll();
         if self.auto_follow {
-            self.transcript_scroll = max;
-        } else if self.transcript_scroll >= max {
-            self.transcript_scroll = max;
+            self.set_transcript_scroll(max);
+        } else if current >= max {
+            self.set_transcript_scroll(max);
             self.auto_follow = true;
         }
     }
 
-    /// Maximum scroll offset for the given viewport.
+    /// Maximum scroll offset for the given viewport. Keeps its pre-Plan-10
+    /// signature — `reconcile_scroll` (event_loop.rs) and the tests below
+    /// call this directly, and it is still the single source of truth for a
+    /// standalone `area`.
     pub fn transcript_max_scroll(&self, area: Rect) -> u16 {
         // Pass the inner width (excluding the 1-char border on each side) so that
         // transcript_line_count wraps at the same column ratatui's Paragraph does.
@@ -706,9 +1120,29 @@ impl App {
         // attachment/artifact chips are appended — otherwise auto-follow
         // would clamp short of the chip rows and they'd be unreachable.
         let inner_width = inner_transcript_width(area);
-        let total = self.transcript_total_line_count(inner_width) as u32;
+        let height = self.transcript_measurement(inner_width).height();
+        self.transcript_max_scroll_from_height(area, height)
+    }
+
+    /// Sibling of `transcript_max_scroll` that takes an ALREADY-MEASURED
+    /// height (Phase 36.6.4 Plan 10, G-08 closure) instead of deriving one —
+    /// used by `scroll_indicator_for_height` so the border title shares the
+    /// frame's one measurement instead of triggering its own.
+    pub(crate) fn transcript_max_scroll_from_height(&self, area: Rect, height: usize) -> u16 {
+        let total = height as u32;
         let visible = area.height.saturating_sub(2) as u32;
         total.saturating_sub(visible).min(u16::MAX as u32) as u16
+    }
+
+    /// Shared predicate for whether history row `idx` is hidden from the
+    /// normal per-message transcript loop (Phase 36.6.4 Plan 07, G-01
+    /// closure). `transcript_text` and `transcript_line_count` both call
+    /// this SAME function so the rendered rows and the counted rows can
+    /// never diverge — a hidden shell-run copy (D-11) or a bare skill
+    /// trigger (D-01/D-02 of 41.1 Plan 02) contributes zero rows to either.
+    fn history_row_is_hidden(&self, idx: usize) -> bool {
+        self.skill_run_hidden_indices.contains(&idx)
+            || self.shell_history_hidden_indices.contains(&idx)
     }
 
     /// Total wrapped-line count across all history entries + streaming buffer.
@@ -724,9 +1158,17 @@ impl App {
     /// `ceil((prefix_len + body_chars) / width)` — not `ceil(body / (width -
     /// prefix))`. The two formulas diverge at certain line lengths. See D-06/D-07
     /// in `.planning/phases/21.8.3-tui-streaming-scroll-fix-and-scrollbar/`.
+    ///
+    /// Phase 36.6.4 Plan 07 (G-01): skips both `skill_run_hidden_indices` and
+    /// `shell_history_hidden_indices` via `history_row_is_hidden` — the SAME
+    /// predicate `transcript_text` applies — so a hidden history row never
+    /// contributes a row here while also never rendering there.
     pub fn transcript_line_count(&self, width: usize) -> usize {
         let mut total = 0usize;
-        for msg in &self.history {
+        for (idx, msg) in self.history.iter().enumerate() {
+            if self.history_row_is_hidden(idx) {
+                continue;
+            }
             let (role_label, color) = role_style(msg);
             // Mirror transcript_text() (line 785) — skip messages whose role_style returns None.
             // No role currently returns None post-22.4-17; this is a structural guard for future
@@ -765,32 +1207,27 @@ impl App {
         total
     }
 
-    /// Total wrapped-row count of the FULL rendered transcript, including the
-    /// Phase 46.7 Plan 07 chip rows (`sent_attachment_chips` then
-    /// `captured_artifacts`, in that fixed order) appended after
-    /// `transcript_line_count`'s base total. `ui.rs::render_transcript`'s
-    /// scrollbar and `transcript_max_scroll` use this — not
-    /// `transcript_line_count` directly — so chip rows are always reachable
-    /// by scrolling and the auto-follow bottom lands past them.
+    /// Total wrapped-row count of the FULL rendered transcript.
+    ///
+    /// Phase 36.6.4 Plan 07 (G-01/G-02/G-06 closure): this is now a MEASURED
+    /// height, not a hand-maintained sum over `sent_attachment_chips` /
+    /// `captured_artifacts` / `image_chips` / `shell_runs`. It defers
+    /// entirely to `transcript_rendered_plain_rows`, which renders
+    /// `transcript_render_text()` — the SOLE content authority — once, into
+    /// a scratch buffer, and reports the row a trailing sentinel line lands
+    /// on. No group list is maintained here; a group appended to
+    /// `transcript_render_text` is counted automatically, by construction,
+    /// without a matching edit in this function.
     ///
     /// `width` MUST be the same inner render width callers pass to
     /// `transcript_line_count`/`rebuild_chip_hit_test` (memory
     /// `feedback_scroll_width_inner`) or the count drifts from what's drawn.
+    ///
+    /// Phase 36.6.4 Plan 10 (G-08 closure): reads `.height()` directly off
+    /// `transcript_measurement` rather than cloning `rows` just to take its
+    /// length.
     pub fn transcript_total_line_count(&self, width: usize) -> usize {
-        let mut total = self.transcript_line_count(width);
-        for chip in &self.sent_attachment_chips {
-            total =
-                total.saturating_add(word_wrapped_line_count(&attachment_chip_plain(chip), width));
-        }
-        if let Ok(artifacts) = self.captured_artifacts.lock() {
-            for artifact in artifacts.iter() {
-                total = total.saturating_add(word_wrapped_line_count(
-                    &artifact_chip_plain(artifact),
-                    width,
-                ));
-            }
-        }
-        total
+        self.transcript_measurement(width).height()
     }
 
     // ── Event routing ─────────────────────────────────────────────────────────
@@ -817,6 +1254,19 @@ impl App {
         use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
         if key.kind != KeyEventKind::Press {
             return; // T-22.4-05-01: discard release/repeat
+        }
+
+        // Esc while vim-style visual mode is active (Phase 36.6.4 Plan 02,
+        // D-05) — checked AHEAD of the overlay-close precedence chain below.
+        // Visual mode carries no `OverlayKind` (it has no modal chrome), but
+        // Esc must still mean "back out of the current modal thing first,"
+        // matching the overlay chain's own precedence discipline. Clears the
+        // selection and returns to `Idle` — no clipboard write (D-04's
+        // silent-cancel contract).
+        if key.code == KeyCode::Esc && self.selection_mode == selection::SelectionMode::Visual {
+            self.selection_mode = selection::SelectionMode::Idle;
+            self.selection = None;
+            return;
         }
 
         // Esc — overlay-close precedence (Phase 36.6.2 Plan 01 foundation),
@@ -893,6 +1343,18 @@ impl App {
                 Some(OverlayKind::ModelPicker { .. }) => {
                     self.model_picker_filter.clear();
                     self.model_picker_selected = 0;
+                    self.drain_approval_queue_after_close();
+                }
+                // Phase 36.6.4 Plan 05 (D-13): Esc closes with no side
+                // effect (mirrors Help/SkillsHub) — `.take()` already
+                // cleared `active_overlay` above. Clear the decode state
+                // too, so a future open of a (possibly different) image
+                // always re-decodes fresh rather than flashing the
+                // previous image's stale Ready/Failed state.
+                Some(OverlayKind::ImageViewer { .. }) => {
+                    if let Ok(mut guard) = self.image_decode.lock() {
+                        *guard = None;
+                    }
                     self.drain_approval_queue_after_close();
                 }
                 None => self.clear_textarea(),
@@ -1004,6 +1466,65 @@ impl App {
             return;
         }
 
+        // `v` — enter vim-style visual selection (Phase 36.6.4 Plan 02,
+        // D-05). Same guard shape as the `?` Help shortcut immediately
+        // above (textarea empty; overlays already returned above this
+        // point): with any content already typed, `v` falls through to the
+        // `_` arm below and types the literal character. Anchors both
+        // endpoints at the current viewport-derived content position (the
+        // top-left content cell of the visible transcript) so a
+        // keyboard-only selection always starts somewhere on screen.
+        if key.code == KeyCode::Char('v') && self.textarea.is_empty() {
+            let offset = self
+                .scroll_view_state
+                .lock()
+                .map(|guard| guard.offset())
+                .unwrap_or_else(|_| Position::new(0, 0));
+            let anchor = selection::ContentPos::new(offset.y as usize, offset.x as usize);
+            self.selection_mode = selection::SelectionMode::Visual;
+            self.selection = Some(Selection::new_at(anchor));
+            return;
+        }
+
+        // `h`/`j`/`k`/`l`/arrows extend the cursor, `y` yanks-and-exits —
+        // ONLY while visual mode is active (Phase 36.6.4 Plan 02, D-05).
+        // Intercepted here, ahead of the match block's unconditional
+        // Up/Down history-recall arms, so vim-style movement wins the
+        // instant `v` has anchored a selection; typing these letters
+        // outside visual mode is completely unaffected (they fall through
+        // to the `_` arm below like any other character).
+        if self.selection_mode == selection::SelectionMode::Visual {
+            use selection::MoveDir;
+            let dir = match key.code {
+                KeyCode::Char('h') | KeyCode::Left => Some(MoveDir::Left),
+                KeyCode::Char('j') | KeyCode::Down => Some(MoveDir::Down),
+                KeyCode::Char('k') | KeyCode::Up => Some(MoveDir::Up),
+                KeyCode::Char('l') | KeyCode::Right => Some(MoveDir::Right),
+                _ => None,
+            };
+            if let Some(dir) = dir {
+                let area = *self
+                    .transcript_area
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let width = inner_transcript_width(area);
+                let max_row = self.transcript_total_line_count(width).saturating_sub(1);
+                if let Some(sel) = self.selection.as_mut() {
+                    sel.cursor = selection::move_cursor(sel.cursor, dir, max_row);
+                }
+                return;
+            }
+            if key.code == KeyCode::Char('y') {
+                let area = *self
+                    .transcript_area
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                self.yank_selection(area);
+                self.selection_mode = selection::SelectionMode::Idle;
+                return;
+            }
+        }
+
         // Palette precedence entry (Phase 36.6.3 Plan 01, TUI-INPUT-01,
         // D-03/D-04). Only reachable when `palette_query` is `Some` (i.e. the
         // palette is currently showing, derived live from `self.textarea` —
@@ -1023,6 +1544,20 @@ impl App {
 
             // Ctrl+C — double-press state machine (D-10..D-14)
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => self.handle_ctrl_c_key(),
+
+            // Ctrl+Y — yank the current selection from EITHER mode (Phase
+            // 36.6.4 Plan 02, D-04). `Ctrl+C` is taken (Cancel/force-quit)
+            // and `Ctrl+Shift+C` is intercepted by most terminals before the
+            // app ever sees it — D-04 lands the yank binding on `Ctrl+Y`
+            // instead. `yank_selection` is the SAME no-op on an
+            // empty/absent selection as the mouse-drag-release path.
+            (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
+                let area = *self
+                    .transcript_area
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                self.yank_selection(area);
+            }
 
             // Shift/Alt+Enter — insert newline without submitting (D-08)
             (KeyCode::Enter, m)
@@ -1687,18 +2222,37 @@ impl App {
         }
     }
 
-    /// Mouse event handler — scrolls transcript when within `area` bounds.
+    /// Double/triple-click time budget (Phase 36.6.4 Plan 02, D-07). No
+    /// terminal reports the platform double-click setting to a TUI, so this
+    /// is a Claude's-discretion value per the plan's `planner_assumptions`
+    /// — named and documented rather than a bare magic number, so a wrong
+    /// magnitude is a one-line change. 500ms matches the common OS default
+    /// double-click interval.
+    const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(500);
+
+    /// Mouse event handler — scrolls transcript, opens chips, and drives
+    /// text selection when within `area` bounds.
     ///
     /// **Threat T-22.4-05-07 (Tampering):** bounds check prevents scroll events
     /// outside the transcript pane from affecting scroll state.
     ///
-    /// Phase 46.7 Plan 07 (D-17, hard scope fence): the ONLY addition beyond
-    /// the pre-existing Scroll arms is `Down(Left)`, which opens an artifact
-    /// URL when the click lands inside a chip's hit-test rect (built by
-    /// `rebuild_chip_hit_test` during the previous render pass) and is a
-    /// no-op otherwise. No other mouse behavior (hover/drag/selection/etc.)
-    /// is added — general TUI mouse interaction stays a deferred, separately
-    /// planned phase.
+    /// Phase 46.7 Plan 07 (D-17): `Down(Left)` opens an artifact URL when the
+    /// click lands inside a chip's hit-test rect (built by
+    /// `rebuild_chip_hit_test` during the previous render pass) — chip
+    /// hit-test keeps priority over starting a selection when the click
+    /// lands inside a chip rect.
+    ///
+    /// Phase 36.6.4 Plan 01 (D-04/D-07/D-08): `Down(Left)` ALSO seeds a new
+    /// selection anchor+cursor at the clicked content position (even when a
+    /// chip was hit — the chip click still opens the URL AND starts a
+    /// selection at that cell, matching ordinary terminal click-drag
+    /// semantics). `Drag(Left)` extends the cursor. `Up(Left)` auto-copies
+    /// the dragged range to the clipboard over OSC52 (D-04's X11
+    /// primary-selection model: extract, write, clear nothing — the
+    /// highlight persists until the next click). Mouse capture stays
+    /// enabled throughout (D-08) — this is the entire reason selection must
+    /// work as in-app rendering rather than relying on the terminal's own
+    /// native selection UI.
     pub fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent, area: Rect) {
         use crossterm::event::{MouseButton, MouseEventKind};
         let within = mouse.column >= area.x
@@ -1708,38 +2262,222 @@ impl App {
         if !within {
             return;
         }
+        let scroll_offset = self
+            .scroll_view_state
+            .lock()
+            .map(|guard| guard.offset())
+            .unwrap_or_else(|_| Position::new(0, 0));
         match mouse.kind {
             MouseEventKind::ScrollUp => self.scroll_up(3),
             MouseEventKind::ScrollDown => self.scroll_down(3),
+            // D-07/click-count granularity (Phase 36.6.4 Plan 02): the chip
+            // hit-test KEEPS PRIORITY — a press inside a chip rect opens the
+            // chip and anchors a fresh (empty, invisible) char-range
+            // selection exactly like Plan 01 did, never escalating
+            // granularity or participating in the double/triple-click
+            // count (that ordering already existed in this arm from Plan
+            // 01 and must not be inverted here).
             MouseEventKind::Down(MouseButton::Left) => {
                 let hit = self
                     .chip_hit_test
                     .lock()
                     .ok()
                     .and_then(|hits| chip_action_at(&hits, mouse.column, mouse.row));
-                if let Some(ChipAction::OpenArtifactUrl(url)) = hit
-                    && let Err(e) = (self.opener)(&url)
-                {
-                    tracing::warn!(
-                        error = %e, url = %url,
-                        "Phase 46.7 Plan 07: failed to open artifact URL in browser"
-                    );
+                let hit_present = hit.is_some();
+                match &hit {
+                    Some(ChipAction::OpenArtifactUrl(url)) => {
+                        if let Err(e) = (self.opener)(url) {
+                            tracing::warn!(
+                                error = %e, url = %url,
+                                "Phase 46.7 Plan 07: failed to open artifact URL in browser"
+                            );
+                        }
+                    }
+                    // Phase 36.6.4 Plan 05 (D-13): a click sets the active
+                    // overlay rather than calling the browser opener. Fresh
+                    // decode state per open (not just on Esc-close) — cleared
+                    // here so a stale Ready/Failed from a PREVIOUS image
+                    // never flashes before the new decode task finishes.
+                    Some(ChipAction::OpenImage { label, source }) => {
+                        self.active_overlay = Some(OverlayKind::ImageViewer {
+                            label: label.clone(),
+                            source: source.clone(),
+                        });
+                        if let Ok(mut guard) = self.image_decode.lock() {
+                            *guard = None;
+                        }
+                    }
+                    None => {}
                 }
+                let pos = selection::content_pos_at(area, scroll_offset, mouse.column, mouse.row);
+                if hit_present {
+                    self.selection = Some(Selection::new_at(pos));
+                    self.last_press = None;
+                } else {
+                    let now = Instant::now();
+                    let (granularity, count) =
+                        selection::classify_click(self.last_press, pos, now, Self::DOUBLE_CLICK_WINDOW);
+                    self.last_press = Some((pos, now, count));
+                    self.selection = Some(self.resolve_click_selection(pos, granularity, area));
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(sel) = self.selection.as_mut() {
+                    sel.cursor =
+                        selection::content_pos_at(area, scroll_offset, mouse.column, mouse.row);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.yank_selection(area);
             }
             _ => {}
         }
     }
 
+    /// Resolve a fresh `Down(Left)` press into a `Selection` for the given
+    /// click `granularity` (Phase 36.6.4 Plan 02, D-07). `Char` reproduces
+    /// Plan 01's original zero-length anchor (a `Drag` extends it). `Word`/
+    /// `Line` re-render the CURRENT transcript at the press's `area` width
+    /// (the SAME `transcript_rendered_plain_rows` extraction `yank_
+    /// selection` itself uses, so the selected range can never drift from
+    /// what's actually drawn) and resolve boundaries via the pure
+    /// `selection::word_range_at`/`line_range_at` helpers — both produce an
+    /// ordinary same-row `Selection` that renders and yanks exactly like a
+    /// drag-selected range (UI-SPEC §2: no distinct visual treatment for
+    /// click-vs-drag origin).
+    fn resolve_click_selection(
+        &self,
+        pos: selection::ContentPos,
+        granularity: selection::ClickGranularity,
+        area: Rect,
+    ) -> Selection {
+        let (start_col, end_col) = match granularity {
+            selection::ClickGranularity::Char => return Selection::new_at(pos),
+            selection::ClickGranularity::Word | selection::ClickGranularity::Line => {
+                let width = inner_transcript_width(area);
+                let rows = self.transcript_rendered_plain_rows(width);
+                let row_text = rows.get(pos.row).cloned().unwrap_or_default();
+                match granularity {
+                    selection::ClickGranularity::Word => selection::word_range_at(&row_text, pos.col),
+                    selection::ClickGranularity::Line => selection::line_range_at(&row_text),
+                    selection::ClickGranularity::Char => unreachable!("handled above"),
+                }
+            }
+        };
+        Selection {
+            anchor: selection::ContentPos::new(pos.row, start_col),
+            cursor: selection::ContentPos::new(pos.row, end_col),
+        }
+    }
+
     /// BLOCKER-NEW-03 router: slash input → `dispatch_slash` (never `app.history`).
-    /// Non-slash input → `submit()` (LLM turn).
+    /// `!` input → `dispatch_bang_blocking` (Phase 36.6.4 Plan 03, D-09..D-11;
+    /// never `app.history` either — TUI-HIST-01/D-16). Non-slash/non-`!`
+    /// input → `submit()` (LLM turn).
     fn dispatch_or_submit(&mut self) {
         let text = self.textarea.lines().join("\n");
         if text.starts_with('/') {
+            // Phase 36.6.4 Plan 03 (D-16, TUI-HIST-01): push the raw slash
+            // line into the LOCAL recall buffer — mirrors submit()'s
+            // history_store.push+reset_cursor pair (see `submit()` below).
+            // This is the ONLY new machinery D-16 needs for slash recall;
+            // `ReplHistory::push` already dedupes consecutive entries and
+            // enforces its own cap. MUST NOT touch `self.history` (the LLM
+            // conversation) — that stays exactly as `dispatch_slash_blocking`
+            // already routes it (BLOCKER-NEW-03, invariants_22_4.rs,
+            // unchanged by this plan).
+            self.history_store.push(text.clone());
+            self.history_store.reset_cursor();
             self.dispatch_slash_blocking(&text);
             self.clear_textarea();
             return;
         }
+        if text.starts_with('!') {
+            // Phase 36.6.4 Plan 03 (D-09..D-11/D-16, TUI-BANG-01/TUI-HIST-01):
+            // route to the shell module. Same history_store push as the
+            // slash arm above — Up-arrow recall works for `!` commands too.
+            // The raw `!{command}` line itself NEVER enters `self.history`;
+            // only the shell run's OUTPUT does (D-11), via
+            // `apply_shell_outcome` below.
+            self.history_store.push(text.clone());
+            self.history_store.reset_cursor();
+            self.dispatch_bang_blocking(&text);
+            self.clear_textarea();
+            return;
+        }
         self.submit();
+    }
+
+    /// Route a `!`-prefixed line to `shell_bang` (Phase 36.6.4 Plan 03,
+    /// D-09..D-11). Mirrors `dispatch_slash_blocking`'s tokio-runtime
+    /// detection: inside a runtime, blocks on `shell_bang::run` via
+    /// `block_in_place` (same synchronous shape the slash path already
+    /// uses); outside a runtime (unit tests with no `#[tokio::test]`),
+    /// records intent in the status hint without panicking.
+    ///
+    /// D-10 refusal is checked HERE, before any spawn attempt, so a refused
+    /// command never reaches `shell_bang::run` at all — it renders a single
+    /// `Role::System` line (UI-SPEC §3 REFUSED state) and returns. This is
+    /// NOT the raw `!{command}` line entering `app.history` — the
+    /// prohibition (TUI-HIST-01) is about the raw command text becoming a
+    /// User-role echo, which never happens on either path.
+    fn dispatch_bang_blocking(&mut self, input: &str) {
+        let command = input.strip_prefix('!').unwrap_or(input).trim().to_string();
+        let first_token = command.split_whitespace().next().unwrap_or("");
+        if shell_bang::classify_interactive(first_token) {
+            let mut sys = ChatMessage::user(shell_bang::refusal_message(&command));
+            sys.role = Role::System;
+            self.history.push(sys);
+            self.scroll_to_bottom();
+            return;
+        }
+
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let cmd = command.clone();
+                let outcome = tokio::task::block_in_place(|| {
+                    handle.block_on(async { shell_bang::run(&cmd).await })
+                });
+                self.apply_shell_outcome(outcome);
+            }
+            Err(_) => {
+                // Outside tokio runtime — test path. Record intent in hint.
+                self.status.hint = format!("shell (test): {command}");
+            }
+        }
+    }
+
+    /// Apply a completed `ShellOutcome` (Phase 36.6.4 Plan 03, D-11):
+    /// records a `ShellRun` for the custom-styled transcript render
+    /// (`shell_runs`, consumed by `transcript_render_text` via
+    /// `shell_bang::shell_block_lines`), and pushes the SAME plain text
+    /// (`shell_bang::shell_block_plain`, byte-identical — not re-derived)
+    /// into `app.history` as a `Role::System` message so a follow-up
+    /// question sees exactly what the operator saw. That message's index is
+    /// recorded in `shell_history_hidden_indices` so `transcript_text`'s
+    /// normal per-message loop does not ALSO render it (double-render guard).
+    ///
+    /// Phase 36.6.4 Plan 12 (G-09 closure): the hidden copy is pushed FIRST
+    /// so its index is known, then the `ShellRun` is stamped with
+    /// `history_anchor: self.history.len()` (the post-push length) — the
+    /// styled block renders at the SAME point in time as its own hidden
+    /// copy, closing the defect where a `!` block was structurally
+    /// incapable of rendering above any later history row.
+    fn apply_shell_outcome(&mut self, outcome: shell_bang::ShellOutcome) {
+        let mut run = shell_bang::ShellRun {
+            command: outcome.command.clone(),
+            state: shell_bang::ShellRunState::Done(outcome),
+            history_anchor: 0,
+        };
+        let plain = shell_bang::shell_block_plain(&run).join("\n");
+        let mut sys = ChatMessage::user(&plain);
+        sys.role = Role::System;
+        self.history.push(sys);
+        self.shell_history_hidden_indices
+            .insert(self.history.len() - 1);
+        run.history_anchor = self.history.len();
+        self.shell_runs.push(run);
+        self.scroll_to_bottom();
     }
 
     /// Invoke `dispatch_slash` on the tokio runtime.
@@ -1842,6 +2580,9 @@ impl App {
                 // now-cleared history — drop them so they can't mis-hide a
                 // future message that later occupies the same index.
                 self.skill_run_hidden_indices.clear();
+                // Phase 36.6.4 Plan 03: same reasoning for shell-run hidden
+                // indices.
+                self.shell_history_hidden_indices.clear();
                 self.active_personality_overlay = None;
                 self.assistant_buffer = None;
                 let mut system = ChatMessage::user(&text);
@@ -2004,11 +2745,46 @@ impl App {
     }
 
     /// Flush `assistant_buffer` into `history` as an assistant message.
+    ///
+    /// Phase 36.6.4 Plan 05 (D-12, TUI-IMG-01): the first D-12 trigger —
+    /// runs the gateway's own `MediaTagExtractor` over the completed turn
+    /// BEFORE it's pushed into history, so `<MEDIA:>` tags never reach the
+    /// transcript as raw text (this codebase would otherwise be the only
+    /// surface still doing that; web/Telegram/cron already strip them via
+    /// the same extractor). Fed as one whole-buffer `feed()` call — the
+    /// extractor's byte-walk algorithm is correct whether it arrives as one
+    /// shot or many streamed deltas, and by the time a turn commits here the
+    /// buffer IS already fully assembled. Only `MediaKind::Photo` refs
+    /// become image chips (this phase's scope); other kinds still have
+    /// their tag stripped from the visible text but produce no chip — audio/
+    /// video/document rendering is out of scope for `OverlayKind::ImageViewer`.
     fn commit_assistant_buffer(&mut self) {
         if let Some(buf) = self.assistant_buffer.take()
             && !buf.is_empty()
         {
-            self.history.push(assistant_message(buf));
+            let mut extractor = MediaTagExtractor::new();
+            let mut visible = extractor.feed(&buf);
+            visible.push_str(&extractor.flush_tail());
+            // Phase 36.6.4 Plan 12 (G-09 closure): collect the photo refs
+            // FIRST, push the assistant message the chips belong to, THEN
+            // push the chips with `history_anchor: self.history.len()` (the
+            // post-push length) — so a chip's anchor names the point in
+            // time AFTER the turn that produced it, not before.
+            let photo_refs: Vec<_> = extractor
+                .take_attachments()
+                .into_iter()
+                .filter(|media_ref| media_ref.kind == MediaKind::Photo)
+                .collect();
+            self.history.push(assistant_message(visible));
+            let anchor = self.history.len();
+            for media_ref in photo_refs {
+                let label = image_chip_label_for_source(&media_ref.source);
+                self.image_chips.push(ImageChip {
+                    label,
+                    source: media_ref,
+                    history_anchor: anchor,
+                });
+            }
         }
     }
 
@@ -2052,6 +2828,15 @@ impl App {
     /// Tick callback — advance knight-rider animation counter.
     pub fn on_tick(&mut self) {
         self.knight_rider_tick = self.knight_rider_tick.wrapping_add(1);
+        // Phase 36.6.4 Plan 02 (D-04): one-shot copy-confirmation window —
+        // reverts the status-line hint slot to normal once its tick budget
+        // elapses. Reuses the EXISTING 100ms tick (Motion Contract: no new
+        // animated primitive).
+        if let Some((_, expires_at)) = self.copy_confirmation
+            && self.knight_rider_tick >= expires_at
+        {
+            self.copy_confirmation = None;
+        }
     }
 
     // ── Submit ────────────────────────────────────────────────────────────────
@@ -2093,8 +2878,18 @@ impl App {
         self.history_store.push(submit_text.clone());
         self.history_store.reset_cursor();
         if attachments_queued {
+            // Phase 36.6.4 Plan 12 (G-09 closure): record where THIS turn's
+            // attachment chips start (existing chips from earlier turns are
+            // untouched) BEFORE building the message — the builder can only
+            // stamp a placeholder anchor since it doesn't yet know where the
+            // owning user message will land.
+            let chips_from = self.sent_attachment_chips.len();
             let msg = self.build_user_message_with_attachments(&submit_text);
             self.history.push(msg);
+            let anchor = self.history.len();
+            for chip in &mut self.sent_attachment_chips[chips_from..] {
+                chip.history_anchor = anchor;
+            }
         } else {
             self.history.push(user_message(submit_text.clone()));
         }
@@ -2400,9 +3195,17 @@ impl App {
                     // the `[📎 ...]` transcript chip BEFORE `pending`/`queued`
                     // (and its `PendingAttachment` filename) drop out of scope —
                     // this is the only surviving record once the turn is sent.
+                    //
+                    // Phase 36.6.4 Plan 12 (G-09 closure): `history_anchor`
+                    // is a PLACEHOLDER here — the owning user message isn't
+                    // pushed into `history` until the caller (`submit()`)
+                    // does it one line later, so this function cannot
+                    // compute the real anchor. `submit()` overwrites it
+                    // immediately after that push.
                     self.sent_attachment_chips.push(SentAttachmentChip {
                         filename: pending.filename.clone(),
                         size_bytes: bytes.len() as u64,
+                        history_anchor: 0,
                     });
                     locals.push(local);
                 }
@@ -2503,43 +3306,65 @@ impl App {
 
     // ── Transcript rendering ──────────────────────────────────────────────────
 
-    /// Build a `Text<'static>` for the transcript paragraph widget.
-    ///
-    /// System messages are suppressed (role_style returns `None` for System).
-    /// Streaming buffer is appended in green at the end.
-    pub fn transcript_text(&self) -> Text<'static> {
+    /// Render `App.history[idx]`'s lines exactly as `transcript_text`'s old
+    /// per-message loop body did, or an empty `Vec` when the row is hidden
+    /// or has no visible role style (Phase 36.6.4 Plan 12, G-09 closure —
+    /// extracted from `transcript_text` so `transcript_render_units` can
+    /// interleave history rows with anchored units one row at a time
+    /// instead of appending a flat pre-built block).
+    fn history_lines_for(&self, idx: usize) -> Vec<Line<'static>> {
         let mut lines: Vec<Line<'static>> = Vec::new();
-        for (idx, msg) in self.history.iter().enumerate() {
-            // Phase 41.1 Plan 02 (key_link / UI-SPEC §C): a bare-invoke synthetic
-            // skill trigger is model-facing turn content only — never a user
-            // bubble. Its DIM meta chip (a separate Role::System line) is the
-            // sole user-visible artifact, so skip rendering the trigger itself.
-            if self.skill_run_hidden_indices.contains(&idx) {
-                continue;
-            }
-            let (role_label, color) = role_style(msg);
-            let Some(color) = color else { continue };
-            // UAT Round 2 Gap 4 (Phase 22.4 Plan 22.4-17): System rows render in
-            // dim DarkGray so slash-command confirmations (/help, /clear, /new,
-            // /mouse on|off, typo-suggester output) are observable yet visually
-            // demoted from real conversation rows. See role_style() above.
-            let style = if matches!(msg.role, Role::System) {
-                Style::default().fg(color).add_modifier(Modifier::DIM)
+        let Some(msg) = self.history.get(idx) else {
+            return lines;
+        };
+        // Phase 41.1 Plan 02 (key_link / UI-SPEC §C): a bare-invoke synthetic
+        // skill trigger is model-facing turn content only — never a user
+        // bubble. Its DIM meta chip (a separate Role::System line) is the
+        // sole user-visible artifact, so skip rendering the trigger itself.
+        //
+        // Phase 36.6.4 Plan 03 (D-11/D-16): a shell-run's captured-output
+        // message is rendered EXCLUSIVELY via `shell_runs`/
+        // `shell_block_lines`'s custom styling — skip it here or it would
+        // double-render.
+        //
+        // Phase 36.6.4 Plan 07 (G-01): both checks route through the SAME
+        // `history_row_is_hidden` predicate `transcript_line_count` uses,
+        // so the rendered rows and the counted rows can never diverge.
+        if self.history_row_is_hidden(idx) {
+            return lines;
+        }
+        let (role_label, color) = role_style(msg);
+        let Some(color) = color else { return lines };
+        // UAT Round 2 Gap 4 (Phase 22.4 Plan 22.4-17): System rows render in
+        // dim DarkGray so slash-command confirmations (/help, /clear, /new,
+        // /mouse on|off, typo-suggester output) are observable yet visually
+        // demoted from real conversation rows. See role_style() above.
+        let style = if matches!(msg.role, Role::System) {
+            Style::default().fg(color).add_modifier(Modifier::DIM)
+        } else {
+            Style::default().fg(color)
+        };
+        let body = render_message_body(msg);
+        for (i, line_text) in body.lines().enumerate() {
+            if i == 0 {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{role_label}: "), style),
+                    Span::raw(line_text.to_string()),
+                ]));
             } else {
-                Style::default().fg(color)
-            };
-            let body = render_message_body(msg);
-            for (i, line_text) in body.lines().enumerate() {
-                if i == 0 {
-                    lines.push(Line::from(vec![
-                        Span::styled(format!("{role_label}: "), style),
-                        Span::raw(line_text.to_string()),
-                    ]));
-                } else {
-                    lines.push(Line::from(Span::raw(line_text.to_string())));
-                }
+                lines.push(Line::from(Span::raw(line_text.to_string())));
             }
         }
+        lines
+    }
+
+    /// Render the in-flight `assistant_buffer` block exactly as
+    /// `transcript_text`'s old trailing block did (Phase 36.6.4 Plan 12,
+    /// G-09 closure — extracted so `transcript_render_units` can emit it
+    /// LAST among conversation content, after every anchored unit, so the
+    /// reply currently arriving is always bottom-most, D-02).
+    fn streaming_lines(&self) -> Vec<Line<'static>> {
+        let mut lines: Vec<Line<'static>> = Vec::new();
         if let Some(buf) = &self.assistant_buffer {
             let green = Style::default().fg(Color::Green);
             for (i, line_text) in buf.lines().enumerate() {
@@ -2553,26 +3378,419 @@ impl App {
                 }
             }
         }
+        lines
+    }
+
+    /// Build a `Text<'static>` for the transcript paragraph widget.
+    ///
+    /// System messages are suppressed (role_style returns `None` for System).
+    /// Streaming buffer is appended in green at the end.
+    ///
+    /// Phase 36.6.4 Plan 12 (G-09 closure): thin wrapper over
+    /// `history_lines_for` (one call per history row) + `streaming_lines`
+    /// — preserves this function's exact prior output byte-for-byte; the
+    /// per-row extraction lets `transcript_render_units` interleave the
+    /// same two building blocks with anchored units instead.
+    pub fn transcript_text(&self) -> Text<'static> {
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        for idx in 0..self.history.len() {
+            lines.extend(self.history_lines_for(idx));
+        }
+        lines.extend(self.streaming_lines());
         Text::from(lines)
     }
 
-    /// Build the transcript `Text` for the Paragraph widget: `transcript_text()`'s
-    /// base history/streaming-buffer lines, plus Phase 46.7 Plan 07's chip
-    /// rows appended in a fixed order — `sent_attachment_chips` (D-19
-    /// `[📎 ...]`, `Color::DarkGray`) then `captured_artifacts` (D-19
-    /// `[▤ ...]`, `Color::Cyan`) — that `rebuild_chip_hit_test` and
-    /// `transcript_total_line_count` both assume when computing row offsets.
-    pub fn transcript_render_text(&self) -> Text<'static> {
-        let mut lines: Vec<Line<'static>> = self.transcript_text().lines;
+    /// Build every transcript line in render order, tagged with its content
+    /// group, its `history_anchor` ordering key and (for a clickable chip)
+    /// the click action it carries.
+    ///
+    /// Phase 36.6.4 Plan 12 (G-09 closure): THE ONLY place emission order is
+    /// decided, rewritten from Plan 07's group-major concatenation to an
+    /// ORDER RULE over each unit's `history_anchor` (see `TranscriptGroup`'s
+    /// doc comment for why group-major order was the defect). Both
+    /// `transcript_render_text` and `rebuild_chip_hit_test` still derive
+    /// from this SAME enumeration, so a group appended here still appears
+    /// in the rendered text, the measured height and the chip hit-test
+    /// offsets all at once.
+    ///
+    /// **The rule.** Every anchored unit (attachment/artifact/image chips,
+    /// shell runs) is bucketed by `history_anchor.min(history.len())` — the
+    /// clamp handles a stale anchor surviving `/clear`, which empties
+    /// `history` but leaves the three chip/run collections populated.
+    /// Within one bucket, units keep STABLE creation order, and the
+    /// non-shell groups keep their pre-Plan-12 relative sequence
+    /// (attachment, then artifact, then image) — shell runs are bucketed
+    /// last so two groups sharing an anchor still read attachment/
+    /// artifact/image/shell, matching the original group-major order when
+    /// nothing anchors ahead of the others. The walk then interleaves:
+    /// bucket `0` first, then for `i` in `0..history.len()`, history row
+    /// `i`'s lines (`history_lines_for`, `history_anchor: i`, skipped when
+    /// hidden) followed by bucket `i + 1`. `streaming_lines()` is always
+    /// emitted last, at `history_anchor: history.len()`, so the in-flight
+    /// reply is always bottom-most among conversation content (D-02).
+    ///
+    /// `captured_artifacts` (group `ArtifactChips`, D-G09-4) is the one
+    /// group with NO creation-time anchor available: it is an
+    /// `Arc<Mutex<Vec<CapturedArtifact>>>` cloned into the streaming task
+    /// (`event_loop.rs`) and pushed from a closure holding no `&App`, and
+    /// artifacts arrive before the assistant message they belong to
+    /// exists. It is given a RENDER-TIME anchor of `history.len()` instead
+    /// — after all settled history, before the streaming buffer — which is
+    /// a one-line reversal to a pinned trailing block if ever preferred.
+    pub fn transcript_render_units(&self) -> Vec<TranscriptUnit> {
+        TRANSCRIPT_UNIT_BUILDS.with(|c| bump(c, 1));
+        let history_len = self.history.len();
+        let mut buckets: Vec<Vec<TranscriptUnit>> = (0..=history_len).map(|_| Vec::new()).collect();
+
+        // Phase 36.6.4 Plan 12 Task 2: attachment chips carry a REAL
+        // creation-time anchor, stamped by `App::submit` right after the
+        // owning user message is pushed.
         for chip in &self.sent_attachment_chips {
-            lines.push(attachment_chip_line(chip));
+            let anchor = chip.history_anchor.min(history_len);
+            buckets[anchor].push(TranscriptUnit {
+                group: TranscriptGroup::AttachmentChips,
+                line: attachment_chip_line(chip),
+                plain: None,
+                action: None,
+                history_anchor: anchor,
+            });
         }
+        // D-G09-4: `captured_artifacts` is the ONE group with no obtainable
+        // creation-time anchor — it is an `Arc<Mutex<Vec<CapturedArtifact>>>`
+        // cloned into the streaming task (`event_loop.rs`, around the
+        // `captured_artifacts` clone + its later push from a closure that
+        // holds no `&App`), and artifacts arrive mid-turn, before the
+        // assistant message they belong to even exists. A RENDER-TIME
+        // anchor of `history_len` keeps them below all settled history and
+        // above the in-flight streaming reply; switching to a pinned
+        // trailing block instead is a one-line change if ever preferred.
         if let Ok(artifacts) = self.captured_artifacts.lock() {
             for artifact in artifacts.iter() {
-                lines.push(artifact_chip_line(artifact));
+                let anchor = history_len;
+                buckets[anchor].push(TranscriptUnit {
+                    group: TranscriptGroup::ArtifactChips,
+                    line: artifact_chip_line(artifact),
+                    plain: Some(artifact_chip_plain(artifact)),
+                    action: Some(ChipAction::OpenArtifactUrl(artifact_browser_url(
+                        &artifact.artifact_id,
+                    ))),
+                    history_anchor: anchor,
+                });
             }
         }
-        Text::from(lines)
+        // Phase 36.6.4 Plan 12 Task 2: image chips carry a REAL
+        // creation-time anchor, stamped by `commit_assistant_buffer` (after
+        // the assistant message that produced them) or `handle_image_slash`
+        // (`commands.rs`, at `/image <path>` success).
+        for chip in &self.image_chips {
+            let anchor = chip.history_anchor.min(history_len);
+            buckets[anchor].push(TranscriptUnit {
+                group: TranscriptGroup::ImageChips,
+                line: image_chip_line(chip),
+                plain: Some(image_chip_plain(chip)),
+                action: Some(ChipAction::OpenImage {
+                    label: chip.label.clone(),
+                    source: chip.source.clone(),
+                }),
+                history_anchor: anchor,
+            });
+        }
+        // Phase 36.6.4 Plan 03 (D-09..D-11, TUI-BANG-01): `!` shell blocks —
+        // directly-styled lines (NOT a new `Role`). Plan 12: the ONE group
+        // with a real anchor in this task — `run.history_anchor` was
+        // stamped by `apply_shell_outcome` at the same point in time as its
+        // hidden `Role::System` copy.
+        for run in &self.shell_runs {
+            let anchor = run.history_anchor.min(history_len);
+            for line in shell_bang::shell_block_lines(run) {
+                buckets[anchor].push(TranscriptUnit {
+                    group: TranscriptGroup::ShellRuns,
+                    line,
+                    plain: None,
+                    action: None,
+                    history_anchor: anchor,
+                });
+            }
+        }
+
+        let mut units: Vec<TranscriptUnit> = Vec::new();
+        units.append(&mut buckets[0]);
+        for i in 0..history_len {
+            for line in self.history_lines_for(i) {
+                units.push(TranscriptUnit {
+                    group: TranscriptGroup::History,
+                    line,
+                    plain: None,
+                    action: None,
+                    history_anchor: i,
+                });
+            }
+            units.append(&mut buckets[i + 1]);
+        }
+        for line in self.streaming_lines() {
+            units.push(TranscriptUnit {
+                group: TranscriptGroup::History,
+                line,
+                plain: None,
+                action: None,
+                history_anchor: history_len,
+            });
+        }
+        units
+    }
+
+    /// Build the transcript `Text` for the Paragraph widget — every
+    /// `transcript_render_units()` line, in order, with the group/action
+    /// tags dropped. No group list is maintained here; it is inherited
+    /// entirely from `transcript_render_units`.
+    pub fn transcript_render_text(&self) -> Text<'static> {
+        Text::from(
+            self.transcript_render_units()
+                .into_iter()
+                .map(|unit| unit.line)
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// The frame's single entry point for transcript geometry (Phase 36.6.4
+    /// Plan 10, G-08 closure). Builds the content enumeration and measures
+    /// it once; every consumer — the title indicator, the chip hit-test,
+    /// the ScrollView content size, the scrollbar and link extraction — all
+    /// read the SAME `TranscriptMeasurement` for a frame instead of each
+    /// re-deriving it.
+    ///
+    /// Task 2 (G-08 closure): a single-entry memo sits behind this exact
+    /// signature — no call site changes twice. The units are always built
+    /// first (the deliberate cost of an honest key: the fingerprint must be
+    /// computed FROM the same enumeration the render would walk), then a
+    /// `MeasureKey` is derived from them; a match against the cached key
+    /// returns the cached `Arc` without a render, a miss measures, caches
+    /// and returns the fresh one. The cache is single-entry — replaced, not
+    /// accumulated — so memory is bounded by one transcript-sized snapshot.
+    pub fn transcript_measurement(&self, width: usize) -> Arc<TranscriptMeasurement> {
+        let units = self.transcript_render_units();
+        let key = MeasureKey {
+            fingerprint: transcript_content_fingerprint(&units),
+            unit_count: units.len(),
+            total_display_width: transcript_units_total_display_width(&units),
+            width,
+        };
+
+        {
+            let guard = self
+                .transcript_measure_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some((cached_key, cached)) = guard.as_ref()
+                && *cached_key == key
+            {
+                TRANSCRIPT_CACHE_HITS.with(|c| bump(c, 1));
+                return Arc::clone(cached);
+            }
+        }
+
+        TRANSCRIPT_CACHE_MISSES.with(|c| bump(c, 1));
+        let measurement = Arc::new(self.measure_transcript_uncached(units, width));
+
+        let mut guard = self
+            .transcript_measure_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some((key, Arc::clone(&measurement)));
+        measurement
+    }
+
+    /// The single interleaved render pass (Phase 36.6.4 Plan 10, Task 1):
+    /// collapses Plan 07's two independent sentinel renders
+    /// (`transcript_rendered_plain_rows` + `transcript_unit_row_offsets`)
+    /// into ONE scratch `Paragraph` render that yields rows, per-unit
+    /// `(start_row, end_row)` offsets and content height together.
+    ///
+    /// Interleaves a `TRANSCRIPT_MEASURE_SENTINEL` `Line` before every
+    /// unit's own line, plus one trailing sentinel (N+1 sentinels for N
+    /// units) — identical construction to Plan 07's per-unit render.
+    /// Because `Paragraph` wraps each `Line` independently, a sentinel
+    /// `Line` never changes how any OTHER line wraps.
+    ///
+    /// Rows are classified with a single forward walk (never a backward
+    /// scan): a row begins a sentinel occurrence when it starts with the
+    /// sentinel's next expected prefix; the occurrence's remaining rows are
+    /// consumed by continuing to match the sentinel's remaining characters
+    /// against the following rows. This derives the sentinel's row span
+    /// from the render itself — it never calls `word_wrapped_line_count` to
+    /// predict it. A row that starts matching but never completes the
+    /// match (a false start — e.g. transcript content that happens to
+    /// begin with the sentinel's bytes, T-36.6.4-G08-06) is flushed back
+    /// into `rows` rather than lost, so a coincidental collision can only
+    /// ever cost a mis-classified row, never a dropped one.
+    ///
+    /// If fewer than N+1 sentinels are found, the scratch bound
+    /// under-provisioned for this content: double it and retry, at most
+    /// twice. If the last attempt still comes up short, every rendered row
+    /// is kept (a harmless blank tail) and `offsets` covers only the units
+    /// whose sentinels were actually located — the same safe failure
+    /// direction Plan 07 documented, never a clipped real row.
+    fn measure_transcript_uncached(&self, units: Vec<TranscriptUnit>, width: usize) -> TranscriptMeasurement {
+        if width == 0 || units.is_empty() {
+            return TranscriptMeasurement {
+                width,
+                units,
+                rows: Vec::new(),
+                offsets: Vec::new(),
+            };
+        }
+
+        let sentinel = TRANSCRIPT_MEASURE_SENTINEL;
+        let sentinel_len = sentinel.len(); // pure ASCII — byte len == char len
+
+        // The interleaved Text's shape is fixed across retries; only the
+        // scratch buffer's height changes.
+        let mut text = Text::default();
+        for unit in &units {
+            text.lines.push(Line::from(sentinel.to_string()));
+            text.lines.push(unit.line.clone());
+        }
+        text.lines.push(Line::from(sentinel.to_string()));
+
+        let interleaved_line_count = text.lines.len();
+        let total_display_width: usize = text
+            .lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                    .sum::<usize>()
+            })
+            .sum();
+
+        // TIGHT bound derived only from the content being rendered — no
+        // `HEADROOM_MULTIPLIER`/`HEADROOM_FIXED_ROWS` over-provision.
+        // Correctness no longer depends on the bound being generous because
+        // an under-provisioned render is detected (fewer than N+1
+        // sentinels found) and retried with a doubled bound below.
+        let base_cap = interleaved_line_count
+            .saturating_add(total_display_width.div_ceil(width))
+            .saturating_add(8)
+            .min(u16::MAX as usize) as u16;
+
+        let mut renders_local: u64 = 0;
+        let mut scratch_rows_local: u64 = 0;
+        let mut cells_walked_local: u64 = 0;
+        let mut row_lookups_local: u64 = 0;
+
+        let mut cap = base_cap;
+        let mut rows: Vec<String> = Vec::new();
+        let mut offsets: Vec<(usize, usize)> = Vec::new();
+
+        for attempt in 0..3u8 {
+            let scratch_area = Rect::new(0, 0, width as u16, cap);
+            let mut buf = ratatui::buffer::Buffer::empty(scratch_area);
+            let paragraph = ratatui::widgets::Paragraph::new(text.clone())
+                .wrap(ratatui::widgets::Wrap { trim: false });
+            ratatui::widgets::Widget::render(paragraph, scratch_area, &mut buf);
+            renders_local += 1;
+            scratch_rows_local += scratch_area.height as u64;
+            cells_walked_local += scratch_area.height as u64 * scratch_area.width as u64;
+
+            rows = Vec::with_capacity(scratch_area.height as usize);
+            offsets = Vec::with_capacity(units.len());
+            let mut starts: Vec<usize> = Vec::with_capacity(units.len());
+            let mut matched_chars: usize = 0;
+            let mut pending_sentinel_rows: Vec<String> = Vec::new();
+            let mut sentinel_index: usize = 0;
+
+            for row in 0..scratch_area.height {
+                row_lookups_local += 1;
+                // Walk by CONSUMED WIDTH (not cell index) — a wide glyph's
+                // continuation cell is skipped, matching every other
+                // transcript-row extraction in this file.
+                let mut line = String::new();
+                let mut col: u16 = 0;
+                while col < scratch_area.width {
+                    let symbol = buf
+                        .cell((col, row))
+                        .map(|c| c.symbol().to_string())
+                        .unwrap_or_default();
+                    let w = (UnicodeWidthStr::width(symbol.as_str()) as u16).max(1);
+                    line.push_str(&symbol);
+                    col = col.saturating_add(w);
+                }
+
+                let remaining = &sentinel[matched_chars..];
+                let prefix_len = remaining.len().min(width);
+                let expected_prefix = &remaining[..prefix_len];
+                if !expected_prefix.is_empty() && line.starts_with(expected_prefix) {
+                    pending_sentinel_rows.push(line);
+                    matched_chars += prefix_len;
+                    if matched_chars >= sentinel_len {
+                        // Sentinel occurrence #sentinel_index fully matched
+                        // — these rows genuinely were the sentinel, not
+                        // transcript content, so they are discarded (never
+                        // pushed to `rows`).
+                        pending_sentinel_rows.clear();
+                        matched_chars = 0;
+                        if sentinel_index > 0 {
+                            let start = starts[sentinel_index - 1];
+                            offsets.push((start, rows.len()));
+                        }
+                        if sentinel_index < units.len() {
+                            starts.push(rows.len());
+                        }
+                        sentinel_index += 1;
+                        if sentinel_index > units.len() {
+                            // The trailing (N+1-th) sentinel just completed —
+                            // every unit is measured. Stop walking rows: the
+                            // scratch buffer's tight-but-not-exact bound
+                            // (base_cap) leaves some blank rows past this
+                            // point, and without this break they would be
+                            // misread as extra content rows, inflating
+                            // `rows.len()` past the true height (mirrors the
+                            // old `rows.truncate(sentinel_row)` behavior).
+                            break;
+                        }
+                    }
+                } else {
+                    // Not a sentinel continuation — flush any in-progress
+                    // false-start rows back into `rows` (they were real
+                    // content, not a completed sentinel occurrence) before
+                    // pushing this row too.
+                    if !pending_sentinel_rows.is_empty() {
+                        rows.append(&mut pending_sentinel_rows);
+                        matched_chars = 0;
+                    }
+                    rows.push(line);
+                }
+            }
+            // A match still in progress when the buffer ran out is a false
+            // start (or an under-provisioned buffer) — flush it back into
+            // `rows` rather than losing it.
+            if !pending_sentinel_rows.is_empty() {
+                rows.append(&mut pending_sentinel_rows);
+            }
+
+            if sentinel_index > units.len() {
+                break; // success — every sentinel located
+            }
+            if attempt < 2 {
+                cap = cap.saturating_mul(2);
+            }
+        }
+
+        TRANSCRIPT_RENDERS.with(|c| bump(c, renders_local));
+        TRANSCRIPT_SCRATCH_ROWS.with(|c| bump(c, scratch_rows_local));
+        TRANSCRIPT_CELLS_WALKED.with(|c| bump(c, cells_walked_local));
+        TRANSCRIPT_ROW_LOOKUPS.with(|c| bump(c, row_lookups_local));
+
+        TranscriptMeasurement { width, units, rows, offsets }
+    }
+
+    /// Half-open `(start_row, end_row)` for each `transcript_render_units()`
+    /// entry, at wrap `width` — thin wrapper over `transcript_measurement`
+    /// (Phase 36.6.4 Plan 10). Kept for callers/tests that only need the
+    /// offsets, not the full measurement.
+    pub fn transcript_unit_row_offsets(&self, width: usize) -> Vec<(usize, usize)> {
+        self.transcript_measurement(width).offsets.clone()
     }
 
     /// Build the per-render chip hit-test map for `area` and store it into
@@ -2581,68 +3799,81 @@ impl App {
     /// stored map on `Down(Left)`. Only artifact-link chips get an entry —
     /// plain attachment chips are display-only per the UI-SPEC.
     ///
-    /// Rects reuse the SAME inner-width (`area.width - 2`) word-wrap math as
-    /// `transcript_line_count`/`transcript_total_line_count`/the scrollbar
-    /// (memory `feedback_scroll_width_inner`) — computed via a running
-    /// wrapped-row cursor over: the base transcript, then every
-    /// `sent_attachment_chips` row (display-only, still consumes row space),
-    /// then each `captured_artifacts` row in order — so a click never drifts
-    /// from what's actually drawn by `transcript_render_text`.
+    /// Phase 36.6.4 Plan 07 Task 2: walks `transcript_render_units()` zipped
+    /// with `transcript_unit_row_offsets()` — the SAME enumeration
+    /// `transcript_render_text` renders from — instead of maintaining its
+    /// own running row cursor over a hand-duplicated group order. A rect's
+    /// geometry (tight single-row width via `UnicodeWidthStr`, full-width
+    /// fallback for a wrapped multi-row chip, `area.x + 1` / `area.y + 1`
+    /// border offsets, visible-window clamp against `transcript_scroll()`)
+    /// is unchanged from before this rewrite.
     ///
     /// A chip fully scrolled outside the visible viewport gets no entry — the
     /// map is bounded to what's on screen this frame (T-46.7-22 accepted
     /// disposition) and is fully rebuilt every call (no cross-frame
     /// accumulation).
-    pub fn rebuild_chip_hit_test(&self, area: Rect) {
-        let inner_width = inner_transcript_width(area);
+    ///
+    /// Phase 36.6.4 Plan 10 Task 1 (G-08 closure): takes the frame's
+    /// already-computed `&TranscriptMeasurement` as a second parameter
+    /// instead of re-deriving `transcript_render_units`/
+    /// `transcript_unit_row_offsets` itself — `ui.rs::render_transcript`
+    /// obtains the measurement once and shares it with this call, so a
+    /// frame's hit-test build never costs a second scratch render.
+    /// `measurement.width` is used in place of a freshly-derived
+    /// `inner_transcript_width(area)` — the two must always agree, since
+    /// the caller built the measurement from this same `area`.
+    pub fn rebuild_chip_hit_test(&self, area: Rect, measurement: &TranscriptMeasurement) {
+        // Phase 36.6.4 Plan 02: cache the render-time area for `handle_key`'s
+        // keyboard-only yank/visual-mode paths — see `transcript_area`'s doc
+        // comment for why this lives here rather than threading a `Rect`
+        // through `handle_key`.
+        if let Ok(mut guard) = self.transcript_area.lock() {
+            *guard = area;
+        }
+        let inner_width = measurement.width;
         let visible_rows = area.height.saturating_sub(2) as usize;
-        let scroll = self.transcript_scroll as usize;
+        // Phase 36.6.4 Plan 01/02 (Pitfall 2): reads `scroll_view_state` —
+        // the SOLE offset authority — never a second cached field, so a
+        // chip's hit-test rect can never silently drift from where it's
+        // actually drawn after a scroll.
+        let scroll = self.transcript_scroll() as usize;
+
+        let units = &measurement.units;
+        let offsets = &measurement.offsets;
 
         let mut hits: Vec<(Rect, ChipAction)> = Vec::new();
-        let mut row_cursor = self.transcript_line_count(inner_width);
-        for chip in &self.sent_attachment_chips {
-            row_cursor = row_cursor.saturating_add(word_wrapped_line_count(
-                &attachment_chip_plain(chip),
-                inner_width,
-            ));
-        }
-        if let Ok(artifacts) = self.captured_artifacts.lock() {
-            for artifact in artifacts.iter() {
-                let plain = artifact_chip_plain(artifact);
-                let row_count = word_wrapped_line_count(&plain, inner_width);
-                let start = row_cursor;
-                let end = start.saturating_add(row_count); // exclusive
-                let vis_start = start.max(scroll);
-                let vis_end = end.min(scroll.saturating_add(visible_rows));
-                if vis_start < vis_end {
-                    let y = area
-                        .y
-                        .saturating_add(1)
-                        .saturating_add((vis_start - scroll) as u16);
-                    let height = (vis_end - vis_start) as u16;
-                    // Single-row chips get a tight rect (the chip's own
-                    // display width, clamped to the pane); a wrapped
-                    // multi-row chip falls back to the full inner width for
-                    // its spanned rows — the "cell range" it actually
-                    // occupies either way.
-                    let width = if row_count <= 1 {
-                        (UnicodeWidthStr::width(plain.as_str()) as u16).min(inner_width as u16)
-                    } else {
-                        inner_width as u16
-                    };
-                    let rect = Rect {
-                        x: area.x.saturating_add(1),
-                        y,
-                        width,
-                        height,
-                    };
-                    hits.push((
-                        rect,
-                        ChipAction::OpenArtifactUrl(artifact_browser_url(&artifact.artifact_id)),
-                    ));
-                }
-                row_cursor = end;
+        for (unit, (start, end)) in units.iter().zip(offsets.iter()) {
+            let Some(action) = &unit.action else {
+                continue;
+            };
+            let (start, end) = (*start, *end);
+            let vis_start = start.max(scroll);
+            let vis_end = end.min(scroll.saturating_add(visible_rows));
+            if vis_start >= vis_end {
+                continue;
             }
+            let y = area.y.saturating_add(1).saturating_add((vis_start - scroll) as u16);
+            let height = (vis_end - vis_start) as u16;
+            let row_count = end - start;
+            // Single-row chips get a tight rect (the chip's own display
+            // width, clamped to the pane); a wrapped multi-row chip falls
+            // back to the full inner width for its spanned rows — the "cell
+            // range" it actually occupies either way.
+            let width = if row_count <= 1 {
+                unit.plain
+                    .as_deref()
+                    .map(|plain| (UnicodeWidthStr::width(plain) as u16).min(inner_width as u16))
+                    .unwrap_or(inner_width as u16)
+            } else {
+                inner_width as u16
+            };
+            let rect = Rect {
+                x: area.x.saturating_add(1),
+                y,
+                width,
+                height,
+            };
+            hits.push((rect, action.clone()));
         }
 
         if let Ok(mut guard) = self.chip_hit_test.lock() {
@@ -2650,7 +3881,145 @@ impl App {
         }
     }
 
+    /// Build the plain-text (unstyled, ANSI-free) wrapped rows of the
+    /// CURRENT transcript render, in the exact same order/wrap boundaries
+    /// the live `ScrollView` render uses (Phase 36.6.4 Plan 01, D-04).
+    ///
+    /// Re-derives via a scratch render of the SAME `Paragraph` + wrap width
+    /// the live render uses, so text extraction can never drift from what
+    /// the operator visually selected. `width` MUST be
+    /// `inner_transcript_width(area)` (memory `feedback_scroll_width_inner`),
+    /// matching every other transcript-width consumer in this file.
+    ///
+    /// Phase 36.6.4 Plan 07 (G-01/G-02/G-06 closure): the PRIMARY height
+    /// derivation, not a selection-only helper — every other row-count
+    /// consumer (`transcript_total_line_count`, and through it
+    /// `transcript_max_scroll`, `ui.rs::render_transcript`'s ScrollView
+    /// content size and scrollbar) ultimately reads `.len()` of this Vec.
+    ///
+    /// Phase 36.6.4 Plan 10 (G-08 closure): thin wrapper over
+    /// `transcript_measurement` — the scratch render this used to perform
+    /// directly is now the ONE shared interleaved pass, memoized from Task
+    /// 2 onward. Kept for callers/tests that only need the rows, not the
+    /// full measurement (e.g. `yank_selection`, `resolve_click_selection`).
+    pub fn transcript_rendered_plain_rows(&self, width: usize) -> Vec<String> {
+        self.transcript_measurement(width).rows.clone()
+    }
+
+    /// One-shot window (in `knight_rider_tick` units, ~100ms each) the copy
+    /// confirmation toast stays in the status-line hint slot before
+    /// reverting to the normal hint (Phase 36.6.4 Plan 02, D-04, UI-SPEC §2:
+    /// "a fixed ~2s frame-tick window"). 20 ticks * 100ms ≈ 2s.
+    const COPY_CONFIRMATION_WINDOW_TICKS: u64 = 20;
+
+    /// Read the active copy-confirmation toast text, if its window hasn't
+    /// elapsed (Phase 36.6.4 Plan 02, D-04). `&self` accessor for the
+    /// render path (`ui.rs::render_status`), which only ever holds `&App`.
+    pub fn copy_confirmation_text(&self) -> Option<&str> {
+        self.copy_confirmation.as_ref().map(|(text, _)| text.as_str())
+    }
+
+    /// Yank the active selection (if any) to the system clipboard over
+    /// OSC52 (Phase 36.6.4 Plan 01, D-04/D-06). No-op on an empty or absent
+    /// selection (D-04). On a write failure, renders a single `Role::System`
+    /// / `Color::DarkGray` transcript line — never a status-line toast
+    /// (UI-SPEC §2) — reusing the existing System-role line convention.
+    ///
+    /// A successful or truncated write sets `copy_confirmation` (Phase
+    /// 36.6.4 Plan 02) rather than writing `status.hint` directly — the
+    /// confirmation is a TRANSIENT ~2s toast that `on_tick` reverts, not a
+    /// permanent hint replacement. The wording (Phase 36.6.4 Plan 08) is a
+    /// pure function of what the app actually OBSERVED — `copy_toast` — not
+    /// an unconditional receipt claim: OSC52 never acks, so absent a
+    /// `Confirmed` native write, the app can only honestly confirm it
+    /// ATTEMPTED the write, not that the clipboard actually received it.
+    pub fn yank_selection(&mut self, area: Rect) {
+        let Some(sel) = self.selection else {
+            return;
+        };
+        if sel.is_empty() {
+            return;
+        }
+        let width = inner_transcript_width(area);
+        let rows = self.transcript_rendered_plain_rows(width);
+        let text = selection::selected_text(&rows, &sel);
+        let outcome = (self.clipboard_yank)(&text);
+        self.apply_clipboard_outcome(outcome);
+    }
+
+    /// Apply the result of a yank attempt to app state — factored out of
+    /// `yank_selection` (Phase 36.6.4 Plan 02 Task 3; renamed and
+    /// re-typed in Plan 08) so the write-failure and wording branches are
+    /// unit-testable without forcing a REAL stdout write failure or a real
+    /// terminal-capability environment. `copy_toast` (Plan 08) owns the
+    /// wording decision; this fn only routes the resulting string (or the
+    /// write-failure line, or nothing) into app state.
+    fn apply_clipboard_outcome(&mut self, outcome: selection::ClipboardOutcome) {
+        match outcome {
+            selection::ClipboardOutcome::Written(report, caps) => {
+                let toast = selection::copy_toast(report, caps);
+                self.copy_confirmation = Some((
+                    toast,
+                    self.knight_rider_tick
+                        .saturating_add(Self::COPY_CONFIRMATION_WINDOW_TICKS),
+                ));
+            }
+            selection::ClipboardOutcome::Empty => {
+                // Empty selection — silent no-op (D-04): no write, no toast, no error.
+            }
+            selection::ClipboardOutcome::WriteFailed(e) => {
+                let mut system = ChatMessage::user(format!("Could not copy selection: {e}."));
+                system.role = Role::System;
+                self.history.push(system);
+            }
+        }
+    }
+
+    /// Trigger the ONE-TIME image decode for the currently open image
+    /// overlay (Phase 36.6.4 Plan 05, D-13, Task 2). `&self` — called from
+    /// `overlay::render_image_viewer`, which only ever holds `&App`.
+    /// `image_decode` is set to `Decoding` synchronously here so a second
+    /// call before the spawned task finishes is a no-op from the caller's
+    /// perspective (the caller only calls this when it observes `None`).
+    ///
+    /// Guarded against a missing Tokio runtime (`Handle::try_current`) so a
+    /// plain, non-async `#[test]` that renders overlay CHROME only (no
+    /// decode round-trip) never panics — it simply leaves the state at
+    /// `Decoding` forever, which is exactly the state that class of test
+    /// wants to observe. A real session always runs inside the Tokio
+    /// runtime the whole TUI is built on, so production behavior is
+    /// unaffected.
+    pub(crate) fn trigger_image_decode(&self, source: MediaRef, target: Rect) {
+        if let Ok(mut guard) = self.image_decode.lock() {
+            *guard = Some(ImageDecodeState::Decoding);
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let decode_state = Arc::clone(&self.image_decode);
+        let picker = self.picker.clone();
+        handle.spawn_blocking(move || {
+            let result = decode_image_protocol(&source, &picker, target);
+            if let Ok(mut guard) = decode_state.lock() {
+                *guard = Some(match result {
+                    Ok(protocol) => ImageDecodeState::Ready(Arc::new(protocol)),
+                    Err(reason) => ImageDecodeState::Failed(reason),
+                });
+            }
+        });
+    }
+
     // ── test-support constructors ─────────────────────────────────────────────
+
+    /// Snapshot of the current chip hit-test map, for cross-module test
+    /// assertions (Phase 36.6.4 Plan 02) — `ui.rs`'s test module renders
+    /// through the real `ui()` entry point and needs to inspect the
+    /// re-derived rects without reaching into the private `chip_hit_test`
+    /// field directly. Test-only surface, gated behind `test-support`.
+    #[cfg(feature = "test-support")]
+    pub fn chip_hit_test_snapshot(&self) -> Vec<(Rect, ChipAction)> {
+        self.chip_hit_test.lock().map(|g| g.clone()).unwrap_or_default()
+    }
 
     /// Construct a minimal empty App for snapshot/unit tests.
     /// Requires the `test-support` feature.
@@ -2989,6 +4358,57 @@ pub(crate) fn inner_transcript_width(area: Rect) -> usize {
 pub enum ChipAction {
     /// Open this artifact's viewer URL in the default browser.
     OpenArtifactUrl(String),
+    /// Open the image viewer overlay for this chip (Phase 36.6.4 Plan 05,
+    /// D-13). Carries the chip's label (used verbatim as the overlay's
+    /// left title) and the underlying `MediaRef` the decode step reads.
+    OpenImage { label: String, source: MediaRef },
+}
+
+/// Phase 36.6.4 Plan 12 (G-09 closure): the five content groups a
+/// transcript line can come from. `TranscriptGroup` is a PROVENANCE TAG
+/// only, consumed by tests and by `rebuild_chip_hit_test`'s click-action
+/// dispatch — it is NOT an ordering authority. Emission order is governed
+/// by `TranscriptUnit::history_anchor`: `App::transcript_render_units`
+/// walks `App.history` and interleaves every anchored unit at the point in
+/// time its anchor names (see that function's doc comment for the exact
+/// rule). Before Plan 12 this enum's declared order WAS the sole ordering
+/// authority — group-major concatenation made a `!` block structurally
+/// incapable of rendering above any later history row (the operator's
+/// Round 5 report). A sixth group can be added here without becoming a
+/// sixth line in a hardcoded list to remember to update; it just needs a
+/// `history_anchor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TranscriptGroup {
+    History,
+    AttachmentChips,
+    ArtifactChips,
+    ImageChips,
+    ShellRuns,
+}
+
+/// One rendered transcript line, tagged with the content group that
+/// produced it. `plain` carries the ANSI-free text a clickable chip's
+/// hit-test rect sizes itself from (`None` for groups that never need it —
+/// history/streaming rows and display-only attachment chips are never
+/// individually hit-tested). `action` is `Some` only for a clickable chip
+/// (artifact links, image chips); history/streaming/attachment/shell-block
+/// lines are always `None`.
+///
+/// `Debug, Clone` (Phase 36.6.4 Plan 10): `TranscriptMeasurement` holds a
+/// `Vec<TranscriptUnit>` and both derives on that struct require them.
+///
+/// `history_anchor` (Phase 36.6.4 Plan 12, G-09 closure): the ordering key
+/// `transcript_render_units` sorts units by — see `TranscriptGroup`'s doc
+/// comment. It is copied from the producing record's own
+/// `history_anchor` (or is the loop index / `history.len()` for
+/// history/streaming rows) and is never used to index into `history`.
+#[derive(Debug, Clone)]
+pub struct TranscriptUnit {
+    pub group: TranscriptGroup,
+    pub line: Line<'static>,
+    pub plain: Option<String>,
+    pub action: Option<ChipAction>,
+    pub history_anchor: usize,
 }
 
 /// A file actually sent with a submitted turn (D-19). Recorded by
@@ -3002,6 +4422,13 @@ pub enum ChipAction {
 pub struct SentAttachmentChip {
     pub filename: String,
     pub size_bytes: u64,
+    /// Phase 36.6.4 Plan 12 (G-09 closure): the chip's chronological
+    /// ordering key — an index into (never past) `App.history`. Pushed
+    /// inside `build_user_message_with_attachments` with a placeholder of
+    /// `0`; `App::submit` (the caller, which alone knows where the owning
+    /// user message lands) overwrites it immediately after pushing that
+    /// message.
+    pub history_anchor: usize,
 }
 
 /// Human-readable byte size for the `[📎 {filename} {size}]` chip (D-19),
@@ -3068,6 +4495,181 @@ fn artifact_chip_line(
         artifact_chip_plain(artifact),
         Style::default().fg(Color::Cyan),
     ))
+}
+
+// ── Phase 36.6.4 Plan 05: image chip + overlay (D-12/D-13, TUI-IMG-01) ──────
+
+/// One image chip's rendered identity — the FULL (untruncated) label plus
+/// the `MediaRef` needed to open the viewer overlay. Flat + append-only,
+/// mirroring `SentAttachmentChip`/`captured_artifacts`.
+#[derive(Debug, Clone)]
+pub struct ImageChip {
+    pub label: String,
+    pub source: MediaRef,
+    /// Phase 36.6.4 Plan 12 (G-09 closure): the chip's chronological
+    /// ordering key. Stamped at creation time — `App::commit_assistant_buffer`
+    /// stamps `history.len()` AFTER pushing the assistant message the chip
+    /// came from; `commands::handle_image_slash` stamps `app.history.len()`
+    /// at the moment `/image <path>` succeeds (that command pushes nothing
+    /// into `history` itself, so "now" is exactly "after everything said so
+    /// far").
+    pub history_anchor: usize,
+}
+
+/// Maximum bytes a referenced image file may be before ANY decode is
+/// attempted (T-36.6.4-IMG-01, this plan's `must_haves.prohibitions`
+/// entry). Checked at BOTH trigger points — `/image <path>`'s synchronous
+/// `check_image_path_bounded` (this file) — AND re-asserted at overlay
+/// open by `decode_image_protocol` (Task 2), since a `<MEDIA:>` path can
+/// grow between chip creation and the operator clicking it.
+pub(crate) const IMAGE_FILE_SIZE_CAP_BYTES: u64 = 25 * 1024 * 1024; // 25 MiB
+
+/// Bounded-read check for a LOCAL image path — the `/image <path>`
+/// trigger-time gate. Reads only filesystem METADATA, never file bytes.
+/// `Ok(())` when the path exists, is a regular file, and is under the cap;
+/// `Err(reason)` otherwise (never attempts to open/decode the file here —
+/// decode is Task 2's overlay-open concern).
+pub(crate) fn check_image_path_bounded(path: &std::path::Path) -> Result<(), String> {
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("not a regular file".to_string());
+    }
+    if meta.len() > IMAGE_FILE_SIZE_CAP_BYTES {
+        return Err(format!(
+            "file is {} bytes, exceeds the {IMAGE_FILE_SIZE_CAP_BYTES} byte limit",
+            meta.len()
+        ));
+    }
+    Ok(())
+}
+
+/// Label for `/image <path>` — the file's basename (UI-SPEC §5: "the label
+/// is the file basename for `/image <path>`"). Returns the FULL untruncated
+/// label; `image_chip_plain` truncates at render time.
+pub(crate) fn image_chip_label_for_path(path: &std::path::Path) -> String {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "image".to_string())
+}
+
+/// Label for a `<MEDIA:>`-extracted `MediaSource` — the file basename for a
+/// `Path` source; for a `Url` source (or a path with no filename component)
+/// a short, human-distinguishable "AI image {id}" fallback (UI-SPEC §5:
+/// "a short identifier fragment plus a generic prefix for a tag with no
+/// human-readable filename"). Returns the FULL untruncated label.
+fn image_chip_label_for_source(source: &MediaSource) -> String {
+    match source {
+        MediaSource::Path(path) => image_chip_label_for_path(path),
+        MediaSource::Url(url) => {
+            let tail = url
+                .rsplit('/')
+                .next()
+                .filter(|s| !s.is_empty() && s.contains('.'));
+            match tail {
+                Some(name) => name.to_string(),
+                None => {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    url.hash(&mut hasher);
+                    format!("AI image {:08x}", hasher.finish() as u32)
+                }
+            }
+        }
+    }
+}
+
+/// Truncate `s` at `max_cells` DISPLAY cells (`unicode-width`, not chars or
+/// bytes), appending a trailing `"…"` when truncated. Char-safe and
+/// wide-glyph-safe — mirrors `transcript_rendered_plain_rows`'s
+/// consumed-width walking discipline, applied to a single label string.
+fn truncate_display_cells(s: &str, max_cells: usize) -> String {
+    if UnicodeWidthStr::width(s) <= max_cells {
+        return s.to_string();
+    }
+    let budget = max_cells.saturating_sub(1); // reserve 1 cell for "…"
+    let mut out = String::new();
+    let mut width = 0usize;
+    for ch in s.chars() {
+        let w = ch.width().unwrap_or(0);
+        if width + w > budget {
+            break;
+        }
+        width += w;
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
+/// Plain (unstyled) text for a `[🖼 ...]` image chip — see
+/// `attachment_chip_plain`'s doc comment for why this is factored out.
+/// Label truncates at 40 DISPLAY CELLS with a trailing `"…"` (UI-SPEC §5).
+fn image_chip_plain(chip: &ImageChip) -> String {
+    format!("[🖼 {}]", truncate_display_cells(&chip.label, 40))
+}
+
+/// Styled transcript line for a `[🖼 ...]` image chip. `Color::Cyan` — the
+/// SAME "this opens something" hue the artifact chip already uses (images
+/// are artifact-like: click to open the viewer overlay).
+fn image_chip_line(chip: &ImageChip) -> Line<'static> {
+    Line::from(Span::styled(
+        image_chip_plain(chip),
+        Style::default().fg(Color::Cyan),
+    ))
+}
+
+/// Decode/protocol-build state for the open image overlay (Task 2).
+/// `Protocol` is wrapped in an `Arc` so cloning this enum out of the
+/// `Mutex` guard (required since the guard can't outlive the render call)
+/// is cheap regardless of the underlying protocol payload's own size (a
+/// Sixel/Kitty encoding can be large).
+#[derive(Clone)]
+pub enum ImageDecodeState {
+    Decoding,
+    Ready(Arc<ratatui_image::protocol::Protocol>),
+    Failed(String),
+}
+
+/// Decode + protocol-build for one image source (Task 2, D-13). Run
+/// entirely off the render thread inside a `spawn_blocking` closure
+/// (T-36.6.4-IMG-01: decode must never wedge the render loop). Re-asserts
+/// the bounded-read cap — Task 1's `check_image_path_bounded` only covers
+/// the synchronous `/image` trigger path, so a `<MEDIA:>` path that grew
+/// between chip creation and overlay open still fails cleanly here rather
+/// than reading an unbounded file. `MediaSource::Url` is not fetched by
+/// this build — returns an honest failure rather than a silent no-op or a
+/// live network read at click time (see SUMMARY for the scope note).
+pub(crate) fn decode_image_protocol(
+    source: &MediaRef,
+    picker: &ratatui_image::picker::Picker,
+    target: Rect,
+) -> Result<ratatui_image::protocol::Protocol, String> {
+    let path = match &source.source {
+        MediaSource::Path(p) => p,
+        MediaSource::Url(_) => {
+            return Err("remote image URLs are not supported by the TUI viewer yet".to_string());
+        }
+    };
+    let meta = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("not a regular file".to_string());
+    }
+    if meta.len() > IMAGE_FILE_SIZE_CAP_BYTES {
+        return Err(format!(
+            "file is {} bytes, exceeds the {IMAGE_FILE_SIZE_CAP_BYTES} byte limit",
+            meta.len()
+        ));
+    }
+    let dyn_img = image::ImageReader::open(path)
+        .map_err(|e| e.to_string())?
+        .decode()
+        .map_err(|e| e.to_string())?;
+    let size = ratatui::layout::Size::new(target.width.max(1), target.height.max(1));
+    picker
+        .clone()
+        .new_protocol(dyn_img, size, ratatui_image::Resize::Fit(None))
+        .map_err(|e| e.to_string())
 }
 
 /// Pure hit-test lookup: the `ChipAction` (if any) whose rect contains
@@ -3186,6 +4788,10 @@ fn test_deps() -> AppDeps {
                 std::process::id()
             )),
         )),
+        // Phase 36.6.4 Plan 05: deterministic halfblocks constructor — no
+        // stdio query performed (the crate's own documented headless-test
+        // pattern). Never `from_query_stdio()` in a test context.
+        picker: ratatui_image::picker::Picker::halfblocks(),
     }
 }
 
@@ -3468,6 +5074,31 @@ mod scroll_tests {
         assert!(s.contains("auto_tts: true"), "status after toggle: {s}");
     }
 
+    /// Test 4 (Phase 36.6.4 Plan 05 Task 1, D-12/D-13, TUI-IMG-01): a
+    /// nonexistent path produces one System-role transcript line and zero
+    /// chips.
+    #[tokio::test]
+    async fn image_slash_command_missing_path_renders_system_line_and_no_chip() {
+        use crate::tui_rata::commands::{SlashOutcome, dispatch_slash};
+
+        let mut app = App::new_test_empty();
+        let outcome =
+            dispatch_slash(&mut app, "/image /nonexistent/path/does-not-exist.png").await;
+        match outcome {
+            SlashOutcome::Handled(text) => {
+                assert!(
+                    text.starts_with("Could not load image:"),
+                    "expected the operator-facing load error copy, got: {text}"
+                );
+            }
+            other => panic!("expected SlashOutcome::Handled, got: {other:?}"),
+        }
+        assert!(
+            app.image_chips.is_empty(),
+            "a missing path must render NO chip"
+        );
+    }
+
     #[test]
     fn non_slash_submit_creates_pending_rx_and_pending_tx() {
         let mut app = App::new_test_empty();
@@ -3499,7 +5130,7 @@ mod scroll_tests {
     fn handle_mouse_outside_area_noop() {
         use crossterm::event::{MouseEvent, MouseEventKind};
         let mut app = App::new_test_empty();
-        let scroll_before = app.transcript_scroll;
+        let scroll_before = app.transcript_scroll();
         let auto_before = app.auto_follow;
         let outside = MouseEvent {
             kind: MouseEventKind::ScrollUp,
@@ -3508,7 +5139,7 @@ mod scroll_tests {
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
         app.handle_mouse(outside, area(80, 24));
-        assert_eq!(app.transcript_scroll, scroll_before);
+        assert_eq!(app.transcript_scroll(), scroll_before);
         assert_eq!(app.auto_follow, auto_before);
     }
 
@@ -3550,7 +5181,7 @@ mod scroll_tests {
             "SkillsReload arm of apply_slash_outcome must call scroll_to_bottom() to re-engage auto_follow",
         );
         assert_eq!(
-            app.transcript_scroll, 0,
+            app.transcript_scroll(), 0,
             "SkillsReload arm must call scroll_to_bottom() which zeros transcript_scroll (symmetric with scroll_to_top)",
         );
         // Sanity: the diff line was actually appended as a System message.
@@ -3590,7 +5221,7 @@ mod scroll_tests {
             "SkillActivated arm of apply_slash_outcome must call scroll_to_bottom() to re-engage auto_follow",
         );
         assert_eq!(
-            app.transcript_scroll, 0,
+            app.transcript_scroll(), 0,
             "SkillActivated arm must call scroll_to_bottom() which zeros transcript_scroll (symmetric with scroll_to_top)",
         );
         // The body was activated via the existing overlay path.
@@ -4149,14 +5780,14 @@ mod scroll_tests {
         //          transcript_scroll stays at whatever it was → test fails.
         let mut app = App::new_test_empty();
         app.auto_follow = false;
-        app.transcript_scroll = 5;
+        app.set_transcript_scroll(5);
         app.handle_stream_event(StreamEvent::Started);
         app.handle_stream_event(StreamEvent::Delta("some text".to_string()));
         // Simulate user re-engaging auto_follow before stream finishes
         app.auto_follow = true;
         app.handle_stream_event(StreamEvent::Finished { total_tokens: 0 });
         assert_eq!(
-            app.transcript_scroll, 0,
+            app.transcript_scroll(), 0,
             "Finished with auto_follow=true must call scroll_to_bottom() which zeros transcript_scroll"
         );
         assert!(
@@ -4171,12 +5802,12 @@ mod scroll_tests {
         // Pre-fix: submit() only sets auto_follow=true at line 742;
         //          transcript_scroll stays at 7 → test fails.
         let mut app = App::new_test_empty();
-        app.transcript_scroll = 7;
+        app.set_transcript_scroll(7);
         app.auto_follow = false;
         app.textarea.insert_str("hello world");
         app.submit();
         assert_eq!(
-            app.transcript_scroll, 0,
+            app.transcript_scroll(), 0,
             "submit() must call scroll_to_bottom() which zeros transcript_scroll"
         );
         assert!(
@@ -4191,7 +5822,7 @@ mod scroll_tests {
         // D-10: End key (plain) must call scroll_to_bottom().
         // Pre-fix: End falls through to textarea catch-all → transcript_scroll stays at 9.
         let mut app = App::new_test_empty();
-        app.transcript_scroll = 9;
+        app.set_transcript_scroll(9);
         app.auto_follow = false;
         let end_key = KeyEvent {
             code: KeyCode::End,
@@ -4201,7 +5832,7 @@ mod scroll_tests {
         };
         app.handle_key(end_key);
         assert_eq!(
-            app.transcript_scroll, 0,
+            app.transcript_scroll(), 0,
             "End key must call scroll_to_bottom() which zeros transcript_scroll"
         );
         assert!(
@@ -4210,7 +5841,7 @@ mod scroll_tests {
         );
 
         // Also verify Ctrl+End (same arm via wildcard modifiers)
-        app.transcript_scroll = 9;
+        app.set_transcript_scroll(9);
         app.auto_follow = false;
         let ctrl_end = KeyEvent {
             code: KeyCode::End,
@@ -4220,7 +5851,7 @@ mod scroll_tests {
         };
         app.handle_key(ctrl_end);
         assert_eq!(
-            app.transcript_scroll, 0,
+            app.transcript_scroll(), 0,
             "Ctrl+End must also call scroll_to_bottom()"
         );
         assert!(
@@ -4239,7 +5870,7 @@ mod scroll_tests {
         let a = area(80, 24);
         // Empty history: reconcile_scroll → transcript_scroll == 0
         app.reconcile_scroll(a);
-        assert_eq!(app.transcript_scroll, 0);
+        assert_eq!(app.transcript_scroll(), 0);
 
         // Push a large assistant_buffer (200 lines)
         app.assistant_buffer = Some("x\n".repeat(200));
@@ -4248,8 +5879,1358 @@ mod scroll_tests {
 
         let max = app.transcript_max_scroll(a);
         assert_eq!(
-            app.transcript_scroll, max,
+            app.transcript_scroll(), max,
             "reconcile_scroll with auto_follow=true must snap transcript_scroll to transcript_max_scroll (post-fix the max is correct)"
+        );
+    }
+
+    // ── Phase 36.6.4 Plan 07 (G-01/G-02/G-06 closure) — measured-height tests ──
+
+    #[test]
+    fn hidden_shell_messages_contribute_zero_rows_to_measured_height() {
+        let width = 80usize;
+
+        // Three shell outcomes applied the NORMAL way: each pushes a hidden
+        // `shell_history_hidden_indices` System copy into `history` (D-11)
+        // alongside the `shell_runs` entry the custom-styled renderer draws.
+        let mut with_hidden = App::new_test_empty();
+        for i in 0..3 {
+            with_hidden.apply_shell_outcome(shell_bang::ShellOutcome {
+                command: format!("echo {i}"),
+                stdout: format!("shell output line {i}"),
+                stderr: String::new(),
+                result: shell_bang::ShellResult::Exited(0),
+                truncation: None,
+            });
+        }
+        assert_eq!(
+            with_hidden.shell_history_hidden_indices.len(),
+            3,
+            "sanity: three shell outcomes must record three hidden indices"
+        );
+        let measured_with_hidden = with_hidden.transcript_total_line_count(width);
+
+        // Ground truth: the SAME three `shell_runs`, with no hidden `history`
+        // copy at all — if the hidden copy contributes any row, the two
+        // measured heights diverge by exactly that amount.
+        let mut without_hidden_history = App::new_test_empty();
+        for i in 0..3 {
+            let outcome = shell_bang::ShellOutcome {
+                command: format!("echo {i}"),
+                stdout: format!("shell output line {i}"),
+                stderr: String::new(),
+                result: shell_bang::ShellResult::Exited(0),
+                truncation: None,
+            };
+            without_hidden_history.shell_runs.push(shell_bang::ShellRun {
+                command: outcome.command.clone(),
+                state: shell_bang::ShellRunState::Done(outcome),
+                history_anchor: 0,
+            });
+        }
+        let measured_without_hidden_history =
+            without_hidden_history.transcript_total_line_count(width);
+
+        assert_eq!(
+            measured_with_hidden, measured_without_hidden_history,
+            "the hidden shell-run System copy in `history` (D-11) must contribute ZERO rows \
+             to the measured height — pre-fix this diverged by the hidden messages' own \
+             wrapped height (the operator's real session measured a divergence of 46 rows)"
+        );
+    }
+
+    #[test]
+    fn image_chips_are_counted_in_measured_height() {
+        let width = 80usize;
+        let mut app = App::new_test_empty();
+        let before = app.transcript_total_line_count(width);
+
+        for i in 0..3 {
+            let anchor = app.history.len();
+            app.image_chips.push(ImageChip {
+                label: format!("img{i}.png"),
+                source: MediaRef {
+                    source: MediaSource::Path(PathBuf::from(format!("/tmp/img{i}.png"))),
+                    kind: MediaKind::Photo,
+                    original_tag_text: format!("<MEDIA: /tmp/img{i}.png>"),
+                },
+                history_anchor: anchor,
+            });
+        }
+        let after = app.transcript_total_line_count(width);
+
+        assert_eq!(
+            after,
+            before + 3,
+            "three single-row image chips must grow the measured height by exactly three \
+             rows — pre-fix image chips grew the height by zero (G-02)"
+        );
+    }
+
+    #[test]
+    fn boundary_width_line_with_trailing_space_measures_one_row() {
+        let width = 20usize;
+        let mut app = App::new_test_empty();
+        // "You: " (5 display cells) + 14 'a's + a trailing space == 20 cells
+        // exactly — a line whose display width equals `width` and ends in
+        // trailing whitespace. This is the G-06 boundary shape: with the OLD
+        // hand-rolled `word_wrapped_line_count` estimate driving the height
+        // (rather than a real `Paragraph` render), a boundary-exact line with
+        // trailing whitespace is exactly the class of input the estimator was
+        // never cross-checked against ratatui for (the existing
+        // `word_wrap_tests` regression suite pins several other boundary
+        // shapes — see `word_wrapped_line_count_short_empty_exact` — but not
+        // this one). This test locks the row count to the REAL measured
+        // rendering going forward, so any future estimator reintroduced on
+        // this path is caught immediately.
+        app.history.push(user_message("aaaaaaaaaaaaaa ".to_string()));
+
+        assert_eq!(
+            app.transcript_total_line_count(width),
+            1,
+            "a line whose display width equals `width` and ends in trailing whitespace must \
+             measure exactly one row, not two"
+        );
+    }
+
+    // ── Phase 36.6.4 Plan 07 Task 2 (one content enumeration) tests ──────────
+
+    /// Populate `app` with a chosen subset of the five transcript groups.
+    /// Bit 0=History, 1=AttachmentChips, 2=ArtifactChips, 3=ImageChips,
+    /// 4=ShellRuns — used to walk all 32 subsets in
+    /// `unit_row_offsets_end_equals_measured_height_for_every_group`.
+    fn populate_groups(app: &mut App, mask: u8) {
+        if mask & 0b00001 != 0 {
+            app.history.push(user_message("hello there".to_string()));
+        }
+        if mask & 0b00010 != 0 {
+            app.sent_attachment_chips.push(SentAttachmentChip {
+                filename: "notes.txt".to_string(),
+                size_bytes: 1024,
+                history_anchor: app.history.len(),
+            });
+        }
+        if mask & 0b00100 != 0 {
+            app.captured_artifacts
+                .lock()
+                .unwrap()
+                .push(transcript_chip_tests_support::artifact_for("artifact-1", "Report"));
+        }
+        if mask & 0b01000 != 0 {
+            let anchor = app.history.len();
+            app.image_chips.push(ImageChip {
+                label: "pic.png".to_string(),
+                source: MediaRef {
+                    source: MediaSource::Path(PathBuf::from("/tmp/pic.png")),
+                    kind: MediaKind::Photo,
+                    original_tag_text: "<MEDIA: /tmp/pic.png>".to_string(),
+                },
+                history_anchor: anchor,
+            });
+        }
+        if mask & 0b10000 != 0 {
+            app.apply_shell_outcome(shell_bang::ShellOutcome {
+                command: "echo hi".to_string(),
+                stdout: "hi".to_string(),
+                stderr: String::new(),
+                result: shell_bang::ShellResult::Exited(0),
+                truncation: None,
+            });
+        }
+    }
+
+    /// The lockstep fence: for every one of the 32 subsets of the five
+    /// content groups, the last unit's `end_row` (from
+    /// `transcript_unit_row_offsets`, derived via a sentinel-interleaved
+    /// render) must equal `transcript_total_line_count` (derived via a
+    /// SEPARATE, flat sentinel render — Task 1's `transcript_rendered_
+    /// plain_rows`). This is NOT vacuous: the two values come from two
+    /// independent renders.
+    #[test]
+    fn unit_row_offsets_end_equals_measured_height_for_every_group() {
+        let width = 40usize;
+        for mask in 0u8..32 {
+            let mut app = App::new_test_empty();
+            populate_groups(&mut app, mask);
+
+            let offsets = app.transcript_unit_row_offsets(width);
+            let measured = app.transcript_total_line_count(width);
+
+            match offsets.last() {
+                Some(&(_, end)) => assert_eq!(
+                    end, measured,
+                    "mask={mask:#07b}: last unit's end_row must equal the measured height"
+                ),
+                None => assert_eq!(
+                    measured, 0,
+                    "mask={mask:#07b}: no units means the measured height must be 0 too"
+                ),
+            }
+        }
+    }
+
+    /// A group appended to `transcript_render_units` without a matching
+    /// update to `transcript_unit_row_offsets` (or vice versa) must fail
+    /// here: the number of distinct `TranscriptGroup` values present in the
+    /// units list must equal the number covered by the offsets Vec (which
+    /// is zipped 1:1 with the units).
+    #[test]
+    fn a_new_group_appears_in_both_render_text_and_hit_test_offsets() {
+        let width = 40usize;
+        let mut app = App::new_test_empty();
+        populate_groups(&mut app, 0b11111); // all five groups present
+
+        let units = app.transcript_render_units();
+        let offsets = app.transcript_unit_row_offsets(width);
+
+        let groups_in_units: std::collections::HashSet<TranscriptGroup> =
+            units.iter().map(|u| u.group).collect();
+        let groups_covered_by_offsets: std::collections::HashSet<TranscriptGroup> = units
+            .iter()
+            .zip(offsets.iter())
+            .map(|(u, _)| u.group)
+            .collect();
+
+        assert_eq!(
+            groups_in_units.len(),
+            groups_covered_by_offsets.len(),
+            "every group present in transcript_render_units() must also be covered by \
+             transcript_unit_row_offsets() — a group appended to one without the other \
+             must fail here"
+        );
+        assert_eq!(groups_in_units.len(), 5, "test setup: all five groups must be present");
+        assert_eq!(
+            offsets.len(),
+            units.len(),
+            "transcript_unit_row_offsets() must return one offset per unit"
+        );
+    }
+
+    /// With both an artifact chip and an image chip populated, plus enough
+    /// history to force a non-zero scroll offset, each visible chip's
+    /// hit-test rect `y` must equal the border offset plus the unit's
+    /// measured start row, minus the scroll offset — mirroring exactly what
+    /// `rebuild_chip_hit_test` computes internally.
+    #[test]
+    fn chip_hit_test_rects_match_measured_rows_for_image_and_artifact_chips() {
+        let mut app = App::new_test_empty();
+        for i in 0..30 {
+            app.history.push(user_message(format!("line {i}")));
+        }
+        app.captured_artifacts
+            .lock()
+            .unwrap()
+            .push(transcript_chip_tests_support::artifact_for("artifact-1", "Report"));
+        app.image_chips.push(ImageChip {
+            label: "pic.png".to_string(),
+            source: MediaRef {
+                source: MediaSource::Path(PathBuf::from("/tmp/pic.png")),
+                kind: MediaKind::Photo,
+                original_tag_text: "<MEDIA: /tmp/pic.png>".to_string(),
+            },
+            history_anchor: app.history.len(),
+        });
+
+        let a = area(40, 10); // small viewport forces a non-zero scroll offset
+        let inner_width = inner_transcript_width(a);
+        app.scroll_to_bottom();
+        app.reconcile_scroll(a);
+        let scroll = app.transcript_scroll() as usize;
+        assert!(scroll > 0, "test setup: expected a non-zero scroll offset");
+
+        let measurement = app.transcript_measurement(inner_width);
+        app.rebuild_chip_hit_test(a, &measurement);
+
+        let offsets = app.transcript_unit_row_offsets(inner_width);
+        let units = app.transcript_render_units();
+        let hits = app.chip_hit_test.lock().unwrap();
+        assert!(!hits.is_empty(), "test setup: expected at least one visible chip hit rect");
+
+        let mut checked = 0usize;
+        for (unit, (start, _end)) in units.iter().zip(offsets.iter()) {
+            let Some(action) = &unit.action else {
+                continue;
+            };
+            let Some((rect, _)) = hits.iter().find(|(_, hit_action)| hit_action == action) else {
+                continue; // scrolled out of the visible viewport this frame
+            };
+            let expected_y =
+                a.y.saturating_add(1).saturating_add((*start as u16).saturating_sub(scroll as u16));
+            assert_eq!(
+                rect.y, expected_y,
+                "hit rect's y must equal border offset + measured start row - scroll offset \
+                 for action {action:?}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "test setup: expected at least one chip to be checked");
+    }
+
+    // ── Phase 36.6.4 Plan 10 Task 1 (G-08 closure): one linear pass ──────────
+
+    /// For each of widths 10/20/40/78/195 and a corpus containing a
+    /// wide-glyph line, a line whose display width equals the wrap width and
+    /// ends in a space, an empty line, a multi-word paragraph and one
+    /// unbroken 120-character token, the measurement's `rows` must be
+    /// byte-identical to a PLAIN (non-interleaved) render of the same
+    /// content — built here in the test, never in `app.rs`, so no second
+    /// production derivation is introduced.
+    #[test]
+    fn interleaved_pass_rows_match_a_plain_render_of_the_same_content() {
+        for &width in &[10usize, 20, 40, 78, 195] {
+            let mut app = App::new_test_empty();
+            app.history.push(user_message("emoji line 🖼🖼🖼 with wide glyphs".to_string()));
+            let boundary_line = format!("{} ", "x".repeat(width.saturating_sub(1)));
+            app.history.push(user_message(boundary_line));
+            app.history.push(user_message(String::new()));
+            app.history.push(user_message(
+                "multi word paragraph with several separate tokens in it".to_string(),
+            ));
+            app.history.push(user_message("y".repeat(120)));
+
+            let measurement = app.transcript_measurement(width);
+
+            // Reference: a plain (non-interleaved) render of the SAME units,
+            // sized with a generous (never tight) headroom so it can never
+            // itself under-measure — then truncated to the measurement's own
+            // reported height, which is what actually distinguishes "the
+            // measurement is right" from "both derivations under-count the
+            // same way".
+            let units = app.transcript_render_units();
+            let text = Text::from(units.iter().map(|u| u.line.clone()).collect::<Vec<_>>());
+            let unwrapped_line_count = text.lines.len();
+            let total_display_width: usize = text
+                .lines
+                .iter()
+                .map(|line| {
+                    line.spans
+                        .iter()
+                        .map(|span| UnicodeWidthStr::width(span.content.as_ref()))
+                        .sum::<usize>()
+                })
+                .sum();
+            let cap = total_display_width
+                .div_ceil(width)
+                .saturating_mul(4)
+                .saturating_add(unwrapped_line_count)
+                .saturating_add(128)
+                .min(u16::MAX as usize) as u16;
+            let scratch_area = Rect::new(0, 0, width as u16, cap);
+            let mut buf = ratatui::buffer::Buffer::empty(scratch_area);
+            let paragraph = ratatui::widgets::Paragraph::new(text)
+                .wrap(ratatui::widgets::Wrap { trim: false });
+            ratatui::widgets::Widget::render(paragraph, scratch_area, &mut buf);
+            let mut reference_rows: Vec<String> = Vec::with_capacity(scratch_area.height as usize);
+            for row in 0..scratch_area.height {
+                let mut line = String::new();
+                let mut col: u16 = 0;
+                while col < scratch_area.width {
+                    let symbol = buf
+                        .cell((col, row))
+                        .map(|c| c.symbol().to_string())
+                        .unwrap_or_default();
+                    let w = (UnicodeWidthStr::width(symbol.as_str()) as u16).max(1);
+                    line.push_str(&symbol);
+                    col = col.saturating_add(w);
+                }
+                reference_rows.push(line);
+            }
+            reference_rows.truncate(measurement.height());
+
+            assert_eq!(
+                measurement.rows, reference_rows,
+                "width={width}: interleaved-pass rows must be byte-identical to a plain \
+                 render of the same content"
+            );
+        }
+    }
+
+    /// Given N units, the pass must yield exactly N `(start_row, end_row)`
+    /// pairs in flat (sentinel-free) row space: `start_0 == 0`, each
+    /// `end_i == start_{i+1}`, and the last `end` equals the measured
+    /// height — checked over all 32 subsets of the five content groups
+    /// (`populate_groups`), so the contiguity fence holds regardless of
+    /// which groups are present.
+    #[test]
+    fn unit_offsets_are_contiguous_and_end_at_the_measured_height() {
+        let width = 40usize;
+        for mask in 0u8..32 {
+            let mut app = App::new_test_empty();
+            populate_groups(&mut app, mask);
+
+            let measurement = app.transcript_measurement(width);
+            let offsets = &measurement.offsets;
+            let unit_count = measurement.units.len();
+
+            assert_eq!(
+                offsets.len(),
+                unit_count,
+                "mask={mask:#07b}: expected one offset per unit"
+            );
+            if offsets.is_empty() {
+                continue;
+            }
+            assert_eq!(
+                offsets[0].0, 0,
+                "mask={mask:#07b}: the first unit's start_row must be 0"
+            );
+            for i in 0..offsets.len() - 1 {
+                assert_eq!(
+                    offsets[i].1,
+                    offsets[i + 1].0,
+                    "mask={mask:#07b}: unit {i}'s end_row must equal unit {}'s start_row",
+                    i + 1
+                );
+            }
+            assert_eq!(
+                offsets.last().unwrap().1,
+                measurement.height(),
+                "mask={mask:#07b}: the last unit's end_row must equal the measured height"
+            );
+        }
+    }
+
+    /// The quadratic fence: `row_lookups` must grow LINEARLY with unit
+    /// count — doubling the units at most ~doubles the counter. Fails on
+    /// the pre-fix tree, where the per-sentinel backward scan made this
+    /// ratio ~4 (O(units x rows)).
+    #[test]
+    fn row_lookups_grow_linearly_with_unit_count() {
+        let width = 195usize;
+
+        let mut app_600 = App::new_test_empty();
+        for i in 0..600 {
+            app_600.history.push(user_message(format!("line {i} of a realistic transcript")));
+        }
+        reset_transcript_measure_stats();
+        let _ = app_600.transcript_measurement(width);
+        let lookups_600 = transcript_measure_stats().row_lookups;
+
+        let mut app_1200 = App::new_test_empty();
+        for i in 0..1200 {
+            app_1200.history.push(user_message(format!("line {i} of a realistic transcript")));
+        }
+        reset_transcript_measure_stats();
+        let _ = app_1200.transcript_measurement(width);
+        let lookups_1200 = transcript_measure_stats().row_lookups;
+
+        assert!(
+            (lookups_1200 as f64) <= 2.3 * (lookups_600 as f64),
+            "row_lookups must grow linearly: 600 units -> {lookups_600}, \
+             1200 units -> {lookups_1200} (ratio {:.2}, must be <= 2.3)",
+            lookups_1200 as f64 / lookups_600.max(1) as f64
+        );
+    }
+
+    // ── Phase 36.6.4 Plan 10 Task 2 (G-08 closure) — the memo ──────────────
+
+    #[test]
+    fn measurement_is_reused_when_content_is_unchanged() {
+        let mut app = App::new_test_empty();
+        for i in 0..50 {
+            app.history.push(user_message(format!("line {i} of a realistic transcript")));
+        }
+        let width = 80usize;
+
+        reset_transcript_measure_stats();
+        let first = app.transcript_measurement(width);
+        let second = app.transcript_measurement(width);
+
+        let stats = transcript_measure_stats();
+        assert_eq!(
+            stats.renders, 1,
+            "two calls with no intervening content mutation must perform exactly one render, got {stats:?}"
+        );
+        assert_eq!(
+            stats.cache_hits, 1,
+            "the second call must be served from the memo, got {stats:?}"
+        );
+        assert_eq!(
+            first.rows, second.rows,
+            "the cached measurement must be identical to the one that produced it"
+        );
+    }
+
+    /// Named-mutation type for `every_content_mutation_invalidates_the_measurement`
+    /// — factored out of the `Vec` literal per `clippy::type_complexity`.
+    type NamedMutation = (&'static str, Box<dyn Fn(&mut App)>);
+
+    #[test]
+    fn every_content_mutation_invalidates_the_measurement() {
+        let width = 80usize;
+        let mutations: Vec<NamedMutation> = vec![
+            (
+                "push a history message",
+                Box::new(|app: &mut App| {
+                    app.history.push(user_message("a fresh history line".to_string()));
+                }),
+            ),
+            (
+                "append to assistant_buffer",
+                Box::new(|app: &mut App| {
+                    app.assistant_buffer
+                        .get_or_insert_with(String::new)
+                        .push_str("a streamed token");
+                }),
+            ),
+            (
+                "push an image chip",
+                Box::new(|app: &mut App| {
+                    let history_anchor = app.history.len();
+                    app.image_chips.push(ImageChip {
+                        label: "img.png".to_string(),
+                        source: MediaRef {
+                            source: MediaSource::Path(PathBuf::from("/tmp/img.png")),
+                            kind: MediaKind::Photo,
+                            original_tag_text: "<MEDIA: /tmp/img.png>".to_string(),
+                        },
+                        history_anchor,
+                    });
+                }),
+            ),
+            (
+                "push a shell run (with its hidden history copy)",
+                Box::new(|app: &mut App| {
+                    app.apply_shell_outcome(shell_bang::ShellOutcome {
+                        command: "echo hi".to_string(),
+                        stdout: "hi".to_string(),
+                        stderr: String::new(),
+                        result: shell_bang::ShellResult::Exited(0),
+                        truncation: None,
+                    });
+                }),
+            ),
+            (
+                "push an attachment chip",
+                Box::new(|app: &mut App| {
+                    let history_anchor = app.history.len();
+                    app.sent_attachment_chips.push(SentAttachmentChip {
+                        filename: "notes.txt".to_string(),
+                        size_bytes: 512,
+                        history_anchor,
+                    });
+                }),
+            ),
+        ];
+
+        let mut app = App::new_test_empty();
+        for i in 0..5 {
+            app.history.push(user_message(format!("seed line {i}")));
+        }
+
+        for (name, apply) in mutations {
+            let before = app.transcript_measurement(width);
+            apply(&mut app);
+            reset_transcript_measure_stats();
+            let after = app.transcript_measurement(width);
+            let stats = transcript_measure_stats();
+            assert_eq!(
+                stats.renders, 1,
+                "mutation `{name}` must invalidate the memo and force exactly one render, got {stats:?}"
+            );
+            assert_ne!(
+                before.rows.len(),
+                after.rows.len(),
+                "mutation `{name}` adds rows — the measured height must change"
+            );
+        }
+    }
+
+    #[test]
+    fn same_length_different_text_invalidates_the_measurement() {
+        let width = 80usize;
+        let mut app = App::new_test_empty();
+        app.history.push(user_message("aaaaaaaaaa".to_string()));
+        let before = app.transcript_measurement(width);
+
+        // Replace the message body with a DIFFERENT string of the SAME byte
+        // length — length alone must never be treated as the memo key.
+        if let Some(last) = app.history.last_mut() {
+            *last = user_message("bbbbbbbbbb".to_string());
+        }
+
+        reset_transcript_measure_stats();
+        let after = app.transcript_measurement(width);
+        let stats = transcript_measure_stats();
+        assert_eq!(
+            stats.renders, 1,
+            "a same-length different-text mutation must still invalidate the memo, got {stats:?}"
+        );
+        assert_ne!(
+            before.rows, after.rows,
+            "different text must produce different measured rows even at identical byte length"
+        );
+    }
+
+    #[test]
+    fn width_change_invalidates_the_measurement() {
+        let mut app = App::new_test_empty();
+        for i in 0..20 {
+            app.history
+                .push(user_message(format!("line {i} of a transcript that wraps across widths")));
+        }
+
+        reset_transcript_measure_stats();
+        let _a1 = app.transcript_measurement(80);
+        let _b = app.transcript_measurement(120);
+        let _a2 = app.transcript_measurement(80);
+
+        let stats = transcript_measure_stats();
+        assert_eq!(
+            stats.renders, 3,
+            "widths A, B, A must render three times — A's rows must never be served at width B, got {stats:?}"
+        );
+    }
+
+    /// Anti-staleness fence: for a randomised sequence of mutations, the
+    /// memoised measurement must be byte-identical to a fresh
+    /// `measure_transcript_uncached` over the SAME content and width after
+    /// every step. Fixed-seed LCG — no `rand` dependency, per the plan.
+    #[test]
+    fn cached_rows_are_byte_identical_to_a_fresh_measurement() {
+        let width = 80usize;
+        let mut app = App::new_test_empty();
+        for i in 0..5 {
+            app.history.push(user_message(format!("seed line {i}")));
+        }
+
+        // 32-bit LCG (Numerical Recipes constants), fixed seed for reproducibility.
+        let mut seed: u32 = 0x1234_5678;
+        let mut next_u32 = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            seed
+        };
+
+        for step in 0..50 {
+            match next_u32() % 5 {
+                0 => app.history.push(user_message(format!("mutation line {step}"))),
+                1 => {
+                    app.assistant_buffer
+                        .get_or_insert_with(String::new)
+                        .push_str(&format!(" token{step}"));
+                }
+                2 => {
+                    let history_anchor = app.history.len();
+                    app.image_chips.push(ImageChip {
+                        label: format!("img{step}.png"),
+                        source: MediaRef {
+                            source: MediaSource::Path(PathBuf::from(format!("/tmp/img{step}.png"))),
+                            kind: MediaKind::Photo,
+                            original_tag_text: format!("<MEDIA: /tmp/img{step}.png>"),
+                        },
+                        history_anchor,
+                    });
+                }
+                3 => app.apply_shell_outcome(shell_bang::ShellOutcome {
+                    command: format!("echo {step}"),
+                    stdout: format!("shell output {step}"),
+                    stderr: String::new(),
+                    result: shell_bang::ShellResult::Exited(0),
+                    truncation: None,
+                }),
+                _ => {
+                    let history_anchor = app.history.len();
+                    app.sent_attachment_chips.push(SentAttachmentChip {
+                        filename: format!("file{step}.txt"),
+                        size_bytes: (step as u64 + 1) * 128,
+                        history_anchor,
+                    });
+                }
+            }
+
+            let memoised = app.transcript_measurement(width);
+            let units = app.transcript_render_units();
+            let fresh = app.measure_transcript_uncached(units, width);
+
+            assert_eq!(
+                memoised.rows, fresh.rows,
+                "step {step}: memoised rows must equal a fresh measurement of the same content"
+            );
+            assert_eq!(
+                memoised.offsets, fresh.offsets,
+                "step {step}: memoised offsets must equal a fresh measurement of the same content"
+            );
+        }
+    }
+
+    // ── Phase 36.6.4 Plan 12 (G-09 closure): chronological transcript order ──
+
+    /// The operator's Round 5 report, minimized: `!ls`, then a question, and
+    /// the reply must render BELOW the shell block, not above it. This is
+    /// the MANDATORY G-05/Nyquist RED observation — run against the pre-fix
+    /// tree BEFORE Task 1's production changes land, its failure output
+    /// quoted verbatim in the SUMMARY.
+    #[test]
+    fn shell_block_renders_above_a_later_assistant_reply() {
+        let mut app = App::new_test_empty();
+        app.history.push(user_message("first question".to_string()));
+        app.apply_shell_outcome(shell_bang::ShellOutcome {
+            command: "ls".to_string(),
+            stdout: "SHELL_OUTPUT_TOKEN_7f3a".to_string(),
+            stderr: String::new(),
+            result: shell_bang::ShellResult::Exited(0),
+            truncation: None,
+        });
+        app.history.push(assistant_message("ASSISTANT_REPLY_TOKEN_9c1d".to_string()));
+
+        let units = app.transcript_render_units();
+
+        let last_shell_idx = units
+            .iter()
+            .enumerate()
+            .filter(|(_, u)| u.group == TranscriptGroup::ShellRuns)
+            .map(|(i, _)| i)
+            .next_back()
+            .expect("test setup: a shell run must produce at least one unit");
+        let first_reply_idx = units
+            .iter()
+            .enumerate()
+            .find(|(_, u)| {
+                u.group == TranscriptGroup::History
+                    && u.line
+                        .spans
+                        .iter()
+                        .any(|s| s.content.contains("ASSISTANT_REPLY_TOKEN_9c1d"))
+            })
+            .map(|(i, _)| i)
+            .expect("test setup: the assistant reply must produce a History unit");
+
+        assert!(
+            last_shell_idx < first_reply_idx,
+            "the `!` block (unit {last_shell_idx}) must render ABOVE the later assistant \
+             reply (unit {first_reply_idx}) — on the pre-fix tree the shell block is \
+             appended after ALL history, so this assertion fails there"
+        );
+    }
+
+    /// The generalised order fence the existing presence-only keeper test
+    /// (`a_new_group_appears_in_both_render_text_and_hit_test_offsets`)
+    /// cannot provide: every unit's `history_anchor` must be non-decreasing
+    /// across the whole enumeration.
+    #[test]
+    fn transcript_units_are_emitted_in_nondecreasing_anchor_order() {
+        let mut app = App::new_test_empty();
+        populate_groups(&mut app, 0b11111);
+
+        let units = app.transcript_render_units();
+        assert!(
+            !units.is_empty(),
+            "test setup: populate_groups(0b11111) must produce at least one unit"
+        );
+
+        let mut prev_anchor = 0usize;
+        for (i, unit) in units.iter().enumerate() {
+            assert!(
+                unit.history_anchor >= prev_anchor,
+                "unit {i} (group {:?}) has history_anchor {} which is LESS than the \
+                 previous unit's anchor {prev_anchor} — anchors must be non-decreasing",
+                unit.group,
+                unit.history_anchor
+            );
+            prev_anchor = unit.history_anchor;
+        }
+    }
+
+    /// Task 1 acceptance: `history_lines_for`/`streaming_lines` must
+    /// reproduce `transcript_text()`'s exact pre-refactor role-prefixed
+    /// output for a transcript with no chips and no shell runs.
+    #[test]
+    fn transcript_text_is_byte_identical_after_the_history_lines_for_extraction() {
+        let mut app = App::new_test_empty();
+        app.history
+            .push(user_message("first line\nsecond line".to_string()));
+        app.history.push(assistant_message("a reply".to_string()));
+        app.assistant_buffer = Some("streaming reply".to_string());
+
+        let text = app.transcript_text();
+        let rendered: Vec<String> = text
+            .lines
+            .iter()
+            .map(|line| line.spans.iter().map(|s| s.content.to_string()).collect::<String>())
+            .collect();
+
+        assert_eq!(
+            rendered,
+            vec![
+                "You: first line".to_string(),
+                "second line".to_string(),
+                "Hermes: a reply".to_string(),
+                "Hermes: streaming reply".to_string(),
+            ],
+            "history_lines_for/streaming_lines must preserve transcript_text()'s exact prior \
+             role-prefixed output for a transcript with no chips and no shell runs"
+        );
+    }
+
+    // ── Phase 36.6.4 Plan 12 Task 2 (G-09 closure): real anchors for image ──
+    // ── and attachment chips ─────────────────────────────────────────────
+
+    /// D-G09-2: a `<MEDIA:>` tag extracted from a completed assistant turn
+    /// must render its chip AFTER that turn's own History units, and BEFORE
+    /// a later user message.
+    #[test]
+    fn image_chip_from_media_tag_renders_after_its_own_assistant_turn() {
+        let mut app = App::new_test_empty();
+        app.assistant_buffer =
+            Some("Here: <MEDIA: /tmp/x.png> ASSISTANT_TOKEN_2b91".to_string());
+        app.commit_assistant_buffer();
+        app.history.push(user_message("LATER_QUESTION_TOKEN_4d17".to_string()));
+
+        let units = app.transcript_render_units();
+
+        let assistant_idx = units
+            .iter()
+            .position(|u| {
+                u.group == TranscriptGroup::History
+                    && u.line.spans.iter().any(|s| s.content.contains("ASSISTANT_TOKEN_2b91"))
+            })
+            .expect("test setup: the assistant turn must produce a History unit");
+        let chip_idx = units
+            .iter()
+            .position(|u| u.group == TranscriptGroup::ImageChips)
+            .expect("test setup: the media-tag image chip must be present");
+        let later_msg_idx = units
+            .iter()
+            .position(|u| {
+                u.group == TranscriptGroup::History
+                    && u.line.spans.iter().any(|s| s.content.contains("LATER_QUESTION_TOKEN_4d17"))
+            })
+            .expect("test setup: the later user message must produce a History unit");
+
+        assert!(
+            assistant_idx < chip_idx,
+            "the image chip (unit {chip_idx}) must render AFTER its own assistant turn \
+             (unit {assistant_idx})"
+        );
+        assert!(
+            chip_idx < later_msg_idx,
+            "the image chip (unit {chip_idx}) must render BEFORE the later user message \
+             (unit {later_msg_idx})"
+        );
+    }
+
+    /// D-G09-2: `/image <path>` pushes nothing into `history` itself, so a
+    /// chip it creates must render after ALL history rows present at the
+    /// moment the command succeeds.
+    #[tokio::test]
+    async fn image_chip_from_slash_command_renders_after_the_last_history_row() {
+        use crate::tui_rata::commands::{SlashOutcome, dispatch_slash};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pic.png");
+        std::fs::write(&path, b"not a real png, just bytes for the size check").unwrap();
+
+        let mut app = App::new_test_empty();
+        for i in 0..4 {
+            app.history.push(user_message(format!("line {i}")));
+        }
+        let history_len_before = app.history.len();
+
+        let outcome = dispatch_slash(&mut app, &format!("/image {}", path.display())).await;
+        assert!(
+            matches!(outcome, SlashOutcome::Silent),
+            "test setup: a valid image path must yield SlashOutcome::Silent, got: {outcome:?}"
+        );
+        assert_eq!(
+            app.image_chips.len(),
+            1,
+            "test setup: /image must yield exactly one chip"
+        );
+        assert_eq!(
+            app.image_chips[0].history_anchor, history_len_before,
+            "the chip's anchor must equal the history length at the moment /image succeeded"
+        );
+
+        let units = app.transcript_render_units();
+        let last_history_idx = units
+            .iter()
+            .enumerate()
+            .filter(|(_, u)| u.group == TranscriptGroup::History)
+            .map(|(i, _)| i)
+            .next_back()
+            .expect("test setup: history rows must produce units");
+        let chip_idx = units
+            .iter()
+            .position(|u| u.group == TranscriptGroup::ImageChips)
+            .expect("test setup: the image chip unit must be present");
+
+        assert!(
+            chip_idx > last_history_idx,
+            "the image chip (unit {chip_idx}) must render AFTER the last history row \
+             (unit {last_history_idx})"
+        );
+    }
+
+    /// D-G09-3: an attachment chip must render immediately after the user
+    /// message it was sent with — not below every later turn (the same
+    /// defect class as the shell-block/image-chip cases, closed by the same
+    /// two-step stamp in `App::submit`).
+    #[test]
+    fn attachment_chip_renders_immediately_after_its_own_user_message() {
+        // Deliberately does NOT redirect `IRONHERMES_HOME` (unlike
+        // `app_with_store`/`model_picker_apply_persists_config_yaml`) — that
+        // env var is process-global and this crate's existing suite ALREADY
+        // exhibits cross-test collisions on it independent of this plan
+        // (observed: skipping this test alone still fails 5 unrelated
+        // `tui_attach_at_path` tests under default parallelism). Adding a
+        // 3rd/4th mutator to that shared hazard only widens the window, so
+        // this test instead gives `app` a UNIQUE `session_id` — distinct
+        // from `test_deps()`'s crate-wide shared `"test-session"` — so its
+        // attachment file lives in its own directory no matter what
+        // `IRONHERMES_HOME` currently resolves to.
+        let mut app = App::new_test_empty();
+        app.session_id = format!("plan12-attachment-order-test-{}", std::process::id());
+        app.history.push(user_message("earlier turn".to_string()));
+
+        let attachments_dir = ironhermes_core::session_attachments_dir(&app.session_id);
+        std::fs::create_dir_all(attachments_dir.join("att1")).unwrap();
+        std::fs::write(attachments_dir.join("att1").join("notes.txt"), b"attachment body").unwrap();
+        app.pending_attachments.push(PendingAttachment {
+            filename: "notes.txt".to_string(),
+            content_type: Some("text/plain".to_string()),
+            stored_rel_path: "att1/notes.txt".to_string(),
+        });
+
+        app.textarea.insert_str("PLEASE_REVIEW_TOKEN_8a3f");
+        app.submit();
+
+        assert_eq!(
+            app.sent_attachment_chips.len(),
+            1,
+            "test setup: submit() must have created exactly one attachment chip"
+        );
+
+        app.history.push(assistant_message("REVIEW_REPLY_TOKEN_9c22".to_string()));
+
+        let units = app.transcript_render_units();
+
+        let user_msg_idx = units
+            .iter()
+            .position(|u| {
+                u.group == TranscriptGroup::History
+                    && u.line.spans.iter().any(|s| s.content.contains("PLEASE_REVIEW_TOKEN_8a3f"))
+            })
+            .expect("test setup: the submitted user message must produce a History unit");
+        let chip_idx = units
+            .iter()
+            .position(|u| u.group == TranscriptGroup::AttachmentChips)
+            .expect("test setup: the attachment chip must be present");
+        let reply_idx = units
+            .iter()
+            .position(|u| {
+                u.group == TranscriptGroup::History
+                    && u.line.spans.iter().any(|s| s.content.contains("REVIEW_REPLY_TOKEN_9c22"))
+            })
+            .expect("test setup: the later assistant reply must produce a History unit");
+
+        assert!(
+            user_msg_idx < chip_idx,
+            "the attachment chip (unit {chip_idx}) must render AFTER its own user message \
+             (unit {user_msg_idx})"
+        );
+        assert!(
+            chip_idx < reply_idx,
+            "the attachment chip (unit {chip_idx}) must render BEFORE the later assistant \
+             reply (unit {reply_idx})"
+        );
+
+        // Best-effort cleanup of this test's uniquely-named directory —
+        // not required for correctness (a leaked dir is harmless), just
+        // tidiness.
+        if let Some(session_dir) = attachments_dir.parent() {
+            let _ = std::fs::remove_dir_all(session_dir);
+        }
+    }
+
+    /// D-G09-4: `captured_artifacts` has no obtainable creation-time anchor
+    /// (see `transcript_render_units`'s doc comment) — it gets a
+    /// RENDER-TIME anchor of `history.len()` instead, which must place it
+    /// after all settled history and before the in-flight streaming reply.
+    #[test]
+    fn artifact_chips_render_after_settled_history_and_before_the_streaming_buffer() {
+        let mut app = App::new_test_empty();
+        app.history.push(user_message("a question".to_string()));
+        app.history
+            .push(assistant_message("SETTLED_REPLY_TOKEN_5e60".to_string()));
+        app.captured_artifacts
+            .lock()
+            .unwrap()
+            .push(transcript_chip_tests_support::artifact_for("artifact-1", "Report"));
+        app.assistant_buffer = Some("STREAMING_TOKEN_7f18".to_string());
+
+        let units = app.transcript_render_units();
+
+        let last_settled_idx = units
+            .iter()
+            .enumerate()
+            .filter(|(_, u)| {
+                u.group == TranscriptGroup::History
+                    && u.line.spans.iter().any(|s| s.content.contains("SETTLED_REPLY_TOKEN_5e60"))
+            })
+            .map(|(i, _)| i)
+            .next_back()
+            .expect("test setup: the settled assistant reply must produce a History unit");
+        let artifact_idx = units
+            .iter()
+            .position(|u| u.group == TranscriptGroup::ArtifactChips)
+            .expect("test setup: the artifact chip must be present");
+        let streaming_idx = units
+            .iter()
+            .position(|u| {
+                u.group == TranscriptGroup::History
+                    && u.line.spans.iter().any(|s| s.content.contains("STREAMING_TOKEN_7f18"))
+            })
+            .expect("test setup: the streaming buffer must produce a History unit");
+
+        assert!(
+            artifact_idx > last_settled_idx,
+            "the artifact chip (unit {artifact_idx}) must render AFTER all settled history \
+             (unit {last_settled_idx})"
+        );
+        assert!(
+            artifact_idx < streaming_idx,
+            "the artifact chip (unit {artifact_idx}) must render BEFORE the in-flight \
+             streaming buffer (unit {streaming_idx})"
+        );
+    }
+
+    /// T-36.6.4-P12-02: `/clear` (`SlashOutcome::ClearSession`) empties
+    /// `history` but leaves `shell_runs`/`image_chips`/`sent_attachment_chips`
+    /// populated with now-stale anchors exceeding the new (shrunk)
+    /// `history.len()`. `transcript_render_units` must clamp rather than
+    /// index, and must not panic.
+    #[test]
+    fn a_stale_anchor_past_history_len_sorts_last_and_does_not_panic() {
+        let mut app = App::new_test_empty();
+        for i in 0..5 {
+            app.history.push(user_message(format!("line {i}")));
+        }
+        app.apply_shell_outcome(shell_bang::ShellOutcome {
+            command: "echo hi".to_string(),
+            stdout: "hi".to_string(),
+            stderr: String::new(),
+            result: shell_bang::ShellResult::Exited(0),
+            truncation: None,
+        });
+        let image_anchor = app.history.len();
+        app.image_chips.push(ImageChip {
+            label: "pic.png".to_string(),
+            source: MediaRef {
+                source: MediaSource::Path(PathBuf::from("/tmp/pic.png")),
+                kind: MediaKind::Photo,
+                original_tag_text: "<MEDIA: /tmp/pic.png>".to_string(),
+            },
+            history_anchor: image_anchor,
+        });
+        assert!(
+            app.shell_runs[0].history_anchor > 1,
+            "test setup: the shell run's anchor must exceed the post-clear history length"
+        );
+        assert!(
+            app.image_chips[0].history_anchor > 1,
+            "test setup: the image chip's anchor must exceed the post-clear history length"
+        );
+
+        // Replicate `SlashOutcome::ClearSession`'s exact effect (app.rs,
+        // `apply_slash_outcome`): `history` clears to ONE System
+        // confirmation message; `shell_runs`/`image_chips` are left
+        // untouched with now-stale anchors.
+        app.history.clear();
+        app.skill_run_hidden_indices.clear();
+        app.shell_history_hidden_indices.clear();
+        let mut system = ChatMessage::user("Session cleared.");
+        system.role = Role::System;
+        app.history.push(system);
+        assert_eq!(
+            app.history.len(),
+            1,
+            "test setup: history must be exactly one message after the simulated /clear"
+        );
+
+        // Must not panic — this call is the assertion.
+        let units = app.transcript_render_units();
+
+        let surviving_idx = units
+            .iter()
+            .position(|u| u.group == TranscriptGroup::History)
+            .expect("test setup: the surviving System message must produce a History unit");
+        let shell_idx = units
+            .iter()
+            .position(|u| u.group == TranscriptGroup::ShellRuns)
+            .expect("the stale-anchored shell run must still be present");
+        let image_idx = units
+            .iter()
+            .position(|u| u.group == TranscriptGroup::ImageChips)
+            .expect("the stale-anchored image chip must still be present");
+
+        assert!(
+            shell_idx > surviving_idx,
+            "the stale-anchored shell run (unit {shell_idx}) must sort AFTER the surviving \
+             row (unit {surviving_idx})"
+        );
+        assert!(
+            image_idx > surviving_idx,
+            "the stale-anchored image chip (unit {image_idx}) must sort AFTER the surviving \
+             row (unit {surviving_idx})"
+        );
+    }
+
+    // ── Phase 36.6.4 Plan 12 Task 3 (G-09 closure): lock the four ───────────
+    // ── enumeration consumers to the anchor-ordered emission ────────────────
+
+    /// Consumer 1 — row offsets. `transcript_unit_row_offsets` must return
+    /// exactly one non-overlapping, strictly-increasing offset per unit
+    /// through an INTERLEAVED (not group-major) transcript, with the last
+    /// unit's `end_row` equal to the measured height — generalising the
+    /// existing group-major-only `unit_row_offsets_end_equals_measured_height_for_every_group`
+    /// fence to the reordered enumeration.
+    #[test]
+    fn unit_row_offsets_track_units_through_an_interleaved_transcript() {
+        let width = 40usize;
+        let mut app = App::new_test_empty();
+        app.history.push(user_message("first message".to_string()));
+        app.apply_shell_outcome(shell_bang::ShellOutcome {
+            command: "echo hi".to_string(),
+            stdout: "hi".to_string(),
+            stderr: String::new(),
+            result: shell_bang::ShellResult::Exited(0),
+            truncation: None,
+        });
+        let anchor = app.history.len();
+        app.image_chips.push(ImageChip {
+            label: "pic.png".to_string(),
+            source: MediaRef {
+                source: MediaSource::Path(PathBuf::from("/tmp/pic.png")),
+                kind: MediaKind::Photo,
+                original_tag_text: "<MEDIA: /tmp/pic.png>".to_string(),
+            },
+            history_anchor: anchor,
+        });
+        app.history.push(assistant_message("a later reply".to_string()));
+
+        let units = app.transcript_render_units();
+        let offsets = app.transcript_unit_row_offsets(width);
+        let measured_height = app.transcript_measurement(width).height();
+
+        assert_eq!(
+            offsets.len(),
+            units.len(),
+            "transcript_unit_row_offsets must return exactly one offset per unit"
+        );
+        assert!(
+            !offsets.is_empty(),
+            "test setup: this interleaved transcript must produce at least one unit"
+        );
+
+        let mut prev_end = 0usize;
+        for (i, &(start, end)) in offsets.iter().enumerate() {
+            assert!(
+                start >= prev_end,
+                "offset {i}: start ({start}) must not overlap the previous unit's end \
+                 ({prev_end})"
+            );
+            assert!(
+                end > start,
+                "offset {i}: end ({end}) must be strictly greater than start ({start})"
+            );
+            prev_end = end;
+        }
+        assert_eq!(
+            offsets.last().unwrap().1,
+            measured_height,
+            "the last unit's end_row must equal the measured height, through an interleaved \
+             (not group-major) enumeration"
+        );
+    }
+
+    /// Consumer 2 — click geometry (silent failure mode, UI-SPEC E1/overflow).
+    /// An image chip placed in the MIDDLE of a long transcript, once
+    /// scrolled into view, must get a hit-test rect whose `y` tracks its
+    /// OWN measured `start_row` — not the row it would have occupied under
+    /// the old bottom-pinned group-major order.
+    #[test]
+    fn chip_hit_test_rect_follows_an_interleaved_chip_after_scroll() {
+        let mut app = App::new_test_empty();
+        for i in 0..20 {
+            app.history.push(user_message(format!("line {i}")));
+        }
+        let mid_anchor = app.history.len();
+        app.image_chips.push(ImageChip {
+            label: "middle.png".to_string(),
+            source: MediaRef {
+                source: MediaSource::Path(PathBuf::from("/tmp/middle.png")),
+                kind: MediaKind::Photo,
+                original_tag_text: "<MEDIA: /tmp/middle.png>".to_string(),
+            },
+            history_anchor: mid_anchor,
+        });
+        for i in 20..40 {
+            app.history.push(user_message(format!("line {i}")));
+        }
+
+        let a = area(40, 10); // small viewport forces the chip to require a scroll
+        let inner_width = inner_transcript_width(a);
+        app.scroll_down(15);
+        let measurement = app.transcript_measurement(inner_width);
+        app.rebuild_chip_hit_test(a, &measurement);
+
+        let scroll = app.transcript_scroll() as usize;
+        assert!(scroll > 0, "test setup: expected a non-zero scroll offset");
+
+        let units = app.transcript_render_units();
+        let offsets = app.transcript_unit_row_offsets(inner_width);
+        let chip_unit_idx = units
+            .iter()
+            .position(|u| u.group == TranscriptGroup::ImageChips)
+            .expect("test setup: the middle image chip must be present");
+        let (start_row, _end_row) = offsets[chip_unit_idx];
+        assert!(
+            start_row >= scroll,
+            "test setup: expected the middle chip's start_row ({start_row}) to be within or \
+             after the scroll offset ({scroll}) so it is actually visible"
+        );
+
+        let hits = app.chip_hit_test_snapshot();
+        let (rect, _) = hits
+            .iter()
+            .find(|(_, act)| {
+                matches!(act, ChipAction::OpenImage { label, .. } if label == "middle.png")
+            })
+            .expect(
+                "test setup: the middle chip must be visible in the hit-test map after \
+                 scrolling",
+            );
+
+        let expected_y = a.y.saturating_add(1).saturating_add((start_row - scroll) as u16);
+        assert_eq!(
+            rect.y, expected_y,
+            "the hit-test rect's y must track the interleaved chip's own measured start_row \
+             after scroll, not a bottom-pinned position"
+        );
+    }
+
+    /// Consumer 3 — link extraction. A bare URL inside a shell block's
+    /// stdout, and another inside an assistant reply that arrives
+    /// afterwards, must each be found by `hyperlink::extract_links` on the
+    /// row that ACTUALLY displays it — the shell block's link on an
+    /// earlier row than the later reply's, through the real `ui()` render
+    /// entry point.
+    #[test]
+    fn link_rows_align_with_reordered_rows() {
+        use crate::tui_rata::ui::ui;
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let mut app = App::new_test_empty();
+        app.apply_shell_outcome(shell_bang::ShellOutcome {
+            command: "echo url".to_string(),
+            stdout: "see https://shell-link.example.com for details".to_string(),
+            stderr: String::new(),
+            result: shell_bang::ShellResult::Exited(0),
+            truncation: None,
+        });
+        app.history.push(assistant_message(
+            "the reply mentions https://reply-link.example.com too".to_string(),
+        ));
+
+        let size = ratatui::prelude::Size { width: 80, height: 24 };
+        let transcript_area = crate::tui_rata::event_loop::compute_transcript_area(size, false);
+        let inner_width = inner_transcript_width(transcript_area);
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| ui(f, &app)).unwrap();
+
+        let plain_rows = app.transcript_rendered_plain_rows(inner_width);
+
+        let shell_row = plain_rows
+            .iter()
+            .position(|row| {
+                crate::tui_rata::hyperlink::extract_links(row)
+                    .iter()
+                    .any(|l| l.url.contains("shell-link.example.com"))
+            })
+            .expect("test setup: the shell block's link must appear on some rendered row");
+        let reply_row = plain_rows
+            .iter()
+            .position(|row| {
+                crate::tui_rata::hyperlink::extract_links(row)
+                    .iter()
+                    .any(|l| l.url.contains("reply-link.example.com"))
+            })
+            .expect("test setup: the reply's link must appear on some rendered row");
+
+        assert!(
+            shell_row < reply_row,
+            "the shell block's link (row {shell_row}) must render on an EARLIER row than \
+             the later assistant reply's link (row {reply_row})"
+        );
+    }
+
+    /// Consumer 4 — the memo, load-bearing. Two directly-constructed unit
+    /// sequences with identical group tags, span bytes, `plain` and
+    /// `action` presence but different `history_anchor` values must
+    /// produce DIFFERENT `transcript_content_fingerprint`s — otherwise a
+    /// reorder the memo cannot see could serve stale cached click geometry.
+    /// (The reverted fault-injection that proves the hashing is actually
+    /// load-bearing, not merely order-incidental, is recorded verbatim in
+    /// the SUMMARY per Plan 10's precedent — it cannot live in this test
+    /// without permanently weakening `transcript_content_fingerprint`.)
+    #[test]
+    fn two_enumerations_differing_only_in_anchor_produce_different_measure_keys() {
+        let make_units = |anchor: usize| -> Vec<TranscriptUnit> {
+            vec![
+                TranscriptUnit {
+                    group: TranscriptGroup::History,
+                    line: Line::from(Span::raw("You: shared content".to_string())),
+                    plain: None,
+                    action: None,
+                    history_anchor: anchor,
+                },
+                TranscriptUnit {
+                    group: TranscriptGroup::ImageChips,
+                    line: Line::from(Span::styled(
+                        "[🖼 pic.png]".to_string(),
+                        Style::default().fg(Color::Cyan),
+                    )),
+                    plain: Some("[🖼 pic.png]".to_string()),
+                    action: Some(ChipAction::OpenImage {
+                        label: "pic.png".to_string(),
+                        source: MediaRef {
+                            source: MediaSource::Path(PathBuf::from("/tmp/pic.png")),
+                            kind: MediaKind::Photo,
+                            original_tag_text: "<MEDIA: /tmp/pic.png>".to_string(),
+                        },
+                    }),
+                    history_anchor: anchor,
+                },
+            ]
+        };
+
+        let units_a = make_units(0);
+        let units_b = make_units(1);
+
+        // Sanity: identical group tags, span bytes, plain, and action
+        // presence — the ONLY difference between the two sequences is
+        // `history_anchor`.
+        for (a, b) in units_a.iter().zip(units_b.iter()) {
+            assert_eq!(a.group, b.group, "test setup: groups must match");
+            assert_eq!(a.plain, b.plain, "test setup: plain text must match");
+            assert_eq!(
+                a.action.is_some(),
+                b.action.is_some(),
+                "test setup: action presence must match"
+            );
+            let a_content: Vec<_> = a.line.spans.iter().map(|s| s.content.as_ref()).collect();
+            let b_content: Vec<_> = b.line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(a_content, b_content, "test setup: span content must match");
+        }
+
+        let fp_a = transcript_content_fingerprint(&units_a);
+        let fp_b = transcript_content_fingerprint(&units_b);
+        assert_ne!(
+            fp_a, fp_b,
+            "two enumerations differing ONLY in history_anchor must produce DIFFERENT \
+             fingerprints — a reorder must never be served stale cached geometry"
         );
     }
 }
@@ -4653,6 +7634,7 @@ mod transcript_chip_tests {
         app.sent_attachment_chips.push(SentAttachmentChip {
             filename: "photo.png".to_string(),
             size_bytes: 2_202_009, // ~2.1 MiB
+            history_anchor: app.history.len(),
         });
         app.captured_artifacts
             .lock()
@@ -4681,13 +7663,16 @@ mod transcript_chip_tests {
         app.sent_attachment_chips.push(SentAttachmentChip {
             filename: "notes.txt".to_string(),
             size_bytes: 512,
+            history_anchor: app.history.len(),
         });
         app.captured_artifacts
             .lock()
             .unwrap()
             .push(artifact("artifact-xyz", "Dashboard"));
 
-        app.rebuild_chip_hit_test(area(80, 24));
+        let a = area(80, 24);
+        let measurement = app.transcript_measurement(inner_transcript_width(a));
+        app.rebuild_chip_hit_test(a, &measurement);
 
         let hits = app.chip_hit_test.lock().unwrap();
         assert_eq!(
@@ -4707,7 +7692,131 @@ mod transcript_chip_tests {
                     "URL must hit the 46.6 viewer route: {url}"
                 );
             }
+            other => panic!("expected ChipAction::OpenArtifactUrl, got: {other:?}"),
         }
+    }
+
+    // ── Phase 36.6.4 Plan 05 Task 1 `<behavior>` tests (D-12/D-13, TUI-IMG-01) ──
+
+    fn photo_media_ref(path: &str) -> MediaRef {
+        MediaRef {
+            source: MediaSource::Path(PathBuf::from(path)),
+            kind: MediaKind::Photo,
+            original_tag_text: format!("<MEDIA: {path}>"),
+        }
+    }
+
+    /// Test 1: the chip line carries the frame glyph, `Color::Cyan`, and a
+    /// label truncated at 40 DISPLAY cells with a trailing ellipsis.
+    #[test]
+    fn image_chip_renders_frame_glyph_cyan_truncated_at_40_cells() {
+        let long_label = "x".repeat(60);
+        let chip = ImageChip {
+            label: long_label,
+            source: photo_media_ref("/tmp/x.png"),
+            history_anchor: 0,
+        };
+        let line = image_chip_line(&chip);
+        let text = plain(&line);
+
+        assert!(
+            text.starts_with("[🖼 "),
+            "chip must carry the frame-with-picture glyph: {text}"
+        );
+        assert!(text.ends_with("…]"), "over-long label must end with an ellipsis: {text}");
+        let label_part = text
+            .trim_start_matches("[🖼 ")
+            .trim_end_matches(']');
+        assert_eq!(
+            UnicodeWidthStr::width(label_part),
+            40,
+            "truncated label must be exactly 40 DISPLAY cells wide: {label_part}"
+        );
+        assert_eq!(line.spans[0].style.fg, Some(Color::Cyan));
+    }
+
+    /// Test 2: a completed assistant turn containing a media tag renders a
+    /// chip and the raw tag literal does not appear in the transcript.
+    #[test]
+    fn media_tag_in_assistant_turn_yields_chip_not_raw_tag_text() {
+        let mut app = App::new_test_empty();
+        app.assistant_buffer =
+            Some("Here is your image: <MEDIA: /tmp/gen.png>".to_string());
+        app.commit_assistant_buffer();
+
+        assert_eq!(
+            app.image_chips.len(),
+            1,
+            "one Photo MediaRef must yield exactly one image chip"
+        );
+        assert_eq!(app.image_chips[0].label, "gen.png");
+
+        for msg in &app.history {
+            if let Some(MessageContent::Text(t)) = &msg.content {
+                assert!(
+                    !t.contains("<MEDIA:"),
+                    "raw tag literal must never reach the transcript: {t}"
+                );
+            }
+        }
+    }
+
+    /// Test 5: after scrolling, an image chip's stored hit-test rect
+    /// matches the row it is drawn on (Plan 01's Pitfall-2 guard, extended
+    /// to the new chip family).
+    #[test]
+    fn image_chip_hit_test_participates_after_scroll() {
+        let body = (1..=3).map(|i| format!("ln{i}")).collect::<Vec<_>>().join("\n");
+        let mut app =
+            App::new_test_with_messages(vec![("assistant", Box::leak(body.into_boxed_str()))]);
+        app.image_chips.push(ImageChip {
+            label: "target.png".to_string(),
+            source: photo_media_ref("/tmp/target.png"),
+            history_anchor: app.history.len(),
+        });
+        // Padding AFTER the target (chips are always the LAST content rows
+        // — without trailing padding, a chip is only ever visible at
+        // exactly max_scroll, making "scroll and it's still visible, just
+        // at a different row" impossible to construct).
+        for i in 0..15 {
+            let history_anchor = app.history.len();
+            app.image_chips.push(ImageChip {
+                label: format!("pad{i}.png"),
+                source: photo_media_ref(&format!("/tmp/pad{i}.png")),
+                history_anchor,
+            });
+        }
+
+        let a = area(80, 15);
+        let measurement = app.transcript_measurement(inner_transcript_width(a));
+        app.rebuild_chip_hit_test(a, &measurement);
+        let pre_hits = app.chip_hit_test_snapshot();
+        let pre_rect = pre_hits
+            .iter()
+            .find(|(_, act)| {
+                matches!(act, ChipAction::OpenImage { label, .. } if label == "target.png")
+            })
+            .map(|(r, _)| *r)
+            .expect("target image chip must be visible at scroll=0");
+
+        app.scroll_down(3);
+        let measurement = app.transcript_measurement(inner_transcript_width(a));
+        app.rebuild_chip_hit_test(a, &measurement);
+        let post_hits = app.chip_hit_test_snapshot();
+        let post_rect = post_hits
+            .iter()
+            .find(|(_, act)| {
+                matches!(act, ChipAction::OpenImage { label, .. } if label == "target.png")
+            })
+            .map(|(r, _)| *r)
+            .expect("target image chip must still be visible after a 3-row scroll");
+
+        assert_eq!(
+            post_rect.y,
+            pre_rect.y - 3,
+            "image chip hit-test rect must move UP by exactly the scroll delta, \
+             re-derived from scroll_view_state"
+        );
     }
 
     /// The chip rect width math MUST reuse `inner_transcript_width` — the
@@ -4722,7 +7831,8 @@ mod transcript_chip_tests {
             .unwrap()
             .push(artifact("id1", "hi"));
         let a = area(80, 24);
-        app.rebuild_chip_hit_test(a);
+        let measurement = app.transcript_measurement(inner_transcript_width(a));
+        app.rebuild_chip_hit_test(a, &measurement);
         let hits = app.chip_hit_test.lock().unwrap();
         let (rect, _) = &hits[0];
         assert_eq!(
@@ -4748,9 +7858,10 @@ mod transcript_chip_tests {
         // Base transcript is empty (row 0 is the chip's only row); a tiny
         // 1-row-tall viewport scrolled past row 0 pushes the chip fully
         // out of view.
-        app.transcript_scroll = 5;
+        app.set_transcript_scroll(5);
         let a = area(80, 3); // height 3 → visible_rows = 1
-        app.rebuild_chip_hit_test(a);
+        let measurement = app.transcript_measurement(inner_transcript_width(a));
+        app.rebuild_chip_hit_test(a, &measurement);
         let hits = app.chip_hit_test.lock().unwrap();
         assert!(
             hits.is_empty(),
@@ -4864,7 +7975,7 @@ mod handle_mouse_chip_tests {
             ChipAction::OpenArtifactUrl("http://127.0.0.1:8080/artifacts/id1".to_string()),
         )];
 
-        let scroll_before = app.transcript_scroll;
+        let scroll_before = app.transcript_scroll();
         app.handle_mouse(left_click(rect.x + 50, rect.y), a);
 
         assert!(
@@ -4872,7 +7983,7 @@ mod handle_mouse_chip_tests {
             "click outside any chip rect must not open a URL"
         );
         assert_eq!(
-            app.transcript_scroll, scroll_before,
+            app.transcript_scroll(), scroll_before,
             "Down(Left) must never scroll"
         );
     }
@@ -4884,7 +7995,7 @@ mod handle_mouse_chip_tests {
     #[test]
     fn handle_mouse_scroll_arm_unchanged_by_chip_addition() {
         let mut app = App::new_test_empty();
-        let scroll_before = app.transcript_scroll;
+        let scroll_before = app.transcript_scroll();
         let auto_before = app.auto_follow;
         let a = area(80, 24);
         let scroll_event = crossterm::event::MouseEvent {
@@ -4894,7 +8005,7 @@ mod handle_mouse_chip_tests {
             modifiers: crossterm::event::KeyModifiers::NONE,
         };
         app.handle_mouse(scroll_event, a);
-        assert_eq!(app.transcript_scroll, scroll_before.saturating_add(3));
+        assert_eq!(app.transcript_scroll(), scroll_before.saturating_add(3));
         assert_eq!(app.auto_follow, auto_before);
     }
 }
@@ -5077,7 +8188,7 @@ mod chip_click_vs_rendered_frame_tests {
 
         let mut app = App::new_test_empty();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let gate = TuiApprovalGate::new(tx, app.approvals_store.clone());
+        let gate = TuiApprovalGate::new(tx, app.approvals_store.clone(), Arc::new(AtomicBool::new(false)));
 
         // Spawn the blocked tool call awaiting the gate decision (real gate).
         let handle = tokio::spawn(async move {
@@ -5262,7 +8373,7 @@ mod chip_click_vs_rendered_frame_tests {
 
         let mut app = App::new_test_empty();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let gate = TuiApprovalGate::new(tx, app.approvals_store.clone());
+        let gate = TuiApprovalGate::new(tx, app.approvals_store.clone(), Arc::new(AtomicBool::new(false)));
 
         // Open the Skills Hub via the real Ctrl+K path — an unrelated overlay
         // is active when the approval request arrives.
@@ -5335,7 +8446,7 @@ mod chip_click_vs_rendered_frame_tests {
 
         let mut app = App::new_test_empty();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let gate = TuiApprovalGate::new(tx, app.approvals_store.clone());
+        let gate = TuiApprovalGate::new(tx, app.approvals_store.clone(), Arc::new(AtomicBool::new(false)));
 
         app.handle_key(ap_ctrl(crossterm::event::KeyCode::Char('k')));
         assert!(matches!(app.active_overlay, Some(OverlayKind::SkillsHub)));
@@ -5475,5 +8586,702 @@ mod transcript_chip_tests_support {
             title: title.to_string(),
             filename: "index.html".to_string(),
         }
+    }
+}
+
+// ── Phase 36.6.4 Plan 02 Task 1: vim-style visual mode (D-05) ──────────────
+#[cfg(all(test, feature = "test-support"))]
+mod visual_mode_tests {
+    use super::*;
+
+    fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+        use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    fn ctrl_key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+        use crossterm::event::{KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
+        KeyEvent {
+            code,
+            modifiers: KeyModifiers::CONTROL,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
+        }
+    }
+
+    /// Seeds a generous 30-line transcript and a wide cached
+    /// `transcript_area` so visual-mode row movement has real bounds to
+    /// clamp against (an empty transcript's `max_row` is 0, which would
+    /// make every `j`/Down a no-op and defeat the test's purpose).
+    fn app_with_wide_area() -> App {
+        let body = (1..=30).map(|i| format!("ln{i}")).collect::<Vec<_>>().join("\n");
+        let app = App::new_test_with_messages(vec![("assistant", Box::leak(body.into_boxed_str()))]);
+        *app.transcript_area.lock().unwrap() = Rect::new(0, 0, 80, 24);
+        app
+    }
+
+    #[test]
+    fn visual_mode_v_starts_selection_only_when_textarea_empty() {
+        let mut app = App::new_test_empty();
+        assert!(app.textarea.is_empty(), "test setup: textarea must start empty");
+
+        app.handle_key(key(crossterm::event::KeyCode::Char('v')));
+        assert_eq!(
+            app.selection_mode,
+            selection::SelectionMode::Visual,
+            "v with an empty textarea must enter visual mode"
+        );
+        assert!(
+            app.textarea.is_empty(),
+            "v that enters visual mode must not insert a literal character"
+        );
+        assert!(app.selection.is_some(), "entering visual mode must anchor a selection");
+
+        // With content already typed, v must be a literal character.
+        let mut app2 = App::new_test_empty();
+        app2.textarea.insert_str("hello");
+        app2.handle_key(key(crossterm::event::KeyCode::Char('v')));
+        assert_eq!(
+            app2.selection_mode,
+            selection::SelectionMode::Idle,
+            "v with a non-empty textarea must NOT enter visual mode"
+        );
+        assert_eq!(
+            app2.textarea.lines().join("\n"),
+            "hellov",
+            "v with a non-empty textarea must type the literal character"
+        );
+    }
+
+    #[test]
+    fn visual_mode_hjkl_and_arrows_extend_the_cursor() {
+        let mut app = app_with_wide_area();
+        app.selection_mode = selection::SelectionMode::Visual;
+        app.selection = Some(Selection::new_at(selection::ContentPos::new(5, 5)));
+
+        app.handle_key(key(crossterm::event::KeyCode::Char('j')));
+        assert_eq!(
+            app.selection.unwrap().cursor,
+            selection::ContentPos::new(6, 5),
+            "j must advance the cursor row by one"
+        );
+        assert_eq!(
+            app.selection.unwrap().anchor,
+            selection::ContentPos::new(5, 5),
+            "anchor must stay fixed"
+        );
+
+        app.handle_key(key(crossterm::event::KeyCode::Down));
+        assert_eq!(
+            app.selection.unwrap().cursor,
+            selection::ContentPos::new(7, 5),
+            "Down must also advance the cursor row by one"
+        );
+
+        app.handle_key(key(crossterm::event::KeyCode::Char('h')));
+        assert_eq!(
+            app.selection.unwrap().cursor,
+            selection::ContentPos::new(7, 4),
+            "h must retreat the cursor column"
+        );
+
+        app.handle_key(key(crossterm::event::KeyCode::Left));
+        assert_eq!(
+            app.selection.unwrap().cursor,
+            selection::ContentPos::new(7, 3),
+            "Left must also retreat the cursor column"
+        );
+    }
+
+    #[test]
+    fn visual_mode_y_yanks_and_exits() {
+        let mut app = app_with_wide_area();
+        // Re-pointed at an explicit `Supported` capability (Plan 08): the
+        // real `selection::yank` reads real process environment and, on
+        // macOS, attempts a real `pbcopy` — neither is a stable input to
+        // assert an exact toast string against in CI (see `clipboard_yank`
+        // doc). This asserts the unchanged working-case wording, not the
+        // OLD accidental unconditional one.
+        app.clipboard_yank = Box::new(|text: &str| {
+            let n = text.chars().count();
+            selection::ClipboardOutcome::Written(
+                selection::CopyReport { copied: n, total: n, native_clipboard: selection::NativeClipboardOutcome::NotAttempted },
+                selection::TerminalClipboardCaps {
+                    support: selection::Osc52Support::Supported,
+                    display_name: "iTerm2",
+                },
+            )
+        });
+        app.selection_mode = selection::SelectionMode::Visual;
+        app.selection = Some(Selection {
+            anchor: selection::ContentPos::new(0, 0),
+            cursor: selection::ContentPos::new(0, 2),
+        });
+
+        app.handle_key(key(crossterm::event::KeyCode::Char('y')));
+
+        assert_eq!(
+            app.selection_mode,
+            selection::SelectionMode::Idle,
+            "y must exit visual mode"
+        );
+        assert!(
+            app.copy_confirmation_text().is_some_and(|t| t.starts_with("Copied")),
+            "y must have driven a real yank attempt with the unchanged working-case wording; got {:?}",
+            app.copy_confirmation_text()
+        );
+    }
+
+    #[test]
+    fn visual_mode_esc_cancels_without_writing() {
+        let mut app = app_with_wide_area();
+        app.selection_mode = selection::SelectionMode::Visual;
+        app.selection = Some(Selection {
+            anchor: selection::ContentPos::new(0, 0),
+            cursor: selection::ContentPos::new(0, 2),
+        });
+        let hint_before = app.status.hint.clone();
+
+        app.handle_key(key(crossterm::event::KeyCode::Esc));
+
+        assert_eq!(
+            app.selection_mode,
+            selection::SelectionMode::Idle,
+            "Esc must exit visual mode"
+        );
+        assert!(app.selection.is_none(), "Esc must clear the selection");
+        assert_eq!(
+            app.status.hint, hint_before,
+            "Esc must never write to the clipboard (hint must be unchanged)"
+        );
+    }
+
+    #[test]
+    fn ctrl_y_yanks_a_mouse_drag_selection() {
+        let mut app = App::new_test_with_messages(vec![("assistant", "hello world")]);
+        // Re-pointed at an explicit `Supported` capability (Plan 08) — see
+        // the doc comment on `visual_mode_y_yanks_and_exits`'s override.
+        app.clipboard_yank = Box::new(|text: &str| {
+            let n = text.chars().count();
+            selection::ClipboardOutcome::Written(
+                selection::CopyReport { copied: n, total: n, native_clipboard: selection::NativeClipboardOutcome::NotAttempted },
+                selection::TerminalClipboardCaps {
+                    support: selection::Osc52Support::Supported,
+                    display_name: "iTerm2",
+                },
+            )
+        });
+        let area = Rect::new(0, 0, 80, 19);
+        // Seed the transcript_area cache the same way a real render would,
+        // via the already-tested rebuild_chip_hit_test call site.
+        let measurement = app.transcript_measurement(inner_transcript_width(area));
+        app.rebuild_chip_hit_test(area, &measurement);
+
+        // A mouse drag establishes a selection — never entering visual mode.
+        app.selection = Some(Selection {
+            anchor: selection::ContentPos::new(0, 8),
+            cursor: selection::ContentPos::new(0, 13),
+        });
+        assert_eq!(
+            app.selection_mode,
+            selection::SelectionMode::Idle,
+            "test setup: a mouse-drag selection must not touch selection_mode"
+        );
+
+        app.handle_key(ctrl_key(crossterm::event::KeyCode::Char('y')));
+
+        assert_eq!(
+            app.selection_mode,
+            selection::SelectionMode::Idle,
+            "Ctrl+Y from Idle mode must not enter visual mode"
+        );
+        assert!(
+            app.copy_confirmation_text().is_some_and(|t| t.starts_with("Copied")),
+            "Ctrl+Y must yank the mouse-drag selection; got toast {:?}",
+            app.copy_confirmation_text()
+        );
+    }
+
+    /// Regression guard: the pre-existing `handle_key` family (the `?`
+    /// guard, history recall, approval/skills-hub routing) is unaffected by
+    /// the new v/hjkl/y/Ctrl+Y arms.
+    #[test]
+    fn handle_key_up_down_history_recall_unregressed_outside_visual_mode() {
+        let mut app = App::new_test_empty();
+        assert_eq!(app.selection_mode, selection::SelectionMode::Idle);
+        // No history entries — Up/Down must be no-ops, not panics, and must
+        // not touch selection_mode/selection.
+        app.handle_key(key(crossterm::event::KeyCode::Up));
+        app.handle_key(key(crossterm::event::KeyCode::Down));
+        assert_eq!(app.selection_mode, selection::SelectionMode::Idle);
+        assert!(app.selection.is_none());
+    }
+}
+
+// ── Phase 36.6.4 Plan 02 Task 2: double/triple-click granularity (D-07) ────
+#[cfg(all(test, feature = "test-support"))]
+mod click_count_tests {
+    use super::*;
+
+    fn left_down(column: u16, row: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    fn left_up(column: u16, row: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column,
+            row,
+            modifiers: crossterm::event::KeyModifiers::NONE,
+        }
+    }
+
+    /// Matches `chunks[0]` in an 80x24 frame — the same convention every
+    /// other selection test in this crate uses.
+    fn area() -> Rect {
+        Rect::new(0, 0, 80, 19)
+    }
+
+    #[test]
+    fn double_click_selects_word_under_cursor() {
+        let mut app = App::new_test_with_messages(vec![("assistant", "hello world")]);
+        let a = area();
+        // "Hermes: hello world" — content col 9 ('e' of hello) -> viewport
+        // col = area.x(0) + 1(border) + 9 = 10.
+        app.handle_mouse(left_down(10, 1), a);
+        assert!(
+            app.selection.unwrap().is_empty(),
+            "test setup: a single click is a char-range (empty) anchor"
+        );
+        app.handle_mouse(left_up(10, 1), a);
+
+        app.handle_mouse(left_down(10, 1), a);
+        let sel = app.selection.expect("second click at the same cell must produce a selection");
+        assert_eq!(sel.anchor, selection::ContentPos::new(0, 8));
+        assert_eq!(sel.cursor, selection::ContentPos::new(0, 13));
+
+        let rows = app.transcript_rendered_plain_rows(inner_transcript_width(a));
+        assert_eq!(selection::selected_text(&rows, &sel), "hello");
+    }
+
+    #[test]
+    fn triple_click_selects_full_displayed_line() {
+        let mut app = App::new_test_with_messages(vec![("assistant", "hello world")]);
+        let a = area();
+        app.handle_mouse(left_down(10, 1), a);
+        app.handle_mouse(left_up(10, 1), a);
+        app.handle_mouse(left_down(10, 1), a);
+        app.handle_mouse(left_up(10, 1), a);
+        app.handle_mouse(left_down(10, 1), a);
+        let sel = app.selection.expect("third click at the same cell must produce a selection");
+        assert_eq!(sel.anchor, selection::ContentPos::new(0, 0));
+
+        let rows = app.transcript_rendered_plain_rows(inner_transcript_width(a));
+        assert_eq!(
+            sel.cursor,
+            selection::ContentPos::new(0, rows[0].chars().count()),
+            "triple-click must select the FULL wrapped display row"
+        );
+        let text = selection::selected_text(&rows, &sel);
+        assert!(
+            text.trim_end().ends_with("hello world"),
+            "the full displayed line's actual content must be included; got {text:?}"
+        );
+    }
+
+    #[test]
+    fn click_count_resets_after_window_or_cell_change() {
+        let mut app = App::new_test_with_messages(vec![("assistant", "hello world")]);
+        let a = area();
+
+        // Two escalating clicks at the SAME cell reach Word granularity.
+        app.handle_mouse(left_down(10, 1), a);
+        app.handle_mouse(left_up(10, 1), a);
+        app.handle_mouse(left_down(10, 1), a);
+        assert!(!app.selection.unwrap().is_empty(), "test setup: second click must be Word");
+        app.handle_mouse(left_up(10, 1), a);
+
+        // A third click in a DIFFERENT cell must reset to count 1 (Char),
+        // never escalate to Line.
+        app.handle_mouse(left_down(30, 1), a);
+        assert!(
+            app.selection.unwrap().is_empty(),
+            "a press in a different cell must reset to a char anchor, not escalate to Line"
+        );
+
+        // Directly simulate an elapsed double-click window (same cell, but
+        // stale timestamp) — must also reset to Char, not escalate.
+        app.last_press = Some((
+            selection::ContentPos::new(0, 9),
+            Instant::now() - Duration::from_millis(600),
+            2,
+        ));
+        app.handle_mouse(left_down(10, 1), a);
+        assert!(
+            app.selection.unwrap().is_empty(),
+            "a press outside the double-click window must reset to a char anchor, not escalate"
+        );
+    }
+
+    #[test]
+    fn word_selection_respects_grapheme_boundaries() {
+        let mut app = App::new_test_with_messages(vec![("assistant", "a\u{1F600}b cd")]);
+        let a = area();
+        // "Hermes: a😀b cd" — content col 9 ('😀') -> viewport col 1+9=10.
+        app.handle_mouse(left_down(10, 1), a);
+        app.handle_mouse(left_up(10, 1), a);
+        app.handle_mouse(left_down(10, 1), a);
+        let sel = app.selection.expect("second click must select the word");
+
+        let rows = app.transcript_rendered_plain_rows(inner_transcript_width(a));
+        let text = selection::selected_text(&rows, &sel);
+        assert_eq!(
+            text, "a\u{1F600}b",
+            "the wide glyph must be selected whole within its word, never split mid-codepoint"
+        );
+    }
+
+    /// Regression guard: chip-click priority (Phase 46.7 Plan 07 / Plan 01)
+    /// is unaffected by click-count granularity — a chip press still opens
+    /// the chip and does not escalate/participate in the click-count.
+    #[test]
+    fn chip_click_priority_unregressed_by_click_count_granularity() {
+        use std::sync::{Arc as StdArc, Mutex as StdMutex};
+
+        let mut app = App::new_test_empty();
+        let opened: StdArc<StdMutex<Vec<String>>> = StdArc::new(StdMutex::new(Vec::new()));
+        let opened_clone = opened.clone();
+        app.opener = Box::new(move |url: &str| {
+            opened_clone.lock().unwrap().push(url.to_string());
+            Ok(())
+        });
+
+        let a = area();
+        let rect = Rect {
+            x: a.x + 1,
+            y: a.y + 1,
+            width: 20,
+            height: 1,
+        };
+        *app.chip_hit_test.lock().unwrap() = vec![(
+            rect,
+            ChipAction::OpenArtifactUrl("http://127.0.0.1:8080/artifacts/id1".to_string()),
+        )];
+
+        app.handle_mouse(left_down(rect.x + 2, rect.y), a);
+        app.handle_mouse(left_up(rect.x + 2, rect.y), a);
+        app.handle_mouse(left_down(rect.x + 2, rect.y), a);
+
+        assert_eq!(
+            opened.lock().unwrap().len(),
+            2,
+            "both presses on the chip rect must open the URL every time"
+        );
+        assert!(
+            app.selection.unwrap().is_empty(),
+            "a second press on the SAME chip rect must still be a plain char anchor \
+             (Char granularity), never escalate to Word/Line"
+        );
+        assert!(
+            app.last_press.is_none(),
+            "chip presses must never seed last_press (they don't participate in click-count)"
+        );
+    }
+}
+
+// ── Phase 36.6.4 Plan 02 Task 3: honest copy-confirmation feedback (D-04) ──
+#[cfg(all(test, feature = "test-support"))]
+mod copy_confirmation_tests {
+    use super::*;
+
+    fn supported_written(copied: usize, total: usize) -> selection::ClipboardOutcome {
+        selection::ClipboardOutcome::Written(
+            selection::CopyReport { copied, total, native_clipboard: selection::NativeClipboardOutcome::NotAttempted },
+            selection::TerminalClipboardCaps {
+                support: selection::Osc52Support::Supported,
+                display_name: "iTerm2",
+            },
+        )
+    }
+
+    #[test]
+    fn copy_toast_reports_char_count_without_receipt_language() {
+        let mut app = App::new_test_empty();
+        app.apply_clipboard_outcome(supported_written(5, 5));
+
+        let toast = app
+            .copy_confirmation_text()
+            .expect("a successful write must set a confirmation toast");
+        assert_eq!(toast, "Copied 5 chars");
+        assert!(!toast.contains('✓'), "must carry no checkmark: {toast:?}");
+        assert!(
+            !toast.to_lowercase().contains("clipboard"),
+            "an UNtruncated confirmation must not mention 'clipboard' at all \
+             (that word is reserved for the truncated variant): {toast:?}"
+        );
+    }
+
+    #[test]
+    fn copy_toast_reverts_after_window() {
+        let mut app = App::new_test_empty();
+        app.apply_clipboard_outcome(supported_written(5, 5));
+        assert!(app.copy_confirmation_text().is_some(), "test setup: toast must be active");
+
+        for _ in 0..App::COPY_CONFIRMATION_WINDOW_TICKS - 1 {
+            app.on_tick();
+        }
+        assert!(
+            app.copy_confirmation_text().is_some(),
+            "the toast must still be showing one tick before its window elapses"
+        );
+
+        app.on_tick();
+        assert!(
+            app.copy_confirmation_text().is_none(),
+            "the toast must revert to the normal hint once its window elapses"
+        );
+    }
+
+    #[test]
+    fn copy_truncation_message_carries_both_counts() {
+        let mut app = App::new_test_empty();
+        app.apply_clipboard_outcome(supported_written(74_000, 74_500));
+
+        let toast = app.copy_confirmation_text().expect("truncated write must set a toast");
+        assert!(toast.contains("74000") || toast.contains("74,000"), "got: {toast:?}");
+        assert!(toast.contains("74500") || toast.contains("74,500"), "got: {toast:?}");
+        assert!(
+            toast.contains("terminal clipboard limit — truncated"),
+            "must name the terminal-clipboard-limit reason: {toast:?}"
+        );
+    }
+
+    #[test]
+    fn copy_write_failure_renders_system_transcript_line_not_toast() {
+        let mut app = App::new_test_empty();
+        assert!(app.history.is_empty(), "test setup: no pre-existing history");
+        let hint_before = app.status.hint.clone();
+
+        app.apply_clipboard_outcome(selection::ClipboardOutcome::WriteFailed(std::io::Error::other(
+            "broken pipe",
+        )));
+
+        assert!(
+            app.copy_confirmation_text().is_none(),
+            "a write failure must NEVER set a status-line toast"
+        );
+        assert_eq!(app.status.hint, hint_before, "the hint slot must be untouched on failure");
+        let last = app.history.last().expect("a write failure must push a transcript line");
+        assert_eq!(last.role, Role::System);
+        match &last.content {
+            Some(MessageContent::Text(t)) => {
+                assert!(
+                    t.starts_with("Could not copy selection: broken pipe"),
+                    "got: {t:?}"
+                );
+            }
+            other => panic!("expected Text content, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn copy_empty_selection_result_is_completely_silent() {
+        let mut app = App::new_test_empty();
+        let hint_before = app.status.hint.clone();
+
+        app.apply_clipboard_outcome(selection::ClipboardOutcome::Empty);
+
+        assert!(app.copy_confirmation_text().is_none());
+        assert_eq!(app.status.hint, hint_before);
+        assert!(app.history.is_empty(), "an empty-selection yank must never touch history");
+    }
+
+    // — Plan 08: honest wording for the Unsupported/Unknown OSC52 states,
+    // and the native-outcome precedence rule (2026-08-17 amendment) ──────
+
+    #[test]
+    fn unsupported_terminal_toast_via_app_does_not_claim_a_copy() {
+        let mut app = App::new_test_empty();
+        app.apply_clipboard_outcome(selection::ClipboardOutcome::Written(
+            selection::CopyReport { copied: 5, total: 5, native_clipboard: selection::NativeClipboardOutcome::NotAttempted },
+            selection::TerminalClipboardCaps {
+                support: selection::Osc52Support::Unsupported,
+                display_name: "Terminal.app",
+            },
+        ));
+        let toast = app.copy_confirmation_text().expect("must set a toast");
+        assert!(!toast.starts_with("Copied"), "got {toast:?}");
+        assert!(toast.contains("Terminal.app"), "got {toast:?}");
+    }
+
+    #[test]
+    fn confirmed_native_write_via_app_reports_a_copy_even_when_osc52_is_unsupported() {
+        let mut app = App::new_test_empty();
+        app.apply_clipboard_outcome(selection::ClipboardOutcome::Written(
+            selection::CopyReport { copied: 5, total: 5, native_clipboard: selection::NativeClipboardOutcome::Confirmed },
+            selection::TerminalClipboardCaps {
+                support: selection::Osc52Support::Unsupported,
+                display_name: "Terminal.app",
+            },
+        ));
+        let toast = app.copy_confirmation_text().expect("must set a toast");
+        assert!(toast.starts_with("Copied"), "the observed native write must win: got {toast:?}");
+    }
+}
+
+// ── Phase 36.6.4 Plan 03 (D-09..D-11, TUI-BANG-01): `!` dispatch + render ──
+
+#[cfg(all(test, feature = "test-support"))]
+mod shell_bang_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn shell_bang_output_enters_app_history_matching_transcript() {
+        let mut app = App::new_test_empty();
+        let outcome = shell_bang::ShellOutcome {
+            command: "echo hi".to_string(),
+            stdout: "hi".to_string(),
+            stderr: String::new(),
+            result: shell_bang::ShellResult::Exited(0),
+            truncation: None,
+        };
+        app.apply_shell_outcome(outcome);
+
+        assert_eq!(app.history.len(), 1, "exactly one History entry per shell run");
+        assert_eq!(app.history[0].role, Role::System);
+        let body = render_message_body(&app.history[0]);
+
+        // T-36.6.4-SHELL-02 / TUI-BANG-01 prohibition: the model-facing text
+        // and the operator-visible transcript render must be the SAME
+        // content, byte-identical by construction (both derive from
+        // shell_bang::shell_block_plain — never re-derived independently).
+        assert_eq!(app.shell_runs.len(), 1);
+        let plain = shell_bang::shell_block_plain(&app.shell_runs[0]).join("\n");
+        assert_eq!(body, plain, "App.history content must match the transcript render exactly");
+        assert_eq!(body, "$ echo hi\nhi\n[exit 0]");
+
+        // Double-render guard: the hidden-indices set must mark this
+        // message so `transcript_text`'s normal per-message loop skips it
+        // (it renders exclusively via `shell_runs`/`shell_block_lines`).
+        assert!(app.shell_history_hidden_indices.contains(&0));
+        let normal_render = app.transcript_text();
+        assert!(
+            normal_render.lines.is_empty(),
+            "the shell-run System message must NOT also render via the normal \
+             per-message loop: {normal_render:?}"
+        );
+
+        // The custom-styled render DOES show it exactly once.
+        let full_render = app.transcript_render_text();
+        let rendered_plain: Vec<String> = full_render
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.to_string()).collect::<String>())
+            .collect();
+        assert_eq!(rendered_plain, vec!["$ echo hi".to_string(), "hi".to_string(), "[exit 0]".to_string()]);
+    }
+
+    #[test]
+    fn shell_bang_refusal_renders_single_system_line_and_no_history_entry_for_the_command_text() {
+        let mut app = App::new_test_empty();
+        app.textarea.insert_str("!vim file.txt");
+        app.dispatch_or_submit();
+
+        assert_eq!(
+            app.history.len(),
+            1,
+            "REFUSED renders exactly one System line — no Running…/exit-code lifecycle"
+        );
+        let msg = &app.history[0];
+        assert_eq!(msg.role, Role::System, "refusal must be Role::System, never Role::User");
+        let body = render_message_body(msg);
+        assert!(body.contains("refused"), "got: {body:?}");
+
+        // No shell_runs entry — refusal never spawns, never enters the
+        // Running…/exit-code lifecycle.
+        assert!(app.shell_runs.is_empty());
+
+        // The raw "!vim file.txt" line itself never entered app.history as
+        // its own bubble (the only entry is the constructed refusal
+        // message, not an echoed User-role command line).
+        assert!(
+            app.history.iter().all(|m| m.role != Role::User),
+            "no Role::User entry for the raw command text must exist"
+        );
+    }
+}
+
+// ── Phase 36.6.4 Plan 03 (D-16, TUI-HIST-01): slash/`!` recall history ────
+
+#[cfg(all(test, feature = "test-support"))]
+mod history_store_tests {
+    use super::*;
+
+    #[test]
+    fn history_store_recall_includes_slash_commands() {
+        let mut app = App::new_test_empty();
+        app.textarea.insert_str("/help");
+        app.dispatch_or_submit();
+
+        assert!(app.textarea.is_empty(), "textarea must clear after dispatch");
+        assert_eq!(
+            app.history_store.prev(),
+            Some("/help"),
+            "Up-arrow must recall the submitted slash command"
+        );
+    }
+
+    #[test]
+    fn history_store_recall_includes_bang_commands() {
+        let mut app = App::new_test_empty();
+        app.textarea.insert_str("!echo hi");
+        app.dispatch_or_submit();
+
+        assert_eq!(
+            app.history_store.prev(),
+            Some("!echo hi"),
+            "Up-arrow must recall the submitted `!` command"
+        );
+    }
+
+    #[test]
+    fn history_store_recall_never_puts_slash_or_bang_in_app_history() {
+        let mut app = App::new_test_empty();
+        app.textarea.insert_str("/help");
+        app.dispatch_or_submit();
+        app.textarea.insert_str("!echo hi");
+        app.dispatch_or_submit();
+
+        for msg in &app.history {
+            let body = render_message_body(msg);
+            assert_ne!(body, "/help", "raw slash line must never enter app.history verbatim");
+            assert_ne!(body, "!echo hi", "raw `!` line must never enter app.history verbatim");
+        }
+    }
+
+    #[test]
+    fn history_store_push_is_idempotent_for_consecutive_duplicates() {
+        let mut app = App::new_test_empty();
+        app.textarea.insert_str("/help");
+        app.dispatch_or_submit();
+        app.textarea.insert_str("/help");
+        app.dispatch_or_submit();
+
+        assert_eq!(
+            app.history_store.len(),
+            1,
+            "ReplHistory::push's existing consecutive-duplicate suppression must collapse \
+             the second identical /help submission to a single entry"
+        );
     }
 }

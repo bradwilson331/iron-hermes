@@ -22,6 +22,7 @@
 
 use anyhow::Result;
 use ironhermes_core::config::Config;
+use ironhermes_core::provider::main_provider_key_env_name;
 use ironhermes_tools::Prerequisite;
 
 use crate::Cli;
@@ -73,11 +74,28 @@ fn preflight_action(
 /// config is present+valid but `has_runnable_llm` returned false. Mirrors
 /// the interactive wizard's concern (no usable provider key) without
 /// dropping into a stdin prompt.
-fn emit_non_interactive_llm_notice(out: &mut dyn std::io::Write) {
+///
+/// Quick task 260820-5fu (T-5FU-01): names the env var actually consulted for
+/// the configured main provider, resolved config-only via
+/// [`main_provider_key_env_name`] (`crates/ironhermes-core/src/provider.rs`,
+/// which performs no `std::env` access) — never the variable's VALUE. Before
+/// this fix the message always named the three canonical vars regardless of
+/// the configured provider, which was actively wrong advice for an operator
+/// on e.g. `model.provider: groq`. When no name resolves (an unrecognized
+/// custom provider with no `providers.<name>.api_key_env`), falls back to the
+/// original three-name list unchanged. The leading sentence through the word
+/// "detected" and the word "provider" are preserved byte-identically —
+/// `doctor_integration.rs`'s loose substring assertion depends on it.
+fn emit_non_interactive_llm_notice(config: &Config, out: &mut dyn std::io::Write) {
+    let checked = match main_provider_key_env_name(config) {
+        Some(name) => format!("{name}, a local config.model.base_url, and config.model.api_key"),
+        None => "OPENROUTER_API_KEY, ANTHROPIC_API_KEY, OPENAI_API_KEY, a local \
+config.model.base_url, and config.model.api_key"
+            .to_string(),
+    };
     let _ = writeln!(
         out,
-        "\u{26a0} No runnable LLM provider detected (checked OPENROUTER_API_KEY, \
-ANTHROPIC_API_KEY, OPENAI_API_KEY, a local config.model.base_url, and config.model.api_key) \
+        "\u{26a0} No runnable LLM provider detected (checked {checked}) \
 \u{2014} proceeding non-interactively. Set one of those env vars (or run `hermes setup` \
 interactively) to fix this; requests will fail with an auth error until then."
     );
@@ -151,7 +169,7 @@ pub async fn run_preflight_check(_cli: &Cli, interactive: bool) -> Result<()> {
                 PreflightAction::Proceed => {
                     if !runnable {
                         // Non-interactive + not-runnable: notice instead of wizard.
-                        emit_non_interactive_llm_notice(&mut std::io::stderr());
+                        emit_non_interactive_llm_notice(&config, &mut std::io::stderr());
                     }
                 }
             }
@@ -179,19 +197,53 @@ pub async fn run_preflight_check(_cli: &Cli, interactive: bool) -> Result<()> {
 
 /// D-08: Determine whether the current environment has a usable LLM provider.
 ///
-/// Three ordered checks (RESEARCH Pitfall 6 — env vars FIRST because
-/// dotenvy::from_path already ran in main.rs before preflight):
+/// Four checks (RESEARCH Pitfall 6 — env vars FIRST because dotenvy::from_path
+/// already ran in main.rs before preflight):
 ///
-/// 1. Post-dotenvy process env vars — reads the merged state (highest signal).
-/// 2. Raw .env file scan — belt-and-suspenders for edge cases where the env
-///    var was not loaded into the process (e.g. sub-process launch contexts).
+/// 0. The MAIN provider's configured key env var, resolved via
+///    [`main_provider_key_env_name`] (`crates/ironhermes-core/src/provider.rs`)
+///    — covers non-canonical providers (groq, mistral, deepseek, ...)
+///    declared through `providers.<name>.api_key_env`, checked against both
+///    the process env and the raw `.env` file. `None` falls straight through
+///    to check 1 (quick task 260820-5fu).
+/// 1. Post-dotenvy process env vars for the three canonical names — reads
+///    the merged state (highest signal).
+/// 2. Raw .env file scan for the same three canonical names —
+///    belt-and-suspenders for edge cases where the env var was not loaded
+///    into the process (e.g. sub-process launch contexts).
 /// 3. Local endpoint in config.model.base_url — Ollama users with a localhost
 ///    base_url are NEVER prompted; this is the D-08 escape hatch.
+/// 4. Deprecated `config.model.api_key` inline literal — still accepted by
+///    `validate()`.
 ///
-/// T-35.1-01 mitigation: `l.len() > key.len()` in the raw .env scan rejects
-/// lines like `OPENROUTER_API_KEY=` (empty value) that would otherwise bypass
-/// detection and silently let a "bad" state through.
+/// T-35.1-01 mitigation: `l.len() > key.len()` in the raw .env scan (check 2)
+/// rejects lines like `OPENROUTER_API_KEY=` (empty value) that would
+/// otherwise bypass detection and silently let a "bad" state through. Check 0
+/// applies an equivalent trim-based emptiness test on the resolved variable.
 fn has_runnable_llm(config: &Config, hermes_home: &std::path::Path) -> bool {
+    // Check 0 (quick task 260820-5fu): the main provider's configured key env
+    // var, resolved config-only via `main_provider_key_env_name`. Additive —
+    // `None` (unrecognized custom provider with no api_key_env) falls
+    // straight through to the existing checks below; never panics, never
+    // short-circuits to `false`.
+    if let Some(name) = main_provider_key_env_name(config) {
+        if std::env::var(&name)
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        let prefix = format!("{name}=");
+        let env_path = hermes_home.join(".env");
+        if env_path.exists()
+            && let Ok(text) = std::fs::read_to_string(&env_path)
+            && text
+                .lines()
+                .any(|l| l.starts_with(prefix.as_str()) && !l[prefix.len()..].trim().is_empty())
+        {
+            return true;
+        }
+    }
     // Check 1: post-dotenvy env vars (primary — reads AFTER dotenvy::from_path
     // at main.rs ~line 275, so this reflects the merged .env + process env state).
     for var in &["OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"] {
@@ -456,6 +508,205 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Quick task 260820-5fu: Task 1 — non-canonical provider via
+    // providers.<main>.api_key_env, resolved through main_provider_key_env_name.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn has_runnable_llm_returns_true_for_non_canonical_provider_api_key_env_in_process_env() {
+        let _g = crate::test_env_lock();
+        // SAFETY: clear the canonical vars and the test-specific var so an
+        // inherited developer key cannot make this pass for the wrong reason.
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::set_var("GROQ_API_KEY", "gsk-test-value");
+        }
+        let mut config = Config::default();
+        config.model.provider = "groq".to_string();
+        config.providers.insert(
+            "groq".to_string(),
+            ironhermes_core::config::ProviderConfig {
+                api_key_env: Some("GROQ_API_KEY".to_string()),
+                ..Default::default()
+            },
+        );
+        let tmp = TempDir::new().unwrap();
+        let result = has_runnable_llm(&config, tmp.path());
+        // SAFETY: restore env.
+        unsafe { std::env::remove_var("GROQ_API_KEY") };
+        assert!(
+            result,
+            "expected true when the main provider's providers.<name>.api_key_env \
+             variable is exported non-empty, even though it is not one of the \
+             three canonical names"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Quick task 260820-5fu: Task 2 — pin the edges (empty/whitespace values,
+    // None fallback, the additive guarantee, and untouched escape hatches).
+    // -----------------------------------------------------------------------
+
+    fn groq_config_with_api_key_env() -> Config {
+        let mut config = Config::default();
+        config.model.provider = "groq".to_string();
+        config.providers.insert(
+            "groq".to_string(),
+            ironhermes_core::config::ProviderConfig {
+                api_key_env: Some("GROQ_API_KEY".to_string()),
+                ..Default::default()
+            },
+        );
+        config
+    }
+
+    fn clear_canonical_and_groq_env() {
+        // SAFETY: test-only env mutation; serialised by env_lock (caller holds it).
+        unsafe {
+            std::env::remove_var("OPENROUTER_API_KEY");
+            std::env::remove_var("ANTHROPIC_API_KEY");
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("GROQ_API_KEY");
+        }
+    }
+
+    #[test]
+    fn has_runnable_llm_returns_true_when_dotenv_has_provider_api_key_env_value() {
+        let _g = crate::test_env_lock();
+        clear_canonical_and_groq_env();
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".env"), "GROQ_API_KEY=gsk-real\n").unwrap();
+        let config = groq_config_with_api_key_env();
+        assert!(
+            has_runnable_llm(&config, tmp.path()),
+            "expected true when providers.groq.api_key_env's variable is present \
+             non-empty only in .env, symmetric with the process-env case"
+        );
+    }
+
+    #[test]
+    fn has_runnable_llm_returns_false_when_provider_api_key_env_value_is_empty() {
+        let _g = crate::test_env_lock();
+        clear_canonical_and_groq_env();
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".env"), "GROQ_API_KEY=\n").unwrap();
+        let config = groq_config_with_api_key_env();
+        assert!(
+            !has_runnable_llm(&config, tmp.path()),
+            "expected false when the .env value for the resolved provider key is empty"
+        );
+    }
+
+    #[test]
+    fn has_runnable_llm_returns_false_when_provider_api_key_env_value_is_whitespace_only() {
+        let _g = crate::test_env_lock();
+        clear_canonical_and_groq_env();
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join(".env"), "GROQ_API_KEY=   \n").unwrap();
+        let config = groq_config_with_api_key_env();
+        assert!(
+            !has_runnable_llm(&config, tmp.path()),
+            "expected false when the .env value for the resolved provider key is \
+             whitespace-only (stricter trim-based test than the existing \
+             length-comparison check, applied only on the new path)"
+        );
+    }
+
+    #[test]
+    fn has_runnable_llm_returns_false_when_provider_api_key_env_process_value_is_whitespace_only() {
+        let _g = crate::test_env_lock();
+        clear_canonical_and_groq_env();
+        // SAFETY: test-only env mutation; serialised by env_lock.
+        unsafe { std::env::set_var("GROQ_API_KEY", " ") };
+        let config = groq_config_with_api_key_env();
+        let tmp = TempDir::new().unwrap();
+        let result = has_runnable_llm(&config, tmp.path());
+        // SAFETY: restore env.
+        unsafe { std::env::remove_var("GROQ_API_KEY") };
+        assert!(
+            !result,
+            "expected false when the exported provider key value is whitespace-only"
+        );
+    }
+
+    #[test]
+    fn has_runnable_llm_returns_false_when_main_provider_has_no_resolvable_key_name() {
+        let _g = crate::test_env_lock();
+        clear_canonical_and_groq_env();
+        let mut config = Config::default();
+        config.model.provider = "totally_unknown".to_string();
+        // No `providers` entry for "totally_unknown" and it is not one of the
+        // three canonical names, so main_provider_key_env_name returns None.
+        let tmp = TempDir::new().unwrap();
+        // No .env file, no base_url, no model.api_key.
+        assert!(
+            !has_runnable_llm(&config, tmp.path()),
+            "expected false (no panic) when main_provider_key_env_name resolves to None"
+        );
+    }
+
+    #[test]
+    fn has_runnable_llm_returns_true_for_exported_canonical_key_without_providers_entry() {
+        let _g = crate::test_env_lock();
+        clear_canonical_and_groq_env();
+        // SAFETY: test-only env mutation; serialised by env_lock.
+        unsafe { std::env::set_var("OPENROUTER_API_KEY", "sk-abc") };
+        // Default config: provider = "openrouter", providers map EMPTY — the
+        // additive guarantee: today's behaviour must survive unchanged. Both
+        // the new check 0 (via the canonical fallback in
+        // main_provider_key_env_name) and the existing check 1 resolve to the
+        // same OPENROUTER_API_KEY name here, so they agree.
+        let config = Config::default();
+        assert!(config.providers.is_empty());
+        let tmp = TempDir::new().unwrap();
+        let result = has_runnable_llm(&config, tmp.path());
+        // SAFETY: restore env.
+        unsafe { std::env::remove_var("OPENROUTER_API_KEY") };
+        assert!(
+            result,
+            "expected true for an exported canonical key with an empty providers map \
+             (today's behaviour, must survive additively)"
+        );
+    }
+
+    #[test]
+    fn has_runnable_llm_returns_true_for_untouched_local_base_url_escape_hatch_with_no_api_key_env()
+    {
+        let _g = crate::test_env_lock();
+        clear_canonical_and_groq_env();
+        // groq main provider with NO api_key_env anywhere — main_provider_key_env_name
+        // resolves to None (groq is not canonical and has no providers entry), so
+        // check 0 must fall straight through to check 3 (local base_url).
+        let mut config = Config::default();
+        config.model.provider = "groq".to_string();
+        config.model.base_url = Some("http://localhost:11434".to_string());
+        let tmp = TempDir::new().unwrap();
+        assert!(
+            has_runnable_llm(&config, tmp.path()),
+            "expected true via the untouched local base_url escape hatch, unaffected \
+             by check 0 resolving to None"
+        );
+    }
+
+    #[test]
+    fn has_runnable_llm_returns_true_for_untouched_deprecated_model_api_key_with_no_api_key_env() {
+        let _g = crate::test_env_lock();
+        clear_canonical_and_groq_env();
+        // Same as above, but via the deprecated config.model.api_key escape hatch.
+        let mut config = Config::default();
+        config.model.provider = "groq".to_string();
+        config.model.api_key = Some("sk-legacy".to_string());
+        let tmp = TempDir::new().unwrap();
+        assert!(
+            has_runnable_llm(&config, tmp.path()),
+            "expected true via the untouched deprecated model.api_key escape hatch, \
+             unaffected by check 0 resolving to None"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Original emit_prereq_banner tests
     // -----------------------------------------------------------------------
 
@@ -519,5 +770,89 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         emit_prereq_banner(&active, &mut buf);
         assert!(buf.is_empty(), "no output when active list is empty");
+    }
+
+    // -----------------------------------------------------------------------
+    // Quick task 260820-5fu: Task 3 — emit_non_interactive_llm_notice names
+    // the variable it actually checked, and never a value (T-5FU-01).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn emit_non_interactive_llm_notice_names_resolved_provider_variable() {
+        let config = groq_config_with_api_key_env();
+        let mut buf: Vec<u8> = Vec::new();
+        emit_non_interactive_llm_notice(&config, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(
+            output.contains("GROQ_API_KEY"),
+            "notice must name the resolved provider variable, got: {output}"
+        );
+    }
+
+    #[test]
+    fn emit_non_interactive_llm_notice_still_names_openrouter_for_default_config() {
+        let config = Config::default();
+        let mut buf: Vec<u8> = Vec::new();
+        emit_non_interactive_llm_notice(&config, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(
+            output.contains("OPENROUTER_API_KEY"),
+            "notice must still name OPENROUTER_API_KEY for the default config, got: {output}"
+        );
+    }
+
+    #[test]
+    fn emit_non_interactive_llm_notice_falls_back_and_does_not_panic_for_unresolvable_provider() {
+        let mut config = Config::default();
+        config.model.provider = "totally_unknown".to_string();
+        let mut buf: Vec<u8> = Vec::new();
+        emit_non_interactive_llm_notice(&config, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(
+            output.contains("No runnable LLM provider detected"),
+            "notice must still render for an unrecognized custom provider, got: {output}"
+        );
+        assert!(
+            !output.contains("totally_unknown"),
+            "notice must omit any per-provider variable name when none resolves, got: {output}"
+        );
+    }
+
+    #[test]
+    fn emit_non_interactive_llm_notice_never_contains_a_key_value() {
+        // The function is config-only and never reads std::env — this test
+        // documents that guarantee even though there is no value to leak from
+        // a Config alone. A dummy secret is asserted absent as a belt-and-
+        // suspenders check against future regressions.
+        let config = groq_config_with_api_key_env();
+        let mut buf: Vec<u8> = Vec::new();
+        emit_non_interactive_llm_notice(&config, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        const DUMMY_SECRET: &str = "gsk-dummy-secret-value-should-never-appear";
+        assert!(
+            output.contains("GROQ_API_KEY"),
+            "notice must contain the variable NAME, got: {output}"
+        );
+        assert!(
+            !output.contains(DUMMY_SECRET),
+            "notice must never contain a key VALUE, got: {output}"
+        );
+    }
+
+    #[test]
+    fn emit_non_interactive_llm_notice_preserves_leading_sentence_and_provider_word() {
+        let config = groq_config_with_api_key_env();
+        let mut buf: Vec<u8> = Vec::new();
+        emit_non_interactive_llm_notice(&config, &mut buf);
+        let output = String::from_utf8(buf).unwrap();
+        assert!(
+            output.starts_with("\u{26a0} No runnable LLM provider detected"),
+            "leading sentence through 'detected' must be byte-identical \
+             (doctor_integration.rs depends on the substring), got: {output}"
+        );
+        assert!(
+            output.contains("provider"),
+            "the word 'provider' must still appear, got: {output}"
+        );
     }
 }

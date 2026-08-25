@@ -40,6 +40,41 @@ whoever administers the relay, and confirm membership before debugging anything 
 `restricted: not a relay member` is the single most common first-run failure and has nothing
 to do with `config.yaml`.
 
+## Two ways to connect IronHermes to Buzz
+
+IronHermes can reach Buzz in two different, coexisting ways. Pick based on who should own
+the process and who should own access control — neither path supersedes the other.
+
+**Native gateway adapter — the rest of this document.** IronHermes runs continuously as its
+own Nostr identity: it holds its own keys, applies its own pubkey allowlist (see
+[Access control](#access-control) below), and stays online whether or not anyone is talking
+to it. Choose this for an always-on community bot that IronHermes owns end to end, the way
+a Telegram or Discord bot does.
+
+**ACP path — Buzz spawns IronHermes.** Buzz owns the process lifecycle, via
+`--agent-command`/`--agent-args` (or the `BUZZ_ACP_AGENT_COMMAND`/`BUZZ_ACP_AGENT_ARGS` env
+vars). IronHermes has no Nostr identity of its own on this path — it's a subprocess Buzz
+talks to over the Agent Client Protocol, the same slot Goose or Claude Code can occupy —
+and Buzz owns access control, because IronHermes's pubkey allowlist never runs for
+ACP-spawned sessions. Note that buzz-acp does **not** publish the agent's streamed ACP
+text into the channel — replies reach Buzz only when the agent self-publishes via
+`buzz messages send` under the bridge's identity, which needs profile setup on the
+IronHermes side. Choose this when Buzz is already the harness and IronHermes is meant
+to be a swappable agent behind it. See [`docs/ACP.md`'s "Buzz as ACP
+client"](ACP.md#buzz-as-acp-client) section for the full setup and the reply contract.
+
+| | Native gateway adapter | ACP path |
+|---|---|---|
+| Owns the process | IronHermes (long-running `ironhermes gateway run`) | Buzz (`buzz-acp`'s `AgentPool`, spawns `ironhermes acp`) |
+| Owns the Nostr identity | IronHermes (its own keypair, signs every message) | Buzz — IronHermes has none on this path |
+| Enforces access control | IronHermes's own pubkey whitelist (`gateway.platforms.buzz.whitelist`) | Buzz — the whitelist above never runs |
+| Approvals interactive? | Yes — desktop DM approval flow (with the [caveats above](#what-does-not-work-yet)) | No — buzz-acp auto-denies every permission request; approval-requiring tools stay off unless the Buzz profile's own toolset opts them in |
+| Configuration lives in | `config.yaml`'s `gateway.platforms.buzz` section | `buzz-acp`'s own config (`--agent-command`/`--agent-args` or env vars) plus the IronHermes profile it spawns |
+
+Both are first-class integrations, not a primary path and a fallback — run either one, or
+both at once on different profiles, depending on whether a given deployment wants
+IronHermes to own its own identity or to be one of several agents Buzz manages.
+
 ## Quick start
 
 1. Generate an identity for the active profile:

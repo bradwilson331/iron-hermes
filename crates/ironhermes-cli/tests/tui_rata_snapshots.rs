@@ -99,7 +99,15 @@ fn snap_scroll_active_indicator() {
         .collect();
     let mut app = App::new_test_with_messages(lines);
     app.auto_follow = false;
-    app.transcript_scroll = 20;
+    // Phase 36.6.4 Plan 01 (D-02): the old `transcript_scroll: u16` field is
+    // gone — `scroll_view_state` is the sole offset authority. `set_transcript_
+    // scroll` is a private App method, so this external test seeds the
+    // offset directly through the public `scroll_view_state` field, the same
+    // `ScrollViewState` API `App` itself uses internally.
+    app.scroll_view_state
+        .get_mut()
+        .unwrap()
+        .set_offset(ratatui::layout::Position::new(0, 20));
 
     // WARNING-05: clamp to transcript_max_scroll so the indicator shows a
     // real in-range "scroll N/M" state. Transcript chunk on 80x24 is

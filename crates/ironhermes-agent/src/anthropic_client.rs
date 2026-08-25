@@ -361,37 +361,44 @@ pub fn discover_anthropic_credential(config_api_key: Option<&str>) -> Option<Str
 /// Returns `(system_prompt, anthropic_messages)`.
 ///
 /// Translation rules:
-/// - `system` messages: concatenated into system prompt (not included in messages)
+/// - a LEADING (index 0) `system` message: becomes the system prompt (not included in messages)
+/// - NON-leading `system` messages: demoted to `user` in place, content preserved
 /// - `user` messages: role="user", content as text block
 /// - `assistant` messages with tool_calls: content blocks (text first if any, then tool_use blocks)
 /// - `tool` messages: role="user" with tool_result content block
 /// - Consecutive same-role messages are merged into a single message
 pub(crate) fn adapt_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<AnthropicMessage>) {
-    // Extract system messages
-    let system_parts: Vec<String> = messages
-        .iter()
+    // Only a LEADING system message carries system-prompt authority.
+    //
+    // Non-leading `Role::System` messages are runtime-injected CONTEXT, not
+    // instructions: `!` shell output and slash-command output (`tui_rata`), the
+    // compression history summary (`summarizing_engine`), and advisory notes
+    // (`agent_loop`). Concatenating those into `system` re-sent them as system
+    // instructions on EVERY subsequent turn, permanently promoting
+    // externally-sourced text (e.g. the output of `!curl`) to system authority
+    // for the rest of the session.
+    //
+    // `client.rs::normalize_non_leading_system` already applies exactly this
+    // rule on the ChatCompletions path; the native Anthropic adapter never
+    // called it, so the two paths disagreed. This mirrors its semantics —
+    // keep index 0 as `system`, demote every other `system` message to `user`
+    // in place with its content preserved.
+    let system = messages
+        .first()
         .filter(|m| m.role == Role::System)
-        .filter_map(|m| {
-            m.content
-                .as_ref()
-                .and_then(|c| c.as_text())
-                .map(String::from)
-        })
-        .collect();
-
-    let system = if system_parts.is_empty() {
-        None
-    } else {
-        Some(system_parts.join("\n\n"))
-    };
+        .and_then(|m| m.content.as_ref())
+        .and_then(|c| c.as_text())
+        .map(String::from);
 
     // Convert non-system messages
     let mut raw_messages: Vec<AnthropicMessage> = Vec::new();
 
-    for msg in messages {
+    for (idx, msg) in messages.iter().enumerate() {
         match msg.role {
-            Role::System => continue,
-            Role::User => {
+            // The leading system message became `system` above.
+            Role::System if idx == 0 => continue,
+            // Every other system message is demoted to `user` in place.
+            Role::System | Role::User => {
                 let blocks: Vec<ContentBlock> = match msg.content.as_ref() {
                     Some(MessageContent::Text(t)) => vec![ContentBlock::Text {
                         text: t.clone(),
@@ -1195,6 +1202,66 @@ mod tests {
         assert_eq!(system.as_deref(), Some("You are a helpful assistant."));
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].role, "user");
+    }
+
+    /// Phase 36.6.4 code review CR-02 (Critical): a NON-leading `Role::System`
+    /// message must never reach the `system` field.
+    ///
+    /// `tui_rata::App::apply_shell_outcome` pushes `!` shell output into history
+    /// as `Role::System`. Before this fix, `adapt_messages` filtered EVERY
+    /// system message regardless of position and joined them into `system`,
+    /// which Anthropic re-sends on every turn — so the output of `!curl` gained
+    /// system-prompt authority permanently. `client.rs::normalize_non_leading_system`
+    /// already prevented this on the ChatCompletions path; the two adapters
+    /// disagreed.
+    ///
+    /// FAILS ON THE PRE-FIX TREE: `system` was
+    /// `"You are a helpful assistant.\n\nuid=0(root) gid=0(root)"`.
+    #[test]
+    fn non_leading_system_is_demoted_to_user_not_hoisted_into_system_prompt() {
+        let mut shell_output = ChatMessage::user("uid=0(root) gid=0(root)");
+        shell_output.role = Role::System;
+
+        let messages = vec![
+            ChatMessage::system("You are a helpful assistant."),
+            ChatMessage::user("run id for me"),
+            shell_output,
+            ChatMessage::user("what did that say?"),
+        ];
+        let (system, msgs) = adapt_messages(&messages);
+
+        // The leading system message — and ONLY it — is the system prompt.
+        assert_eq!(
+            system.as_deref(),
+            Some("You are a helpful assistant."),
+            "only the leading system message may become the system prompt; \
+             shell output must never be appended to it"
+        );
+        assert!(
+            !system.as_deref().unwrap_or("").contains("uid=0"),
+            "externally-sourced shell output leaked into the system prompt, \
+             where Anthropic re-sends it with system authority every turn"
+        );
+
+        // The demoted message survives as ordinary user context. All three
+        // remaining messages are user-role and merge into one.
+        assert_eq!(msgs.len(), 1, "consecutive user messages merge");
+        assert_eq!(msgs[0].role, "user");
+        let AnthropicContent::Blocks(blocks) = &msgs[0].content else {
+            panic!("expected content blocks for the merged user message");
+        };
+        let joined: String = blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("uid=0(root)"),
+            "demoting must PRESERVE the content as user context, not drop it; got: {joined}"
+        );
     }
 
     // Test: adapt_messages converts role:"user" and role:"assistant"

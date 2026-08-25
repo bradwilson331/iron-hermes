@@ -386,6 +386,17 @@ impl Tool for CronjobTool {
         CRONJOB_DESCRIPTION
     }
 
+    /// Phase 48.2 Plan 11 (G-48.2-6 slice a): the cron tick loop that FIRES
+    /// a scheduled job lives in the gateway process (runner.rs:2041-2061),
+    /// not here — create/list/get/update/pause/resume/remove all work with
+    /// the gateway down; the schedule simply will not fire until it runs
+    /// again. No `is_available()` or `prerequisites()` override: this tool
+    /// stays AVAILABLE regardless of gateway state (see the trait method's
+    /// doc comment for why that distinction is deliberate).
+    fn runtime_dependency(&self) -> Option<&'static str> {
+        Some(crate::registry::GATEWAY_RUNTIME_DEPENDENCY)
+    }
+
     fn schema(&self) -> ToolSchema {
         ToolSchema::new(
             "cronjob",
@@ -478,6 +489,19 @@ mod tests {
 
     fn parse_response(s: &str) -> Value {
         serde_json::from_str(s).expect("valid JSON response")
+    }
+
+    // --- metadata (Phase 48.2 Plan 11, G-48.2-6 slice a) ---
+
+    /// `cronjob` declares the gateway as its runtime dependency — the cron
+    /// tick loop that fires a job lives there, not in this crate.
+    #[test]
+    fn test_cronjob_declares_gateway_runtime_dependency() {
+        let (tool, _dir) = make_tool();
+        assert_eq!(
+            tool.runtime_dependency(),
+            Some(crate::registry::GATEWAY_RUNTIME_DEPENDENCY)
+        );
     }
 
     // --- create ---

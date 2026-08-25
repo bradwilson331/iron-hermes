@@ -36,6 +36,9 @@ use crate::components::hermes_app::screens::kanban::modals::{
 };
 use crate::components::hermes_app::screens::kanban::profile_switcher::ProfileSwitcher;
 use crate::components::hermes_app::screens::kanban::wizard::CreateProfileWizard;
+// Phase 50.1 Plan 02 (D-10): the context prop shared by CreateProfileWizard
+// and ProfileDetailDrawer — Kanban's mounts below pass `Kanban` explicitly.
+use crate::components::hermes_app::screens::profile_shared::ProfileDialogContext;
 use crate::protocol::TaskRow;
 use dioxus::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -675,6 +678,9 @@ pub fn ScreenKanban(is_active: bool) -> Element {
             // MANAGE ALL PROFILES footer link via `detail_profile`.
             crate::components::hermes_app::screens::kanban::profile_drawer::ProfileDetailDrawer {
                 profile_id: detail_profile,
+                // Phase 50.1 Plan 02 (D-10): explicit at the call site, not
+                // implicit in the default.
+                context: ProfileDialogContext::Kanban,
                 on_close: move |_| detail_profile.set(None),
                 on_profile_updated: move |_| {
                     // Refreshes the dropdown's profile list the same way
@@ -738,6 +744,9 @@ pub fn ScreenKanban(is_active: bool) -> Element {
             // mounted conditionally exactly like `CreateTaskModal` above.
             if *wizard_open.read() {
                 CreateProfileWizard {
+                    // Phase 50.1 Plan 02 (D-10): explicit at the call site,
+                    // not implicit in the default.
+                    context: ProfileDialogContext::Kanban,
                     on_dismiss: move |_| wizard_open.set(false),
                     on_created: move |_name: String| {
                         let cur = *profile_list_refresh_tick.read();

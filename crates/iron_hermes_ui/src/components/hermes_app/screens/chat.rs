@@ -63,6 +63,12 @@ pub enum ChatBubbleKind {
     // Renders as a `.chat-meta` row — no avatar, no bubble background, DIM text
     // (metadata, not a message); modeled on the `Divider` no-bubble marker.
     Meta,
+    // Phase 50.2 Plan 07 (D-20, UI-SPEC Component Inventory §2): the shared
+    // `@mention` handoff quote block. No avatar, no bubble-wrap — modeled
+    // on `Divider`/`Meta`'s no-bubble marker shape — renders
+    // `MentionHandoffBlock` via the `mention_*` fields on `ChatBubble`
+    // below instead of `text`.
+    MentionHandoff,
 }
 
 /// One tool-call progress row inside an assistant bubble.
@@ -109,6 +115,14 @@ pub struct ChatBubble {
     // afterward. Empty for every non-user bubble kind and for user bubbles
     // sent before this plan's UI existed.
     pub attachments: Vec<ChatAttachmentRow>,
+    // Phase 50.2 Plan 07 (D-20): populated only for `ChatBubbleKind::MentionHandoff`
+    // rows — the mentioned bot's name, the delegated (quoted) message, the
+    // client-render state, and (once resolved) the raw reply. `None` for
+    // every other bubble kind.
+    pub mention_target: Option<String>,
+    pub mention_message: Option<String>,
+    pub mention_state: Option<crate::protocol::MentionHandoffState>,
+    pub mention_reply: Option<String>,
 }
 
 // constructors dead under --all-features/legacy-shell; see AVATAR_LOGO note above.
@@ -125,6 +139,10 @@ impl ChatBubble {
             image_src: None,
             video_src: None,
             attachments: vec![],
+            mention_target: None,
+            mention_message: None,
+            mention_state: None,
+            mention_reply: None,
         }
     }
     /// Phase 46.7 Plan 05 (D-06/D-07): a user bubble carrying attachments sent
@@ -145,6 +163,10 @@ impl ChatBubble {
             image_src: None,
             video_src: None,
             attachments,
+            mention_target: None,
+            mention_message: None,
+            mention_state: None,
+            mention_reply: None,
         }
     }
     pub fn assistant(id: u64, text: String) -> Self {
@@ -158,6 +180,10 @@ impl ChatBubble {
             image_src: None,
             video_src: None,
             attachments: vec![],
+            mention_target: None,
+            mention_message: None,
+            mention_state: None,
+            mention_reply: None,
         }
     }
     pub fn error(id: u64, text: String) -> Self {
@@ -171,6 +197,10 @@ impl ChatBubble {
             image_src: None,
             video_src: None,
             attachments: vec![],
+            mention_target: None,
+            mention_message: None,
+            mention_state: None,
+            mention_reply: None,
         }
     }
     /// Phase 36.17.7 D-02-a/b: audio bubble carrying a Blob URL and MIME.
@@ -187,6 +217,10 @@ impl ChatBubble {
             image_src: None,
             video_src: None,
             attachments: vec![],
+            mention_target: None,
+            mention_message: None,
+            mention_state: None,
+            mention_reply: None,
         }
     }
     /// Phase 01-04 (DLV-03 web): image bubble carrying a Blob URL.
@@ -203,6 +237,10 @@ impl ChatBubble {
             image_src: Some(src),
             video_src: None,
             attachments: vec![],
+            mention_target: None,
+            mention_message: None,
+            mention_state: None,
+            mention_reply: None,
         }
     }
     /// Phase 36.3.3 (D-08 web): video bubble carrying a Blob URL.
@@ -219,6 +257,10 @@ impl ChatBubble {
             image_src: None,
             video_src: Some(src),
             attachments: vec![],
+            mention_target: None,
+            mention_message: None,
+            mention_state: None,
+            mention_reply: None,
         }
     }
     /// Phase 41.1 Plan 03 (SKILL-13 web / D-06, UI-SPEC §C): DIM run-turn meta
@@ -236,6 +278,37 @@ impl ChatBubble {
             image_src: None,
             video_src: None,
             attachments: vec![],
+            mention_target: None,
+            mention_message: None,
+            mention_state: None,
+            mention_reply: None,
+        }
+    }
+    /// Phase 50.2 Plan 07 (D-20, UI-SPEC Component Inventory §2): an
+    /// `@mention` handoff quote block. Carries no `text` (the shared
+    /// `MentionHandoffBlock` component reads `mention_message`/
+    /// `mention_state`/`mention_reply` instead) and no avatar/attachments —
+    /// modeled on `meta`/`audio` above.
+    pub fn mention_handoff(
+        id: u64,
+        target: String,
+        message: String,
+        state: crate::protocol::MentionHandoffState,
+    ) -> Self {
+        Self {
+            id,
+            kind: ChatBubbleKind::MentionHandoff,
+            text: String::new(),
+            tool_rows: vec![],
+            audio_src: None,
+            audio_mime: None,
+            image_src: None,
+            video_src: None,
+            attachments: vec![],
+            mention_target: Some(target),
+            mention_message: Some(message),
+            mention_state: Some(state),
+            mention_reply: None,
         }
     }
 }
@@ -936,6 +1009,12 @@ pub fn ScreenChat(is_active: bool) -> Element {
                         // Phase 46.7 Plan 05 (D-11): persisted session attachments,
                         // rendered as a strip below the divider label.
                         attachments: session_attachments,
+                        // Phase 50.2 Plan 07 (D-20): dividers never carry a
+                        // mention-handoff block.
+                        mention_target: None,
+                        mention_message: None,
+                        mention_state: None,
+                        mention_reply: None,
                     });
                     id_val += 1;
 
@@ -1253,6 +1332,12 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                     ChatBubbleKind::Video     => "chat-msg assistant video",
                                     // Phase 41.1 Plan 03 (UI-SPEC §C): DIM meta row, no bubble.
                                     ChatBubbleKind::Meta      => "chat-meta",
+                                    // Phase 50.2 Plan 07 (UI-SPEC Component
+                                    // Inventory §2): wrapper only — the
+                                    // shared MentionHandoffBlock below
+                                    // supplies its own `.kn-mention-handoff`
+                                    // class.
+                                    ChatBubbleKind::MentionHandoff => "chat-mention",
                                 },
 
                                 // Avatar — the shield-caduceus PNG for the
@@ -1273,6 +1358,8 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                     ChatBubbleKind::Divider => rsx! {},
                                     // Phase 41.1 Plan 03 (UI-SPEC §C): meta chip has no avatar.
                                     ChatBubbleKind::Meta => rsx! {},
+                                    // Phase 50.2 Plan 07: mention-handoff block has no avatar.
+                                    ChatBubbleKind::MentionHandoff => rsx! {},
                                     ChatBubbleKind::Audio => rsx! {
                                         div { class: "avatar logo",
                                             img { src: AVATAR_LOGO, alt: "" }
@@ -1319,7 +1406,12 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                 // `Element` via an explicit `rsx! {}` call —
                                 // bare `div { ... }` is only valid directly
                                 // inside an `rsx!` macro invocation.
-                                if !matches!(b.kind, ChatBubbleKind::Divider | ChatBubbleKind::Meta) {
+                                if !matches!(
+                                    b.kind,
+                                    ChatBubbleKind::Divider
+                                        | ChatBubbleKind::Meta
+                                        | ChatBubbleKind::MentionHandoff
+                                ) {
                                     rsx! {
                                     div { class: "chat-bubble-wrap",
                                         // Phase 36.17.10 Plan 04: conditional cancel/stop button.
@@ -1391,9 +1483,11 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                                 ChatBubbleKind::Audio     => "chat-bubble is-assistant is-audio",
                                                 ChatBubbleKind::Image     => "chat-bubble is-assistant is-image",
                                                 ChatBubbleKind::Video     => "chat-bubble is-assistant is-video",
-                                                // Unreachable — Meta/Divider skip the bubble-wrap
-                                                // above; present only for exhaustive-match compliance.
+                                                // Unreachable — Meta/Divider/MentionHandoff skip the
+                                                // bubble-wrap above; present only for
+                                                // exhaustive-match compliance.
                                                 ChatBubbleKind::Meta      => "chat-bubble is-meta",
+                                                ChatBubbleKind::MentionHandoff => "chat-bubble is-mention",
                                             },
                                             // Phase 36.17.7 D-02-a/b/f: render inline <audio controls>
                                             // when this bubble carries a Blob URL. In Dioxus RSX, the
@@ -1547,6 +1641,35 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                             }
                                         }
                                     }
+                                    }
+                                } else if b.kind == ChatBubbleKind::MentionHandoff {
+                                    // Phase 50.2 Plan 07 (D-20, UI-SPEC
+                                    // Component Inventory §2): the shared
+                                    // `@mention` handoff quote block — the
+                                    // SAME component the Bot Chat window and
+                                    // room transcript render, never a
+                                    // per-surface variant.
+                                    if let (
+                                        Some(target),
+                                        Some(message),
+                                        Some(state),
+                                    ) = (
+                                        b.mention_target.clone(),
+                                        b.mention_message.clone(),
+                                        b.mention_state.clone(),
+                                    ) {
+                                        rsx! {
+                                            crate::components::hermes_app::screens::bot_roster::mention_handoff::MentionHandoffBlock {
+                                                entry: crate::components::hermes_app::screens::bot_roster::mention_handoff::MentionHandoffEntry {
+                                                    target,
+                                                    message,
+                                                    state,
+                                                    reply: b.mention_reply.clone(),
+                                                },
+                                            }
+                                        }
+                                    } else {
+                                        rsx! {}
                                     }
                                 } else if b.kind == ChatBubbleKind::Meta {
                                     // Phase 41.1 Plan 03 (SKILL-13 web / D-06, UI-SPEC §C):

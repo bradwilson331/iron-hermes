@@ -571,11 +571,16 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         // Phase 36.6.3 Plan 04 (D-08): trailing `/help commands` segment
         // replaced with the palette (`/ commands`) + `/model` picker
         // (`/model switch`) mentions, appended LAST so they truncate first
-        // on a narrow terminal (UI-SPEC E4 overflow backstop). DUPLICATED at
-        // status_line.rs's `StatusLineState::default()` — both sites MUST
-        // change together (RESEARCH Pitfall 3): this is the literal the
-        // running TUI actually shows.
-        hint: "ctrl+c cancel · Ctrl+T thinking · Ctrl+K skills · ? help · / commands · /model switch"
+        // on a narrow terminal (UI-SPEC E4 overflow backstop).
+        // Phase 36.6.4 Plan 06 (T-36.6.4-DISC-01/02): `Ctrl+Y copy` and
+        // `! shell` segments inserted immediately after the always-critical
+        // `ctrl+c cancel` segment so they survive narrow-terminal right-clip
+        // truncation, ahead of the less time-critical existing segments.
+        // DUPLICATED at status_line.rs's `StatusLineState::default()` — both
+        // sites MUST change together (RESEARCH Pitfall 3): this is the
+        // literal the running TUI actually shows. Kept in sync by
+        // `status_hint_identical_at_both_construction_sites` below.
+        hint: "ctrl+c cancel · Ctrl+Y copy · ! shell · Ctrl+T thinking · Ctrl+K skills · ? help · / commands · /model switch"
             .to_string(),
         tokens_limit: resolver.resolve_for_main().context_length(),
         ..Default::default()
@@ -685,6 +690,21 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     // instead of being discarded by a fresh `ApprovalsStore::load()` per turn.
     let approvals_store = Arc::new(ironhermes_core::ApprovalsStore::load().await);
 
+    // Phase 36.6.4 Plan 05 (D-13, T-36.6.4-IMG-04): build the image Picker
+    // HERE — `build_app_deps` runs strictly after `run_chat_ratatui`'s
+    // alt-screen entry + `EnableMouseCapture` (both happen before
+    // `run_with_deps`, which calls this fn) and strictly before
+    // `run_app_inner`'s `EventStream::new()` starts reading terminal
+    // events. `Picker::from_query_stdio()` writes/reads stdio momentarily
+    // per the crate's own doc comment — calling it lazily on first overlay
+    // open would risk the query's response bytes being consumed by the
+    // live event stream instead of the query's own blocking read. On
+    // query failure the crate does NOT fall back internally (it returns
+    // `Err`) — `unwrap_or_else` to `Picker::halfblocks()` here is the
+    // crate's own documented idiom, not a detection branch we're adding.
+    let picker = ratatui_image::picker::Picker::from_query_stdio()
+        .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
+
     Ok(AppDeps {
         agent_runtime,
         hook_registry,
@@ -732,6 +752,8 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
         pending_skill_overlays: Vec::new(),
         // Phase 36.3.12 Plan 10 (WR-01): process-lifetime store — see above.
         approvals_store,
+        // Phase 36.6.4 Plan 05: built above, in the startup window.
+        picker,
     })
 }
 
@@ -874,7 +896,7 @@ async fn run_app_inner(terminal: &mut DefaultTerminal, app: &mut App) -> Result<
 
     loop {
         let size = terminal.size()?;
-        let transcript_area = compute_transcript_area(size);
+        let transcript_area = compute_transcript_area(size, app.thinking_expanded);
 
         // Per-turn spawn: submit() sets pending_tx; we pick it up here and spawn.
         if app.pending_tx.is_some()
@@ -960,27 +982,29 @@ async fn recv_clarify_request(
     }
 }
 
-/// Compute the transcript chunk area by mirroring the 4-chunk layout from ui.rs.
+/// Compute the transcript chunk area for `size`, delegating to
+/// `ui::transcript_layout` — the SAME chunk derivation `ui()` renders into —
+/// rather than mirroring its constraints (Phase 36.6.4 Plan 07 Task 2, G-07
+/// closure). Before this, this function hand-mirrored only the 4-chunk
+/// layout and never learned about the thinking-pane-expanded 5-chunk one
+/// (Phase 36.6.2 Plan 02, D-01), so `reconcile_scroll`'s max-scroll
+/// rectangle was always 8 rows too tall whenever the thinking pane was open.
 ///
 /// Used by `run_app_inner` to pass `transcript_area` to `reconcile_scroll`.
-pub(crate) fn compute_transcript_area(size: ratatui::prelude::Size) -> ratatui::layout::Rect {
-    use ratatui::layout::{Constraint, Direction, Layout, Rect};
+pub(crate) fn compute_transcript_area(
+    size: ratatui::prelude::Size,
+    thinking_expanded: bool,
+) -> ratatui::layout::Rect {
+    use ratatui::layout::Rect;
     let frame_area = Rect {
         x: 0,
         y: 0,
         width: size.width,
         height: size.height,
     };
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(5),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(3),
-        ])
-        .split(frame_area);
-    chunks[0]
+    let (chunks, transcript_idx) =
+        crate::tui_rata::ui::transcript_layout(frame_area, thinking_expanded);
+    chunks[transcript_idx]
 }
 
 /// Build the tui_rata per-turn `MessagingPerTurnWiring` (Phase 41.1 Plan 10,
@@ -1161,7 +1185,7 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
         // Fires once per tool completion (6 ToolCompleted sites in AgentLoop).
         let tx_tool_result = tx.clone();
         let tool_result_cb: ironhermes_agent::agent_loop::ToolResultCallback =
-            Box::new(move |name: &str, ok: bool| {
+            Box::new(move |name: &str, ok: bool, _output: &str| {
                 let _ = tx_tool_result.send(StreamEvent::ToolResult {
                     name: name.to_string(),
                     ok,
@@ -1196,13 +1220,17 @@ fn spawn_turn(app: &App, tx: UnboundedSender<StreamEvent>, cancel: CancellationT
         // raw mode. The gate is passed to BOTH the intercepts (which own the real
         // terminal/execute_code gating via execute_gated_command) AND the
         // TurnRequest.approval_gate field (which gates the guardrail
-        // NeedsApproval branch for other tools, e.g. MCP mutations).
+        // NeedsApproval branch for other tools, e.g. MCP mutations) — a third
+        // /yolo consumer (quick-260823-qyp, DD-01). The intercepts take the
+        // turn-start `yolo_now` snapshot below; the gate takes the live Arc
+        // itself so a mid-turn /yolo toggle is observed for the rest of the turn.
         let yolo_now = yolo_enabled_for_gating.load(std::sync::atomic::Ordering::SeqCst);
         let tui_gate: Option<std::sync::Arc<dyn ironhermes_core::ApprovalGate>> =
             approval_tx_for_gate.map(|tx| {
                 std::sync::Arc::new(crate::tui_rata::approval_gate_tui::TuiApprovalGate::new(
                     tx,
                     approvals_for_gating.clone(),
+                    yolo_enabled_for_gating.clone(),
                 )) as std::sync::Arc<dyn ironhermes_core::ApprovalGate>
             });
 
@@ -1506,6 +1534,55 @@ mod tests {
             "Phase 36.2 Plan 07 fix: spawn_turn MUST thread the state store \
              through the TurnRequest; passing the unwired sentinel disables the \
              agent_loop write site and breaks /usage + status-bar cost/tok pills."
+        );
+    }
+
+    /// Phase 36.6.4 Plan 06 (known_trap): the status-line hint string is
+    /// constructed at TWO duplicated sites — this file's `status_initial`
+    /// (the literal the running TUI actually shows) and status_line.rs's
+    /// `StatusLineState::default()`. A discoverability edit applied to only
+    /// one is a silent half-fix: the hint the operator sees would then
+    /// depend on which code path happened to build `StatusLineState`. This
+    /// test extracts the literal `hint: "..."` value from both source files
+    /// via `include_str!` (mirroring `inv_25_1_gap8_browser_tools_wired_in_
+    /// rata_chat` above) and asserts they are byte-identical, so the two
+    /// sites cannot silently diverge again.
+    #[test]
+    fn status_hint_identical_at_both_construction_sites() {
+        fn extract_hint(source: &str) -> String {
+            let non_comment: String = source
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let marker = "hint: \"";
+            let start = non_comment
+                .find(marker)
+                .unwrap_or_else(|| panic!("expected to find a `hint: \"` literal in source"))
+                + marker.len();
+            let end = non_comment[start..]
+                .find('"')
+                .unwrap_or_else(|| panic!("expected a closing quote for the hint string literal"))
+                + start;
+            non_comment[start..end].to_string()
+        }
+
+        let event_loop_hint = extract_hint(include_str!("event_loop.rs"));
+        let status_line_hint = extract_hint(include_str!("status_line.rs"));
+
+        assert_eq!(
+            event_loop_hint, status_line_hint,
+            "the status-line hint is constructed at two duplicated sites \
+             (event_loop.rs's status_initial and status_line.rs's \
+             StatusLineState::default()) that MUST carry the identical \
+             string — a discoverability change applied to only one is a \
+             silent half-fix (Phase 36.6.4 Plan 06 known_trap)"
+        );
+        assert!(
+            event_loop_hint.contains("Ctrl+Y copy") && event_loop_hint.contains("! shell"),
+            "expected the extended hint to carry the new `Ctrl+Y copy` / `! shell` \
+             segments placed right after the always-critical `ctrl+c cancel` \
+             segment; got {event_loop_hint:?}"
         );
     }
 

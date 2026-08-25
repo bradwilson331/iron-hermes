@@ -1,4 +1,4 @@
-//! Append-only mutation audit log — `~/.ironhermes/audit.jsonl` (Phase 46 D-01/D-02/D-03).
+//! Append-only mutation audit log — `~/.ironhermes/logs/audit.jsonl` (Phase 46 D-01/D-02/D-03).
 //!
 //! Phase 45 explicitly deferred this (45 D-12): `PendingApproval` never wrote to disk.
 //! This module closes that gap so CFL-03's audit half is satisfied: every approval-gate
@@ -39,6 +39,12 @@ use serde_json::Value;
 use crate::constants::get_hermes_home;
 
 const AUDIT_FILENAME: &str = "audit.jsonl";
+
+/// Phase 48.2 operator request: log-class files live under the home's `logs/`
+/// subdirectory alongside `blackbox-*.jsonl` and `kanban/`, not loose at the
+/// home root. `AuditLog::append` already `create_dir_all`s its parent, so this
+/// directory materializes on first write with no separate bootstrap step.
+const LOGS_DIRNAME: &str = "logs";
 
 /// Default byte cap for the serialized `args` string before the `…(truncated)` marker
 /// is appended (D-03).
@@ -230,12 +236,12 @@ pub struct AuditLog {
 }
 
 impl AuditLog {
-    /// Build an `AuditLog` at `get_hermes_home()/audit.jsonl` (never `HERMES_HOME` —
+    /// Build an `AuditLog` at `get_hermes_home()/logs/audit.jsonl` (never `HERMES_HOME` —
     /// always `IRONHERMES_HOME` per project convention). Does not touch disk until the
     /// first [`AuditLog::append`] call.
     pub fn load(cfg: AuditConfig) -> Self {
         Self {
-            path: get_hermes_home().join(AUDIT_FILENAME),
+            path: get_hermes_home().join(LOGS_DIRNAME).join(AUDIT_FILENAME),
             write_lock: tokio::sync::Mutex::new(()),
             cfg,
         }

@@ -499,7 +499,7 @@ async fn browser_vision_routes_to_auxiliary_vision_role() {
         body_text.contains("base64") || body_text.contains("image_url"),
         "aux server request body should contain base64 image payload or image_url key; \
          got first 200 chars: {}",
-        &body_text.chars().take(200).collect::<String>()
+        body_text.chars().take(200).collect::<String>()
     );
 
     let _ = invoke(&registry, "browser_close", json!({})).await;

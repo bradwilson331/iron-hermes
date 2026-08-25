@@ -719,6 +719,178 @@ impl GatewayRunner {
         let platform_gate = crate::boot_gate::resolve_enabled_platforms(&self.config)
             .map_err(|e| anyhow::anyhow!("Gateway startup refused: {e}"))?;
 
+        // Phase 36.7.1 Plan 01: ONE shared, lock-guarded `DeliveryRegistry`
+        // handle, created before ANY platform adapter is constructed and
+        // handed into `WebhookAdapter::new` below. This solves an ordering
+        // problem: the pre-existing `DeliveryRegistry` (used by the cron
+        // tick loop, still built fresh inside that loop and unchanged by
+        // this plan) is populated long after adapters are constructed,
+        // whereas the webhook adapter is constructed here, early. A shared
+        // `Arc<RwLock<..>>` handle — populated below, once every platform
+        // adapter exists — lets the webhook adapter observe adapters
+        // registered after its own construction, which a by-value registry
+        // handed to its constructor could not.
+        let shared_delivery_registry: Arc<RwLock<DeliveryRegistry>> =
+            Arc::new(RwLock::new(DeliveryRegistry::new()));
+
+        // Phase 36.7.1 Plan 01: construct the webhook adapter, mirroring the
+        // Buzz construction block's shape immediately below. Construction is
+        // cheap and does no I/O (see `WebhookAdapter::new`'s own doc
+        // comment) — binding the listener happens later, inside the spawned
+        // section 7e task. On a construction error, log and skip rather than
+        // panic — a webhook platform that cannot be constructed must not
+        // take down the whole gateway process (fail-closed: a webhook
+        // platform that cannot be constructed is not served).
+        let mut webhook_adapter: Option<Arc<ironhermes_restgw::webhook::WebhookAdapter>> = None;
+        match &platform_gate.webhook {
+            crate::boot_gate::PlatformResolution::Usable(_creds) => {
+                let webhook_platform_config = self
+                    .config
+                    .gateway
+                    .platforms
+                    .get("webhook")
+                    .cloned()
+                    .unwrap_or_default();
+                let webhook_routes_config = ironhermes_restgw::webhook::route_config::WebhookRoutesConfig {
+                    host: webhook_platform_config
+                        .host
+                        .clone()
+                        .unwrap_or_else(|| "127.0.0.1".to_string()),
+                    port: webhook_platform_config.port.unwrap_or(0),
+                    public_opt_in: webhook_platform_config.public_opt_in,
+                    external_base_url: webhook_platform_config
+                        .extra
+                        .get("external_base_url")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                    routes: webhook_platform_config.routes.clone(),
+                };
+                // T-36.7.1-09 (security audit): construction runs the
+                // load-time SSRF check for every configured `deliver: url`
+                // target, and `ssrf::is_safe_url` resolves DNS SYNCHRONOUSLY
+                // (its own module doc tells async callers to wrap it). Calling
+                // it directly here would block a runtime worker for one DNS
+                // lookup per route. `WebhookAdapter::new` stays sync — this is
+                // fail-fast construction-time validation and should read as
+                // such — so the wrap goes here, at the one async call site.
+                let registry_for_construction = shared_delivery_registry.clone();
+                let construction = tokio::task::spawn_blocking(move || {
+                    ironhermes_restgw::webhook::WebhookAdapter::new(
+                        webhook_routes_config,
+                        registry_for_construction,
+                    )
+                })
+                .await;
+                match construction {
+                    Ok(Ok(adapter)) => webhook_adapter = Some(Arc::new(adapter)),
+                    Ok(Err(e)) => tracing::error!(
+                        "Webhook adapter construction failed: {e:#}. Skipping (fail-closed)."
+                    ),
+                    Err(e) => tracing::error!(
+                        "Webhook adapter construction task failed: {e}. Skipping (fail-closed)."
+                    ),
+                }
+            }
+            crate::boot_gate::PlatformResolution::NotUsable(
+                crate::boot_gate::PlatformSkipReason::Disabled,
+            ) => {
+                tracing::debug!("Webhook adapter skipped (not enabled)");
+            }
+            crate::boot_gate::PlatformResolution::NotUsable(
+                crate::boot_gate::PlatformSkipReason::SectionAbsent,
+            ) => {
+                tracing::debug!("Webhook adapter skipped (not configured)");
+            }
+            crate::boot_gate::PlatformResolution::NotUsable(reason) => {
+                tracing::error!("Webhook adapter not resolved ({reason}). Skipping (fail-closed).");
+            }
+        }
+
+        // Phase 36.7.1 Plan 04: construct the REST API server adapter,
+        // mirroring the webhook construction block immediately above.
+        // Construction is cheap and does no I/O (D-06 only checks the
+        // environment) — binding the listener happens later, inside the
+        // spawned section below. On a construction error, log and skip
+        // rather than panic: fail closed for THIS platform only, so a
+        // misconfigured REST surface does not take Telegram/Buzz/webhook
+        // down with it.
+        let mut api_server_adapter: Option<Arc<ironhermes_restgw::api_server::ApiServerAdapter>> =
+            None;
+        match &platform_gate.api_server {
+            crate::boot_gate::PlatformResolution::Usable(_creds) => {
+                let api_server_platform_config = self
+                    .config
+                    .gateway
+                    .platforms
+                    .get("api_server")
+                    .cloned()
+                    .unwrap_or_default();
+                let api_server_config = ironhermes_restgw::api_server::ApiServerConfig {
+                    host: api_server_platform_config.host.clone(),
+                    port: api_server_platform_config.port,
+                    public_opt_in: api_server_platform_config.public_opt_in,
+                };
+                // Task 3: shared runtime handles constructed ONCE here so
+                // Plans 06-09 (runs, sessions, chat, jobs route families)
+                // can read live state without editing this construction
+                // site again. `ModelRegistry::new()` does no I/O — a fresh,
+                // static-table-backed registry, same shape every other
+                // consumer in this codebase constructs on demand.
+                let api_server_handles = ironhermes_restgw::api_server::ApiServerHandles {
+                    turn_registry: self.turn_registry.clone(),
+                    state_store: self.state_store.clone(),
+                    job_store: self.job_store.clone(),
+                    model_registry: Arc::new(ironhermes_core::ModelRegistry::new()),
+                    skill_registry: self.skill_registry.clone(),
+                    tool_registry: self.tool_registry.clone(),
+                    // Plan 06 (runs family, `POST /v1/runs/{id}/approval`):
+                    // `None` here — a per-platform `ApprovalCoordinator` (the
+                    // `build_platform_approval_coordinator` pattern used
+                    // below for Buzz/Telegram) needs the constructed
+                    // `Arc<ApiServerAdapter>` as its bound `PlatformAdapter`,
+                    // which does not exist yet at this point in construction
+                    // (these handles are an INPUT to `ApiServerAdapter::new`
+                    // below, not an output of it) — the same
+                    // construction-ordering shape Phase 47.6 Plan 03 solved
+                    // for Buzz via the `buzz_adapter`-bound-before-primary-
+                    // adapter restructuring a few lines below. Wiring the
+                    // real coordinator here is that same restructuring,
+                    // deliberately deferred rather than rushed into this
+                    // already-large function; until then the approval route
+                    // fails closed (not-found) rather than resolving nothing
+                    // or panicking.
+                    approval_gate: None,
+                    run_events: Arc::new(
+                        ironhermes_restgw::api_server::sse::RunEventRegistry::new(),
+                    ),
+                };
+                match ironhermes_restgw::api_server::ApiServerAdapter::new(
+                    api_server_config,
+                    api_server_handles,
+                ) {
+                    Ok(adapter) => api_server_adapter = Some(Arc::new(adapter)),
+                    Err(e) => tracing::error!(
+                        "API server adapter construction failed: {e:#}. Skipping (fail-closed)."
+                    ),
+                }
+            }
+            crate::boot_gate::PlatformResolution::NotUsable(
+                crate::boot_gate::PlatformSkipReason::Disabled,
+            ) => {
+                tracing::debug!("API server adapter skipped (not enabled)");
+            }
+            crate::boot_gate::PlatformResolution::NotUsable(
+                crate::boot_gate::PlatformSkipReason::SectionAbsent,
+            ) => {
+                tracing::debug!("API server adapter skipped (not configured)");
+            }
+            crate::boot_gate::PlatformResolution::NotUsable(reason) => {
+                tracing::error!(
+                    "API server adapter not resolved ({reason}). Skipping (fail-closed)."
+                );
+            }
+        }
+
         // Phase 47.6 Plan 01: bound here, in `start()`'s OWN scope — NOT
         // inside the section 7d block below and NOT inside the spawned
         // adapter task — so later plans can read it from outer scope. Four
@@ -1275,6 +1447,69 @@ impl GatewayRunner {
             buzz_ready = buzz_adapter.is_some(),
             "Gateway optional-platform sections complete"
         );
+
+        // --- 7e. Optional webhook adapter: populate the shared
+        // DeliveryRegistry with every platform adapter constructed above,
+        // THEN bind + spawn the webhook adapter's own inbound loop (Phase
+        // 36.7.1 Plan 01, D-04/D-07/D-12). Populating the shared handle
+        // here — after Telegram/Buzz construction, same platform set the
+        // cron tick loop's own (separate, unchanged) registry uses — is
+        // what lets the webhook adapter observe adapters registered after
+        // its own construction (see the shared-handle comment near
+        // `platform_gate` above).
+        {
+            let mut registry = shared_delivery_registry.write().await;
+            if let Some(ref tg) = telegram_adapter {
+                registry.insert("telegram", tg.clone() as Arc<dyn DeliverySend>);
+            }
+            #[cfg(feature = "buzz")]
+            if let Some(ref buzz) = buzz_adapter {
+                registry.insert("buzz", buzz.clone() as Arc<dyn DeliverySend>);
+            }
+        }
+
+        if let Some(adapter) = webhook_adapter.clone() {
+            let handler_webhook: Arc<dyn crate::adapter::MessageHandler> =
+                Arc::new(self.build_gateway_handler());
+            let cancel_webhook = self.cancel.clone();
+            // `run_webhook_adapter`/`serve_webhook_adapter` itself logs the
+            // actual BOUND address (`local_addr()`) once the listener opens
+            // — that is the operator-facing "which port answered" line;
+            // logging the pre-bind config here would be misleading when
+            // `port: 0` requests an ephemeral port.
+            tracing::info!("Webhook adapter spawning");
+            join_set.spawn(async move {
+                if let Err(e) =
+                    ironhermes_restgw::webhook::run_webhook_adapter(adapter, handler_webhook, cancel_webhook)
+                        .await
+                {
+                    tracing::error!("Webhook adapter error: {e:#}");
+                }
+            });
+        }
+
+        if let Some(adapter) = api_server_adapter.clone() {
+            let handler_api_server: Arc<dyn crate::adapter::MessageHandler> =
+                Arc::new(self.build_gateway_handler());
+            let cancel_api_server = self.cancel.clone();
+            // `run_api_server_adapter`/`serve_api_server_adapter` itself
+            // logs the actual BOUND address (`local_addr()`) once the
+            // listener opens — the operator-facing "which port answered"
+            // line, matching the webhook adapter's own log-after-bind
+            // shape immediately above.
+            tracing::info!("API server adapter spawning");
+            join_set.spawn(async move {
+                if let Err(e) = ironhermes_restgw::api_server::run_api_server_adapter(
+                    adapter,
+                    handler_api_server,
+                    cancel_api_server,
+                )
+                .await
+                {
+                    tracing::error!("API server adapter error: {e:#}");
+                }
+            });
+        }
 
         // --- 8. Dispatch loop (Phase 47.6 Plan 03: conditional on Telegram
         // being present — everything it needs from steps 3-6 was stashed

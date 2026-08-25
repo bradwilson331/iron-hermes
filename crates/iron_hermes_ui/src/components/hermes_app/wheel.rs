@@ -27,6 +27,16 @@
 //! Pitfall 3 mitigation: drag clamp margin = 12 + RING_GAP + 7 = 33 so the
 //! orange resize ring nodes always stay inside the viewport regardless of
 //! where the wheel is dragged.
+//!
+//! UAT round 2 fix B: the drag/resize gesture state (`drag_state`/
+//! `resize_state`) read inside the window-level pointermove/pointerup
+//! closures is a plain `Rc<Cell<...>>`, deliberately NOT a `Signal`. A raw
+//! JS callback fires outside Dioxus's own render/event-scope bookkeeping, so
+//! reading a component-owned `Signal` there can trip Dioxus's owner/
+//! descendant scope validation and hard-panic the WASM runtime — reproduced
+//! live on the Tools page, where a background poll churns unrelated row
+//! scopes every ~4s. See the doc comment on the window-listener block below
+//! for the full mechanism.
 
 use crate::state::{Screen, WheelState, WheelWedge};
 #[cfg(target_arch = "wasm32")]
@@ -160,9 +170,18 @@ pub fn Wheel() -> Element {
     let mut wheel = use_context::<Signal<WheelState>>();
     let mut active_screen = use_context::<Signal<Screen>>();
 
-    // Local gesture state.
-    let mut dragging = use_signal(|| Option::<DragState>::None);
-    let mut resizing = use_signal(|| Option::<ResizeState>::None);
+    // Local gesture state (UAT round 2 fix B). Deliberately a plain
+    // `Rc<Cell<...>>`, NOT a `Signal` — see the fix-B doc comment on the
+    // window-listener block below for why a Dioxus `Signal` here is unsafe
+    // to read from a raw window-level JS callback. Nothing in the render
+    // tree subscribes to this value (no reactive class or text depends on
+    // it — it only drives the imperative `wheel.with_mut(...)` writes in
+    // the pointermove handler), so dropping Signal reactivity here costs
+    // nothing observable.
+    let drag_state: std::rc::Rc<std::cell::Cell<Option<DragState>>> =
+        use_hook(|| std::rc::Rc::new(std::cell::Cell::new(None)));
+    let resize_state: std::rc::Rc<std::cell::Cell<Option<ResizeState>>> =
+        use_hook(|| std::rc::Rc::new(std::cell::Cell::new(None)));
 
     // Tooltip local state.
     let mut tooltip_open = use_signal(|| false);
@@ -181,6 +200,32 @@ pub fn Wheel() -> Element {
 
     // ── Window-level pointermove + pointerup listeners ──
     //
+    // UAT round 2 fix B (wheel.rs regression): `dragging`/`resizing` used to
+    // be `Signal<Option<...>>` values owned by THIS component's own scope,
+    // read directly inside these window-level closures. That is unsafe: a
+    // window listener installed here lives for the Wheel component's entire
+    // mounted lifetime, but Dioxus dispatches a raw external JS callback
+    // (this one included) OUTSIDE its own render/event-scope bookkeeping —
+    // so whichever scope Dioxus's runtime happens to consider "current" at
+    // the moment the browser actually fires a `pointermove` event is
+    // effectively arbitrary. On the Tools page, where the MCP status poll
+    // churns unrelated row scopes every ~4s, that "current" scope is
+    // frequently one of those rows, not Wheel's own. Reading a Wheel-owned
+    // `Signal` from inside the raw callback under a foreign "current" scope
+    // trips Dioxus's owner/descendant validation ("a Copy Value created in
+    // ScopeId(Wheel) ... was used in ScopeId(some row) ... which is not a
+    // descendant of the owning scope") and can hard-panic the WASM runtime —
+    // reproduced live on this page. `drag_state`/`resize_state` are
+    // therefore plain `Rc<Cell<...>>`, never `Signal`s: ordinary interior
+    // mutability carries no scope-ownership bookkeeping at all, so reading
+    // or writing it from a raw JS callback firing under an unrelated
+    // "current" scope is always safe, regardless of which scope Dioxus
+    // believes is active. `wheel: Signal<WheelState>` itself stays a
+    // `Signal` and is still read/written below via `wheel.read()` /
+    // `wheel.with_mut(...)` — it is HermesApp-root-provided context, and
+    // every scope on the page is a descendant of the root, so it never trips
+    // this check the way a component-local signal does.
+    //
     // Installed via the `listener_slot: Signal<Option<Closure>>` + `use_drop`
     // idiom REPLICATED from warp_hermes.rs:497-552. The cfg-gate is required
     // because `wasm_bindgen::Closure` only exists on wasm32 and the listeners
@@ -188,8 +233,8 @@ pub fn Wheel() -> Element {
     //
     // We register exactly two window listeners (pointermove, pointerup) and
     // tear them down on Wheel unmount. Inside the move handler we branch on
-    // `dragging` / `resizing` to drive translate / resize independently —
-    // mirrors wheel-v2.js lines 402-465.
+    // `drag_state` / `resize_state` to drive translate / resize independently
+    // — mirrors wheel-v2.js lines 402-465.
     #[cfg(target_arch = "wasm32")]
     {
         use wasm_bindgen::closure::Closure;
@@ -202,6 +247,16 @@ pub fn Wheel() -> Element {
 
         let mut move_slot: Signal<Option<PointerListener>> = use_signal(|| None);
         let mut up_slot: Signal<Option<PointerListener>> = use_signal(|| None);
+
+        // Fresh `Rc` clones per closure — `move_cb` and `up_cb` each need
+        // their own owned handle to `drag_state`/`resize_state`; cloning an
+        // `Rc<Cell<...>>` is cheap (refcount bump only, no Dioxus machinery
+        // involved) and carries none of the scope-ownership risk a `Signal`
+        // clone would.
+        let move_drag_state = drag_state.clone();
+        let move_resize_state = resize_state.clone();
+        let up_drag_state = drag_state.clone();
+        let up_resize_state = resize_state.clone();
 
         use_effect(move || {
             let Some(window) = web_sys::window() else {
@@ -221,55 +276,69 @@ pub fn Wheel() -> Element {
                 .unwrap_or(1080.0);
 
             // pointermove — drives both drag-translate and drag-resize.
-            let move_cb = Closure::<dyn FnMut(WebPointerEvent)>::new(move |e: WebPointerEvent| {
-                let cx = e.client_x() as f64;
-                let cy = e.client_y() as f64;
+            //
+            // `use_effect`'s callback is `FnMut` (may run more than once),
+            // so each `Rc` captured by the effect closure is `.clone()`d
+            // again HERE, inside the body, rather than moved directly into
+            // `move_cb`/`up_cb` — a plain `move` would only compile for a
+            // single invocation of the effect body.
+            let move_cb = Closure::<dyn FnMut(WebPointerEvent)>::new({
+                let move_drag_state = move_drag_state.clone();
+                let move_resize_state = move_resize_state.clone();
+                move |e: WebPointerEvent| {
+                    let cx = e.client_x() as f64;
+                    let cy = e.client_y() as f64;
 
-                // Drag-rim translate.
-                let drag_snapshot = *dragging.read();
-                if let Some(mut d) = drag_snapshot {
-                    let dx = cx - d.start_client.0;
-                    let dy = cy - d.start_client.1;
-                    d.dist = d.dist.max((dx * dx + dy * dy).sqrt());
-                    // Update tracked drag distance for click suppression.
-                    dragging.set(Some(d));
+                    // Drag-rim translate.
+                    let drag_snapshot = move_drag_state.get();
+                    if let Some(mut d) = drag_snapshot {
+                        let dx = cx - d.start_client.0;
+                        let dy = cy - d.start_client.1;
+                        d.dist = d.dist.max((dx * dx + dy * dy).sqrt());
+                        // Update tracked drag distance for click suppression.
+                        move_drag_state.set(Some(d));
 
-                    let shell_size = {
-                        let s = wheel.read();
-                        s.size
-                    };
-                    let max_x = (win_w - shell_size - DRAG_MARGIN).max(DRAG_MARGIN);
-                    let max_y = (win_h - shell_size - DRAG_MARGIN).max(DRAG_MARGIN);
-                    let new_x = (d.start_pos.0 + dx).clamp(DRAG_MARGIN, max_x);
-                    let new_y = (d.start_pos.1 + dy).clamp(DRAG_MARGIN, max_y);
-                    wheel.with_mut(|s| {
-                        s.position = (new_x, new_y);
-                    });
-                    return;
-                }
+                        let shell_size = {
+                            let s = wheel.read();
+                            s.size
+                        };
+                        let max_x = (win_w - shell_size - DRAG_MARGIN).max(DRAG_MARGIN);
+                        let max_y = (win_h - shell_size - DRAG_MARGIN).max(DRAG_MARGIN);
+                        let new_x = (d.start_pos.0 + dx).clamp(DRAG_MARGIN, max_x);
+                        let new_y = (d.start_pos.1 + dy).clamp(DRAG_MARGIN, max_y);
+                        wheel.with_mut(|s| {
+                            s.position = (new_x, new_y);
+                        });
+                        return;
+                    }
 
-                // Drag-resize-ring rescale.
-                let resize_snapshot = *resizing.read();
-                if let Some(r) = resize_snapshot {
-                    let dx = cx - r.start_client.0;
-                    let dy = cy - r.start_client.1;
-                    // Diagonal scaling — average of the two deltas (wheel-v2.js
-                    // line 458: `const delta = (dx + dy) / 2`).
-                    let delta = (dx + dy) / 2.0;
-                    let new_size = (r.start_size + delta).clamp(MIN_SIZE, MAX_SIZE);
-                    wheel.with_mut(|s| {
-                        s.size = new_size;
-                    });
+                    // Drag-resize-ring rescale.
+                    let resize_snapshot = move_resize_state.get();
+                    if let Some(r) = resize_snapshot {
+                        let dx = cx - r.start_client.0;
+                        let dy = cy - r.start_client.1;
+                        // Diagonal scaling — average of the two deltas (wheel-v2.js
+                        // line 458: `const delta = (dx + dy) / 2`).
+                        let delta = (dx + dy) / 2.0;
+                        let new_size = (r.start_size + delta).clamp(MIN_SIZE, MAX_SIZE);
+                        wheel.with_mut(|s| {
+                            s.size = new_size;
+                        });
+                    }
                 }
             });
             let _ = window
                 .add_event_listener_with_callback("pointermove", move_cb.as_ref().unchecked_ref());
             move_slot.set(Some(move_cb));
 
-            // pointerup — clear both gesture signals.
-            let up_cb = Closure::<dyn FnMut(WebPointerEvent)>::new(move |_e: WebPointerEvent| {
-                dragging.set(None);
-                resizing.set(None);
+            // pointerup — clear both gesture states.
+            let up_cb = Closure::<dyn FnMut(WebPointerEvent)>::new({
+                let up_drag_state = up_drag_state.clone();
+                let up_resize_state = up_resize_state.clone();
+                move |_e: WebPointerEvent| {
+                    up_drag_state.set(None);
+                    up_resize_state.set(None);
+                }
             });
             let _ = window
                 .add_event_listener_with_callback("pointerup", up_cb.as_ref().unchecked_ref());
@@ -416,26 +485,34 @@ pub fn Wheel() -> Element {
                             fill: "rgba(57,197,207,0.001)",
                             "fill-rule": "evenodd",
                             d: "{d}",
-                            onpointerdown: move |e| {
-                                // Begin drag-rim translate. Per wheel-v2.js
-                                // line 391: only primary mouse button.
-                                if e.trigger_button() != Some(MouseButton::Primary) {
-                                    return;
+                            onpointerdown: {
+                                // Fix B: fresh `Rc` clone for this handler
+                                // closure — see the window-listener block's
+                                // doc comment for why `drag_state` is a
+                                // plain `Rc<Cell<...>>` rather than a
+                                // `Signal`.
+                                let drag_state = drag_state.clone();
+                                move |e| {
+                                    // Begin drag-rim translate. Per wheel-v2.js
+                                    // line 391: only primary mouse button.
+                                    if e.trigger_button() != Some(MouseButton::Primary) {
+                                        return;
+                                    }
+                                    let c = e.client_coordinates();
+                                    // Snapshot position INTO locals before writing gesture state.
+                                    let start_pos = {
+                                        let s = wheel.read();
+                                        s.position
+                                    };
+                                    drag_state.set(Some(DragState {
+                                        start_client: (c.x, c.y),
+                                        start_pos,
+                                        pointer_id: e.pointer_id(),
+                                        dist: 0.0,
+                                    }));
+                                    tooltip_open.set(false);
+                                    e.stop_propagation();
                                 }
-                                let c = e.client_coordinates();
-                                // Snapshot position INTO locals before writing dragging signal.
-                                let start_pos = {
-                                    let s = wheel.read();
-                                    s.position
-                                };
-                                dragging.set(Some(DragState {
-                                    start_client: (c.x, c.y),
-                                    start_pos,
-                                    pointer_id: e.pointer_id(),
-                                    dist: 0.0,
-                                }));
-                                tooltip_open.set(false);
-                                e.stop_propagation();
                             },
                             onmouseenter: move |_| {
                                 tooltip_resize.set(false);
@@ -706,22 +783,30 @@ pub fn Wheel() -> Element {
                             fill: "none", stroke: "rgba(255,166,87,0.55)",
                             "stroke-width": "{RING_W}",
                             "pointer-events": "stroke",
-                            onpointerdown: move |e| {
-                                if e.trigger_button() != Some(MouseButton::Primary) {
-                                    return;
+                            onpointerdown: {
+                                // Fix B: fresh `Rc` clone for this handler
+                                // closure — see the window-listener block's
+                                // doc comment for why `resize_state` is a
+                                // plain `Rc<Cell<...>>` rather than a
+                                // `Signal`.
+                                let resize_state = resize_state.clone();
+                                move |e| {
+                                    if e.trigger_button() != Some(MouseButton::Primary) {
+                                        return;
+                                    }
+                                    let c = e.client_coordinates();
+                                    let start_size = {
+                                        let s = wheel.read();
+                                        s.size
+                                    };
+                                    resize_state.set(Some(ResizeState {
+                                        start_client: (c.x, c.y),
+                                        start_size,
+                                        pointer_id: e.pointer_id(),
+                                    }));
+                                    tooltip_open.set(false);
+                                    e.stop_propagation();
                                 }
-                                let c = e.client_coordinates();
-                                let start_size = {
-                                    let s = wheel.read();
-                                    s.size
-                                };
-                                resizing.set(Some(ResizeState {
-                                    start_client: (c.x, c.y),
-                                    start_size,
-                                    pointer_id: e.pointer_id(),
-                                }));
-                                tooltip_open.set(false);
-                                e.stop_propagation();
                             },
                             onmouseenter: move |_| {
                                 tooltip_resize.set(true);

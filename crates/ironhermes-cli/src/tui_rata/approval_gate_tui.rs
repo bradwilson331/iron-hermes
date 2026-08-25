@@ -24,7 +24,43 @@
 //! The `[s]ession` tier and the pre-surface short-circuit both go through the SAME
 //! process-lifetime [`ApprovalsStore`](ironhermes_core::ApprovalsStore) the headless
 //! flow uses, with the SAME `normalize_command` cache-key scope — no parallel store.
+//!
+//! # DD-01: live `/yolo` Arc, not a snapshot bool
+//!
+//! `yolo` is `Arc<AtomicBool>` — the SAME `Arc` [`App.yolo_enabled`] owns and
+//! [`handle_toggle`](crate::tui_rata::commands) flips — read live inside
+//! `request_approval` with `Ordering::SeqCst`, never captured as a per-turn
+//! snapshot. Phase 39.1 Plan 04 (R39.1-06 / D-06) removed the mid-turn
+//! slash-command gate, so the operator can type `/yolo` while a turn is in
+//! flight; a snapshot would silently ignore that toggle for the rest of the
+//! turn. This is a deliberate divergence from
+//! [`CliApprovalGate`](crate::approval_gate::CliApprovalGate), which stores a
+//! snapshot `bool` — correct there because the headless CLI has no mid-turn
+//! toggle surface (`resolve_yolo` fixes the value for the process at
+//! startup). Do NOT "harmonize" the two types by converting this field to a
+//! plain `bool` — that reintroduces the toggle-goes-stale bug this module
+//! exists to fix. `build_tui_gated_terminal_intercept` /
+//! `build_tui_gated_execute_code_intercept` intentionally keep taking the
+//! turn-start `yolo_now` snapshot (out of scope here), so the gate is never
+//! MORE permissive than the intercepts — only ever stricter, since it also
+//! observes the operator turning yolo back OFF mid-turn.
+//!
+//! # DD-02: the yolo short-circuit runs first
+//!
+//! The yolo load is the FIRST statement of `request_approval`, ahead of
+//! command extraction and ahead of the `is_session_approved` cache check —
+//! mirroring `CliApprovalGate`'s `prompt_for_approval_with_reader`, whose
+//! yolo check is likewise its first statement, ahead of both the non-TTY
+//! check and the session cache. The ordering cannot change any observable
+//! outcome (a cache hit and a yolo bypass both resolve to `Approved`); it
+//! only skips a pointless `.await` on the shared `ApprovalsStore` lock when
+//! the answer is already known.
+//!
+//! This bypass fires ONLY on the `NeedsApproval` branch consulted by
+//! `request_approval`; it cannot reach a Tier-2 `GuardrailDecision::Block`,
+//! which returns upstream in `agent_loop.rs` without ever consulting a gate.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -90,15 +126,25 @@ impl ApprovalRequest {
 pub struct TuiApprovalGate {
     tx: UnboundedSender<ApprovalRequest>,
     approvals: Arc<ApprovalsStore>,
+    /// The SAME `Arc<AtomicBool>` that `App.yolo_enabled` owns and
+    /// `handle_toggle` flips. Read live (never snapshotted) per DD-01, so a
+    /// mid-turn `/yolo` toggle is observed for the rest of the turn.
+    yolo: Arc<AtomicBool>,
 }
 
 impl TuiApprovalGate {
     /// `tx`: the sender half wired to `App.approval_rx` (drained by
     /// `recv_approval_request` in `run_app_inner`'s `select!`). `approvals`: the
     /// SAME process-lifetime store every `spawn_turn` gating closure shares (WR-01)
-    /// so a `[s]ession` grant persists exactly as it does headless.
-    pub fn new(tx: UnboundedSender<ApprovalRequest>, approvals: Arc<ApprovalsStore>) -> Self {
-        Self { tx, approvals }
+    /// so a `[s]ession` grant persists exactly as it does headless. `yolo`: the
+    /// live `/yolo` toggle Arc (DD-01) — pass `app.yolo_enabled.clone()`, not a
+    /// fresh Arc, so this gate observes the operator's actual toggle state.
+    pub fn new(
+        tx: UnboundedSender<ApprovalRequest>,
+        approvals: Arc<ApprovalsStore>,
+        yolo: Arc<AtomicBool>,
+    ) -> Self {
+        Self { tx, approvals, yolo }
     }
 }
 
@@ -111,6 +157,16 @@ impl ApprovalGate for TuiApprovalGate {
         reason: &str,
         args: &serde_json::Value,
     ) -> ApprovalOutcome {
+        // DD-02: yolo short-circuit FIRST, ahead of command extraction and the
+        // is_session_approved cache check — mirrors CliApprovalGate's
+        // prompt_for_approval_with_reader precedent. DD-01: live Arc read, not
+        // a snapshot, so a mid-turn /yolo toggle is observed for the rest of
+        // this turn. Ordering::SeqCst matches handle_toggle (commands.rs) and
+        // the existing load at the per-turn construction site.
+        if self.yolo.load(Ordering::SeqCst) {
+            return ApprovalOutcome::Approved;
+        }
+
         // Same command extraction + cache-key normalization CliApprovalGate uses,
         // so the [s]ession short-circuit shares the headless cache-key scope (D-04).
         let command = args
@@ -291,7 +347,7 @@ mod tests {
         let approvals = Arc::new(ApprovalsStore::with_path(
             std::env::temp_dir().join("gsd_tui_gate_roundtrip.json"),
         ));
-        let gate = TuiApprovalGate::new(tx, approvals);
+        let gate = TuiApprovalGate::new(tx, approvals, Arc::new(AtomicBool::new(false)));
 
         let req_task = tokio::spawn(async move {
             gate.request_approval(
@@ -318,7 +374,7 @@ mod tests {
         let approvals = Arc::new(ApprovalsStore::with_path(
             std::env::temp_dir().join("gsd_tui_gate_drop.json"),
         ));
-        let gate = TuiApprovalGate::new(tx, approvals);
+        let gate = TuiApprovalGate::new(tx, approvals, Arc::new(AtomicBool::new(false)));
 
         let req_task = tokio::spawn(async move {
             gate.request_approval(
@@ -352,7 +408,7 @@ mod tests {
         ));
         // Pre-approve the SAME normalized cache key on the SAME store.
         approvals.approve_session("echo hi").await;
-        let gate = TuiApprovalGate::new(tx, approvals);
+        let gate = TuiApprovalGate::new(tx, approvals, Arc::new(AtomicBool::new(false)));
 
         let outcome = gate
             .request_approval(
@@ -367,6 +423,120 @@ mod tests {
         assert!(
             rx.try_recv().is_err(),
             "session short-circuit must NOT emit an ApprovalRequest"
+        );
+    }
+
+    /// Quick task 260823-qyp Test A: yolo ON + dropped receiver still resolves
+    /// `Approved`. The dead receiver is the assertion's teeth — if the
+    /// short-circuit did not fire, `self.tx.send` would fail closed and this
+    /// would return `Denied` instead. `Approved` with no live receiver is only
+    /// reachable via the DD-01/DD-02 bypass.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tui_gate_yolo_on_bypasses_with_dead_receiver() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
+        drop(rx);
+        let approvals = Arc::new(ApprovalsStore::with_path(
+            std::env::temp_dir().join("gsd_tui_gate_yolo_on.json"),
+        ));
+        let yolo = Arc::new(AtomicBool::new(true));
+        let gate = TuiApprovalGate::new(tx, approvals, yolo);
+
+        let outcome = gate
+            .request_approval(
+                "sess",
+                "terminal",
+                "reason",
+                &serde_json::json!({ "command": "rm -rf /" }),
+            )
+            .await;
+
+        assert_eq!(
+            outcome,
+            ApprovalOutcome::Approved,
+            "yolo=true must short-circuit to Approved even with no live receiver — \
+             a dead channel proves nothing was sent, so this is only reachable via the bypass"
+        );
+    }
+
+    /// Quick task 260823-qyp Test B: yolo OFF still surfaces a real
+    /// `ApprovalRequest` on the channel and still honors the operator's
+    /// `Denied` answer — proves the overlay path is untouched when yolo is off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tui_gate_yolo_off_still_surfaces_overlay() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
+        let approvals = Arc::new(ApprovalsStore::with_path(
+            std::env::temp_dir().join("gsd_tui_gate_yolo_off.json"),
+        ));
+        let yolo = Arc::new(AtomicBool::new(false));
+        let gate = TuiApprovalGate::new(tx, approvals, yolo);
+
+        let req_task = tokio::spawn(async move {
+            gate.request_approval(
+                "sess",
+                "terminal",
+                "reason",
+                &serde_json::json!({ "command": "echo hi" }),
+            )
+            .await
+        });
+
+        let req = rx
+            .recv()
+            .await
+            .expect("yolo=false must still emit an ApprovalRequest on the channel");
+        let _ = req.resolve.send(ApprovalOutcome::Denied);
+
+        let outcome = req_task.await.unwrap();
+        assert_eq!(
+            outcome,
+            ApprovalOutcome::Denied,
+            "the operator's Denied answer must still win when yolo is off"
+        );
+    }
+
+    /// Quick task 260823-qyp Test C (DD-01 regression lock): a mid-turn flip on
+    /// the SAME gate instance changes the outcome. This is the test that fails
+    /// if anyone downgrades `TuiApprovalGate.yolo` from `Arc<AtomicBool>` to a
+    /// snapshot `bool` — a snapshot would return `Denied` on the second call too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn tui_gate_midturn_yolo_flip_is_observed() {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<ApprovalRequest>();
+        drop(rx);
+        let approvals = Arc::new(ApprovalsStore::with_path(
+            std::env::temp_dir().join("gsd_tui_gate_midturn_flip.json"),
+        ));
+        let yolo = Arc::new(AtomicBool::new(false));
+        let gate = TuiApprovalGate::new(tx, approvals, yolo.clone());
+
+        let first = gate
+            .request_approval(
+                "sess",
+                "terminal",
+                "reason",
+                &serde_json::json!({ "command": "echo hi" }),
+            )
+            .await;
+        assert_eq!(
+            first,
+            ApprovalOutcome::Denied,
+            "yolo=false + dead receiver must fail closed to Denied before the flip"
+        );
+
+        yolo.store(true, Ordering::SeqCst);
+
+        let second = gate
+            .request_approval(
+                "sess",
+                "terminal",
+                "reason",
+                &serde_json::json!({ "command": "echo hi" }),
+            )
+            .await;
+        assert_eq!(
+            second,
+            ApprovalOutcome::Approved,
+            "DD-01 guard: the SAME gate instance must observe the live toggle flip — \
+             a snapshot bool would still return Denied here"
         );
     }
 }

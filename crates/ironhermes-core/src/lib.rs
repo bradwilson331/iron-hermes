@@ -1,3 +1,4 @@
+pub mod adapter; // Phase 36.7.1: MessageHandler/PlatformAdapter (moved from ironhermes-gateway to break a dependency cycle with ironhermes-restgw; re-exported unchanged from ironhermes_gateway::adapter)
 pub mod approval_gate;
 pub mod approvals;
 pub mod async_bridge; // Phase 41.3 UAT gap: LocalSet-safe async→sync bridge
@@ -34,6 +35,7 @@ pub mod token_estimator;
 pub mod tts; // Phase 36.17.5
 pub mod types;
 pub mod vault; // Phase 46.8 UAT gap G-46.8-1
+pub mod webhook_route; // Phase 36.7.1: inbound webhook route config schema
 pub mod wizard;
 pub mod workspace;
 
@@ -93,6 +95,13 @@ pub use types::*;
 // `open_store`/`RustyVaultStore::open` call site (server, cron-runner, CLI) routes
 // through this so they all agree on the same on-disk vault location as `vault init`.
 pub use vault::{resolve_vault_config, resolve_vault_config_with_home};
+
+// Phase 36.7.1: inbound webhook route config schema — canonical definition
+// lives here (not in `ironhermes-restgw`) so `PlatformGatewayConfig` can hold
+// a `Vec<WebhookRoute>` field without a dependency-direction cycle.
+pub use webhook_route::{
+    DeliverTarget, OutboundAuth, RouteRails, SessionMode, SignatureKind, WebhookRoute,
+};
 
 // Phase 25.3 D-W-1 — Workspace newtype + cwd walk-up resolution helper.
 // Re-export name is `resolve_workspace_from_cwd` (aliased) to avoid collision with

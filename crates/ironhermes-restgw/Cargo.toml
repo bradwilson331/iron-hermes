@@ -1,0 +1,69 @@
+[package]
+name = "ironhermes-restgw"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Inbound webhook adapter + HTTP REST API server for IronHermes (Phase 36.7.1)"
+
+[dependencies]
+# NOTE: this crate deliberately does NOT depend on `ironhermes-gateway`.
+# `WebhookAdapter` implements `ironhermes_core::adapter::{MessageHandler,
+# PlatformAdapter}` (re-exported unchanged from
+# `ironhermes_gateway::adapter` for backward compatibility) rather than a
+# gateway-owned trait — `ironhermes-gateway::runner` constructs and spawns
+# this crate's `WebhookAdapter`, so a dependency the other way would cycle.
+# See `ironhermes_core::adapter`'s module doc for the full rationale.
+ironhermes-core = { path = "../ironhermes-core" }
+ironhermes-agent = { path = "../ironhermes-agent" }
+ironhermes-state = { path = "../ironhermes-state" }
+ironhermes-cron = { path = "../ironhermes-cron" }
+ironhermes-tools = { path = "../ironhermes-tools" }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }
+tokio-util = { workspace = true }
+tokio-stream = { workspace = true }
+base64 = { workspace = true }
+url = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+# Direct pins (not workspace-level — this crate is the only consumer today):
+#
+# `axum = "=0.8.4"` reuses the EXACT pin `iron_hermes_ui` already carries
+# (crates/iron_hermes_ui/Cargo.toml), so the dependency graph never holds two
+# axum majors at once.
+#
+# `sha1 = "0.10"` is load-bearing and must stay pinned to the 0.10.x line, not
+# the newer 0.11 release: `hmac 0.12` (the workspace pin) is built against the
+# `digest 0.10.x` trait generation, and `sha1 0.11` belongs to the next
+# generation — mixing them fails to satisfy the digest trait bound on the
+# SHA-1 HMAC type Twilio's verifier (Plan 02) needs. `Cargo.lock` already
+# carries both `hmac`/`sha1` generations transitively; this direct pin is what
+# keeps this crate on the 0.10 generation explicitly.
+#
+# `ed25519-dalek = "3.0"` is net-new (absent from Cargo.lock before this
+# plan), used by the Telnyx verifier (Plan 02).
+#
+# All three package names were run through the package-legitimacy gate during
+# phase research and returned OK (no [ASSUMED]/[SUS]/[SLOP] verdict).
+axum = "=0.8.4"
+sha1 = "0.10"
+ed25519-dalek = "3.0"
+
+[dev-dependencies]
+axum = "=0.8.4"
+reqwest = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+# Already a workspace dependency (used elsewhere) — added here as a
+# dev-dependency only, to capture `tracing::warn!` output in
+# tests/webhook_delivery.rs (O-02's "the denial ... emits a warning-level
+# record" behavior). No new external package introduced.
+tracing-subscriber = { workspace = true }

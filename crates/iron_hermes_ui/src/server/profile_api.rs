@@ -60,8 +60,8 @@ use crate::protocol::{ProfileGap, ProfileHealth};
 // `ProfileConfigWritePayload` are Plan 05's additions, same reasoning:
 // part of `fetch_profile_detail`/`update_profile_config`'s signatures.
 use crate::protocol::{
-    CreateProfileRequest, KeyMode, KeyRow, KeyStatus, ProfileConfigWritePayload, ProfileDetail,
-    ProfileRow,
+    CreateProfileRequest, DuplicateProfileRequest, KeyMode, KeyRow, KeyStatus,
+    ProfileConfigWritePayload, ProfileDetail, ProfilePersona, ProfileRow, ProfileSkillRow,
 };
 
 /// Phase 47.4 Plan 01 (D-08): the five-name LLM-provider key allowlist.
@@ -564,10 +564,33 @@ pub(crate) fn render_profile_env(
     name: &str,
     entries: &[(String, String)],
 ) -> Result<String, String> {
+    render_profile_env_with_stamp(name, entries, None)
+}
+
+/// Phase 48.2 Plan 07 (D-09 checkpoint, resolved option b — inventory
+/// stamp): lift of [`render_profile_env`]'s body, parameterized with an
+/// optional EXTRA provenance comment line rendered right after the existing
+/// header and before the two informational lines. [`render_profile_env`]
+/// delegates here with `None`, so its own output — and every existing test
+/// against it — is byte-identical to before this lift (T-48.2-07-04: no
+/// second write implementation, only this one shared core gains a new,
+/// backward-compatible parameter). `extra_stamp` is always a `#`-prefixed
+/// comment line, inert to the `dotenvy` reader, verified by the same
+/// round-trip check below.
+#[cfg(feature = "server")]
+pub(crate) fn render_profile_env_with_stamp(
+    name: &str,
+    entries: &[(String, String)],
+    extra_stamp: Option<&str>,
+) -> Result<String, String> {
     let mut out = String::new();
     out.push_str(PROFILE_ENV_PROVENANCE_PREFIX);
     out.push_str(name);
     out.push_str("\"\n");
+    if let Some(stamp) = extra_stamp {
+        out.push_str(stamp);
+        out.push('\n');
+    }
     out.push_str(
         "# Provider keys inherited from the root .env — workers run with a scrubbed env, so this\n",
     );
@@ -810,6 +833,385 @@ pub async fn create_profile(req: CreateProfileRequest) -> Result<Vec<KeyRow>, Se
         let _ = req;
         Err(ServerFnError::new(
             "create_profile unavailable without `server` feature",
+        ))
+    }
+}
+
+// ============================================================================
+// Phase 50.1 Plan 06 (D-17): duplicate_profile — an explicit allowlist copy
+// that omits key material.
+// ============================================================================
+
+/// Phase 50.1 Plan 06: recursive directory copy shared by
+/// `DuplicateCopyEntry`'s `SkillsDir`/`MemoriesDir` variants and
+/// `bot_avatar_api::copy_bot_avatar_files`. Never follows a symlink — a
+/// symlinked entry anywhere inside the source tree is skipped rather than
+/// dereferenced, so a duplicate can never be tricked into copying bytes
+/// from outside the source directory it was told to copy. Creates the
+/// destination directory even when the source is empty, so an empty
+/// `skills/` dir round-trips as an empty `skills/` dir rather than a
+/// missing one.
+#[cfg(feature = "server")]
+pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("create_dir_all({dst:?}): {e}"))?;
+    for entry in std::fs::read_dir(src).map_err(|e| format!("read_dir({src:?}): {e}"))? {
+        let entry = entry.map_err(|e| format!("read_dir entry: {e}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|e| format!("file_type({:?}): {e}", entry.path()))?;
+        let dest_path = dst.join(entry.file_name());
+        if file_type.is_symlink() {
+            continue;
+        } else if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest_path)?;
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), &dest_path)
+                .map_err(|e| format!("copy {:?}: {e}", entry.path()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Phase 50.1 Plan 06 (D-17): one entry in the explicit allowlist a
+/// duplicate copies. A `match` arm per variant, not a generic "copy this
+/// relative path" table — `WorkspacePersona` needs bespoke handling (the
+/// D-16 workspace-resolver marker directory), which a purely data-driven
+/// table would not naturally express.
+#[cfg(feature = "server")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DuplicateCopyEntry {
+    /// `config.yaml` — copied only if the source has one (a profile
+    /// scaffolded with no root `config.yaml` to copy from legitimately has
+    /// none, mirroring `create_profile_impl`'s own "SKIPPED" branch).
+    ConfigFile,
+    /// `skills/` — the profile's own skill directory, copied only if
+    /// present.
+    SkillsDir,
+    /// `memories/` — the profile's own memory store, copied only if
+    /// present.
+    MemoriesDir,
+    /// The persona file (`SOUL.md`), never the rest of `workspace/` (live
+    /// session/worktree state stays behind). OF-6 fix
+    /// (`50.1-OPERATOR-FEEDBACK.md`): copies from/to the PROFILE-ROOT
+    /// `SOUL.md` — `profile_dir_for(name).join("SOUL.md")` — the path
+    /// `ironhermes_agent::prompt_builder::PromptBuilder::load_soul_md`
+    /// actually reads at turn time via `get_hermes_home()` once
+    /// `IRONHERMES_HOME` is pivoted by `--profile <bot_name>`. Reads the
+    /// source with a fallback to the pre-OF-6 legacy `workspace/SOUL.md`
+    /// location, so duplicating a bot whose persona predates this fix still
+    /// carries it forward. The target's `workspace/.ironhermes/` marker
+    /// directory is still seeded here (duplicating, not calling,
+    /// `profile_workspace_dir`'s own marker step, since the target profile
+    /// directory does not exist yet during staging) — that marker is
+    /// load-bearing for `ironhermes-cli::run_single`'s workspace-scoped
+    /// session/trajectory tracking during a handoff turn, a real and
+    /// separate mechanism from persona loading (see `profile_workspace_dir`'s
+    /// doc comment).
+    WorkspacePersona,
+}
+
+/// Phase 50.1 Plan 06 (D-17): the explicit allowlist of profile artifacts a
+/// clone carries — copy by ALLOWLIST, never by directory sweep with
+/// exclusions. An allowlist grows only when a future change explicitly adds
+/// an entry here; a sweep-with-exclusions would silently start copying
+/// anything a future phase adds to the profile directory shape, and the one
+/// thing that must NEVER be copied (`.env` — the CR-03 exfiltration
+/// mechanism, since profile `.env` values are dotenvy-substituted at read
+/// time and a copied variable reference can dereference to a different
+/// secret in its new home) is exactly the kind of file a future phase would
+/// add. `.env`, `state.db`, `sessions/`, `cron/`, `logs/`,
+/// `subagent-transcripts/`, `browser-profile/` and `ui-meta.json` (the
+/// bot-meta sidecar, handled separately by `bot_meta_api::copy_bot_meta`)
+/// are all deliberately absent — none is ever touched by
+/// `duplicate_profile_impl`.
+///
+/// Credential-carrying duplication waits for Phase 51's per-profile
+/// secret-storage work, where it becomes a re-key to the new bot rather
+/// than a plaintext copy — this omission is a design, not an oversight.
+/// (D-06: this file never names that future storage mechanism.)
+#[cfg(feature = "server")]
+const DUPLICATE_COPY_ENTRIES: &[DuplicateCopyEntry] = &[
+    DuplicateCopyEntry::ConfigFile,
+    DuplicateCopyEntry::SkillsDir,
+    DuplicateCopyEntry::MemoriesDir,
+    DuplicateCopyEntry::WorkspacePersona,
+];
+
+/// Phase 50.1 Plan 06: dispatch one [`DuplicateCopyEntry`] into a
+/// build-then-promote staging directory. `staging_dir` is NOT yet the
+/// target profile's real path (see `duplicate_profile_impl`) — every path
+/// here is joined relative to it directly, never through `profile_dir_for`.
+#[cfg(feature = "server")]
+fn copy_duplicate_entry(
+    entry: DuplicateCopyEntry,
+    source_dir: &Path,
+    staging_dir: &Path,
+) -> Result<(), String> {
+    match entry {
+        DuplicateCopyEntry::ConfigFile => {
+            let src = source_dir.join("config.yaml");
+            if src.is_file() {
+                std::fs::copy(&src, staging_dir.join("config.yaml"))
+                    .map_err(|e| format!("copy config.yaml: {e}"))?;
+            }
+            Ok(())
+        }
+        DuplicateCopyEntry::SkillsDir => {
+            let src = source_dir.join("skills");
+            if src.is_dir() {
+                copy_dir_recursive(&src, &staging_dir.join("skills"))?;
+            }
+            Ok(())
+        }
+        DuplicateCopyEntry::MemoriesDir => {
+            let src = source_dir.join("memories");
+            if src.is_dir() {
+                copy_dir_recursive(&src, &staging_dir.join("memories"))?;
+            }
+            Ok(())
+        }
+        DuplicateCopyEntry::WorkspacePersona => {
+            // OF-6 fix: canonical source is the profile-root SOUL.md;
+            // legacy `workspace/SOUL.md` is the pre-fix location, kept as a
+            // fallback so a source bot saved before this fix still clones
+            // its persona forward.
+            let canonical_src = source_dir.join("SOUL.md");
+            let legacy_src = source_dir.join("workspace").join("SOUL.md");
+            let src = if canonical_src.is_file() {
+                Some(canonical_src)
+            } else if legacy_src.is_file() {
+                Some(legacy_src)
+            } else {
+                None
+            };
+            if let Some(src) = src {
+                let target_workspace = staging_dir.join("workspace");
+                std::fs::create_dir_all(&target_workspace)
+                    .map_err(|e| format!("create target workspace dir: {e}"))?;
+                // Session/trajectory-scoping marker — see the
+                // `WorkspacePersona` variant's own doc comment for why this
+                // is duplicated here rather than calling
+                // `profile_workspace_dir`.
+                std::fs::create_dir_all(target_workspace.join(".ironhermes"))
+                    .map_err(|e| format!("create target workspace marker dir: {e}"))?;
+                std::fs::copy(&src, staging_dir.join("SOUL.md"))
+                    .map_err(|e| format!("copy persona file: {e}"))?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Phase 50.1 Plan 06 (D-17, T-50.1-06-01/07): the `duplicate_profile` impl
+/// layer. Validates both names, rejects an existing target and a missing
+/// source before any path is resolved, then builds the copy in a staging
+/// directory and promotes it with a single `rename` — a mid-copy failure
+/// therefore never leaves a half-populated target directory an operator
+/// would mistake for a working bot (T-50.1-06-07). The staging directory's
+/// name is dot-prefixed so `list_profiles`'s existing dotfile skip already
+/// hides a crash-orphaned staging directory from the roster.
+///
+/// After the directory promotes, copies the "look" (D-17): the bot-meta
+/// record via `bot_meta_api::copy_bot_meta`, then any avatar file bytes it
+/// references via `bot_avatar_api::copy_bot_avatar_files`. Either failing
+/// rolls back the just-promoted target directory — a clone with config but
+/// a silently missing look is a degraded clone, not the "no half-done
+/// state" guarantee this fn promises.
+#[cfg(feature = "server")]
+pub(crate) fn duplicate_profile_impl(source: &str, target: &str) -> Result<String, String> {
+    let validated_source = ironhermes_core::profile::validate_profile_name(source)
+        .map_err(|e| format!("invalid source profile name: {e}"))?;
+    let validated_target = ironhermes_core::profile::validate_profile_name(target)
+        .map_err(|e| format!("invalid target profile name: {e}"))?;
+
+    let source_dir = profile_dir_for(&validated_source);
+    if !source_dir.is_dir() {
+        return Err(format!("source profile '{validated_source}' does not exist"));
+    }
+
+    let target_dir = profile_dir_for(&validated_target);
+    if target_dir.exists() {
+        return Err(format!("profile '{validated_target}' already exists"));
+    }
+
+    let profiles_root = ironhermes_core::get_hermes_home().join(ironhermes_core::PROFILES_SUBDIR);
+    std::fs::create_dir_all(&profiles_root)
+        .map_err(|e| format!("create_dir_all(profiles root): {e}"))?;
+    // Leading dot: `list_profiles` already skips dot-prefixed entries
+    // (T-47.4-01-D1), so a staging directory left behind by a crashed
+    // duplicate never appears in the roster as a phantom bot.
+    let staging_dir = profiles_root.join(format!(".duplicate-staging-{}", uuid::Uuid::new_v4()));
+    let _ = std::fs::remove_dir_all(&staging_dir); // clear any stale leftover
+
+    let build_result = (|| -> Result<(), String> {
+        std::fs::create_dir_all(&staging_dir)
+            .map_err(|e| format!("create_dir_all(staging): {e}"))?;
+        for entry in DUPLICATE_COPY_ENTRIES {
+            copy_duplicate_entry(*entry, &source_dir, &staging_dir)?;
+        }
+        Ok(())
+    })();
+
+    if let Err(e) = build_result {
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        return Err(e);
+    }
+
+    if let Err(e) = std::fs::rename(&staging_dir, &target_dir) {
+        let _ = std::fs::remove_dir_all(&staging_dir);
+        return Err(format!("promote staged copy to {target_dir:?}: {e}"));
+    }
+
+    if let Err(e) = crate::server::bot_meta_api::copy_bot_meta(&validated_source, &validated_target)
+    {
+        let _ = std::fs::remove_dir_all(&target_dir);
+        return Err(format!("copy bot-meta: {e}"));
+    }
+    if let Err(e) =
+        crate::server::bot_avatar_api::copy_bot_avatar_files(&validated_source, &validated_target)
+    {
+        let _ = std::fs::remove_dir_all(&target_dir);
+        return Err(format!("copy avatar: {e}"));
+    }
+
+    Ok(validated_target)
+}
+
+/// Phase 50.1 Plan 06 (D-17): the `duplicate_profile` `#[server]` fn.
+/// Follows this crate's four-step write protocol: validate → fresh
+/// `Config::load()` → `check_profile_write_gate` → `spawn_blocking` around
+/// `duplicate_profile_impl`. There is no profile CLI subcommand to delegate
+/// to in this workspace (RESEARCH.md Pitfall 3) — the copy is direct
+/// filesystem work, following `create_profile_impl`'s own discipline (no
+/// force-unwraps, every error a propagated value).
+#[server]
+pub async fn duplicate_profile(req: DuplicateProfileRequest) -> Result<String, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        let config = ironhermes_core::config::Config::load()
+            .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
+        check_profile_write_gate(&config).map_err(ServerFnError::new)?;
+
+        let DuplicateProfileRequest { source, target } = req;
+        let created = tokio::task::spawn_blocking(move || duplicate_profile_impl(&source, &target))
+            .await
+            .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
+            .map_err(ServerFnError::new)?;
+        Ok(created)
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = req;
+        Err(ServerFnError::new(
+            "duplicate_profile unavailable without `server` feature",
+        ))
+    }
+}
+
+// ============================================================================
+// Phase 50.1 Plan 06 (D-18): delete_profile — permanent removal with a
+// synchronous metadata delete hook.
+// ============================================================================
+
+/// Phase 50.1 Plan 06 (D-18, T-50.1-06-04): the one deletion-protected
+/// profile name. A dedicated, explicit predicate rather than relying on
+/// `validate_profile_name`'s `RESERVED_NAMES` rejection of "default" as an
+/// incidental side effect — the reservation exists for a different reason
+/// (avoiding a name collision with `current_profile()`'s own "no profile
+/// selected" sentinel at CREATE time) and could in principle change without
+/// this delete-time guarantee changing with it. Checked at the impl layer
+/// so the refusal holds even if a caller bypasses the UI entirely
+/// (T-50.1-06-04).
+#[cfg(feature = "server")]
+pub(crate) fn is_deletion_protected(name: &str) -> bool {
+    name == "default"
+}
+
+/// Phase 50.1 Plan 06 (D-18, T-50.1-06-02/03/04): the `delete_profile` impl
+/// layer — permanent removal of an ordinary bot's profile directory plus
+/// its bot-meta entry, in the same call. Refuses the default profile
+/// ([`is_deletion_protected`]) and the currently live profile
+/// (`ironhermes_core::current_profile()`) before ever resolving a path, and
+/// confirms the resolved directory is contained within the profiles root
+/// (canonicalized, following any symlink to its real target) and is not
+/// itself a symlink before removing anything — never follows a symlink out
+/// of the profiles root (T-50.1-06-02).
+#[cfg(feature = "server")]
+pub(crate) fn delete_profile_impl(name: &str) -> Result<(), String> {
+    if is_deletion_protected(name) {
+        return Err("the default profile can't be deleted".to_string());
+    }
+    if name == ironhermes_core::current_profile() {
+        return Err(format!(
+            "profile '{name}' is the currently live profile — it cannot be deleted while it is serving the embedded runtime"
+        ));
+    }
+
+    let validated_name = ironhermes_core::profile::validate_profile_name(name)
+        .map_err(|e| format!("invalid profile name: {e}"))?;
+
+    let profile_dir = profile_dir_for(&validated_name);
+    if !profile_dir.is_dir() {
+        return Err(format!("profile '{validated_name}' does not exist"));
+    }
+    if profile_dir.is_symlink() {
+        return Err(format!(
+            "refusing to remove '{validated_name}': profile path is a symlink"
+        ));
+    }
+
+    let profiles_root = ironhermes_core::get_hermes_home().join(ironhermes_core::PROFILES_SUBDIR);
+    let canonical_dir = std::fs::canonicalize(&profile_dir)
+        .map_err(|e| format!("resolve profile directory: {e}"))?;
+    let canonical_root = std::fs::canonicalize(&profiles_root)
+        .map_err(|e| format!("resolve profiles root: {e}"))?;
+    if !canonical_dir.starts_with(&canonical_root) {
+        return Err(format!(
+            "refusing to remove '{validated_name}': resolved path escapes the profiles root"
+        ));
+    }
+
+    std::fs::remove_dir_all(&profile_dir)
+        .map_err(|e| format!("remove profile directory: {e}"))?;
+
+    // Sibling avatar directory (D-11: never nested inside profiles/) — best
+    // effort. The profile is already gone either way; a stray avatar
+    // directory left behind by a permission edge case must not turn an
+    // otherwise-successful delete into a reported failure.
+    let _ = std::fs::remove_dir_all(crate::server::bot_avatar_api::bot_avatar_dir(
+        &validated_name,
+    ));
+
+    crate::server::bot_meta_api::delete_bot_meta_impl(&validated_name)?;
+
+    Ok(())
+}
+
+/// Phase 50.1 Plan 06 (D-18): the `delete_profile` `#[server]` fn. Follows
+/// this crate's four-step write protocol: validate → fresh `Config::load()`
+/// → `check_profile_write_gate` → `spawn_blocking` around
+/// `delete_profile_impl`. There is no profile CLI subcommand to shell out
+/// to in this workspace (RESEARCH.md Pitfall 3) — this is direct filesystem
+/// removal.
+#[server]
+pub async fn delete_profile(name: String) -> Result<(), ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        let config = ironhermes_core::config::Config::load()
+            .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
+        check_profile_write_gate(&config).map_err(ServerFnError::new)?;
+
+        tokio::task::spawn_blocking(move || delete_profile_impl(&name))
+            .await
+            .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
+            .map_err(ServerFnError::new)?;
+        Ok(())
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = name;
+        Err(ServerFnError::new(
+            "delete_profile unavailable without `server` feature",
         ))
     }
 }
@@ -1122,6 +1524,54 @@ pub(crate) fn validate_profile_config_payload(
             return Err("model must not be empty".to_string());
         }
     }
+    // Phase 50.1 Plan 05 (D-15, T-50.1-05-01): reject a malformed opt-out
+    // list before it ever reaches a config write — an empty or
+    // whitespace-only entry would silently no-op-disable nothing while
+    // still occupying a slot, and an unbounded list is a cheap DoS vector
+    // against the profile config file. Catalog-membership validation
+    // happens separately, in `apply_skills_disabled`, which is the only
+    // place that actually knows the catalog.
+    if let Some(ref skills_disabled) = payload.skills_disabled {
+        const MAX_SKILLS_DISABLED_ENTRIES: usize = 512;
+        if skills_disabled.len() > MAX_SKILLS_DISABLED_ENTRIES {
+            return Err(format!(
+                "skills_disabled must not exceed {MAX_SKILLS_DISABLED_ENTRIES} entries"
+            ));
+        }
+        if skills_disabled.iter().any(|name| name.trim().is_empty()) {
+            return Err(
+                "skills_disabled entries must not be empty or whitespace-only".to_string(),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Phase 50.1 Plan 05 (D-15, T-50.1-05-01/T-50.1-05-03): merge a validated
+/// opt-out list onto a profile's `skills.disabled`, rejecting any name not
+/// present in `catalog_names` — writing nothing (this fn only mutates
+/// `cfg` in memory; the caller's `cfg.save_to` never runs when this
+/// returns `Err`, so an unknown name can never even partially land on
+/// disk). Every other `SkillsConfig` field (`enabled`, `extra_paths`,
+/// `credential_dir`, `config`, `hub`, `defcon_level`) and every non-skills
+/// config section survive untouched — this fn only ever assigns
+/// `cfg.skills.disabled`. Pure and disk-I/O-free so it is directly
+/// unit-testable, mirroring `merge_profile_config_payload`.
+#[cfg(feature = "server")]
+pub(crate) fn apply_skills_disabled(
+    cfg: &mut ironhermes_core::config::Config,
+    skills_disabled: &[String],
+    catalog_names: &HashSet<String>,
+) -> Result<(), String> {
+    for name in skills_disabled {
+        if name.trim().is_empty() {
+            return Err("skill name must not be empty or whitespace-only".to_string());
+        }
+        if !catalog_names.contains(name) {
+            return Err(format!("unknown skill: {name}"));
+        }
+    }
+    cfg.skills.disabled = skills_disabled.to_vec();
     Ok(())
 }
 
@@ -1158,6 +1608,21 @@ pub(crate) fn update_profile_config_impl(
     let mut cfg = ironhermes_core::config::Config::load_from(&config_path)
         .map_err(|e| format!("load profile config.yaml: {e}"))?;
     merge_profile_config_payload(&mut cfg, payload);
+    // Phase 50.1 Plan 05 (D-15): the catalog comes from the process-global
+    // skill registry (T-50.1-05-03 — read-only enumeration of what is
+    // installed on the machine is correct here; this never calls the
+    // separate global skill-toggle server fn or mutates the registry's
+    // active set).
+    if let Some(ref skills_disabled) = payload.skills_disabled {
+        let catalog_names: HashSet<String> = crate::server::state::global_app_state()
+            .runtime
+            .skill_registry()
+            .list()
+            .iter()
+            .map(|r| r.name.clone())
+            .collect();
+        apply_skills_disabled(&mut cfg, skills_disabled, &catalog_names)?;
+    }
     cfg.save_to(&config_path)
         .map_err(|e| format!("save profile config.yaml: {e}"))?;
     Ok(())
@@ -1194,6 +1659,392 @@ pub async fn update_profile_config(
         let _ = payload;
         Err(ServerFnError::new(
             "update_profile_config unavailable without `server` feature",
+        ))
+    }
+}
+
+// =============================================================================
+// Phase 50.1 Plan 05 (D-15/D-16): per-profile skills catalog + persona
+// =============================================================================
+
+/// Phase 50.1 Plan 05 (D-15): the process-global skill registry's category
+/// derivation, duplicated verbatim from `server/api.rs`'s `list_skills`
+/// (the "duplicate the trivial helper" precedent `cli_handoff.rs`'s
+/// `now_ms` doc comment already establishes for this codebase) rather than
+/// widening that fn's visibility across the module boundary. Pure and
+/// disk-I/O-free.
+#[cfg(feature = "server")]
+fn skill_source_category(source: ironhermes_core::skills::SkillSource) -> &'static str {
+    match source {
+        ironhermes_core::skills::SkillSource::Builtin => "bundled",
+        ironhermes_core::skills::SkillSource::Official => "official",
+        ironhermes_core::skills::SkillSource::Trusted => "trusted",
+        ironhermes_core::skills::SkillSource::Community => "installed",
+        ironhermes_core::skills::SkillSource::SelfCreated => "self-created",
+    }
+}
+
+/// Phase 50.1 Plan 05 (D-15): join a (name, category) catalog against one
+/// profile's opt-out set — `enabled_for_profile` is the inverse of
+/// membership, matching `SkillsConfig::disabled`'s "everything not named
+/// is on" semantics. Extracted as a pure fn, decoupled from the live
+/// `SkillRegistry` type, so it is directly unit-testable against a
+/// synthetic catalog rather than depending on whatever skills happen to be
+/// scanned on the machine running the test.
+#[cfg(feature = "server")]
+pub(crate) fn join_profile_skill_rows(
+    catalog: &[(String, String)],
+    disabled: &HashSet<String>,
+) -> Vec<ProfileSkillRow> {
+    catalog
+        .iter()
+        .map(|(name, category)| ProfileSkillRow {
+            name: name.clone(),
+            category: category.clone(),
+            enabled_for_profile: !disabled.contains(name),
+        })
+        .collect()
+}
+
+/// Phase 50.1 Plan 05 (D-15): read one profile's skills catalog — the
+/// process-global registry's catalog (what is installed on the machine)
+/// joined against that profile's own `config.yaml` opt-out list (what is
+/// enabled for THIS bot). Never calls the separate global skill-toggle
+/// server fn and never mutates the
+/// registry's active set — read-only enumeration only.
+#[cfg(feature = "server")]
+pub(crate) fn fetch_profile_skills_impl(name: &str) -> Result<Vec<ProfileSkillRow>, String> {
+    ironhermes_core::profile::validate_profile_name(name)
+        .map_err(|e| format!("invalid profile name: {e}"))?;
+    let config_path = profile_dir_for(name).join("config.yaml");
+    let cfg = ironhermes_core::config::Config::load_from(&config_path)
+        .map_err(|e| format!("load profile config.yaml: {e}"))?;
+    let disabled: HashSet<String> = cfg.skills.disabled.iter().cloned().collect();
+
+    let catalog: Vec<(String, String)> = crate::server::state::global_app_state()
+        .runtime
+        .skill_registry()
+        .list()
+        .iter()
+        .map(|r| (r.name.clone(), skill_source_category(r.source).to_string()))
+        .collect();
+
+    Ok(join_profile_skill_rows(&catalog, &disabled))
+}
+
+/// Phase 50.1 Plan 05 (D-15): `#[server]` read of one profile's skills
+/// catalog. Follows this file's read-fn shape (`fetch_profile_detail`):
+/// validate the name, then `spawn_blocking` the disk-touching impl.
+#[server]
+pub async fn fetch_profile_skills(name: String) -> Result<Vec<ProfileSkillRow>, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        ironhermes_core::profile::validate_profile_name(&name)
+            .map_err(|e| ServerFnError::new(format!("invalid profile name: {e}")))?;
+        let rows = tokio::task::spawn_blocking(move || fetch_profile_skills_impl(&name))
+            .await
+            .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
+            .map_err(ServerFnError::new)?;
+        Ok(rows)
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = name;
+        Err(ServerFnError::new(
+            "fetch_profile_skills unavailable without `server` feature",
+        ))
+    }
+}
+
+/// Phase 50.1 Plan 05 (D-15/D-16): resolve (creating if absent) a bot's own
+/// workspace subdirectory — `profile_dir_for(name)/workspace`, the exact
+/// default `cli_handoff::resolve_bot_workspace_dir` already resolves to
+/// when the handoff caller supplies no override.
+///
+/// **Marker-directory step — NOT the persona-loading mechanism.** Plan 05
+/// created this marker on the theory that
+/// `ironhermes_core::workspace::resolve_from_cwd`'s resolved `soul_path` is
+/// what the agent runtime reads at turn time. OF-6
+/// (`50.1-OPERATOR-FEEDBACK.md`) found that theory false by direct source
+/// read: nothing in `ironhermes-agent` (`prompt_builder.rs`,
+/// `agent_runtime.rs`, `agent_loop.rs`) ever calls `resolve_from_cwd` or
+/// reads `Workspace.soul_path` — `grep -rn` for both across the whole crate
+/// returns zero hits. The actual and ONLY loader of persona content into a
+/// turn's prompt is `PromptBuilder::load_soul_md`, which unconditionally
+/// reads `ironhermes_core::get_hermes_home().join("SOUL.md")` — the
+/// PROFILE-ROOT `SOUL.md` (see `save_profile_persona_impl` below), not
+/// anything under `workspace/`.
+///
+/// This marker directory is still genuinely load-bearing, just for a
+/// different, real mechanism: `ironhermes-cli::run_single` (the `chat -q`
+/// handoff entry point) calls `resolve_from_cwd(cwd)` to scope the CLI
+/// session's `workspace_root` (state.db) and trajectory-log directory to
+/// the bot's own `workspace/` rather than falling back to
+/// `$IRONHERMES_HOME`'s shared marker one level up. Kept here as a side
+/// effect of saving a persona (the same event that currently provisions a
+/// bot's `workspace/` directory at all — no other path creates it yet;
+/// full per-bot workspace provisioning is deferred, per D-06).
+#[cfg(feature = "server")]
+pub(crate) fn profile_workspace_dir(name: &str) -> Result<PathBuf, String> {
+    ironhermes_core::profile::validate_profile_name(name)
+        .map_err(|e| format!("invalid profile name: {e}"))?;
+    let workspace_dir = profile_dir_for(name).join("workspace");
+    std::fs::create_dir_all(&workspace_dir)
+        .map_err(|e| format!("create workspace dir: {e}"))?;
+    let marker_dir = workspace_dir.join(".ironhermes");
+    std::fs::create_dir_all(&marker_dir)
+        .map_err(|e| format!("create workspace marker dir: {e}"))?;
+    Ok(workspace_dir)
+}
+
+/// Phase 50.1 Plan 05 (D-15, T-50.1-05-06): a persona body longer than this
+/// is rejected rather than silently truncated — an operator-visible error
+/// beats a silently-clipped persona nobody notices.
+#[cfg(feature = "server")]
+pub(crate) const PROFILE_PERSONA_MAX_BODY_LEN: usize = 20_000;
+
+/// Phase 50.1 Plan 05 (T-50.1-05-06): reject an over-long body or one
+/// containing a control character other than newline/tab. Pure and
+/// disk-I/O-free.
+#[cfg(feature = "server")]
+pub(crate) fn validate_persona_body(body: &str) -> Result<(), String> {
+    if body.chars().count() > PROFILE_PERSONA_MAX_BODY_LEN {
+        return Err(format!(
+            "persona body exceeds the {PROFILE_PERSONA_MAX_BODY_LEN}-character limit"
+        ));
+    }
+    if body.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
+        return Err(
+            "persona body must not contain control characters other than newline and tab"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// MA-01 fix (`50.1-REVIEW.md`): unique-per-call atomic write for the
+/// persona file — same temp-then-rename discipline
+/// `bot_meta_api::write_json_atomic` and `bot_avatar_api::write_avatar_bytes_atomic`
+/// already use for this crate's other mutating writes (MI-03). A crash or
+/// full disk mid-write must never leave a truncated `SOUL.md` that the bot
+/// then silently runs with. Duplicated rather than shared — same
+/// "duplicate the trivial helper" precedent `bot_meta_api.rs` documents for
+/// `ScopedEnv`.
+#[cfg(feature = "server")]
+fn write_persona_atomic(final_path: &Path, contents: &str) -> Result<(), String> {
+    use std::io::Write as _;
+
+    static TMP_WRITE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let counter = TMP_WRITE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file_name = final_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let tmp_path = final_path.with_file_name(format!(
+        "{file_name}.tmp.{}.{}",
+        std::process::id(),
+        counter
+    ));
+
+    let write_result = (|| -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp_path)?;
+        f.write_all(contents.as_bytes())?;
+        f.flush()?;
+        f.sync_all()?;
+        Ok(())
+    })();
+    if let Err(e) = write_result {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(format!("write persona file: {e}"));
+    }
+    std::fs::rename(&tmp_path, final_path).map_err(|e| format!("rename persona file: {e}"))
+}
+
+/// OF-6 fix (`50.1-OPERATOR-FEEDBACK.md`): the canonical, PROFILE-ROOT
+/// persona path — `profile_dir_for(name).join("SOUL.md")`. This is exactly
+/// what `ironhermes_core::get_hermes_home().join("SOUL.md")` resolves to
+/// once `IRONHERMES_HOME` is pivoted to this profile by `--profile
+/// <bot_name>` (`ironhermes-cli::resolve_and_set_profile`), which is the
+/// path `ironhermes_agent::prompt_builder::PromptBuilder::load_soul_md`
+/// unconditionally reads at turn time. Single source of truth for both the
+/// save and fetch paths below so they can never drift apart again.
+#[cfg(feature = "server")]
+fn canonical_persona_path(name: &str) -> PathBuf {
+    profile_dir_for(name).join("SOUL.md")
+}
+
+/// OF-6 fix: the pre-fix location Plan 05 originally wrote/read
+/// (`workspace/SOUL.md`) — never consumed by the agent runtime at turn
+/// time (see `profile_workspace_dir`'s doc comment for the full
+/// evidence chain). Kept only as a read-side fallback so a persona saved
+/// before this fix shipped (e.g. an already-configured bot) still
+/// displays and migrates without the operator re-typing it.
+#[cfg(feature = "server")]
+fn legacy_persona_path(name: &str) -> PathBuf {
+    profile_dir_for(name).join("workspace").join("SOUL.md")
+}
+
+/// Phase 50.1 Plan 05 (D-15/D-16), OF-6 fix: write a bot's persona
+/// (SOUL.md) to [`canonical_persona_path`] — the profile ROOT, the
+/// location the agent runtime actually reads at turn time. Still calls
+/// `profile_workspace_dir` first (unchanged) purely for its
+/// session/trajectory-scoping marker side effect — see that function's
+/// doc comment.
+///
+/// MA-01 fix (`50.1-REVIEW.md`): refuses a profile whose directory does not
+/// already exist — `profile_workspace_dir` unconditionally
+/// `create_dir_all`s, so without this check a gated-ON save could scaffold
+/// a phantom profile (bypassing `create_profile`) from a name that was
+/// never legitimately created. MI-03 fix: routes through
+/// [`write_persona_atomic`] instead of a plain `fs::write`.
+///
+/// OF-6: after a successful canonical write, removes the legacy
+/// `workspace/SOUL.md` file if present (best-effort) so there is exactly
+/// one source of truth going forward — the operator's freshly-saved body
+/// is authoritative, superseding whatever the legacy file held.
+#[cfg(feature = "server")]
+pub(crate) fn save_profile_persona_impl(name: &str, body: &str) -> Result<(), String> {
+    validate_persona_body(body)?;
+    ironhermes_core::profile::validate_profile_name(name)
+        .map_err(|e| format!("invalid profile name: {e}"))?;
+    if !profile_dir_for(name).is_dir() {
+        return Err(format!("profile '{name}' does not exist"));
+    }
+    let _workspace_dir = profile_workspace_dir(name)?;
+    write_persona_atomic(&canonical_persona_path(name), body)?;
+    let legacy = legacy_persona_path(name);
+    if legacy.is_file() {
+        let _ = std::fs::remove_file(&legacy);
+    }
+    Ok(())
+}
+
+/// Phase 50.1 Plan 05 (D-15/D-16), OF-6 fix: read a bot's persona body — an
+/// absent file (never yet saved) is `Ok` with an empty body, never an
+/// error, mirroring `read_env_keys`'s "a fresh profile legitimately has no
+/// .env yet" discipline. Checks [`canonical_persona_path`] first, falling
+/// back to [`legacy_persona_path`] so a persona saved before the OF-6 fix
+/// shipped still displays correctly.
+///
+/// MA-01 fix (`50.1-REVIEW.md`): this is a browser-reachable READ surface
+/// (`#[server] fetch_profile_persona` skips the write gate, as a read
+/// should), so it must never create anything on disk — including never
+/// migrating the legacy file forward (that happens on the next explicit
+/// save, or automatically on the next CLI handoff dispatch via
+/// `migrate_legacy_persona_if_needed`). This only ever `stat`s and
+/// (conditionally) reads; directory creation stays exclusively behind the
+/// gated `save_profile_persona_impl` path above.
+#[cfg(feature = "server")]
+pub(crate) fn fetch_profile_persona_impl(name: &str) -> Result<ProfilePersona, String> {
+    ironhermes_core::profile::validate_profile_name(name)
+        .map_err(|e| format!("invalid profile name: {e}"))?;
+    let profile_dir = profile_dir_for(name);
+    if !profile_dir.is_dir() {
+        return Err(format!("profile '{name}' does not exist"));
+    }
+    let canonical = canonical_persona_path(name);
+    let legacy = legacy_persona_path(name);
+    let soul_path = if canonical.is_file() {
+        Some(canonical)
+    } else if legacy.is_file() {
+        Some(legacy)
+    } else {
+        None
+    };
+    let body = match soul_path {
+        Some(p) => std::fs::read_to_string(&p).map_err(|e| format!("read persona file: {e}"))?,
+        None => String::new(),
+    };
+    Ok(ProfilePersona {
+        name: name.to_string(),
+        body,
+    })
+}
+
+/// OF-6 fix: one-time, idempotent, best-effort migration of a persona
+/// saved before this fix shipped (at [`legacy_persona_path`]) into
+/// [`canonical_persona_path`] — the location the agent runtime actually
+/// reads. Called from `cli_handoff::run_bot_handoff` immediately before
+/// every dispatch, so an already-saved persona (e.g. a bot configured
+/// before this fix) loads on the very next turn without requiring the
+/// operator to open the drawer and re-save.
+///
+/// No-op if the canonical file already exists (migration already
+/// happened, or the persona was saved fresh after the fix), if there is no
+/// legacy file, or if the legacy file is empty. Never returns an error and
+/// never fails the caller — a migration failure just means the bot falls
+/// back to its default identity for this turn, exactly the pre-fix
+/// behavior, never a broken dispatch. Not a browser-reachable surface, so
+/// the MA-01 "fetch must be mkdir-free" constraint does not apply here.
+#[cfg(feature = "server")]
+pub(crate) fn migrate_legacy_persona_if_needed(name: &str) {
+    let canonical = canonical_persona_path(name);
+    if canonical.is_file() {
+        return;
+    }
+    let legacy = legacy_persona_path(name);
+    let Ok(content) = std::fs::read_to_string(&legacy) else {
+        return;
+    };
+    if content.trim().is_empty() {
+        return;
+    }
+    if write_persona_atomic(&canonical, &content).is_ok() {
+        let _ = std::fs::remove_file(&legacy);
+    }
+}
+
+/// Phase 50.1 Plan 05 (D-15/D-16): `#[server]` persona write. Follows this
+/// crate's four-step write protocol: validate → fresh `Config::load()` →
+/// `check_profile_write_gate` → `spawn_blocking`.
+#[server]
+pub async fn save_profile_persona(name: String, body: String) -> Result<(), ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        ironhermes_core::profile::validate_profile_name(&name)
+            .map_err(|e| ServerFnError::new(format!("invalid profile name: {e}")))?;
+        validate_persona_body(&body).map_err(ServerFnError::new)?;
+
+        let config = ironhermes_core::config::Config::load()
+            .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
+        check_profile_write_gate(&config).map_err(ServerFnError::new)?;
+
+        tokio::task::spawn_blocking(move || save_profile_persona_impl(&name, &body))
+            .await
+            .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
+            .map_err(ServerFnError::new)?;
+        Ok(())
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = (name, body);
+        Err(ServerFnError::new(
+            "save_profile_persona unavailable without `server` feature",
+        ))
+    }
+}
+
+/// Phase 50.1 Plan 05 (D-15/D-16): `#[server]` persona read.
+#[server]
+pub async fn fetch_profile_persona(name: String) -> Result<ProfilePersona, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        ironhermes_core::profile::validate_profile_name(&name)
+            .map_err(|e| ServerFnError::new(format!("invalid profile name: {e}")))?;
+        let persona = tokio::task::spawn_blocking(move || fetch_profile_persona_impl(&name))
+            .await
+            .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
+            .map_err(ServerFnError::new)?;
+        Ok(persona)
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = name;
+        Err(ServerFnError::new(
+            "fetch_profile_persona unavailable without `server` feature",
         ))
     }
 }
@@ -1274,6 +2125,26 @@ pub(crate) fn save_profile_key_impl(
     key_name: &str,
     value: &SecretString,
 ) -> Result<KeyRow, String> {
+    save_profile_key_impl_with_stamp(name, key_name, value, None)
+}
+
+/// Phase 48.2 Plan 07 (D-09 checkpoint, resolved option b — inventory
+/// stamp): lift of [`save_profile_key_impl`]'s body, parameterized with an
+/// optional extra provenance stamp threaded straight through to
+/// [`render_profile_env_with_stamp`]. [`save_profile_key_impl`] delegates
+/// here with `None`, so its own behavior — and every existing test against
+/// it — is unchanged. This, together with the matching lift on
+/// `render_profile_env`, is the ONLY change Phase 48.2 Plan 07 makes to
+/// this file: the tool-credentials module calls THIS fn (with its own
+/// stamp) instead of forking a second `.env`-write implementation
+/// (T-48.2-07-04).
+#[cfg(feature = "server")]
+pub(crate) fn save_profile_key_impl_with_stamp(
+    name: &str,
+    key_name: &str,
+    value: &SecretString,
+    extra_stamp: Option<&str>,
+) -> Result<KeyRow, String> {
     // Phase 47.4 Plan 18 (CR-02, T-47.4-18-01/02): validate at this pure
     // boundary — not only the `#[server]` wrapper — before reading the
     // existing `.env` or writing anything. Same two-part validation as
@@ -1295,7 +2166,7 @@ pub(crate) fn save_profile_key_impl(
     let mut entries: Vec<(String, String)> = env_map.into_iter().collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let contents = render_profile_env(name, &entries)?;
+    let contents = render_profile_env_with_stamp(name, &entries, extra_stamp)?;
     write_env_atomic_0600(&env_path, &contents).map_err(|e| format!("write .env: {e}"))?;
 
     Ok(KeyRow {
@@ -2570,6 +3441,455 @@ mod profile_scaffold_tests {
             .iter()
             .any(|(k, v)| k == "ANTHROPIC_API_KEY" && v == "sk-def"));
     }
+
+    // -------------------------------------------------------------------
+    // Phase 50.1 Plan 06 (D-17): duplicate_profile_impl.
+    // -------------------------------------------------------------------
+
+    fn write_fixture_file(path: &std::path::Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("mkdir parent");
+        }
+        fs::write(path, contents).expect("write fixture file");
+    }
+
+    #[test]
+    fn duplicate_profile_impl_copies_config_skills_memories_and_persona() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+
+        let source_dir = profile_dir_for("source-bot");
+        write_fixture_file(
+            &source_dir.join("config.yaml"),
+            "model:\n  provider: openrouter\n",
+        );
+        write_fixture_file(
+            &source_dir.join("skills").join("greet").join("SKILL.md"),
+            "# Greet\n",
+        );
+        write_fixture_file(
+            &source_dir.join("memories").join("MEMORY.md"),
+            "remembered fact\n",
+        );
+        // OF-6 fix: this fixture is deliberately seeded at the pre-fix
+        // legacy location (`workspace/SOUL.md`) to exercise the fallback
+        // source read — proves a source bot whose persona predates OF-6
+        // still clones it forward.
+        write_fixture_file(
+            &source_dir.join("workspace").join("SOUL.md"),
+            "I am a helpful bot.\n",
+        );
+
+        let created =
+            duplicate_profile_impl("source-bot", "target-bot").expect("duplicate should succeed");
+        assert_eq!(created, "target-bot");
+
+        let target_dir = profile_dir_for("target-bot");
+        assert_eq!(
+            fs::read_to_string(target_dir.join("config.yaml")).expect("target config.yaml"),
+            "model:\n  provider: openrouter\n"
+        );
+        assert_eq!(
+            fs::read_to_string(target_dir.join("skills").join("greet").join("SKILL.md"))
+                .expect("target skill file"),
+            "# Greet\n"
+        );
+        assert_eq!(
+            fs::read_to_string(target_dir.join("memories").join("MEMORY.md"))
+                .expect("target memory file"),
+            "remembered fact\n"
+        );
+        // OF-6 fix: the copy lands at the CANONICAL profile-root SOUL.md —
+        // the path PromptBuilder::load_soul_md actually reads at turn time
+        // — never the legacy workspace/SOUL.md location.
+        assert_eq!(
+            fs::read_to_string(target_dir.join("SOUL.md")).expect("target persona file"),
+            "I am a helpful bot.\n"
+        );
+        assert!(
+            !target_dir.join("workspace").join("SOUL.md").exists(),
+            "duplicate must not also seed the legacy workspace/SOUL.md location"
+        );
+        assert!(
+            target_dir.join("workspace").join(".ironhermes").is_dir(),
+            "target workspace must still carry the session/trajectory-scoping marker"
+        );
+    }
+
+    #[test]
+    fn duplicate_profile_impl_copies_persona_from_canonical_source_location() {
+        // OF-6 fix: a source bot whose persona was saved AFTER this fix
+        // shipped has it at the canonical profile-root SOUL.md, not the
+        // legacy workspace/ location — duplicate must prefer that.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+
+        let source_dir = profile_dir_for("canonical-source-bot");
+        write_fixture_file(
+            &source_dir.join("config.yaml"),
+            "model:\n  provider: openrouter\n",
+        );
+        write_fixture_file(&source_dir.join("SOUL.md"), "I am canonical.\n");
+
+        duplicate_profile_impl("canonical-source-bot", "canonical-target-bot")
+            .expect("duplicate should succeed");
+
+        let target_dir = profile_dir_for("canonical-target-bot");
+        assert_eq!(
+            fs::read_to_string(target_dir.join("SOUL.md")).expect("target persona file"),
+            "I am canonical.\n"
+        );
+    }
+
+    #[test]
+    fn duplicate_profile_impl_never_copies_env_file_even_when_source_has_one() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+
+        let source_dir = profile_dir_for("has-env-bot");
+        write_fixture_file(
+            &source_dir.join("config.yaml"),
+            "model:\n  provider: openrouter\n",
+        );
+        write_fixture_file(
+            &source_dir.join(".env"),
+            "OPENROUTER_API_KEY=sk-should-never-copy\n",
+        );
+
+        duplicate_profile_impl("has-env-bot", "clone-of-has-env-bot")
+            .expect("duplicate should succeed");
+
+        let target_dir = profile_dir_for("clone-of-has-env-bot");
+        assert!(
+            !target_dir.join(".env").exists(),
+            "duplicate must never copy the source's .env file (D-17)"
+        );
+    }
+
+    #[test]
+    fn duplicate_profile_impl_tree_walk_finds_no_seeded_secret_anywhere_under_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+
+        let secret_value = "sk-TreeWalkSecretZ9f3kQ7xN2mP8wL4vR6tY1u";
+        let source_dir = profile_dir_for("secret-bot");
+        write_fixture_file(
+            &source_dir.join("config.yaml"),
+            "model:\n  provider: openrouter\n",
+        );
+        write_fixture_file(
+            &source_dir.join(".env"),
+            &format!("OPENROUTER_API_KEY={secret_value}\n"),
+        );
+        write_fixture_file(
+            &source_dir.join("skills").join("s").join("SKILL.md"),
+            "safe content\n",
+        );
+        write_fixture_file(&source_dir.join("memories").join("MEMORY.md"), "safe content\n");
+        write_fixture_file(&source_dir.join("workspace").join("SOUL.md"), "safe content\n");
+
+        duplicate_profile_impl("secret-bot", "secret-bot-clone").expect("duplicate should succeed");
+
+        let target_dir = profile_dir_for("secret-bot-clone");
+        fn walk_files_recursive(root: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            if let Ok(entries) = fs::read_dir(root) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        walk_files_recursive(&path, out);
+                    } else {
+                        out.push(path);
+                    }
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk_files_recursive(&target_dir, &mut files);
+        assert!(
+            !files.is_empty(),
+            "target directory must contain files for this walk to actually prove anything"
+        );
+        for file in &files {
+            let bytes = fs::read(file).expect("read target file");
+            let contents = String::from_utf8_lossy(&bytes);
+            assert!(
+                !contents.contains(secret_value),
+                "found the seeded secret in {file:?} — a real leak, not a source-inspection false pass"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_profile_impl_rejects_existing_target_leaves_both_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+
+        let source_dir = profile_dir_for("src-exists");
+        write_fixture_file(&source_dir.join("config.yaml"), "source config\n");
+        let target_dir = profile_dir_for("dst-exists");
+        write_fixture_file(&target_dir.join("marker.txt"), "pre-existing target content\n");
+
+        let before = walk_all(&dir.path().join("profiles"));
+        let result = duplicate_profile_impl("src-exists", "dst-exists");
+        assert!(result.is_err(), "an existing target must be rejected");
+        let after = walk_all(&dir.path().join("profiles"));
+        assert_eq!(
+            before, after,
+            "an existing target must leave both directories untouched at the top level"
+        );
+        assert_eq!(
+            fs::read_to_string(target_dir.join("marker.txt")).expect("target marker survives"),
+            "pre-existing target content\n"
+        );
+    }
+
+    #[test]
+    fn duplicate_profile_impl_rejects_reserved_target_names_creates_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+
+        let source_dir = profile_dir_for("reserved-source");
+        write_fixture_file(&source_dir.join("config.yaml"), "source\n");
+
+        for reserved in ["default", "current", "none"] {
+            let result = duplicate_profile_impl("reserved-source", reserved);
+            assert!(result.is_err(), "target '{reserved}' must be rejected");
+        }
+        assert!(
+            !dir.path().join("profiles").join("default").exists()
+                && !dir.path().join("profiles").join("current").exists()
+                && !dir.path().join("profiles").join("none").exists(),
+            "no reserved-name target directory must ever be created"
+        );
+    }
+
+    #[test]
+    fn duplicate_profile_impl_rejects_invalid_chars_target_name_creates_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+
+        let source_dir = profile_dir_for("bad-chars-source");
+        write_fixture_file(&source_dir.join("config.yaml"), "source\n");
+
+        let before = walk_all(&dir.path().join("profiles"));
+        let result = duplicate_profile_impl("bad-chars-source", "../../etc/passwd");
+        assert!(result.is_err());
+        let after = walk_all(&dir.path().join("profiles"));
+        assert_eq!(
+            before, after,
+            "a traversal-shaped target name must write nothing new under profiles/"
+        );
+    }
+
+    #[test]
+    fn duplicate_profile_impl_rejects_missing_source_creates_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+
+        let result = duplicate_profile_impl("does-not-exist", "new-target");
+        assert!(result.is_err());
+        assert!(!profile_dir_for("new-target").exists());
+    }
+
+    #[test]
+    fn duplicate_profile_impl_failure_partway_leaves_no_partial_target() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+
+        let source_dir = profile_dir_for("partial-fail-source");
+        write_fixture_file(&source_dir.join("config.yaml"), "source\n");
+        let unreadable = source_dir.join("memories").join("MEMORY.md");
+        write_fixture_file(&unreadable, "content");
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000))
+            .expect("chmod unreadable");
+
+        let result = duplicate_profile_impl("partial-fail-source", "partial-fail-target");
+
+        // Restore permissions unconditionally so tempdir cleanup can remove
+        // the fixture regardless of the assertions below.
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o600))
+            .expect("restore perms for cleanup");
+
+        assert!(result.is_err(), "an unreadable source file must fail the copy");
+        assert!(
+            !profile_dir_for("partial-fail-target").exists(),
+            "a mid-copy failure must never leave a half-populated target directory"
+        );
+        let staging_leftovers: Vec<_> = fs::read_dir(dir.path().join("profiles"))
+            .expect("read profiles root")
+            .flatten()
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".duplicate-staging-")
+            })
+            .collect();
+        assert!(
+            staging_leftovers.is_empty(),
+            "a failed duplicate must clean up its own staging directory"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 50.1 Plan 06 (D-18): delete_profile_impl / is_deletion_protected.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn delete_profile_is_deletion_protected_returns_true_only_for_default() {
+        assert!(is_deletion_protected("default"));
+        assert!(!is_deletion_protected("ordinary-bot"));
+        assert!(!is_deletion_protected("current"));
+        assert!(!is_deletion_protected("none"));
+    }
+
+    #[test]
+    fn delete_profile_impl_on_default_profile_returns_refusal_and_removes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        // Deliberately no "default" directory scaffolded — the refusal
+        // must fire before any existence check, matching
+        // `is_deletion_protected`'s own pure-predicate contract.
+
+        let before = walk_all(dir.path());
+        let result = delete_profile_impl("default");
+        assert!(result.is_err());
+        let after = walk_all(dir.path());
+        assert_eq!(before, after, "the default profile refusal must remove nothing");
+    }
+
+    #[test]
+    fn delete_profile_impl_on_live_profile_returns_refusal_and_removes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A home path shaped like `<root>/profiles/scout` makes
+        // `ironhermes_core::current_profile()` resolve to "scout" — the
+        // exact fixture shape `cli_handoff.rs`'s own
+        // `run_bot_handoff_for_the_live_profile_returns_streaming_error_without_spawning`
+        // test already established for this precise scenario.
+        let scoped_home = dir.path().join("profiles").join("scout");
+        fs::create_dir_all(&scoped_home).expect("mkdir scoped home");
+        let _guard = ScopedEnv::set("IRONHERMES_HOME", scoped_home.to_str().expect("utf8 path"));
+
+        let result = delete_profile_impl("scout");
+        assert!(result.is_err(), "the live profile must refuse deletion");
+    }
+
+    #[test]
+    fn delete_profile_impl_on_ordinary_profile_removes_directory_and_bot_meta_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+
+        let target_dir = profile_dir_for("removable-bot");
+        write_fixture_file(&target_dir.join("config.yaml"), "source\n");
+
+        let patch = crate::protocol::BotMetaPatch {
+            name: "removable-bot".to_string(),
+            title: Some("Removable Bot".to_string()),
+            description: None,
+            avatar: None,
+            group: None,
+            preview: None,
+            preview_at_ms: None,
+        };
+        crate::server::bot_meta_api::save_bot_meta_impl(&patch).expect("seed bot-meta");
+
+        delete_profile_impl("removable-bot").expect("delete should succeed");
+
+        assert!(!target_dir.exists(), "the profile directory must be removed");
+        let index = crate::server::bot_meta_api::load_bot_meta_map(
+            &crate::server::bot_meta_api::bot_meta_index_path(),
+        )
+        .expect("read bot-meta index");
+        assert!(
+            !index.contains_key("removable-bot"),
+            "the bot-meta index must no longer carry the removed profile's key"
+        );
+    }
+
+    #[test]
+    fn delete_profile_impl_leaves_sibling_bot_meta_entries_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+
+        write_fixture_file(&profile_dir_for("bot-a").join("config.yaml"), "a\n");
+        write_fixture_file(&profile_dir_for("bot-b").join("config.yaml"), "b\n");
+        for name in ["bot-a", "bot-b"] {
+            let patch = crate::protocol::BotMetaPatch {
+                name: name.to_string(),
+                title: Some(name.to_string()),
+                description: None,
+                avatar: None,
+                group: None,
+                preview: None,
+                preview_at_ms: None,
+            };
+            crate::server::bot_meta_api::save_bot_meta_impl(&patch).expect("seed bot-meta");
+        }
+
+        delete_profile_impl("bot-a").expect("delete should succeed");
+
+        let index = crate::server::bot_meta_api::load_bot_meta_map(
+            &crate::server::bot_meta_api::bot_meta_index_path(),
+        )
+        .expect("read bot-meta index");
+        assert!(!index.contains_key("bot-a"));
+        assert!(
+            index.contains_key("bot-b"),
+            "a sibling profile's bot-meta entry must survive unrelated to the deleted one"
+        );
+        assert_eq!(
+            index.get("bot-b").and_then(|m| m.title.clone()),
+            Some("bot-b".to_string())
+        );
+    }
+
+    #[test]
+    fn delete_profile_impl_on_missing_profile_returns_not_found_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+
+        let result = delete_profile_impl("never-existed");
+        assert!(result.is_err(), "a nonexistent profile must not succeed silently");
+    }
+
+    #[test]
+    fn delete_profile_impl_rejects_invalid_name_before_resolving_any_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+
+        let before = walk_all(dir.path());
+        let result = delete_profile_impl("../../etc/passwd");
+        assert!(result.is_err());
+        let after = walk_all(dir.path());
+        assert_eq!(
+            before, after,
+            "a validation-rejected name must never resolve or touch a path"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn delete_profile_impl_refuses_symlinked_profile_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+
+        let real_target = dir.path().join("outside-profiles-root");
+        fs::create_dir_all(&real_target).expect("mkdir outside target");
+        write_fixture_file(&real_target.join("sentinel.txt"), "must survive\n");
+
+        let profiles_root = dir.path().join("profiles");
+        fs::create_dir_all(&profiles_root).expect("mkdir profiles root");
+        std::os::unix::fs::symlink(&real_target, profiles_root.join("symlinked-bot"))
+            .expect("create symlinked profile dir");
+
+        let result = delete_profile_impl("symlinked-bot");
+        assert!(result.is_err(), "a symlinked profile path must be refused");
+        assert!(
+            real_target.join("sentinel.txt").exists(),
+            "the symlink target must never be touched"
+        );
+    }
 }
 
 /// Phase 47.4 Plan 07 (D-07/D-13): real fixture-directory tests for
@@ -3121,6 +4441,7 @@ mod profile_key_masking_tests {
             name: name.to_string(),
             provider: provider.map(|s| s.to_string()),
             model_default: model_default.map(|s| s.to_string()),
+            skills_disabled: None,
         }
     }
 
@@ -3656,6 +4977,441 @@ mod profile_key_masking_tests {
             mask_key_value(short),
             mask_key_value(long),
             "mask_key_value must produce byte-identical output regardless of input length"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 50.1 Plan 05 (D-15): apply_skills_disabled /
+    // join_profile_skill_rows / validate_profile_config_payload
+    // (skills_disabled) — Task 1 <behavior>.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn apply_skills_disabled_writes_exact_two_names() {
+        let mut cfg = Config::default();
+        let catalog: HashSet<String> = ["alpha".to_string(), "beta".to_string(), "gamma".to_string()]
+            .into_iter()
+            .collect();
+        apply_skills_disabled(&mut cfg, &["alpha".to_string(), "gamma".to_string()], &catalog)
+            .expect("known names must be accepted");
+        assert_eq!(
+            cfg.skills.disabled,
+            vec!["alpha".to_string(), "gamma".to_string()]
+        );
+    }
+
+    #[test]
+    fn apply_skills_disabled_empty_list_clears_opt_out() {
+        let mut cfg = Config::default();
+        cfg.skills.disabled = vec!["alpha".to_string()];
+        let catalog: HashSet<String> = ["alpha".to_string()].into_iter().collect();
+        apply_skills_disabled(&mut cfg, &[], &catalog).expect("empty list must be accepted");
+        assert!(
+            cfg.skills.disabled.is_empty(),
+            "an empty opt-out list must clear every prior disable — every skill on"
+        );
+    }
+
+    #[test]
+    fn apply_skills_disabled_preserves_every_other_skills_field() {
+        let mut cfg = Config::default();
+        cfg.skills.enabled = false;
+        cfg.skills.extra_paths = vec![PathBuf::from("/tmp/extra-skills")];
+        cfg.skills.credential_dir = Some(PathBuf::from("/tmp/skill-creds"));
+        cfg.skills.hub.trusted_repos = vec!["acme/skills".to_string()];
+        let before = format!(
+            "{:?}",
+            (
+                &cfg.skills.enabled,
+                &cfg.skills.extra_paths,
+                &cfg.skills.credential_dir,
+                &cfg.skills.config,
+                &cfg.skills.hub,
+                &cfg.skills.defcon_level,
+            )
+        );
+
+        let catalog: HashSet<String> = ["alpha".to_string()].into_iter().collect();
+        apply_skills_disabled(&mut cfg, &["alpha".to_string()], &catalog)
+            .expect("known name must be accepted");
+
+        let after = format!(
+            "{:?}",
+            (
+                &cfg.skills.enabled,
+                &cfg.skills.extra_paths,
+                &cfg.skills.credential_dir,
+                &cfg.skills.config,
+                &cfg.skills.hub,
+                &cfg.skills.defcon_level,
+            )
+        );
+        assert_eq!(
+            before, after,
+            "every SkillsConfig field other than `disabled` must survive byte-identical"
+        );
+    }
+
+    #[test]
+    fn apply_skills_disabled_preserves_non_skills_config_sections() {
+        let mut cfg = Config::default();
+        cfg.model.provider = "acme-provider".to_string();
+        cfg.model.default = "acme-model".to_string();
+        let before_model = format!("{:?}", cfg.model);
+        let before_security = format!("{:?}", cfg.security);
+
+        let catalog: HashSet<String> = ["alpha".to_string()].into_iter().collect();
+        apply_skills_disabled(&mut cfg, &["alpha".to_string()], &catalog)
+            .expect("known name must be accepted");
+
+        assert_eq!(
+            before_model,
+            format!("{:?}", cfg.model),
+            "non-skills sections must survive untouched"
+        );
+        assert_eq!(
+            before_security,
+            format!("{:?}", cfg.security),
+            "non-skills sections must survive untouched"
+        );
+    }
+
+    #[test]
+    fn apply_skills_disabled_rejects_name_not_in_catalog_and_writes_nothing() {
+        let mut cfg = Config::default();
+        cfg.skills.disabled = vec!["already-disabled".to_string()];
+        let catalog: HashSet<String> = ["already-disabled".to_string()].into_iter().collect();
+
+        let err = apply_skills_disabled(&mut cfg, &["not-a-real-skill".to_string()], &catalog)
+            .expect_err("an unknown skill name must be rejected");
+        assert!(err.contains("not-a-real-skill"));
+        assert_eq!(
+            cfg.skills.disabled,
+            vec!["already-disabled".to_string()],
+            "a rejected write must leave the prior opt-out list untouched"
+        );
+    }
+
+    #[test]
+    fn validate_profile_config_payload_rejects_whitespace_only_skills_disabled_entry() {
+        let payload = ProfileConfigWritePayload {
+            name: "my-bot".to_string(),
+            provider: None,
+            model_default: None,
+            skills_disabled: Some(vec!["   ".to_string()]),
+        };
+        let err = validate_profile_config_payload(&payload)
+            .expect_err("a whitespace-only entry must be rejected");
+        assert!(err.contains("skills_disabled"));
+    }
+
+    #[test]
+    fn join_profile_skill_rows_marks_names_in_skills_disabled_as_not_enabled() {
+        let catalog = vec![
+            ("alpha".to_string(), "bundled".to_string()),
+            ("beta".to_string(), "installed".to_string()),
+            ("gamma".to_string(), "official".to_string()),
+        ];
+        let disabled: HashSet<String> = ["alpha".to_string(), "gamma".to_string()]
+            .into_iter()
+            .collect();
+
+        let rows = join_profile_skill_rows(&catalog, &disabled);
+
+        assert_eq!(rows.len(), 3, "every catalog entry must produce exactly one row");
+        for row in &rows {
+            let expected_enabled = row.name == "beta";
+            assert_eq!(
+                row.enabled_for_profile, expected_enabled,
+                "{} must have enabled_for_profile={expected_enabled}",
+                row.name
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 50.1 Plan 05 (D-15/D-16): profile_workspace_dir /
+    // save_profile_persona_impl / fetch_profile_persona_impl /
+    // validate_persona_body — Task 1 <behavior>.
+    // -------------------------------------------------------------------
+
+    /// Duplicated from `profile_scaffold_tests::write_fixture_file` — each
+    /// `#[cfg(test)]` module is its own namespace, this file's own doc
+    /// comments sanction the duplication explicitly.
+    fn write_fixture_file(path: &std::path::Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("mkdir parent");
+        }
+        fs::write(path, contents).expect("write fixture file");
+    }
+
+    #[test]
+    fn profile_workspace_dir_creates_the_dir_and_its_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+
+        let workspace_dir = profile_workspace_dir("scout").expect("must resolve");
+
+        assert!(workspace_dir.is_dir());
+        assert!(
+            workspace_dir.join(".ironhermes").is_dir(),
+            "the marker directory must exist inside the bot's own workspace dir"
+        );
+        assert_eq!(
+            workspace_dir,
+            dir.path().join("profiles").join("scout").join("workspace")
+        );
+    }
+
+    #[test]
+    fn save_and_fetch_profile_persona_round_trips_body() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        // MA-01: save/fetch now require the profile to already exist —
+        // seed it the way `create_profile_impl` would, minus the rest of
+        // the scaffold this pure round-trip test doesn't need.
+        std::fs::create_dir_all(profile_dir_for("scout")).expect("seed profile dir");
+
+        save_profile_persona_impl("scout", "You are Scout, a careful researcher.")
+            .expect("save must succeed");
+        let persona = fetch_profile_persona_impl("scout").expect("fetch must succeed");
+
+        assert_eq!(persona.name, "scout");
+        assert_eq!(persona.body, "You are Scout, a careful researcher.");
+    }
+
+    #[test]
+    fn fetch_profile_persona_impl_absent_file_is_empty_body_not_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        // The profile itself exists (a real bot); only its SOUL.md is
+        // absent (never saved a persona yet) — distinct from MA-01's
+        // "profile does not exist at all" case, covered below.
+        std::fs::create_dir_all(profile_dir_for("brand-new-bot")).expect("seed profile dir");
+
+        let persona = fetch_profile_persona_impl("brand-new-bot")
+            .expect("a profile with no persona file yet must not error");
+        assert_eq!(persona.body, "");
+    }
+
+    #[test]
+    fn fetch_profile_persona_impl_on_nonexistent_profile_creates_nothing_on_disk() {
+        // MA-01 regression (`50.1-REVIEW.md`): a browser-reachable READ
+        // (`fetch_profile_persona`, no write gate) must never create a
+        // profile directory for a syntactically valid but never-created
+        // name, and must error rather than silently succeed with an empty
+        // persona that implies the profile exists.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        let profiles_root = dir.path().join("profiles");
+        let listing_before = list_dir_names(&profiles_root);
+
+        let result = fetch_profile_persona_impl("ghost-bot");
+
+        assert!(
+            result.is_err(),
+            "fetching a persona for a profile that was never created must error, not \
+             fabricate one"
+        );
+        assert!(
+            !profile_dir_for("ghost-bot").exists(),
+            "fetch must not create the profile directory as a side effect"
+        );
+        assert_eq!(
+            listing_before,
+            list_dir_names(&profiles_root),
+            "profiles/ must be left exactly as it was by a fetch for a name that was \
+             never created"
+        );
+    }
+
+    #[test]
+    fn save_profile_persona_impl_on_nonexistent_profile_creates_nothing_on_disk() {
+        // MA-01 fix companion: the gated WRITE side must also refuse to
+        // scaffold a phantom profile from a name nobody created through
+        // `create_profile` — closing the same side door with the gate on.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+
+        let result = save_profile_persona_impl("ghost-bot", "some persona body");
+
+        assert!(
+            result.is_err(),
+            "saving a persona for a profile that was never created must error, not \
+             scaffold one"
+        );
+        assert!(
+            !profile_dir_for("ghost-bot").exists(),
+            "save must not create the profile directory when the profile doesn't exist"
+        );
+    }
+
+    /// Directory-listing snapshot helper for the MA-01 regression above — a
+    /// missing directory (nothing has been created under `profiles/` yet)
+    /// and an empty one both collapse to an empty `Vec`, matching the
+    /// "profiles/ untouched" assertion regardless of whether `profiles/`
+    /// itself pre-existed.
+    fn list_dir_names(dir: &std::path::Path) -> Vec<std::ffi::OsString> {
+        std::fs::read_dir(dir)
+            .map(|rd| {
+                let mut names: Vec<_> = rd
+                    .filter_map(|e| e.ok().map(|e| e.file_name()))
+                    .collect();
+                names.sort();
+                names
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn validate_persona_body_rejects_overlong_body() {
+        let body = "a".repeat(PROFILE_PERSONA_MAX_BODY_LEN + 1);
+        assert!(validate_persona_body(&body).is_err());
+        assert!(validate_persona_body(&"a".repeat(PROFILE_PERSONA_MAX_BODY_LEN)).is_ok());
+    }
+
+    #[test]
+    fn validate_persona_body_rejects_control_chars_other_than_newline_tab() {
+        assert!(validate_persona_body("line one\nline two\tindented").is_ok());
+        assert!(validate_persona_body("bell\u{0007}here").is_err());
+        assert!(validate_persona_body("carriage\rreturn").is_err());
+    }
+
+    #[test]
+    fn save_profile_persona_impl_writes_to_profile_root_not_workspace_subdir() {
+        // OF-6 regression (`50.1-OPERATOR-FEEDBACK.md`): Plan 05 originally
+        // wrote the persona under `workspace/SOUL.md`, on the mistaken
+        // theory that `ironhermes_core::workspace::resolve_from_cwd`'s
+        // resolved `soul_path` is what the agent runtime loads at turn
+        // time. Direct source read of `ironhermes-agent` proved nothing
+        // ever reads that field for prompt content — the actual loader
+        // (`PromptBuilder::load_soul_md`) reads
+        // `get_hermes_home().join("SOUL.md")`, the PROFILE ROOT. This test
+        // pins the write location to that root, not `workspace/`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        std::fs::create_dir_all(profile_dir_for("scout")).expect("seed profile dir");
+
+        save_profile_persona_impl("scout", "Scout's persona body").expect("save must succeed");
+
+        assert_eq!(
+            fs::read_to_string(profile_dir_for("scout").join("SOUL.md"))
+                .expect("persona must land at the profile-root SOUL.md"),
+            "Scout's persona body"
+        );
+        assert!(
+            !profile_dir_for("scout").join("workspace").join("SOUL.md").exists(),
+            "save must not also leave a copy at the legacy workspace/SOUL.md location"
+        );
+    }
+
+    #[test]
+    fn saved_persona_is_actually_loaded_by_the_real_prompt_builder_at_turn_time() {
+        // OF-6's D-16 acceptance bar, proven end-to-end: assemble a REAL
+        // context via the REAL loader (`ironhermes_agent::prompt_builder`,
+        // not a stand-in), for a synthetic bot workspace, and assert the
+        // saved persona text is actually present in the built prompt. This
+        // is the exact chain a `chat -q` handoff turn walks:
+        // `--profile <bot>` pivots IRONHERMES_HOME to the profile root
+        // (`ironhermes-cli::resolve_and_set_profile`) → PromptBuilder reads
+        // `get_hermes_home().join("SOUL.md")`.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _root_guard = home(&dir);
+        std::fs::create_dir_all(profile_dir_for("zig")).expect("seed profile dir");
+
+        save_profile_persona_impl(
+            "zig",
+            "# Researcher\nI am the research analyst on this team.",
+        )
+        .expect("save must succeed");
+
+        // Simulate `--profile zig`'s IRONHERMES_HOME pivot (the child
+        // process's env, per `resolve_and_set_profile` in
+        // ironhermes-cli/src/main.rs) — nested ScopedEnv restores the
+        // outer (root) value on drop.
+        let bot_home = profile_dir_for("zig");
+        let _pivot_guard = ScopedEnv::set(
+            "IRONHERMES_HOME",
+            bot_home.to_str().expect("bot home path must be utf8"),
+        );
+        let cwd = profile_workspace_dir("zig").expect("resolve bot workspace cwd");
+
+        let prompt = ironhermes_agent::prompt_builder::PromptBuilder::new("test-model", "cli")
+            .load_context(&cwd)
+            .build();
+
+        assert!(
+            prompt.contains("I am the research analyst on this team."),
+            "the saved persona must appear in the REAL assembled prompt, not just round-trip \
+             through save/fetch; got: {prompt}"
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_persona_if_needed_copies_legacy_forward_and_removes_it() {
+        // Proves zig-shaped profiles (persona saved before the OF-6 fix, at
+        // the legacy `workspace/SOUL.md` location) self-heal on the next
+        // CLI handoff dispatch without the operator re-typing anything.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        let legacy = legacy_persona_path("zig");
+        write_fixture_file(&legacy, "Pre-fix persona body");
+
+        migrate_legacy_persona_if_needed("zig");
+
+        assert_eq!(
+            fs::read_to_string(canonical_persona_path("zig")).expect("canonical must exist"),
+            "Pre-fix persona body"
+        );
+        assert!(!legacy.exists(), "legacy file must be removed after migration");
+    }
+
+    #[test]
+    fn migrate_legacy_persona_if_needed_is_a_noop_when_canonical_already_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        std::fs::create_dir_all(profile_dir_for("zig")).expect("seed profile dir");
+        save_profile_persona_impl("zig", "Current persona").expect("save must succeed");
+        let legacy = legacy_persona_path("zig");
+        write_fixture_file(&legacy, "Stale legacy content that must never win");
+
+        migrate_legacy_persona_if_needed("zig");
+
+        assert_eq!(
+            fs::read_to_string(canonical_persona_path("zig")).expect("canonical must exist"),
+            "Current persona",
+            "an existing canonical persona must never be overwritten by a stale legacy file"
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_persona_if_needed_is_a_noop_when_no_legacy_file_exists() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        std::fs::create_dir_all(profile_dir_for("fresh-bot")).expect("seed profile dir");
+
+        // Must not panic or create anything for a bot with no persona at all.
+        migrate_legacy_persona_if_needed("fresh-bot");
+
+        assert!(!canonical_persona_path("fresh-bot").exists());
+    }
+
+    #[test]
+    fn fetch_profile_persona_impl_falls_back_to_legacy_location_without_creating_anything() {
+        // OF-6: the drawer must display a pre-fix persona (zig's) even
+        // before migration has run, and fetch must remain mkdir-free
+        // (MA-01) while doing so.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        std::fs::create_dir_all(profile_dir_for("zig")).expect("seed profile dir");
+        write_fixture_file(&legacy_persona_path("zig"), "Legacy persona body");
+
+        let persona = fetch_profile_persona_impl("zig").expect("fetch must succeed");
+
+        assert_eq!(persona.body, "Legacy persona body");
+        assert!(
+            !canonical_persona_path("zig").exists(),
+            "a read-only fetch must never write the canonical file itself"
         );
     }
 }

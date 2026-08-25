@@ -93,6 +93,12 @@ pub struct PlatformCredentials {
     pub discord: PlatformResolution,
     pub slack: PlatformResolution,
     pub buzz: PlatformResolution,
+    /// Phase 36.7.1 Plan 01.
+    pub webhook: PlatformResolution,
+    /// Phase 36.7.1 Plan 01. The adapter itself is constructed in a later
+    /// plan; this resolution arm exists so `PlatformCredentials` is
+    /// exhaustive from the start.
+    pub api_server: PlatformResolution,
 }
 
 /// Returned when ZERO platforms are usable. `Display` lists every platform
@@ -253,6 +259,66 @@ fn resolve_buzz<G: Fn() -> Result<String, PlatformSkipReason>>(
     }
 }
 
+/// Phase 36.7.1 Plan 01: the webhook platform carries no single
+/// platform-wide credential — each route's key material is resolved
+/// independently at `WebhookAdapter::new` construction time (per
+/// RESEARCH.md's Open Question #2: this gate answers "is the platform
+/// enabled at all", not per-route validation, which `boot_gate` has no
+/// route-shaped config to perform anyway). An enabled section with at
+/// least one configured route is [`PlatformResolution::Usable`]; an
+/// enabled section with an empty route list is
+/// [`PlatformSkipReason::MissingCredential`] naming the `routes` key —
+/// there is nothing for the adapter to serve.
+fn resolve_webhook(config: &Config) -> PlatformResolution {
+    let Some(cfg) = config.gateway.platforms.get("webhook") else {
+        return PlatformResolution::NotUsable(PlatformSkipReason::SectionAbsent);
+    };
+    if !cfg.enabled {
+        return PlatformResolution::NotUsable(PlatformSkipReason::Disabled);
+    }
+    if cfg.routes.is_empty() {
+        return PlatformResolution::NotUsable(PlatformSkipReason::MissingCredential(
+            "gateway.platforms.webhook is enabled but has no configured routes — set \
+             gateway.platforms.webhook.routes to at least one route"
+                .to_string(),
+        ));
+    }
+    PlatformResolution::Usable(HashMap::new())
+}
+
+/// Phase 36.7.1 Plan 01 (D-06): the REST API server platform's single
+/// gateway-wide credential is `IRONHERMES_API_SERVER_KEY`. Per D-06's
+/// fail-closed gate, an enabled section with that variable unset is
+/// refused — the message names the variable and NEVER its value, matching
+/// every other credential-missing message in this module. The adapter
+/// itself is constructed in a later plan; this resolution arm is added now
+/// (alongside `resolve_webhook`) so `PlatformCredentials` — a named-field
+/// struct every construction site must be exhaustive over — is not edited
+/// twice across two plans.
+fn resolve_api_server<F: Fn(&str) -> Option<String>>(
+    config: &Config,
+    env_lookup: &F,
+) -> PlatformResolution {
+    let Some(cfg) = config.gateway.platforms.get("api_server") else {
+        return PlatformResolution::NotUsable(PlatformSkipReason::SectionAbsent);
+    };
+    if !cfg.enabled {
+        return PlatformResolution::NotUsable(PlatformSkipReason::Disabled);
+    }
+    match env_lookup("IRONHERMES_API_SERVER_KEY") {
+        Some(key) if !key.is_empty() => {
+            let mut creds = HashMap::new();
+            creds.insert("api_key".to_string(), key);
+            PlatformResolution::Usable(creds)
+        }
+        _ => PlatformResolution::NotUsable(PlatformSkipReason::MissingCredential(
+            "gateway.platforms.api_server is enabled but IRONHERMES_API_SERVER_KEY is not set. \
+             Set the environment variable before starting the gateway."
+                .to_string(),
+        )),
+    }
+}
+
 /// The buzz nsec lookup used in production: resolves via
 /// [`crate::buzz_identity::resolve_buzz_nsec`] when the `buzz` cargo feature
 /// is compiled in; otherwise always reports [`PlatformSkipReason::FeatureDisabled`]
@@ -297,9 +363,15 @@ where
     let discord = resolve_discord(config, &env_lookup);
     let slack = resolve_slack(config, &env_lookup);
     let buzz = resolve_buzz(config, &buzz_nsec_lookup);
+    let webhook = resolve_webhook(config);
+    let api_server = resolve_api_server(config, &env_lookup);
 
-    let any_usable =
-        telegram.is_usable() || discord.is_usable() || slack.is_usable() || buzz.is_usable();
+    let any_usable = telegram.is_usable()
+        || discord.is_usable()
+        || slack.is_usable()
+        || buzz.is_usable()
+        || webhook.is_usable()
+        || api_server.is_usable();
 
     if any_usable {
         return Ok(PlatformCredentials {
@@ -307,6 +379,8 @@ where
             discord,
             slack,
             buzz,
+            webhook,
+            api_server,
         });
     }
 
@@ -316,6 +390,8 @@ where
         ("discord", &discord),
         ("slack", &slack),
         ("buzz", &buzz),
+        ("webhook", &webhook),
+        ("api_server", &api_server),
     ] {
         if let PlatformResolution::NotUsable(reason) = res
             && !matches!(
@@ -604,5 +680,124 @@ gateway:
         let config = Config::default();
         let result = resolve_enabled_platforms_with(&config, no_env, no_buzz);
         assert!(result.is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 36.7.1 Plan 01 Task 3: webhook / api_server resolution arms
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn webhook_platform_resolves_through_boot_gate() {
+        let config = config_from_yaml(
+            r#"
+gateway:
+  platforms:
+    webhook:
+      enabled: true
+      host: "127.0.0.1"
+      port: 8099
+      routes:
+        - name: "test-route"
+          path: "/webhook/test-route"
+          signature: "generic_v2"
+          secret_env: "SOME_SECRET_ENV"
+          prompt_template: "{Body}"
+"#,
+        );
+        let result = resolve_enabled_platforms_with(&config, no_env, no_buzz)
+            .expect("webhook should be usable");
+        assert!(result.webhook.is_usable());
+    }
+
+    #[test]
+    fn webhook_section_absent_is_not_usable_and_not_disabled() {
+        let config = Config::default();
+        let result = resolve_enabled_platforms_with(&config, no_env, no_buzz);
+        // No platform usable at all -> Err; but the important assertion is
+        // the webhook resolution SHAPE, which resolve_webhook computes
+        // regardless of the overall any_usable outcome. Call resolve_webhook
+        // directly to inspect it in isolation.
+        let _ = result; // overall boot-gate error is expected and irrelevant here
+        assert!(matches!(
+            resolve_webhook(&config),
+            PlatformResolution::NotUsable(PlatformSkipReason::SectionAbsent)
+        ));
+    }
+
+    #[test]
+    fn webhook_enabled_with_empty_routes_is_missing_credential() {
+        let config = config_from_yaml(
+            r#"
+gateway:
+  platforms:
+    webhook:
+      enabled: true
+      host: "127.0.0.1"
+      port: 8099
+"#,
+        );
+        assert!(matches!(
+            resolve_webhook(&config),
+            PlatformResolution::NotUsable(PlatformSkipReason::MissingCredential(_))
+        ));
+    }
+
+    #[test]
+    fn webhook_disabled_section_is_disabled_reason() {
+        let config = config_from_yaml(
+            r#"
+gateway:
+  platforms:
+    webhook:
+      enabled: false
+"#,
+        );
+        assert!(matches!(
+            resolve_webhook(&config),
+            PlatformResolution::NotUsable(PlatformSkipReason::Disabled)
+        ));
+    }
+
+    #[test]
+    fn api_server_enabled_missing_key_names_variable_never_value() {
+        let config = config_from_yaml(
+            r#"
+gateway:
+  platforms:
+    api_server:
+      enabled: true
+"#,
+        );
+        let result = resolve_api_server(&config, &no_env);
+        match result {
+            PlatformResolution::NotUsable(PlatformSkipReason::MissingCredential(msg)) => {
+                assert!(msg.contains("IRONHERMES_API_SERVER_KEY"));
+                // D-06: never the value — no env lookup was even invoked
+                // (`no_env` always returns None), so there is no value to
+                // leak by construction.
+            }
+            other => panic!("expected MissingCredential, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn api_server_enabled_with_key_is_usable() {
+        let config = config_from_yaml(
+            r#"
+gateway:
+  platforms:
+    api_server:
+      enabled: true
+"#,
+        );
+        let env_with_key = |name: &str| -> Option<String> {
+            if name == "IRONHERMES_API_SERVER_KEY" {
+                Some("test-key-value".to_string())
+            } else {
+                None
+            }
+        };
+        let result = resolve_api_server(&config, &env_with_key);
+        assert!(result.is_usable());
     }
 }

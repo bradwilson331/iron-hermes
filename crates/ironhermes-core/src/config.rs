@@ -141,7 +141,10 @@ fn default_web_answer_chain_config() -> WebToolChainConfig {
 /// editing config.yaml sees no behavior change.
 fn default_web_extract_chain_config() -> WebToolChainConfig {
     WebToolChainConfig {
-        chain: WEB_EXTRACT_PROVIDERS.iter().map(|s| s.to_string()).collect(),
+        chain: WEB_EXTRACT_PROVIDERS
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
     }
 }
 
@@ -658,7 +661,7 @@ pub struct Config {
     /// empty providers map via `#[serde(default)]`.
     #[serde(default)]
     pub auth: AuthConfig,
-    /// Phase 46 D-03: append-only audit log configuration (`~/.ironhermes/audit.jsonl`).
+    /// Phase 46 D-03: append-only audit log configuration (`~/.ironhermes/logs/audit.jsonl`).
     ///
     /// No on/off disable knob by design (RESEARCH Open Question 2) — D-02's
     /// fail-loudly posture intentionally has no escape hatch. Pre-46 configs parse
@@ -727,6 +730,23 @@ pub struct McpOAuthConfig {
     /// Additional issuer hosts (beyond the built-in baseline) trusted for MCP
     /// OAuth PRM/RFC 8414 discovery when a server declares no per-server pin.
     pub issuer_allowlist: Vec<String>,
+    /// Phase 48.2 Plan 08 (D-13): the absolute public origin an MCP
+    /// authorization server should redirect back to when the web layer drives
+    /// the OAuth handshake (`McpManager::begin_oauth`).
+    ///
+    /// `None` (the default) means the caller derives the redirect origin from
+    /// the incoming browser request instead. This key exists because a
+    /// reverse-proxied or container/VPS deployment's public origin is not
+    /// derivable from the address the process itself binds to. When set, the
+    /// value is validated by `ironhermes_mcp::security::validate_web_redirect_base`
+    /// and combined with the fixed `/oauth/mcp/callback` path to build the
+    /// `redirect_uri` argument passed to `begin_oauth_web`.
+    ///
+    /// Pre-48.2-08 `config.yaml` files (no `mcp_oauth:` block, or a
+    /// `mcp_oauth:` block with no `web_redirect_base_url:` key) parse cleanly
+    /// via `#[serde(default)]` on both the struct and this field.
+    #[serde(default)]
+    pub web_redirect_base_url: Option<String>,
 }
 
 /// Phase 36.17.7 D-02-d: audio cache lifecycle policy.
@@ -3129,6 +3149,29 @@ pub struct PlatformGatewayConfig {
     /// the adapter logs a loud `tracing::warn!` at startup when it is set.
     #[serde(default)]
     pub channel_trust: ChannelTrust,
+    /// Phase 36.7.1 Plan 01: the webhook adapter's listener bind host, e.g.
+    /// `"127.0.0.1"` or `"0.0.0.0"`. `None`/absent on every other platform.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Phase 36.7.1 Plan 01: the webhook adapter's (or, in a later plan,
+    /// the REST API server adapter's) listener bind port. `None`/absent on
+    /// every other platform.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Phase 36.7.1 Plan 01 (D-07): whether the operator explicitly opted
+    /// into exposing this listener on a non-loopback address. `false` on
+    /// every other platform — this flag has no effect there.
+    #[serde(default)]
+    pub public_opt_in: bool,
+    /// Phase 36.7.1 Plan 01: the webhook adapter's configured routes. A
+    /// typed nested list rather than the `extra` flatten escape hatch — the
+    /// route schema (signature scheme, delivery target, rails) is too
+    /// structured to survive as untyped JSON. Empty on every other
+    /// platform. See [`crate::webhook_route::WebhookRoute`] for the schema
+    /// and why it is defined in this crate rather than in
+    /// `ironhermes-restgw`.
+    #[serde(default)]
+    pub routes: Vec<crate::webhook_route::WebhookRoute>,
     #[serde(flatten)]
     pub extra: HashMap<String, serde_json::Value>,
 }
@@ -3216,6 +3259,15 @@ pub struct SecurityConfig {
     /// web config writes are disabled until the operator explicitly opts in.
     /// Set to `true` in `config.yaml` to enable the `update_voice_config` server fn.
     pub web_config_write_enabled: bool,
+    /// Phase 48.2 Plan 13 (G-48.2-6 slice b, T-48.2-13-01): a SECOND, independent
+    /// opt-in — separate from `web_config_write_enabled` above — that authorizes the
+    /// web UI's Tools page to start, stop, and restart the `ironhermes gateway`
+    /// process. Defaults `false` (closed). Editing `config.yaml` from a browser and
+    /// spawning/killing an OS process from a browser are different capabilities:
+    /// an operator who enables the first has not thereby consented to the second.
+    /// A lifecycle action on the Tools page requires BOTH flags to be `true` —
+    /// neither one alone suffices (`gateway_control_api::process_control_gate_message`).
+    pub web_process_control_enabled: bool,
 }
 
 impl Default for SecurityConfig {
@@ -3223,6 +3275,7 @@ impl Default for SecurityConfig {
         Self {
             redact_secrets: true,
             web_config_write_enabled: false,
+            web_process_control_enabled: false,
         }
     }
 }
@@ -5740,6 +5793,68 @@ web:
         assert_eq!(c.terminal.backend, "local");
         assert_eq!(c.terminal.container_runtime, "docker");
     }
+
+    // =========================================================================
+    // Phase 48.2 Plan 08 (D-13): McpOAuthConfig.web_redirect_base_url backward
+    // compat + round-trip
+    // =========================================================================
+
+    #[test]
+    fn config_yaml_without_mcp_oauth_block_parses_with_no_web_redirect_base_url() {
+        // Pre-46.1/pre-48.2-08 config.yaml files have no `mcp_oauth:` key at all.
+        let yaml = r#"
+web:
+  backend: "firecrawl"
+"#;
+        let c: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(c.mcp_oauth.issuer_allowlist.is_empty());
+        assert_eq!(c.mcp_oauth.web_redirect_base_url, None);
+    }
+
+    #[test]
+    fn config_yaml_with_mcp_oauth_but_no_web_redirect_base_url_key_parses() {
+        // A 46.1-era config.yaml sets issuer_allowlist but predates D-13's new key.
+        let yaml = r#"
+mcp_oauth:
+  issuer_allowlist:
+    - "github.com"
+"#;
+        let c: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(c.mcp_oauth.issuer_allowlist, vec!["github.com".to_string()]);
+        assert_eq!(c.mcp_oauth.web_redirect_base_url, None);
+    }
+
+    #[test]
+    fn config_yaml_with_web_redirect_base_url_set_parses_and_round_trips() {
+        let yaml = r#"
+mcp_oauth:
+  issuer_allowlist:
+    - "github.com"
+  web_redirect_base_url: "https://hermes.example.com"
+"#;
+        let c: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            c.mcp_oauth.web_redirect_base_url,
+            Some("https://hermes.example.com".to_string())
+        );
+
+        // D-13: an atomic full-rewrite Config::save() round-trip must not lose the key.
+        let rewritten = serde_yaml::to_string(&c).expect("Config must serialize");
+        let roundtripped: Config =
+            serde_yaml::from_str(&rewritten).expect("Config must re-parse after round-trip");
+        assert_eq!(
+            roundtripped.mcp_oauth.web_redirect_base_url,
+            Some("https://hermes.example.com".to_string()),
+            "D-13: web_redirect_base_url must survive a full Config serialize/deserialize round-trip"
+        );
+    }
+
+    #[test]
+    fn mcp_oauth_config_default_has_no_web_redirect_base_url() {
+        let cfg = McpOAuthConfig::default();
+        assert_eq!(cfg.web_redirect_base_url, None);
+        assert!(cfg.issuer_allowlist.is_empty());
+    }
 }
 
 #[cfg(test)]
@@ -6003,6 +6118,33 @@ security:
             !config.security.web_config_write_enabled,
             "missing web_config_write_enabled in YAML must fall back to false"
         );
+    }
+
+    /// Phase 48.2 Plan 13 (T-48.2-13-01, must_haves): `web_process_control_enabled`
+    /// defaults false and a pre-existing `config.yaml` with no such key still
+    /// parses to false — the exact backward-compatibility contract
+    /// `web_config_write_enabled` established above, mirrored for the second gate.
+    #[test]
+    fn security_web_process_control_default_false() {
+        let default_sc = SecurityConfig::default();
+        assert!(
+            !default_sc.web_process_control_enabled,
+            "web_process_control_enabled default must be false"
+        );
+
+        let yaml = r#"
+security:
+  redact_secrets: true
+  web_config_write_enabled: true
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert!(
+            !config.security.web_process_control_enabled,
+            "missing web_process_control_enabled in YAML must fall back to false, \
+             even when web_config_write_enabled is explicitly true — the two gates \
+             are independent"
+        );
+        assert!(config.security.web_config_write_enabled);
     }
 }
 
@@ -6331,16 +6473,26 @@ display:
     #[test]
     fn web_ui_auth_round_trips_through_yaml() {
         let mut config = Config::default();
-        config.web_ui.auth.password_hash = Some("$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".to_string());
+        config.web_ui.auth.password_hash =
+            Some("$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".to_string());
         config.web_ui.auth.login_theme = "matrix-rain".to_string();
         config.web_ui.auth.cookie_secure = true;
 
         let yaml = serde_yaml::to_string(&config).expect("Config must serialize");
         let reloaded: Config = serde_yaml::from_str(&yaml).expect("Config must deserialize");
 
-        assert_eq!(reloaded.web_ui.auth.password_hash, config.web_ui.auth.password_hash);
-        assert_eq!(reloaded.web_ui.auth.login_theme, config.web_ui.auth.login_theme);
-        assert_eq!(reloaded.web_ui.auth.cookie_secure, config.web_ui.auth.cookie_secure);
+        assert_eq!(
+            reloaded.web_ui.auth.password_hash,
+            config.web_ui.auth.password_hash
+        );
+        assert_eq!(
+            reloaded.web_ui.auth.login_theme,
+            config.web_ui.auth.login_theme
+        );
+        assert_eq!(
+            reloaded.web_ui.auth.cookie_secure,
+            config.web_ui.auth.cookie_secure
+        );
     }
 
     /// D-06 prohibition: operator credentials must NOT live on `WebConfig`

@@ -10,7 +10,7 @@
 //! switch to `tokio::net::lookup_host` at the call site. Phase 4 will handle async wrapping.
 
 use std::collections::HashSet;
-use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs};
 use std::sync::LazyLock;
 use tracing::warn;
 use url::Url;
@@ -91,17 +91,48 @@ pub fn is_safe_url(url_str: &str) -> bool {
 /// Check whether an IP address belongs to a blocked range.
 fn is_blocked_ip(ip: IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => {
-            v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_broadcast()
-                || v4.is_multicast()
-                || v4.is_unspecified()
-                || is_cgnat(v4)
+        IpAddr::V4(v4) => is_blocked_v4(v4),
+        IpAddr::V6(v6) => {
+            // An IPv4-mapped address (`::ffff:a.b.c.d`) reaches the SAME host as
+            // the bare IPv4 address, so it must be judged by the IPv4 rules.
+            // `Ipv6Addr::is_loopback()` is true only for `::1`, so without this
+            // unwrap a hostname with a static AAAA of `::ffff:127.0.0.1` (or
+            // `::ffff:169.254.169.254`) passed every check and connected to
+            // loopback / cloud metadata. No DNS-rebinding race required.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_blocked_v4(v4);
+            }
+            v6.is_loopback()
+                || v6.is_multicast()
+                || v6.is_unspecified()
+                || is_unique_local_v6(v6)
+                || is_unicast_link_local_v6(v6)
         }
-        IpAddr::V6(v6) => v6.is_loopback() || v6.is_multicast() || v6.is_unspecified(),
     }
+}
+
+/// The IPv4 blocked-range predicate, shared with the IPv4-mapped IPv6 arm.
+fn is_blocked_v4(v4: Ipv4Addr) -> bool {
+    v4.is_private()
+        || v4.is_loopback()
+        || v4.is_link_local()
+        || v4.is_broadcast()
+        || v4.is_multicast()
+        || v4.is_unspecified()
+        || is_cgnat(v4)
+}
+
+/// IPv6 unique-local addresses, `fc00::/7` — the v6 analogue of RFC1918 private
+/// space. Hand-rolled because `Ipv6Addr::is_unique_local` is still unstable.
+fn is_unique_local_v6(ip: Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xfe00) == 0xfc00
+}
+
+/// IPv6 unicast link-local addresses, `fe80::/10` — the v6 analogue of
+/// `169.254.0.0/16`. Hand-rolled because `Ipv6Addr::is_unicast_link_local` is
+/// still unstable.
+fn is_unicast_link_local_v6(ip: Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xffc0) == 0xfe80
 }
 
 /// Check whether an IPv4 address falls within the CGNAT range (100.64.0.0/10).
@@ -219,5 +250,82 @@ mod tests {
     fn test_metadata_goog_blocked() {
         // Hostname check catches this before DNS
         assert!(!is_safe_url("https://metadata.goog"));
+    }
+
+    // --- IPv6 blocked ranges (36.7.1 code review CR-01) ---
+    //
+    // These assert on `is_blocked_ip` directly rather than through
+    // `is_safe_url`, because a bracketed IPv6 *literal* in a URL fails closed
+    // for an unrelated reason: `Url::host_str()` returns the bracket-stripped
+    // form, `ToSocketAddrs` cannot resolve it, and the DNS-failure branch
+    // rejects it. That accident is what made a literal spot-check look
+    // "blocked" while a hostname with a static AAAA record sailed through.
+    // The predicate is what the resolved-address loop actually consults, so
+    // the predicate is what these tests pin.
+
+    #[test]
+    fn ipv4_mapped_loopback_blocked() {
+        // `::ffff:127.0.0.1` reaches the same host as `127.0.0.1`.
+        // `Ipv6Addr::is_loopback()` is true only for `::1`, so before CR-01
+        // this returned false and delivery connected to loopback.
+        let ip: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
+        assert!(is_blocked_ip(ip));
+    }
+
+    #[test]
+    fn ipv4_mapped_cloud_metadata_blocked() {
+        let ip: IpAddr = "::ffff:169.254.169.254".parse().unwrap();
+        assert!(is_blocked_ip(ip));
+    }
+
+    #[test]
+    fn ipv4_mapped_private_blocked() {
+        for s in ["::ffff:10.0.0.1", "::ffff:127.0.0.1", "::ffff:172.16.0.1"] {
+            let ip: IpAddr = s.parse().unwrap();
+            assert!(is_blocked_ip(ip), "{s} must be blocked");
+        }
+    }
+
+    #[test]
+    fn ipv6_unique_local_blocked() {
+        // fc00::/7 — both halves of the range.
+        for s in ["fc00::1", "fd00::1", "fdff:ffff::1"] {
+            let ip: IpAddr = s.parse().unwrap();
+            assert!(is_blocked_ip(ip), "{s} must be blocked");
+        }
+    }
+
+    #[test]
+    fn ipv6_link_local_blocked() {
+        // fe80::/10
+        for s in ["fe80::1", "febf:ffff::1"] {
+            let ip: IpAddr = s.parse().unwrap();
+            assert!(is_blocked_ip(ip), "{s} must be blocked");
+        }
+    }
+
+    #[test]
+    fn ipv6_loopback_and_unspecified_still_blocked() {
+        assert!(is_blocked_ip("::1".parse().unwrap()));
+        assert!(is_blocked_ip("::".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv6_public_address_still_allowed() {
+        // The fix must not over-block: a global-unicast v6 address stays
+        // reachable, and `fec0::`/`ff00::` boundaries are not misclassified.
+        assert!(!is_blocked_ip("2001:db8::1".parse().unwrap()));
+        assert!(!is_blocked_ip("2606:4700:4700::1111".parse().unwrap()));
+        // fec0::/10 is deprecated site-local, NOT inside fe80::/10 — the mask
+        // must not accidentally swallow it as link-local.
+        assert!(!is_unicast_link_local_v6("fec0::1".parse().unwrap()));
+        // fb00::/8 sits just below fc00::/7 and must not be caught.
+        assert!(!is_unique_local_v6("fb00::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn ipv4_mapped_public_address_still_allowed() {
+        let ip: IpAddr = "::ffff:93.184.216.34".parse().unwrap();
+        assert!(!is_blocked_ip(ip));
     }
 }

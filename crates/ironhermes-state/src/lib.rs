@@ -684,6 +684,27 @@ impl StateStore {
         Ok(())
     }
 
+    /// Delete a single session and its messages.
+    ///
+    /// Phase 36.7.1 Plan 07: the one gap in an otherwise complete store surface — the
+    /// only pre-existing deletes are the bulk retention sweeps ([`Self::prune_sessions`]),
+    /// filtered on an end timestamp, which cannot express "remove this one session".
+    /// Deletes messages first (no CASCADE in the schema — matches `prune_sessions`'s own
+    /// delete-messages-before-sessions ordering) so a delete never leaves orphaned message
+    /// rows behind the sessions row it just dropped.
+    ///
+    /// Returns whether a session row was actually removed, so a caller (the REST delete
+    /// route) can distinguish a real delete from an identifier that never existed rather
+    /// than reporting a vacuous success either way.
+    pub fn delete_session(&mut self, id: &str) -> Result<bool> {
+        self.conn
+            .execute("DELETE FROM messages WHERE session_id = ?1", params![id])?;
+        let rows = self
+            .conn
+            .execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
+        Ok(rows > 0)
+    }
+
     // -----------------------------------------------------------------------
     // Messages
     // -----------------------------------------------------------------------
@@ -1440,6 +1461,20 @@ impl StateStore {
         self.conn.execute(
             "UPDATE sessions SET title = ?1 WHERE id = ?2",
             params![title, id],
+        )?;
+        Ok(())
+    }
+
+    /// Set or replace the model a session is locked to.
+    ///
+    /// Phase 36.7.1 Plan 07: the caller (the REST model-lock route) validates the model
+    /// against the model registry BEFORE calling this — this method performs no
+    /// validation of its own, matching `update_session_title`'s own "just write the
+    /// column" shape.
+    pub fn update_session_model(&mut self, id: &str, model: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE sessions SET model = ?1 WHERE id = ?2",
+            params![model, id],
         )?;
         Ok(())
     }

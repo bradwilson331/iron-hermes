@@ -25,19 +25,25 @@ pub type TurnId = uuid::Uuid;
 
 /// The surface (platform) that originated a turn.
 ///
-/// - `Web`      — Web UI WebSocket session (iron_hermes_ui).
-/// - `Gateway`  — Telegram/Discord/Slack gateway session (ironhermes-gateway).
-/// - `Cli`      — CLI / TUI session (ironhermes-cli, tui_rata).
-/// - `Realtime` — Web voice2voice session registered at ephemeral-token mint time
+/// - `Web`       — Web UI WebSocket session (iron_hermes_ui).
+/// - `Gateway`   — Telegram/Discord/Slack gateway session (ironhermes-gateway).
+/// - `Cli`       — CLI / TUI session (ironhermes-cli, tui_rata).
+/// - `Realtime`  — Web voice2voice session registered at ephemeral-token mint time
 ///   (iron_hermes_ui realtime_session.rs, Plan 07). WebRTC-direct turns are registered
-///   here so the global registry shows voice turns alongside text turns. Any `match`
-///   on `Surface` **must cover all four arms**.
+///   here so the global registry shows voice turns alongside text turns.
+/// - `ApiServer` — REST API server session (ironhermes-restgw, Phase 36.7.1 Plan 06).
+///   A turn submitted through `POST /v1/runs` is registered under this surface so a
+///   cross-surface listing can distinguish it from a Telegram-, web-, CLI- or
+///   realtime-originated turn — the distinction the approval route (T-36.7.1-48) and
+///   any future operator view depend on. Any `match` on `Surface` **must cover all
+///   five arms**.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Surface {
     Web,
     Gateway,
     Cli,
     Realtime,
+    ApiServer,
 }
 
 impl std::fmt::Display for Surface {
@@ -47,6 +53,7 @@ impl std::fmt::Display for Surface {
             Surface::Gateway => write!(f, "gateway"),
             Surface::Cli => write!(f, "cli"),
             Surface::Realtime => write!(f, "realtime"),
+            Surface::ApiServer => write!(f, "api_server"),
         }
     }
 }
@@ -174,6 +181,19 @@ impl TurnRegistry {
             }
         }
         count
+    }
+
+    /// Look up a single in-flight turn by identifier, projected through
+    /// [`TurnSummary::from_entry`] so the cancellation token never crosses this
+    /// boundary — mirrors the read-lock discipline of [`Self::list_all`].
+    ///
+    /// Returns `None` for an unknown OR already-deregistered identifier rather than a
+    /// default-valued summary — callers (e.g. the REST `/v1/runs/{id}` status route)
+    /// need to distinguish "this run never existed / already finished" from a live
+    /// entry, and a fabricated placeholder summary would erase that distinction.
+    pub async fn get_one(&self, id: TurnId) -> Option<TurnSummary> {
+        let map = self.0.read().await;
+        map.get(&id).map(TurnSummary::from_entry)
     }
 
     /// List all in-flight turns as wire-safe summaries.

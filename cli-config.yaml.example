@@ -8,7 +8,7 @@
 # --- Model Configuration ---
 model:
   # Default model identifier
-  # default: "anthropic/claude-sonnet-4"
+  # default: "anthropic/claude-sonnet-5"
 
   # LLM provider: openrouter, anthropic, openai, ollama, google, together, mistral, groq, deepseek, fireworks
   # provider: "openrouter"
@@ -394,16 +394,21 @@ security:
 # is REQUIRED for validation to pass. Without it the setup wizard re-launches
 # on every start. The actual secret stays in ~/.ironhermes/.env.
 #
-# Canonical pattern (cloud-primary + Ollama fallback, with remote Ollama host):
+# Canonical pattern (cloud-primary, API-key-only — the default):
+#
+# A fallback provider is OPT-IN. Configure one only if it actually runs on
+# this host; see the commented Ollama example further down.
 #
 #   - openrouter is the primary provider (matches model.provider above)
 #   - api_key_env points to OPENROUTER_API_KEY in ~/.ironhermes/.env
-#   - fallback_providers: when openrouter returns 401/403/404/429/5xx the agent
-#     one-shots a swap to the named fallback provider. The fallback uses ITS OWN
-#     `default_model` — the primary's model string is NOT carried over.
-#   - ollama is wired with an explicit remote base_url (env-var interpolation
-#     in YAML is NOT supported; the URL must be a literal). The dummy
-#     OLLAMA_API_KEY=ollama value in .env satisfies the api_key_env contract.
+#   - fallback_providers (OPT-IN, off by default): when openrouter returns
+#     401/403/404/429/5xx the agent one-shots a swap to the named fallback
+#     provider. The fallback uses ITS OWN `default_model` — the primary's model
+#     string is NOT carried over. Only name a provider that actually runs here.
+#   - if you enable the Ollama example below, give it an explicit base_url
+#     (env-var interpolation in YAML is NOT supported; the URL must be a
+#     literal). The dummy OLLAMA_API_KEY=ollama value in .env satisfies the
+#     api_key_env contract.
 #
 # NOTE on extra_request_options (PROV-11..PROV-14):
 #   `model.extra_request_options` is NOT a field — it must live under
@@ -414,10 +419,16 @@ security:
 providers:
   openrouter:
     api_key_env: OPENROUTER_API_KEY     # secret lives in .env
-    fallback_providers: ["ollama"]      # one-shot swap on hard failure
+    # fallback_providers: ["ollama"]    # OPT-IN — see the commented ollama
+                                        # block below. Leave this off unless
+                                        # you actually run a fallback provider
+                                        # on this host; a fallback pointing at
+                                        # a port nothing listens on turns a
+                                        # clean auth error into a confusing
+                                        # connection-refused one.
     # api_mode: chat_completions          # override only if needed
     # base_url: null                      # override only if needed
-    # default_model: "anthropic/claude-sonnet-4"
+    # default_model: "anthropic/claude-sonnet-5"
     # disabled: false                     # set true to exclude from resolver
     #
     # OpenRouter routing preference (upstream provider IDs — anthropic, openai,
@@ -425,23 +436,28 @@ providers:
     # extra_request_options:
     #   provider:
     #     order: ["anthropic", "openai"]
-  ollama:
-    api_key_env: OLLAMA_API_KEY                  # add OLLAMA_API_KEY=ollama in .env
-    base_url: "http://localhost:11434/v1"        # local Ollama; for a remote host use http://<host>:11434/v1
-    api_mode: chat_completions
-    default_model: "llama3.1:8b"
-    # Provider-level extras — applied to every request to this provider
-    extra_request_options:
-      num_ctx: 8192            # default 8K context window
-      num_predict: 512
-    # Per-model overrides — merged per-key on top of provider-level defaults
-    models:
-      "llama3.1:8b":
-        extra_request_options:
-          num_ctx: 32768       # bump just this model to 32K
-      "qwen2.5-coder:7b":
-        extra_request_options:
-          top_k: 40
+# --- Optional local/remote Ollama fallback (OPT-IN) -------------------------
+# Uncomment BOTH this block AND the `fallback_providers` line above to enable.
+# Only do so on a host that actually runs Ollama. Server/container deployments
+# are API-key-only by default and should leave this off.
+#
+#   ollama:
+#     api_key_env: OLLAMA_API_KEY                # add OLLAMA_API_KEY=ollama in .env
+#     base_url: "http://localhost:11434/v1"      # local; for a remote host use http://<host>:11434/v1
+#     api_mode: chat_completions
+#     default_model: "llama3.1:8b"
+#     # Provider-level extras — applied to every request to this provider
+#     extra_request_options:
+#       num_ctx: 8192            # default 8K context window
+#       num_predict: 512
+#     # Per-model overrides — merged per-key on top of provider-level defaults
+#     models:
+#       "llama3.1:8b":
+#         extra_request_options:
+#           num_ctx: 32768       # bump just this model to 32K
+#       "qwen2.5-coder:7b":
+#         extra_request_options:
+#           top_k: 40
 #   anthropic:
 #     api_key_env: ANTHROPIC_API_KEY
 #     api_mode: anthropic_messages

@@ -281,12 +281,26 @@ impl AuthState {
 /// bundle, `matrix-woman.glb`, `three.module.js` and every app stylesheet
 /// public). `/auth/logout` is intentionally NOT here: logging out an
 /// operator should require being that operator.
+///
+/// Phase 48.2 Plan 09 (D-03/T-48.2-09-01): `GET /oauth/mcp/callback` is
+/// public too, and for a structurally different reason than the rest of
+/// this allowlist — not because it is pre-auth UI chrome, but because the
+/// session cookie is `SameSite=Strict` (`session_cookie`, above) and is
+/// therefore never sent on the authorization server's cross-site top-level
+/// redirect back to this origin. Requiring a session here would make the
+/// flow this route exists to serve impossible, not just inconvenient. Its
+/// capability is the unguessable, single-use OAuth `state` instead of a
+/// session (see `mcp_oauth_callback_route.rs`'s module doc for the full
+/// argument). This is one exact-path `GET` arm, not a prefix rule — `POST`
+/// on the same path is deliberately absent here and therefore still
+/// requires a session (asserted by `deny_by_default_allowlist`, below).
 fn is_public(method: &Method, path: &str, login_assets: &HashSet<String>) -> bool {
     match (method, path) {
         (&Method::GET, "/") => true,
         (&Method::GET, "/favicon.ico") => true,
         (&Method::POST, "/auth/login") => true,
         (&Method::GET, "/auth/session") => true,
+        (&Method::GET, p) if p == crate::server::mcp_admin_api::MCP_OAUTH_CALLBACK_PATH => true,
         (&Method::GET, p) if login_assets.contains(p) => true,
         _ => false,
     }
@@ -510,6 +524,11 @@ mod tests {
             (Method::GET, "/chat-attachments/s1/a1"),
             (Method::POST, "/auth/logout"),
             (Method::GET, "/some/future/route"),
+            // Phase 48.2 Plan 09 (T-48.2-09-01): the hole is method-scoped —
+            // POST on the callback path must still require a session, or a
+            // later edit could silently widen it into a write-capable public
+            // endpoint.
+            (Method::POST, crate::server::mcp_admin_api::MCP_OAUTH_CALLBACK_PATH),
         ] {
             assert!(!is_public(&m, p, &assets), "{m} {p} must require a session");
         }
@@ -517,6 +536,7 @@ mod tests {
             (Method::GET, "/"),
             (Method::POST, "/auth/login"),
             (Method::GET, "/auth/session"),
+            (Method::GET, crate::server::mcp_admin_api::MCP_OAUTH_CALLBACK_PATH),
         ] {
             assert!(is_public(&m, p, &assets), "{m} {p} must stay public");
         }

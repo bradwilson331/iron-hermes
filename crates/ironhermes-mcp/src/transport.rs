@@ -146,19 +146,29 @@ pub async fn connect_http(
 /// `global_additive_issuers` is the resolved `Config.mcp_oauth.issuer_allowlist` —
 /// consulted only when `config.allowed_issuer` (the per-server pin) is absent. See
 /// `security::resolve_allowed_issuers`.
-pub async fn connect_http_oauth(
+/// Phase 48.2 Plan 08 (T-48.2-08-01): the single validated construction path
+/// for an rmcp `AuthorizationManager`.
+///
+/// Contains EXACTLY the sequence that previously lived inline in
+/// `connect_http_oauth`: URL/namespace extraction, allowed-issuer
+/// resolution, `validate_prm_issuer` — still the first thing that touches
+/// the URL and still before any network/discovery call —
+/// `AuthStoreCredentialStore::new`, `AuthorizationManager::new`, and
+/// `set_credential_store`. Returns the manager plus the resolved server URL
+/// string.
+///
+/// T-48.2-08-01: this is the ONLY construction site of `AuthorizationManager`
+/// in this file. Both [`connect_http_oauth`] (loopback CLI path) and
+/// [`begin_oauth_web`] (web-completable path) reach the manager exclusively
+/// through this function, so the security-critical ordering — issuer
+/// validation before any network call — has one copy that cannot drift
+/// between two independently-maintained paths.
+async fn build_oauth_manager(
     config: &McpServerConfig,
     auth_store: std::sync::Arc<ironhermes_core::auth::AuthStore>,
     global_additive_issuers: &[String],
-) -> Result<(
-    RunningService<RoleClient, ()>,
-    Option<tokio::process::Child>,
-)> {
-    use rmcp::transport::StreamableHttpClientTransport;
-    use rmcp::transport::auth::{AuthorizationManager, AuthorizationSession};
-    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
+) -> Result<(rmcp::transport::auth::AuthorizationManager, String)> {
+    use rmcp::transport::auth::AuthorizationManager;
 
     let url = config
         .url
@@ -202,6 +212,26 @@ pub async fn connect_http_oauth(
     // D-05: Wire the credential store BEFORE initialize_from_store so all reads/writes
     // go through AuthStoreCredentialStore → auth.json.
     auth_mgr.set_credential_store(adapter);
+
+    Ok((auth_mgr, url.clone()))
+}
+
+pub async fn connect_http_oauth(
+    config: &McpServerConfig,
+    auth_store: std::sync::Arc<ironhermes_core::auth::AuthStore>,
+    global_additive_issuers: &[String],
+) -> Result<(
+    RunningService<RoleClient, ()>,
+    Option<tokio::process::Child>,
+)> {
+    use rmcp::transport::StreamableHttpClientTransport;
+    use rmcp::transport::auth::AuthorizationSession;
+    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let (mut auth_mgr, url) =
+        build_oauth_manager(config, auth_store, global_additive_issuers).await?;
 
     // Hot path: cached token present.
     // initialize_from_store returns Ok(true) when credential_store.load() has a
@@ -345,6 +375,89 @@ pub async fn connect_http_oauth(
     Ok((client, None))
 }
 
+/// Begin a web-completable MCP OAuth authorization (Phase 48.2 Plan 08, D-03).
+///
+/// The web-completable sibling of [`connect_http_oauth`]'s cold path. Reaches
+/// `AuthorizationManager` construction ONLY through [`build_oauth_manager`]
+/// (T-48.2-08-01) — the same validated prelude the loopback CLI path uses —
+/// then performs AS metadata discovery and constructs an `AuthorizationSession`
+/// bound to the caller-supplied `redirect_uri` instead of an ephemeral
+/// loopback URI.
+///
+/// Binds NO listener, calls NO `open::that`, prints NOTHING to stdout, and
+/// waits for nothing — the caller (`McpManager::begin_oauth`) owns parking
+/// the returned session and completing it later from a callback URL string
+/// via [`rmcp::transport::auth::AuthorizationSession::handle_callback_url`].
+///
+/// Every error is wrapped through `crate::security::sanitize_error` before it
+/// leaves this function (A-1 discipline, matching every other fallible step
+/// in this file).
+pub async fn begin_oauth_web(
+    config: &McpServerConfig,
+    auth_store: std::sync::Arc<ironhermes_core::auth::AuthStore>,
+    global_additive_issuers: &[String],
+    redirect_uri: &str,
+) -> Result<rmcp::transport::auth::AuthorizationSession> {
+    use rmcp::transport::auth::AuthorizationSession;
+
+    let (mut auth_mgr, _url) =
+        build_oauth_manager(config, auth_store, global_additive_issuers).await?;
+
+    // Discover AS metadata before creating AuthorizationSession.
+    // AuthorizationSession::new calls register_client() which requires
+    // self.metadata to be Some — set it via set_metadata() first, matching
+    // connect_http_oauth's cold path.
+    let metadata = auth_mgr.discover_metadata().await.map_err(|e| {
+        anyhow::anyhow!(
+            "AS metadata discovery failed: {}",
+            crate::security::sanitize_error(&e.to_string())
+        )
+    })?;
+    auth_mgr.set_metadata(metadata);
+
+    // AuthorizationSession::new performs Dynamic Client Registration with the
+    // caller-supplied redirect_uri — there is no pre-registration constraint,
+    // so a server-hosted https://<web-origin>/oauth/mcp/callback value is
+    // registrable per attempt exactly as the ephemeral loopback URI is today.
+    let session = AuthorizationSession::new(
+        auth_mgr,
+        &[], // no explicit scopes — AS/PRM metadata selects defaults via select_scopes()
+        redirect_uri,
+        Some("IronHermes MCP Client"),
+        None, // no client_metadata_url (URL-based client IDs not required)
+    )
+    .await
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "PKCE session init: {}",
+            crate::security::sanitize_error(&e.to_string())
+        )
+    })?;
+
+    Ok(session)
+}
+
+/// Extract the `state` query parameter from an authorization URL or an OAuth
+/// callback URL (Phase 48.2 Plan 08).
+///
+/// This is the single place that names the `state` query parameter — both
+/// `McpManager::begin_oauth`/`complete_oauth` and (later) the web route
+/// consume it through this function, so the key is spelled once.
+///
+/// Errors with fixed text (never echoing `url`, which may carry an
+/// authorization code or other sensitive query data) when the URL fails to
+/// parse or the parameter is absent or empty.
+pub fn oauth_state_from_url(url: &str) -> Result<String> {
+    let parsed = url::Url::parse(url)
+        .map_err(|_| anyhow::anyhow!("Failed to parse URL while extracting OAuth state"))?;
+    parsed
+        .query_pairs()
+        .find(|(k, _)| k == "state")
+        .map(|(_, v)| v.into_owned())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("URL has no 'state' query parameter"))
+}
+
 #[cfg(test)]
 mod tests {
     /// GAP-6b: static-grep regression — connect_stdio MUST set stderr to
@@ -470,6 +583,186 @@ mod tests {
             src.contains("validate_prm_issuer(url.as_str(),"),
             "B-4: connect_http_oauth must call security::validate_prm_issuer before any \
              network/discovery call to block SSRF via malicious OAuth metadata."
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // oauth_state_from_url tests (Phase 48.2 Plan 08)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn oauth_state_from_url_extracts_from_authorization_url() {
+        let url = "https://as.example.com/authorize?response_type=code&client_id=abc&state=xyz123&redirect_uri=https%3A%2F%2Fhermes.example.com%2Foauth%2Fmcp%2Fcallback";
+        let state = super::oauth_state_from_url(url).expect("state must be extracted");
+        assert_eq!(state, "xyz123");
+    }
+
+    #[test]
+    fn oauth_state_from_url_extracts_from_callback_url_with_code_and_iss() {
+        let url = "https://hermes.example.com/oauth/mcp/callback?code=abc123&state=xyz123&iss=https%3A%2F%2Fas.example.com";
+        let state = super::oauth_state_from_url(url).expect("state must be extracted");
+        assert_eq!(state, "xyz123");
+    }
+
+    #[test]
+    fn oauth_state_from_url_errors_when_state_absent() {
+        let url = "https://hermes.example.com/oauth/mcp/callback?code=abc123";
+        assert!(super::oauth_state_from_url(url).is_err());
+    }
+
+    #[test]
+    fn oauth_state_from_url_errors_when_state_empty() {
+        let url = "https://hermes.example.com/oauth/mcp/callback?code=abc123&state=";
+        assert!(super::oauth_state_from_url(url).is_err());
+    }
+
+    #[test]
+    fn oauth_state_from_url_errors_on_malformed_url() {
+        assert!(super::oauth_state_from_url("not a url").is_err());
+    }
+
+    // -------------------------------------------------------------------------
+    // begin_oauth_web fast-fail tests (Phase 48.2 Plan 08, T-48.2-08-01)
+    //
+    // Both cases must fail via build_oauth_manager's validate_prm_issuer call —
+    // fast, and before any network call — so these tests never attempt to
+    // resolve a real hostname.
+    // -------------------------------------------------------------------------
+
+    /// Open a fresh on-disk `AuthStore` under a per-test temp dir, mirroring
+    /// `auth_store_adapter.rs::make_test_store` and `manager.rs::make_test_auth_store`.
+    async fn make_test_auth_store(tag: &str) -> std::sync::Arc<ironhermes_core::auth::AuthStore> {
+        let dir: std::path::PathBuf = std::env::temp_dir().join(format!(
+            "ironhermes_mcp_transport_test_{}_{}",
+            std::process::id(),
+            tag,
+        ));
+        std::fs::create_dir_all(&dir).expect("could not create per-test temp dir");
+        let path = dir.join("auth.json");
+        ironhermes_core::auth::AuthStore::open(path)
+            .await
+            .expect("test AuthStore::open failed")
+    }
+
+    #[tokio::test]
+    async fn begin_oauth_web_rejects_plain_http_server_url() {
+        let store = make_test_auth_store("http_reject").await;
+        let config = crate::config::McpServerConfig {
+            url: Some("http://insecure.example.com/mcp".to_string()),
+            oauth_provider: Some("test_ns".to_string()),
+            ..Default::default()
+        };
+        let result = super::begin_oauth_web(
+            &config,
+            store,
+            &[],
+            "https://hermes.example.com/oauth/mcp/callback",
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "begin_oauth_web must reject a plain-http server URL via validate_prm_issuer \
+             before any network call (B-4)"
+        );
+    }
+
+    #[tokio::test]
+    async fn begin_oauth_web_rejects_host_outside_resolved_allowlist() {
+        let store = make_test_auth_store("allowlist_reject").await;
+        let config = crate::config::McpServerConfig {
+            url: Some("https://evil.example.com/mcp".to_string()),
+            oauth_provider: Some("test_ns".to_string()),
+            ..Default::default()
+        };
+        // No per-server pin, no global additive issuers → baseline-only allowlist,
+        // which does not include evil.example.com.
+        let result = super::begin_oauth_web(
+            &config,
+            store,
+            &[],
+            "https://hermes.example.com/oauth/mcp/callback",
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "begin_oauth_web must reject an https URL whose host is outside the resolved \
+             allowlist, fast and before any network call (B-4/D-01)"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Ordering guard (Phase 48.2 Plan 08 Task 2, T-48.2-08-01): static-source
+    // regression proving validate_prm_issuer runs before AuthorizationManager
+    // construction inside build_oauth_manager, and that begin_oauth_web never
+    // constructs its own AuthorizationManager — both paths must reach it only
+    // through the shared prelude.
+    // -------------------------------------------------------------------------
+
+    /// Slice a named function's body out of this file's own source, stripping
+    /// comment-only lines so a doc comment mentioning either search term
+    /// cannot satisfy or defeat the caller's assertion.
+    ///
+    /// `fn_signature_needle` must uniquely identify the `fn` line (e.g.
+    /// `"async fn build_oauth_manager("`). Assumes rustfmt's convention that a
+    /// top-level function's closing brace is an unindented `}` on its own
+    /// line — true for every function in this file.
+    fn extract_fn_body_no_comments(src: &str, fn_signature_needle: &str) -> String {
+        let fn_start = src
+            .find(fn_signature_needle)
+            .unwrap_or_else(|| panic!("could not find `{fn_signature_needle}` in transport.rs"));
+        let body_start = src[fn_start..]
+            .find("{\n")
+            .map(|i| fn_start + i)
+            .unwrap_or_else(|| panic!("`{fn_signature_needle}` has no body opening brace"));
+        let body_end = src[body_start..]
+            .find("\n}\n")
+            .map(|i| body_start + i)
+            .unwrap_or_else(|| panic!("`{fn_signature_needle}` body never closes at column 0"));
+        let body = &src[body_start..body_end];
+        body.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn build_oauth_manager_validates_issuer_before_constructing_manager() {
+        let src = include_str!("transport.rs");
+        let code_only = extract_fn_body_no_comments(src, "async fn build_oauth_manager(");
+
+        let validate_pos = code_only.find("validate_prm_issuer(").unwrap_or_else(|| {
+            panic!(
+                "T-48.2-08-01: build_oauth_manager must call security::validate_prm_issuer; \
+                 body={code_only}"
+            )
+        });
+        let construct_pos = code_only
+            .find("AuthorizationManager::new(")
+            .unwrap_or_else(|| {
+                panic!(
+                    "T-48.2-08-01: build_oauth_manager must construct AuthorizationManager; \
+                     body={code_only}"
+                )
+            });
+
+        assert!(
+            validate_pos < construct_pos,
+            "T-48.2-08-01: validate_prm_issuer must run BEFORE AuthorizationManager::new \
+             inside build_oauth_manager (byte offsets within the function body: \
+             validate_prm_issuer={validate_pos}, AuthorizationManager::new={construct_pos})"
+        );
+    }
+
+    #[test]
+    fn begin_oauth_web_does_not_construct_its_own_authorization_manager() {
+        let src = include_str!("transport.rs");
+        let code_only = extract_fn_body_no_comments(src, "pub async fn begin_oauth_web(");
+
+        assert!(
+            !code_only.contains("AuthorizationManager::new("),
+            "T-48.2-08-01: begin_oauth_web must reach AuthorizationManager construction ONLY \
+             through build_oauth_manager — it must not call AuthorizationManager::new itself. \
+             body={code_only}"
         );
     }
 }

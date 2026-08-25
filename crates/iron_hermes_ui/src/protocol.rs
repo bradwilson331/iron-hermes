@@ -730,12 +730,196 @@ impl std::fmt::Debug for CreateProfileRequest {
 /// Phase 47.4 (D-04): `Option`-per-field merge payload for the profile
 /// detail drawer's provider/model save — mirrors `ProviderWritePayload`
 /// (`provider_config_api.rs:59-78`).
+///
+/// Phase 50.1 Plan 05 (D-15): `skills_disabled` extends the same
+/// option-per-field merge discipline — `None` leaves the target profile's
+/// current opt-out list alone, `Some(vec![])` clears it (every skill on).
 #[allow(dead_code)] // Plan 08 consumes this via update_profile_config.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ProfileConfigWritePayload {
     pub name: String,
     pub provider: Option<String>,
     pub model_default: Option<String>,
+    pub skills_disabled: Option<Vec<String>>,
+}
+
+/// Phase 50.1 Plan 05 (D-15): one row of a profile-scoped skills catalog —
+/// the process-global skill registry's catalog joined against one target
+/// profile's own `config.yaml` opt-out list. `enabled_for_profile` is the
+/// inverse of catalog membership in that profile's `skills.disabled`
+/// ("everything not named is on").
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ProfileSkillRow {
+    pub name: String,
+    pub category: String,
+    pub enabled_for_profile: bool,
+}
+
+/// Phase 50.1 Plan 05 (D-15/D-16): a bot's persona (SOUL.md) body, read
+/// from / written to that bot's own workspace subdirectory — the
+/// directory its CLI-handoff subprocess runs in, so the workspace
+/// resolver (`ironhermes_core::workspace::resolve_from_cwd`) picks it up
+/// at turn time. An empty `body` means "no persona file yet" (inherits
+/// the default identity), never an error.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ProfilePersona {
+    pub name: String,
+    pub body: String,
+}
+
+/// Phase 50.1 Plan 01 (D-11): UI-owned bot display metadata. Persisted under
+/// a UI-owned store keyed by profile name — never the profile `config.yaml`
+/// (a malformed one silently degrades to defaults, D-11), never the agent
+/// database (schema migration + lifecycle coupling, D-11).
+///
+/// Persistence shape (operator checkpoint decision, resolved at plan
+/// execution time — recorded in full in `50.1-01-SUMMARY.md`): a hybrid of
+/// the checkpoint's option-c and option-a rather than either pure option.
+/// The CANONICAL copy of one bot's `BotMeta` lives at a per-profile sidecar
+/// file (`~/.ironhermes/profiles/<name>/ui-meta.json`) — deleting the
+/// profile directory removes it with no separate cleanup path needed. A
+/// central JSON map (`~/.ironhermes/bot-meta.json`) caches every bot's
+/// `BotMeta` for the roster's single whole-map read per paint (D-13 fences
+/// the roster away from N-per-profile-directory fan-out); see
+/// `server/bot_meta_api.rs`'s module doc for the full read/write protocol.
+///
+/// No secret-adjacent field lives here, so — unlike `CreateProfileRequest`
+/// below — no hand-written redacting `Debug` impl is required.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct BotMeta {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub avatar: Option<BotAvatarDescriptor>,
+    pub group: Option<String>,
+    pub preview: Option<String>,
+    pub preview_at_ms: Option<i64>,
+    pub updated_at_ms: i64,
+}
+
+/// Phase 50.1 Plan 01 (D-11): `Option`-per-field merge payload for
+/// `save_bot_meta` — mirrors `ProfileConfigWritePayload` below. `None` on a
+/// field means "leave unchanged"; `Some(v)` sets that field to `v`. There is
+/// no way to clear a field back to `None` once set (matches
+/// `ProfileConfigWritePayload`'s own precedent) — a future plan can add an
+/// explicit clear verb if that need ever surfaces.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct BotMetaPatch {
+    pub name: String,
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub avatar: Option<BotAvatarDescriptor>,
+    pub group: Option<String>,
+    pub preview: Option<String>,
+    pub preview_at_ms: Option<i64>,
+}
+
+/// Phase 50.1 Plan 01: a bot's avatar descriptor. `image_id` references a
+/// separately stored asset (plan 50.1-04) — inline data-URL image bytes are
+/// rejected by `save_bot_meta` (T-50.1-01-05) so this metadata payload can
+/// never grow unbounded with binary blobs.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct BotAvatarDescriptor {
+    pub kind: String,
+    pub shape: Option<String>,
+    pub color: Option<String>,
+    pub image_id: Option<String>,
+}
+
+/// Phase 50.1 Plan 04 (D-11/D-12): avatar upload request — the arg-bearing
+/// POST body for `bot_avatar_api::upload_bot_avatar`. `content_b64` is the
+/// raw image bytes, standard base64 (mirrors `chat_attachments_api`'s
+/// `upload_attachment` transport shape).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct BotAvatarUploadRequest {
+    pub bot_name: String,
+    pub content_b64: String,
+}
+
+/// Phase 50.1 Plan 04 (D-12): AI-portrait generation request — the
+/// arg-bearing POST body for `bot_avatar_api::generate_bot_avatar`.
+/// `prompt` is the operator's free-text description; the positive step
+/// count and safety flag are resolved server-side from config, never
+/// client-supplied (see `bot_avatar_api::resolve_generation_args`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct BotAvatarGenerateRequest {
+    pub bot_name: String,
+    pub prompt: String,
+}
+
+/// Phase 50.1 Plan 04 (D-11): the result of a successful upload or
+/// generation — an opaque identifier only. Image bytes never travel inside
+/// the bot-meta metadata payload OR this response; the bytes are served
+/// separately from `serve_bot_avatar`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct BotAvatarSaved {
+    pub image_id: String,
+}
+
+/// Phase 50.1 Plan 01 (D-09): one roster row — a join of the existing
+/// `ProfileRow` enumeration with this plan's optional `BotMeta` and a
+/// server-derived `is_live` flag (D-04: the LIVE badge is never
+/// client-computed).
+///
+/// `is_kanban_worker` (OF-4, gap task) is joined in from
+/// [`BotMetaListResponse::kanban_worker_names`] — a SEPARATE set, not a
+/// field on `BotMeta` — because most kanban worker profiles carry no
+/// `BotMeta` sidecar at all (OF-4: absence of bot-meta is NOT the badge
+/// signal, only board-assignee membership is).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct BotRosterEntry {
+    pub row: ProfileRow,
+    pub meta: Option<BotMeta>,
+    pub is_live: bool,
+    pub is_kanban_worker: bool,
+}
+
+/// Phase 50.1 OF-4 (gap task): `list_bot_meta`'s response, extended with
+/// the kanban-worker badge join. `kanban_worker_names` is a SEPARATE set
+/// from `meta` — folding the flag onto `BotMeta` itself would silently drop
+/// the badge for every kanban worker profile that has no `BotMeta` sidecar
+/// (the common case per OF-4's operator report). Computed server-side with
+/// ONE `fetch_board` read per roster load (D-13 fence: never a per-profile
+/// fan-out — see `server/bot_meta_api.rs`'s `list_bot_meta`); a board-read
+/// failure degrades to an empty set so the roster still renders, badges
+/// simply absent.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+pub struct BotMetaListResponse {
+    pub meta: std::collections::BTreeMap<String, BotMeta>,
+    pub kanban_worker_names: std::collections::BTreeSet<String>,
+}
+
+/// Phase 50.1 Plan 06 (D-17): the `duplicate_profile` request — an explicit
+/// source and target, never merged into `CreateProfileRequest`. The two
+/// contracts are materially different (scaffold-from-root-config-and-
+/// resolve-inherited-keys vs. copy-a-specific-allowlist-of-the-source's-own-
+/// artifacts-and-deliberately-omit-one) and folding them into one payload
+/// would produce a conditional-field footgun where the `.env` omission is
+/// invisible at the call site.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct DuplicateProfileRequest {
+    pub source: String,
+    pub target: String,
+}
+
+/// Phase 50.1 Plan 06 (UI-SPEC Component Inventory §3): the create wizard's
+/// clone-from control state. `Import` is present in the control per the
+/// Copywriting Contract but has no backing operation in this phase — the
+/// wizard renders it disabled with an inline note rather than silently
+/// accepting a selection that does nothing.
+///
+/// Under `--all-features`, `legacy-shell` swaps the reachable app root to
+/// `WarpHermes`, leaving this enum's only construction site
+/// (`profile_shared/create_dialog.rs`'s bot-context wizard) unreferenced
+/// from `main()` for dead-code-lint purposes — even though it is live in
+/// the default (non-legacy-shell) build. Same pre-existing pattern as
+/// `KeyMode` a few lines above.
+#[allow(dead_code)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CloneFromChoice {
+    #[default]
+    Empty,
+    CloneExisting,
+    Import,
 }
 
 /// Phase 47.4 (D-09): the real judge-probe outcome. `Success`/`Failure`/
@@ -764,6 +948,329 @@ pub struct VerifyReport {
     pub key_count: usize,
     pub first_key: Option<String>,
     pub outcome: VerifyOutcome,
+}
+
+/// Phase 50.1 Plan 03 (D-05/D-06/D-20): the CLI-handoff dispatch request — a
+/// non-live bot's name and a single message to send it via an isolated
+/// `ironhermes` subprocess (`server/cli_handoff.rs`). Carries no key
+/// material, so no hand-written redacting `Debug` impl is required (unlike
+/// `CreateProfileRequest` above, which redacts `manual_keys`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct BotHandoffRequest {
+    pub name: String,
+    pub message: String,
+}
+
+/// Phase 50.1 Plan 03: the CLI-handoff dispatch result. `dispatch_bot_message`
+/// (this plan) always returns failure as `Err(ServerFnError)` — every
+/// `BotHandoffError` maps to one, per its module doc — so `error` is never
+/// populated by that call site; it exists on this DTO because D-20 commits
+/// `run_bot_handoff`'s spawn-wait-return shape to Phase 50.2's group-chat
+/// round driver, which needs to represent one member's failed turn as DATA
+/// (not an early `Err` that aborts the whole round) without a second result
+/// type. Neither field carries key material.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct BotHandoffResult {
+    pub reply: String,
+    pub exit_ok: bool,
+    pub error: Option<String>,
+    pub elapsed_ms: u64,
+}
+
+/// Phase 50.2 Plan 16 (G-50.2-2c): `dispatch_bot_message`'s return shape —
+/// either the bot had no turn in flight and ran now (`Replied`, carrying the
+/// same [`BotHandoffResult`] shape as before this plan), or the bot was busy
+/// and the message was accepted and QUEUED rather than racing a second
+/// concurrent subprocess. `Queued` means the message will be folded into
+/// that bot's NEXT handoff prompt, whichever surface starts it next; `depth`
+/// is how many messages are now waiting for that bot (this one included).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum BotDispatchOutcome {
+    Replied(BotHandoffResult),
+    Queued { depth: u32 },
+}
+
+// ---------------------------------------------------------------------
+// Phase 50.2 Plan 07 (D-20): the @mention-handoff middleware's DTO set.
+// Placed adjacent to the `BotHandoff*` block above, following its own
+// documentation style. Consumed by `server/mention_handoff_api.rs` and the
+// shared `bot_roster/mention_handoff.rs` component's three call sites
+// (Bot Chat window, room transcript, live Chat screen).
+// ---------------------------------------------------------------------
+
+/// Phase 50.2 Plan 07 (D-20): one `@mention` handoff dispatch — the target
+/// bot's name and the delegated message text (the mentioning message,
+/// unmodified — the mention is detected, never consumed or edited).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct MentionHandoffRequest {
+    pub target: String,
+    pub message: String,
+}
+
+/// Phase 50.2 Plan 07 (D-20): the successful result of one `@mention`
+/// handoff dispatch. `dispatch_mention_handoff` always returns failure as
+/// `Err(ServerFnError)` — this DTO carries only the success shape.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct MentionHandoffResult {
+    pub target: String,
+    pub reply: String,
+    pub elapsed_ms: u64,
+}
+
+/// Phase 50.2 Plan 07 (D-20, UI-SPEC State Matrix): the client-side render
+/// state one `@mention` handoff block carries. `Failed.reason` carries only
+/// a `BotHandoffError` `Display` string — never raw child output, never an
+/// env value, never a raw `.env` line (the CR-05/CR-06 discipline
+/// `server/cli_handoff.rs`'s module doc records).
+// Phase 50.2 Plan 07 Task 1: `MentionHandoffState`'s first production
+// caller lands in Task 2/3 (the shared `MentionHandoffBlock` component and
+// its three call sites); this intra-plan staging `#[allow(dead_code)]`
+// follows the crate's own precedent (`group_chat_api.rs`'s Plan 04 pure
+// fns carried the same allow before Task 3 wired their driver).
+#[allow(dead_code)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum MentionHandoffState {
+    Pending,
+    Resolved,
+    Failed { reason: String },
+}
+
+// ---------------------------------------------------------------------
+// Phase 50.2 Plan 01 (D-20/D-21/D-04/D-05/D-06/D-03): the group-chat social
+// layer's DTO set. Placed adjacent to `BotMeta`/`BotHandoffResult` above and
+// following the same documentation style; consumed by
+// `server/group_chat_store.rs`, `server/group_chat_api.rs`, and the
+// `bot_roster/{create_room_modal,group_row,group_chat_workspace}.rs`
+// components. Introduced by this plan's tracer task — later 50.2 plans
+// consume these without editing this file.
+// ---------------------------------------------------------------------
+
+/// Phase 50.2 Plan 01: one group-chat room's persisted record — the
+/// canonical value stored at `<hermes_home>/group-rooms.json` (index) and
+/// mirrored per-room at `<hermes_home>/group-rooms/<id>.json` (see
+/// `server/group_chat_store.rs`'s module doc for the full persistence
+/// shape). `id` is a slug derived from `name` at creation time
+/// (`slugify_room_name`) and never changes after that — renaming a room is
+/// out of scope for this plan.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct GroupRoom {
+    pub id: String,
+    pub name: String,
+    pub members: Vec<String>,
+    /// Roster-section label this room is filed under — unused until plan
+    /// 06's roster-sectioning work; carried here now so the DTO shape never
+    /// needs to change when that plan lands.
+    pub group: Option<String>,
+    pub needs_you: bool,
+    pub preview: Option<String>,
+    pub preview_at_ms: Option<i64>,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
+/// Phase 50.2 Plan 01: the roster-row projection of a [`GroupRoom`] —
+/// exactly the fields `group_row.rs` needs to paint one `.kn-room-row`,
+/// without shipping the full transcript over the wire on every roster
+/// paint.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct GroupRoomSummary {
+    pub id: String,
+    pub name: String,
+    pub members: Vec<String>,
+    /// Phase 50.2 Plan 03 (D-11, reachability fix): passed through from
+    /// `GroupRoom.group` — `list_rooms_impl` (`group_chat_store.rs`)
+    /// previously dropped this field when projecting the summary, which
+    /// would have made a room's group assignment permanently invisible to
+    /// the roster's sectioning join no matter what the store held. Mirrors
+    /// `BotMeta.group`'s shape exactly.
+    pub group: Option<String>,
+    pub needs_you: bool,
+    pub preview: Option<String>,
+    pub preview_at_ms: Option<i64>,
+    /// `Some(round)` while a round is actively dispatching for this room;
+    /// `None` when idle. This plan's tracer never sets it to `Some` in the
+    /// summary response — round-in-flight roster-row reflection is plan
+    /// 04's job — but the field is shipped now so that plan is additive.
+    pub active_round: Option<u32>,
+}
+
+/// Phase 50.2 Plan 01: who produced a [`GroupRoomMessage`]. `System` is
+/// reserved for a future round-divider/settled marker persisted as a real
+/// transcript row (unused by this plan's tracer, which renders those
+/// client-side from `round`/`GroupRoundOutcome` instead).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum GroupRoomSpeaker {
+    Operator,
+    Member(String),
+    System,
+}
+
+/// Phase 50.2 Plan 01: the outcome of one member's turn within a round.
+/// `Failed.reason` carries only a [`BotHandoffError`]'s `Display` string —
+/// never raw child stdout, never an env value, never a raw `.env` line (the
+/// CR-05/CR-06 discipline `server/cli_handoff.rs`'s module doc records).
+///
+/// [`BotHandoffError`]: crate::server::cli_handoff::BotHandoffError
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum MemberTurnStatus {
+    Replied,
+    Passed,
+    Failed { reason: String },
+}
+
+/// Phase 50.2 Plan 01: one row in a room's persisted transcript.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct GroupRoomMessage {
+    pub from: GroupRoomSpeaker,
+    pub text: String,
+    pub at_ms: i64,
+    pub round: u32,
+    pub status: MemberTurnStatus,
+}
+
+/// Phase 50.2 Plan 01: a room's full persisted transcript — the per-room
+/// sibling file's on-disk shape
+/// (`<hermes_home>/group-rooms/<id>.json`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct GroupRoomTranscript {
+    pub room: GroupRoom,
+    pub messages: Vec<GroupRoomMessage>,
+}
+
+/// Phase 50.2 Plan 01: one member's failed turn within a completed round —
+/// the summary shape [`GroupRoundOutcome::failures`] carries back to the
+/// caller (the full detail also lands in the transcript as a
+/// [`GroupRoomMessage`] with `status: MemberTurnStatus::Failed`).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct GroupMemberFailure {
+    pub member: String,
+    pub reason: String,
+}
+
+/// Phase 50.2 Plan 01: the result of one `dispatch_group_round` call. This
+/// plan's tracer always returns `rounds_run: 1`, `settled: false`,
+/// `needs_you: false` — the real multi-round settle/needs-you computation
+/// is plan 03's job.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct GroupRoundOutcome {
+    pub rounds_run: u32,
+    pub messages_appended: u32,
+    pub settled: bool,
+    pub needs_you: bool,
+    pub failures: Vec<GroupMemberFailure>,
+}
+
+/// Phase 50.2 Plan 18 (G-50.2-2c): `dispatch_group_round`'s return shape —
+/// either the room had no drive in flight and ran now (`Ran`, carrying the
+/// same [`GroupRoundOutcome`] shape as before this plan), or a drive was
+/// already running for this room and the operator's message was accepted
+/// and QUEUED rather than racing a second concurrent drive on the same
+/// room. `Queued` means the message will be injected as an operator
+/// transcript row at the next round boundary of the drive already running;
+/// `depth` is how many messages are now waiting for that room (this one
+/// included). The room-level twin of [`BotDispatchOutcome`].
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub enum GroupRoundDispatch {
+    Ran(GroupRoundOutcome),
+    Queued { depth: u32 },
+}
+
+/// Phase 50.2 Plan 01 (D-21): the app-wide group-chat orchestration
+/// tunables. `Default` returns the D-21 constants quoted verbatim from
+/// upstream `plugin.js:3295-3298` — this plan consumes only
+/// `Default::default()`; plan 05 gives this struct real persistence and a
+/// settings UI.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct GroupChatSettings {
+    pub max_rounds: u32,
+    pub max_messages: u32,
+    pub history_limit: u32,
+    pub min_members: u32,
+    pub max_members: u32,
+}
+
+impl Default for GroupChatSettings {
+    fn default() -> Self {
+        Self {
+            max_rounds: 3,
+            max_messages: 10,
+            history_limit: 24,
+            min_members: 2,
+            max_members: 6,
+        }
+    }
+}
+
+/// Phase 50.2 Plan 01: the `create_group_room` request payload.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct CreateGroupRoomRequest {
+    pub name: String,
+    pub members: Vec<String>,
+}
+
+/// Phase 50.2 Plan 15 (G-50.2-2a): the `update_group_room_members` request
+/// payload. `room_id` is the room's creation-time slug
+/// (`GroupRoom::id`/`slugify_room_name`) and is never itself changed by this
+/// request — this DTO changes membership only, never a room's name or id
+/// (`protocol.rs:1035-1041` records `id` as frozen after creation).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct UpdateGroupRoomMembersRequest {
+    pub room_id: String,
+    pub members: Vec<String>,
+}
+
+/// Phase 50.2 Plan 01: the `dispatch_group_round` request payload.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct DispatchGroupRoundRequest {
+    pub room_id: String,
+    pub message: String,
+}
+
+// ---------------------------------------------------------------------
+// Phase 50.2 Plan 08 (D-13/D-23/D-11/D-04/D-21): the persisted, operator-
+// side Bot Chat thread — the OPERATOR half of "every bot has a persistent
+// Bot Chat." Plan 02 gave the BOT half (`--session "Bot Chat"` resume +
+// history seeding over the CLI-handoff transport); this DTO set is what
+// `server/bot_chat_store.rs` persists and `bot_roster/chat_window.rs`
+// renders. `BotChatEntryKind` mirrors `chat_window.rs`'s `ChatWindowRole`
+// (`Operator`/`Bot`/`Error`) one variant each, so the persisted shape and
+// the client render shape can never drift apart.
+// ---------------------------------------------------------------------
+
+/// Phase 50.2 Plan 08: which side authored a persisted Bot Chat row —
+/// mirrors `chat_window.rs`'s `ChatWindowRole` exactly.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BotChatEntryKind {
+    Operator,
+    Bot,
+    Error,
+}
+
+/// Phase 50.2 Plan 08: one persisted row in a bot's Bot Chat thread.
+/// `at_ms` is always assigned server-side (`server/bot_chat_store.rs`'s
+/// `append_bot_chat_entries_impl`), never trusted from the client, so a
+/// thread's row order is never dependent on the browser's clock.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct BotChatEntry {
+    pub kind: BotChatEntryKind,
+    pub text: String,
+    pub at_ms: i64,
+}
+
+/// Phase 50.2 Plan 08: one bot's full persisted Bot Chat thread — the
+/// on-disk shape at `<hermes_home>/profiles/<bot>/bot-chat.json` (see
+/// `server/bot_chat_store.rs`'s module doc for the full persistence-shape
+/// record). Bounded to `BOT_CHAT_THREAD_MAX_ENTRIES` (200) most-recent
+/// entries on every append — the OPERATOR'S VIEW only. The bot's own
+/// recall is bounded separately by `ironhermes-cli`'s
+/// `BOT_SESSION_HISTORY_LIMIT` (24, D-21's `GROUP_CHAT_HISTORY_LIMIT`) —
+/// the two bounds are deliberately different because they answer different
+/// questions: how much the operator can scroll back, versus how much
+/// context each turn carries.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct BotChatThread {
+    pub bot: String,
+    pub entries: Vec<BotChatEntry>,
 }
 
 #[cfg(test)]
@@ -1262,5 +1769,17 @@ mod tests {
             parsed, nw,
             "D-13: DecomposeResult::NotWired must round-trip"
         );
+    }
+
+    /// Phase 50.2 Plan 01: `GroupChatSettings::default()` must return exactly
+    /// the D-21 constants quoted verbatim from upstream `plugin.js:3295-3298`.
+    #[test]
+    fn group_chat_settings_default_matches_d21_constants() {
+        let defaults = GroupChatSettings::default();
+        assert_eq!(defaults.max_rounds, 3);
+        assert_eq!(defaults.max_messages, 10);
+        assert_eq!(defaults.history_limit, 24);
+        assert_eq!(defaults.min_members, 2);
+        assert_eq!(defaults.max_members, 6);
     }
 }

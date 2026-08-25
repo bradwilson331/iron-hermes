@@ -1,0 +1,1069 @@
+/*
+ * Phase 50.1 Plan 01 (D-08/D-09/D-11): bot roster CSS band.
+ *
+ * System B tokens only (--w-bg-*, --accent-primary, --fg, --fg-dim, --fs-11,
+ * --fs-13, --sp-1/2/4/6, --w-radius-block, --w-border-hi, --font-mono) — no
+ * new hex literals, matching kanban.css's own discipline. This file is
+ * declared unconditionally from `bot_roster.rs` (never behind a cargo
+ * feature), mirroring `kanban.rs`'s `KANBAN_CSS` declaration.
+ *
+ * This file NEVER modifies kanban.css, screens.css or site.css — the
+ * pre-existing subagent section rendered below the roster keeps its System
+ * A styling untouched (D-09).
+ */
+
+.kn-bot-roster {
+    margin-bottom: var(--sp-6);
+}
+
+.kn-bot-card {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    padding: var(--sp-4);
+    /* Same fill formula `.kn-drawer`/`.kn-modal` already use
+       (kanban.css:324) — copied, not reinvented. */
+    background: color-mix(in srgb, var(--accent-primary) 6%, var(--w-bg-3));
+    border: 1px solid var(--w-border-hi);
+    border-radius: var(--w-radius-block);
+    font-family: var(--font-mono);
+    color: var(--fg);
+}
+
+.kn-bot-card-head {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--sp-2);
+}
+
+/*
+ * Phase 50.1 Plan 04 (D-12): the BotFace container — sizing variants via a
+ * `data-size` attribute (matches the plugin's own multi-context avatar
+ * sizing) rather than inline styles, so every mount site (roster card,
+ * drawer, presence chip, picker preview) draws from one rule set.
+ * `border-radius: var(--r-4)` per the UI-SPEC Token & Class Reuse Map —
+ * the crate's small radius, kept even though the rendered shape itself may
+ * be non-square.
+ */
+.kn-bot-avatar {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    border-radius: var(--r-4);
+    overflow: hidden;
+}
+
+.kn-bot-avatar[data-size="20"] { width: 20px; height: 20px; }
+.kn-bot-avatar[data-size="32"] { width: 32px; height: 32px; }
+.kn-bot-avatar[data-size="40"] { width: 40px; height: 40px; }
+.kn-bot-avatar[data-size="56"] { width: 56px; height: 56px; }
+.kn-bot-avatar[data-size="64"] { width: 64px; height: 64px; }
+
+.kn-bot-avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.kn-bot-avatar svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+/*
+ * Phase 50.1 Plan 04 (D-12): work-state modifier — widens the geometric
+ * face's eye ellipses by the plugin's own ~13% ratio (2.3px idle ->
+ * 2.6px working) via a CSS custom property the SVG's own eye elements
+ * read (`bot_face.rs`). No glow, pulse or spinner — deliberately subtle.
+ * Uploaded/AI-portrait avatars never carry this attribute in a
+ * work-mood-eligible render (there is no eye element to widen on a
+ * photo) — accepted, not deferred (D-12).
+ */
+.kn-bot-avatar[data-mood="work"] {
+    --kn-avatar-eye-ry: 2.6px;
+}
+
+/*
+ * Phase 50.1 Plan 04 (D-12): the three-source avatar picker
+ * (widgets/avatar_picker.rs). `.kn-modal-segmented`/`.kn-modal-seg` are
+ * reused verbatim from kanban.css (UI-SPEC Token & Class Reuse Map) —
+ * only the classes below are new.
+ */
+.kn-avatar-picker {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+}
+
+.kn-avatar-picker-head {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+}
+
+.kn-avatar-shape-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: var(--sp-2);
+}
+
+/* Inert-greyed, not hidden, once an image is chosen (UI-SPEC E5 partial). */
+.kn-avatar-shape-grid--inert,
+.kn-avatar-color-row--inert {
+    opacity: 0.4;
+    pointer-events: none;
+}
+
+.kn-avatar-shape-cell {
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: var(--w-bg-3);
+    border: 1px solid var(--w-border-hi);
+    border-radius: var(--w-radius-block);
+    cursor: pointer;
+}
+
+.kn-avatar-shape-cell--selected {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: 2px;
+}
+
+.kn-avatar-color-row {
+    display: flex;
+    gap: var(--sp-2);
+}
+
+.kn-avatar-color-swatch {
+    width: 32px;
+    height: 32px;
+    min-width: 32px;
+    border-radius: 999px;
+    border: 1px solid var(--w-border-hi);
+    cursor: pointer;
+}
+
+.kn-avatar-color-swatch--selected {
+    outline: 2px solid var(--accent-primary);
+    outline-offset: 2px;
+}
+
+/*
+ * Reuses `chat.rs`'s hidden-file-input mechanism verbatim (visible
+ * `.kn-action-btn` label[for] trigger + a visually hidden `<input
+ * type="file">`) — only this wrapper's visual treatment is new.
+ */
+.kn-avatar-upload-dropzone {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    padding: var(--sp-2);
+    border: 1px dashed var(--w-border-hi);
+    border-radius: var(--w-radius-block);
+}
+
+.kn-avatar-upload-input-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.kn-avatar-generate {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+}
+
+.kn-bot-card-title {
+    flex: 1;
+    font-size: var(--fs-13);
+    font-weight: 600;
+    /* UI-SPEC E2 overflow: single-line ellipsis so card heights stay
+       uniform regardless of name length. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.kn-bot-badge--live {
+    font-size: var(--fs-11);
+    color: var(--accent-primary);
+    border: 1px solid var(--accent-primary);
+    border-radius: var(--w-radius-block);
+    padding: 0 var(--sp-1);
+    white-space: nowrap;
+}
+
+/* Phase 50.1 OF-4 (gap task): badge for profiles that are current
+   assignees on the root kanban board — a pre-existing kanban worker
+   profile, not one created via the bot wizard. Same pill shape as
+   `.kn-bot-badge--live` above, but `--fg-dim` (neutral, informational —
+   matches the `.kn-chip[data-kind="status"]` "todo"/"archived" tone in
+   kanban.css) rather than `--accent-primary`, which UI-SPEC's Color table
+   reserves for the LIVE badge and other 10%-accent roles — the two badges
+   must never visually collide when both render on the same card. */
+.kn-bot-badge--kanban {
+    font-size: var(--fs-11);
+    color: var(--fg-dim);
+    border: 1px solid var(--fg-dim);
+    border-radius: var(--w-radius-block);
+    padding: 0 var(--sp-1);
+    white-space: nowrap;
+}
+
+.kn-bot-card-meta {
+    font-size: var(--fs-11);
+    color: var(--fg-dim);
+}
+
+.kn-bot-card-preview {
+    font-size: var(--fs-13);
+    color: var(--fg-dim);
+    /* UI-SPEC E2 overflow: single-line ellipsis so card heights stay
+       uniform regardless of preview text length. */
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* UI-SPEC E2 loading/empty/error: this file intentionally declares no
+   loading/empty/error rules of its own — `BotRoster` reuses
+   `.kn-drawer-loading` / `.kn-drawer-empty` / `.kn-modal-error` verbatim
+   from `kanban.css` (already loaded unconditionally, since `ScreenKanban`
+   is always mounted per `screens/mod.rs`'s own doc comment), so those three
+   states already render with System B tokens without redeclaring them
+   here. */
+
+.kn-bot-card-actions {
+    display: flex;
+    flex-direction: row;
+    gap: var(--sp-2);
+}
+
+/*
+ * Phase 50.1 Plan 03 (D-04/D-20): the send-to-bot handoff composer, rendered
+ * inline beneath a non-live card's action row. Reuses `.kn-modal-input`'s
+ * focus-border and `.kn-modal-error`'s visual spec verbatim (composed onto
+ * the elements below by `handoff.rs`, not redeclared here) — only layout is
+ * new. System B tokens only, no new hex literals.
+ */
+.kn-bot-handoff {
+    display: flex;
+    flex-direction: row;
+    gap: var(--sp-2);
+}
+
+.kn-bot-handoff-input {
+    flex: 1;
+    min-width: 0;
+}
+
+.kn-bot-handoff-status {
+    margin-top: var(--sp-2);
+    /* `.kn-bot-handoff-status` composes onto the same element as
+       `.kn-modal-error` (handoff.rs) — this file only adds the spacing that
+       distinguishes it from a bare `.kn-modal-error` row inside a modal
+       body, where that margin-top is already provided by `.kn-modal-actions`
+       or a sibling label. Full-width beneath the input row above. */
+    width: 100%;
+}
+
+/*
+ * Phase 50.1 Plan 05 (D-15/D-16): the Advanced pane (model override,
+ * persona, per-bot skills), shared by the create wizard's collapsed
+ * disclosure and the drawer's Advanced section (advanced.rs). Composes
+ * onto `.kn-modal-label` / `.kn-modal-input` / `.kn-modal-checkbox` /
+ * `.kn-drawer-loading` / `.kn-drawer-empty` / `.kn-modal-error`
+ * (kanban.css, already loaded unconditionally) rather than redeclaring
+ * their visual specs — only the layout/sizing new to this pane's three
+ * field groups lives here. System B tokens only, no new hex literals.
+ */
+.kn-advanced-pane {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+}
+
+/* UI-SPEC E3 long-text: a multi-row control, 120px minimum height, native
+   scrolling — reuses `.kn-modal-input`'s background/border/color/font/
+   padding (advanced.rs composes both classes onto the same <textarea>). */
+.kn-persona-input {
+    min-height: 120px;
+    resize: vertical;
+    overflow-y: auto;
+}
+
+/* One `.kn-key-table`-shaped row per catalog skill — reuses
+   `.kn-modal-checkbox`'s flex/gap/font spec (advanced.rs composes both
+   classes onto the same <label>) and `.kn-key-row`'s bottom-border table
+   feel, with the category tag pushed to the row's trailing edge. */
+.kn-skill-row {
+    justify-content: space-between;
+    padding: var(--sp-2) 0;
+    border-bottom: 1px solid var(--w-border);
+}
+
+/*
+ * Phase 50.1 Plan 06 (D-17/D-18): Duplicate + Delete. `.kn-modal-btn--danger`
+ * and `.kn-modal-btn--warn` are general-purpose tint variants on the
+ * existing `.kn-modal-btn` shape (kanban.css) — same 44px min-height,
+ * only the border/text color changes, matching the plan's own instruction
+ * ("reusing the crate's modal button shape ... tinted with the danger
+ * token instead of the accent token"). System B tokens only.
+ */
+.kn-modal-btn--danger {
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
+.kn-modal-btn--danger:hover:not(:disabled),
+.kn-modal-btn--danger:focus:not(:disabled) {
+    background: color-mix(in srgb, var(--danger) 15%, var(--w-bg-3));
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
+.kn-modal-btn--warn {
+    border-color: var(--warn);
+    color: var(--warn);
+}
+
+.kn-modal-btn--warn:hover:not(:disabled),
+.kn-modal-btn--warn:focus:not(:disabled) {
+    background: color-mix(in srgb, var(--warn) 15%, var(--w-bg-3));
+    border-color: var(--warn);
+    color: var(--warn);
+}
+
+/* The card's `⋯` overflow trigger + its dropdown menu — same positioning
+   shape as `.kn-profile-switcher-wrap`/`.kn-profile-menu` (kanban.css),
+   whose item classes (`.kn-profile-menu-item`) this menu reuses verbatim
+   rather than redeclaring menu chrome. Only the positioning wrapper is
+   new here. */
+.kn-bot-card-overflow {
+    position: relative;
+    display: inline-flex;
+}
+
+/* The drawer's Danger zone row — DUPLICATE and DELETE BOT side by side. */
+.kn-bot-danger-zone {
+    display: flex;
+    flex-direction: row;
+    gap: var(--sp-2);
+}
+
+/*
+ * The typed destructive-confirmation modal (delete_confirm.rs). Composes
+ * onto `.kn-modal`/`.kn-modal-overlay`/`.kn-modal-header`/`.kn-modal-body`/
+ * `.kn-modal-actions` (kanban.css) for shape/spacing/typography — this
+ * rule overrides only the shell's default cyan accent border with the
+ * danger token, so the whole dialog reads as destructive at a glance
+ * rather than only the title/confirm-button being danger-tinted.
+ */
+.kn-confirm-delete {
+    border-color: var(--danger);
+}
+
+/*
+ * Phase 50.1 Plan 07 (D-14): the read-only npub row inside the drawer's
+ * Identity section (npub_row.rs). Follows the provider-key row's flex
+ * layout shape (label + value + one action) but is its own class family —
+ * never composes onto the key table's status classes (UI-SPEC Token &
+ * Class Reuse Map: a public identity is neither secret nor settable).
+ * System B tokens only, no new hex literals.
+ */
+.kn-npub-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+    padding-top: var(--sp-2);
+}
+
+/* UI-SPEC E7 overflow/long-text backstop: a ~63-char monospace value wraps
+   inside the drawer's width rather than overflowing it. */
+.kn-npub-value {
+    flex: 1;
+    min-width: 0;
+    font-family: var(--font-mono);
+    font-size: var(--fs-11);
+    color: var(--fg);
+    overflow-wrap: anywhere;
+    word-break: break-all;
+}
+
+.kn-npub-copy {
+    flex-shrink: 0;
+}
+
+/*
+ * Phase 50.1 OF-8a (gap task): the "inherited from main profile" badge
+ * shown next to the npub value when the bot's own `.env` has no identity
+ * secret and the row falls back to the main profile's public key
+ * (display-only — OF-8 DECISION). Its own small pill class, mirroring
+ * `.kn-chip`'s (kanban.css) visual language rather than composing onto
+ * that class directly — correction: kanban.css IS loaded unconditionally
+ * (`ScreenKanban` is always mounted, `bots.css:245`'s own comment already
+ * establishes this for `.kn-drawer-loading`/`.kn-drawer-empty`/
+ * `.kn-modal-error`), so the reason to stay self-contained here is NOT a
+ * load-order risk — it is this row's own "own class family" rule (module
+ * doc), the same one that already governs
+ * `.kn-npub-row`/`.kn-npub-value`/`.kn-npub-copy`, and that a status/
+ * priority/assignee/age-flavored chip is the wrong semantic fit for an
+ * inherited-provenance label regardless of load order. Never composes onto
+ * the provider-key status classes either, for the same reason.
+ */
+.kn-npub-inherited-badge {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    background: var(--w-bg-3);
+    border: 1px solid var(--w-border);
+    border-radius: var(--w-radius-pill);
+    color: var(--fg-dim);
+    font-family: var(--font-mono);
+    font-size: var(--fs-11);
+    padding: 1px 6px;
+    line-height: 1.4;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+}
+
+/*
+ * Phase 50.1 Plan 08 (D-22): the drawer's per-bot Routines section
+ * (bot_roster/routines.rs). `.kn-routine-row` reuses `.kn-key-row`'s
+ * (kanban.css) flex/gap/bottom-border shape — routines carry no
+ * inherited/missing status badge (unlike the Keys table this layout is
+ * modeled on), so this is its own class rather than a composed one, same
+ * "reuse the shape, not the class" precedent `.kn-skill-row` already set
+ * above. System B tokens only, no new hex literals.
+ */
+.kn-routine-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--sp-4);
+    padding: var(--sp-2) 0;
+    border-bottom: 1px solid var(--w-border);
+}
+
+.kn-routine-row-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.kn-routine-row-title {
+    font-size: var(--fs-13);
+    color: var(--fg);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.kn-routine-row-sub {
+    font-size: var(--fs-11);
+    color: var(--fg-dim);
+    font-family: var(--font-mono);
+}
+
+.kn-routine-row-next {
+    font-size: var(--fs-11);
+    color: var(--fg-dim);
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+.kn-routine-row-actions {
+    display: flex;
+    flex-direction: row;
+    gap: var(--sp-2);
+    flex-shrink: 0;
+}
+
+/*
+ * Phase 50.1 Plan 08 (D-19): the Active-now presence strip
+ * (widgets/active_now_strip.rs), mounted above the roster grid. Stays
+ * exactly one row — `overflow-x: auto` scrolls instead of wrapping to a
+ * second row, which would push the grid below it down (T-50.1-08-06). No
+ * `flex-wrap` declaration at all (the flex default is already `nowrap`).
+ * Renders nothing at all when empty at the COMPONENT level, not here — an
+ * idle fleet mounts no `.kn-bot-presence-strip` element, so this rule
+ * contributes zero vertical space by not existing rather than by height:0.
+ * System B tokens only.
+ */
+.kn-bot-presence-strip {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--sp-4);
+    overflow-x: auto;
+    overflow-y: hidden;
+    margin-bottom: var(--sp-4);
+    padding-bottom: var(--sp-1);
+}
+
+.kn-bot-presence-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--sp-1);
+    flex-shrink: 0;
+    max-width: 120px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.kn-bot-presence-avatar-wrap {
+    position: relative;
+    display: inline-flex;
+    flex-shrink: 0;
+}
+
+/* 6px status dot, inset at the avatar's lower right. */
+.kn-bot-presence-dot {
+    position: absolute;
+    right: -1px;
+    bottom: -1px;
+    width: 6px;
+    height: 6px;
+    border-radius: 999px;
+    background: var(--accent-primary);
+    border: 1px solid var(--w-bg-3);
+}
+
+.kn-bot-presence-dot--running {
+    background: var(--success);
+}
+
+.kn-bot-presence-name {
+    font-size: var(--fs-11);
+    color: var(--fg);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/*
+ * Phase 50.1 OF-5 (gap task): the floating one-on-one bot chat window
+ * (bot_roster/chat_window.rs). Composes onto `.kn-modal-overlay`/
+ * `.kn-modal`/`.kn-modal-header`/`.kn-modal-title`/`.kn-drawer-close`/
+ * `.kn-modal-input`/`.kn-action-btn`/`.kn-drawer-empty` (kanban.css) for the
+ * dialog shell, close button, input and send-button chrome and the empty
+ * state — same shell `delete_confirm.rs` already composes onto in this
+ * directory. Only the chat-specific geometry (taller box, scrolling thread,
+ * per-role message rows) is new here. System B tokens only, no new hex
+ * literals.
+ */
+.kn-chat-window {
+    width: 420px;
+    height: 560px;
+    max-height: calc(100vh - 64px);
+}
+
+.kn-chat-header {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--sp-2);
+}
+
+.kn-chat-header .kn-modal-title {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.kn-chat-thread {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: var(--sp-4) var(--sp-6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+}
+
+.kn-chat-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    max-width: 85%;
+}
+
+.kn-chat-row--operator {
+    align-self: flex-end;
+    align-items: flex-end;
+}
+
+.kn-chat-row--bot,
+.kn-chat-row--error {
+    align-self: flex-start;
+    align-items: flex-start;
+}
+
+.kn-chat-row-label {
+    font-size: var(--fs-11);
+    color: var(--fg-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.kn-chat-row-text {
+    font-size: var(--fs-13);
+    color: var(--fg);
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+    background: var(--w-bg-3);
+    border: 1px solid var(--w-border);
+    border-radius: var(--w-radius-block);
+    padding: var(--sp-2);
+}
+
+.kn-chat-row--operator .kn-chat-row-text {
+    border-color: var(--accent-primary);
+}
+
+.kn-chat-row--error .kn-chat-row-text {
+    border-color: var(--danger);
+    color: var(--danger);
+}
+
+.kn-chat-row--pending .kn-chat-row-text {
+    color: var(--fg-dim);
+    font-style: italic;
+}
+
+.kn-chat-input-row {
+    display: flex;
+    flex-direction: row;
+    gap: var(--sp-2);
+    padding: var(--sp-4) var(--sp-6);
+    border-top: 1px solid var(--w-border);
+}
+
+.kn-chat-input {
+    flex: 1;
+    min-width: 0;
+}
+
+/*
+ * Phase 50.2 Plan 01 (D-21/UI-SPEC §4-§6): the group-chat social layer —
+ * Create Room modal member list, the room row in the roster grid, and the
+ * room workspace that replaces the grid in place. Composes onto
+ * `.kn-modal*`/`.kn-chip`/`.kn-action-btn`/`.kn-bot-avatar`/
+ * `.kn-bot-card-head`/`.kn-bot-card-title`/`.kn-bot-card-preview`/
+ * `.kn-drawer-loading`/`.kn-drawer-empty`/`.kn-modal-error` (all above or in
+ * kanban.css, both loaded unconditionally) for shell/typography/status
+ * chrome — this phase introduces zero new design tokens and zero new
+ * fonts. System B tokens only, no new hex literals.
+ */
+
+/* The Create Room modal's scrollable member checklist (`.kn-modal-checkbox`
+   rows compose onto this container, kanban.css). */
+.kn-room-member-list {
+    max-height: 240px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+}
+
+/* One member row's name label inside the checklist — ellipsis-truncates on
+   one line so a long bot name never breaks the row (UI-SPEC E5 backstop). */
+.kn-room-member-row {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+/* One group-chat room's row in the roster grid — `.kn-bot-card`'s
+   fill/border/radius/font/color formula reused verbatim (UI-SPEC: "same
+   card formula as `.kn-bot-card`, content differs"), plus a pointer cursor
+   and accent hover border since the whole row is the single click
+   affordance (no separate action button, unlike a bot card's CHAT/EDIT/⋯
+   split). */
+.kn-room-row {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+    padding: var(--sp-4);
+    background: color-mix(in srgb, var(--accent-primary) 6%, var(--w-bg-3));
+    border: 1px solid var(--w-border-hi);
+    border-radius: var(--w-radius-block);
+    font-family: var(--font-mono);
+    color: var(--fg);
+    cursor: pointer;
+    transition: border-color 120ms ease;
+}
+
+.kn-room-row:hover,
+.kn-room-row:focus-within {
+    border-color: var(--accent-primary);
+}
+
+/* 2-6 overlapping 20px `.kn-bot-avatar` members, negative left margin on
+   every child after the first (UI-SPEC Component Inventory §4). Reused at
+   32px inside `.kn-room-header` — sizing comes from `.kn-bot-avatar`'s own
+   `data-size` rule, this class only supplies the overlap layout. */
+.kn-room-avatar-cluster {
+    display: flex;
+    flex-direction: row;
+    flex-shrink: 0;
+}
+
+.kn-room-avatar-cluster > *:not(:first-child) {
+    margin-left: -8px;
+}
+
+/* Full-panel room view, replacing the roster grid in place (UI-SPEC
+   Component Inventory §6) — header/transcript/composer as flex children,
+   never a `.kn-modal`/`.kn-drawer` (a multi-round transcript needs full
+   vertical space neither bounded shell comfortably gives it). */
+.kn-room-workspace {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.kn-room-header {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--sp-4);
+    padding: var(--sp-6) 0;
+    border-bottom: 1px solid var(--w-border);
+    margin-bottom: var(--sp-4);
+}
+
+/* Phase 50.2 Plan 17 (G-50.2-2a): the room header's member-name text
+   element — dimmed, header-scale font, single line with ellipsis overflow
+   so a long member list truncates rather than pushing the settings gear
+   and overflow controls off the end. `min-width: 0` is required for a flex
+   child to actually shrink below its content width inside the header's
+   row layout. */
+.kn-room-member-names {
+    color: var(--fg-dim);
+    font-size: var(--fs-11);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+}
+
+/* Scrollable message list; header and composer stay fixed around it. */
+.kn-room-transcript {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: var(--sp-4) 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-2);
+}
+
+/* One member turn in the transcript. Message text wraps fully — truncation
+   is only the room ROW's rule (`.kn-bot-card-preview`, above), never the
+   workspace transcript's. */
+.kn-room-message {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: var(--sp-2) var(--sp-4);
+    background: color-mix(in srgb, var(--accent-primary) 4%, var(--w-bg-2));
+    border-radius: var(--w-radius-block);
+    color: var(--fg);
+    font-size: var(--fs-13);
+    line-height: 1.4;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+/* A message's identity-colored left border — the color itself is set
+   inline per-message (`group_chat_workspace.rs`'s `identity_border_token`,
+   one of 50.1's existing 8-swatch identity tokens); this rule only
+   supplies the transparent default so a pass/failed row (no border color
+   set) never shifts layout relative to a Replied row's colored border. */
+.kn-room-message {
+    border-left: 2px solid transparent;
+}
+
+/* Phase 50.2 Plan 06 (State Matrix: "renders as a pass-equivalent row"): a
+   true pass AND a failed turn share this SAME modifier — dimmed, no
+   identity border color. A failed turn's actual reason is retrievable only
+   via `.kn-room-failure-marker`'s accessible label, never inline body
+   text. */
+.kn-room-message[data-status="pass"] {
+    opacity: 0.6;
+    color: var(--fg-dim);
+    border-left-color: transparent;
+}
+
+/* Phase 50.2 Plan 11 (G-2, UAT-EVIDENCE.md §4 F-2): a failed turn is now
+   its OWN status value, not a shadow of "pass" — same dimming (a failure
+   is still low-emphasis data, not an alarm, per D-20 "failure is data"),
+   but `border-left-color: var(--danger)` lets a scan down the transcript
+   separate failures from passes without reading a word. Cannot both match
+   a row (data-status has exactly one value), so this never contests the
+   pass rule above. */
+.kn-room-message[data-status="failed"] {
+    opacity: 0.6;
+    color: var(--fg-dim);
+    border-left-color: var(--danger);
+}
+
+.kn-room-message-head {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--sp-2);
+}
+
+/* Phase 50.2 Plan 06 (UI-SPEC Copywriting Contract), updated Phase 50.2
+   Plan 11 (G-2): the failed-turn inline marker — a small, low-emphasis
+   affordance whose `title` still carries the `BotHandoffError` reason for
+   the hover/focus tooltip. It is `aria-hidden` now that the same reason
+   is visible BODY text (`.kn-room-message[data-status="failed"]`'s row
+   text), so a screen reader is not made to announce the same sentence
+   twice. `cursor: help` signals the hover/focus-revealed tooltip, matching
+   the semantic role rather than inventing a new interactive-affordance
+   cursor. */
+.kn-room-failure-marker {
+    color: var(--fg-dim);
+    cursor: help;
+    font-size: var(--fs-11);
+}
+
+/* Phase 50.2 Plan 06 (UI-SPEC Component Inventory §6): the round-boundary
+   marker — `.kn-drawer-section-label`'s uppercase/letter-spaced treatment,
+   centered, flanked by half-width `border-top` rules (a labelled rule, not
+   a card) — the transcript's ONLY ordering guarantee under the
+   parallel-within-round amendment. */
+.kn-room-round-divider {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: var(--sp-2);
+    margin: var(--sp-2) 0;
+    font-size: var(--fs-11);
+    font-weight: 700;
+    color: var(--fg-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.kn-room-round-divider::before,
+.kn-room-round-divider::after {
+    content: "";
+    flex: 1;
+    border-top: 1px solid var(--w-border);
+}
+
+/* Phase 50.2 Plan 06 (State Matrix: "round settled" — a single dim line
+   after that round's divider band). */
+.kn-room-settled {
+    color: var(--fg-dim);
+    font-size: var(--fs-11);
+    text-align: center;
+    padding: var(--sp-1) 0;
+}
+
+/* Pinned-bottom composer, matching `chat_window.rs`'s existing
+   `.kn-chat-input-row` shape (`.kn-modal-input` + `.kn-action-btn` send). */
+.kn-room-composer {
+    display: flex;
+    flex-direction: row;
+    gap: var(--sp-2);
+    padding-top: var(--sp-4);
+    border-top: 1px solid var(--w-border);
+}
+
+.kn-room-composer .kn-modal-input {
+    flex: 1;
+    min-width: 0;
+}
+
+/*
+ * Phase 50.2 Plan 03 (D-11/D-21, UI-SPEC Component Inventory §3): roster
+ * group sections — replaces the single flat `.grid.wide` with N labeled
+ * blocks when 2+ group labels exist. `.grid.wide` itself (screens.css) is
+ * reused verbatim inside each section, unchanged.
+ */
+
+/* One labeled section wrapper. */
+.kn-roster-group-section {
+    margin-bottom: var(--sp-6);
+}
+
+.kn-roster-group-section:last-child {
+    margin-bottom: 0;
+}
+
+/* Section label + separator above a group's card grid. Base treatment
+   mirrors `.kn-drawer-section-label` (kanban.css) — uppercase, `--fs-11`
+   /700, `0.04em` letter-spacing — plus a full-width separator rule this
+   crate's own section-label class doesn't carry. A long label
+   ellipsis-truncates on one line rather than pushing the count chip out of
+   the row or wrapping. */
+.kn-roster-group-header {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--sp-2);
+    padding: var(--sp-2) 0;
+    margin-bottom: var(--sp-2);
+    border-bottom: 1px solid var(--w-border);
+    font-size: var(--fs-11);
+    font-weight: 700;
+    color: var(--fg-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.kn-roster-group-header span:first-child {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+/* The section's member-count chip — plain `.kn-chip` shape (kanban.css),
+   informational tone (`var(--fg-dim)`), matching `.kn-chip[data-kind=
+   "round"]`'s own "not a status alarm" color choice rather than the accent
+   tone `.kn-chip[data-kind="members"]` uses. */
+.kn-roster-group-count {
+    background: var(--w-bg-3);
+    border: 1px solid var(--w-border);
+    border-radius: var(--w-radius-pill);
+    color: var(--fg-dim);
+    font-family: var(--font-mono);
+    font-size: var(--fs-11);
+    padding: 1px 6px;
+    line-height: 1.4;
+    flex-shrink: 0;
+}
+
+/*
+ * Phase 50.2 Plan 06 (D-21, UI-SPEC Component Inventory §4/§6/§7): the
+ * needs-you badge, the round/members chip color variants, and the
+ * Orchestration Settings drawer's per-field row/reset classes. Composes
+ * onto `.kn-badge`/`.kn-chip`/`.kn-action-btn`/`.kn-modal-label`/
+ * `.kn-modal-input` (all above or in kanban.css, loaded unconditionally)
+ * for shape — only the data-attribute color variants and the settings
+ * row's spacing are new. System B tokens only, no new hex literals.
+ */
+
+/* The NEEDS YOU escalation badge — amber (var(--warn)), matching this
+   crate's existing convention of reserving amber for "notable but not
+   destructive" states, distinct from var(--danger). `.kn-badge`'s base
+   rule (kanban.css) already draws its border from `currentColor`. */
+.kn-badge[data-kind="needs-you"] {
+    color: var(--warn);
+    border-color: var(--warn);
+}
+
+/* Informational, not a status alarm — matches the roster group count
+   chip's own `--fg-dim` tone. */
+.kn-chip[data-kind="round"] {
+    color: var(--fg-dim);
+}
+
+/* Accent — matches `.kn-chip[data-kind="assignee"]`'s existing accent
+   usage (kanban.css): both identify "who." */
+.kn-chip[data-kind="members"] {
+    color: var(--accent-primary);
+}
+
+/* One D-21 tunable row inside the Orchestration Settings drawer —
+   `.kn-modal-label` + `.kn-modal-input` pair (reused verbatim per row),
+   this class supplies only the row's own vertical spacing. */
+.kn-settings-field {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-1);
+}
+
+/* RESET TO DEFAULTS — `.kn-action-btn`'s plain/neutral shape (composed at
+   the call site alongside this class); resetting is a convenience, not a
+   commitment either direction, so this class intentionally declares no
+   accent/danger override. */
+.kn-settings-reset {
+    align-self: flex-start;
+}
+
+/* Phase 50.2 Plan 07 (D-20, UI-SPEC Component Inventory §2): the shared
+ * `@mention` handoff quote block — one component, three call sites (Bot
+ * Chat window, room transcript, live Chat screen). Pending's accent border
+ * mirrors this crate's own "actively happening" convention (the LIVE
+ * badge); resolved fades to `--fg-dim`; failed goes `--danger`. A long
+ * quote or reply wraps and grows the block vertically inside its
+ * scrollable transcript — it never overflows horizontally. System B
+ * tokens only, no new hex literals. */
+.kn-mention-handoff {
+    border-left: 2px solid var(--accent-primary);
+    background: color-mix(in srgb, var(--accent-primary) 4%, var(--w-bg-2));
+    border-radius: var(--w-radius-block);
+    padding: var(--sp-2) var(--sp-4);
+    margin: var(--sp-2) 0;
+    overflow-wrap: break-word;
+    word-break: break-word;
+}
+
+.kn-mention-handoff[data-state="resolved"] {
+    border-left-color: var(--fg-dim);
+}
+
+.kn-mention-handoff[data-state="failed"] {
+    border-left-color: var(--danger);
+}
+
+/* `→ @{bot}` / `@{bot} replied` / `@{bot} — no reply` — colored by state to
+ * match the border: accent while pending, dim once resolved, danger once
+ * failed. */
+.kn-mention-handoff-head {
+    font-size: var(--fs-11);
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--accent-primary);
+}
+
+.kn-mention-handoff[data-state="resolved"] .kn-mention-handoff-head {
+    color: var(--fg-dim);
+}
+
+.kn-mention-handoff[data-state="failed"] .kn-mention-handoff-head {
+    color: var(--danger);
+}
+
+/* The delegated (quoted) message and, once resolved, the reply beneath it
+ * — the quote's own `--fg-dim` tone and the reply's full-weight `--fg` are
+ * both set inline at the render call site (`mention_handoff.rs`), since
+ * they differ per child element within the SAME block; this rule supplies
+ * only the shared body typography. */
+.kn-mention-handoff-body {
+    font-size: var(--fs-13);
+    font-weight: 400;
+    line-height: 1.5;
+    white-space: pre-wrap;
+}

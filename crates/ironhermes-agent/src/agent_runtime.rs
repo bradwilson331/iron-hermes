@@ -238,6 +238,20 @@ pub struct AgentRuntime {
     /// Phase 36.3.12 D-08/D-11: same capture as `terminal_tool_arc`, for
     /// `"execute_code"`.
     execute_code_tool_arc: Option<Arc<dyn ironhermes_tools::registry::Tool>>,
+    /// Phase 36.8 CR-01 (D-16): same capture as `terminal_tool_arc`, for
+    /// `"write_file"`. The ACP surface's per-turn `write_file` gating closure
+    /// (`gate_workspace_write` in `handlers.rs`) needs the SAME already-configured
+    /// tool instance on turn 2+, after the name has been moved out of the
+    /// registry's regular `tools` map by `register_intercepted_or_replace` on turn
+    /// 1 and then swept from the `intercepts` map by the WR-05 end-of-turn cleanup
+    /// — without this capture, a per-turn `get_arc("write_file")` lookup returns
+    /// `None` on every turn after the first and an approved write silently never
+    /// reaches disk (36.8-VERIFICATION.md's CR-01). `Option`, not a bare `Arc`:
+    /// `write_file` registration is toolset-skippable.
+    write_file_tool_arc: Option<Arc<dyn ironhermes_tools::registry::Tool>>,
+    /// Phase 36.8 CR-01 (D-16): same capture as `write_file_tool_arc`, for
+    /// `"patch"`.
+    patch_tool_arc: Option<Arc<dyn ironhermes_tools::registry::Tool>>,
 }
 
 impl AgentRuntime {
@@ -334,16 +348,23 @@ impl AgentRuntime {
         // build_app_runtime_bundle initializes it using get_hermes_home().
         let bb_recorder = bundle.bb_recorder.clone();
 
-        // Phase 36.3.12 D-08/D-10/D-11: capture the regular-tool Arcs for
-        // "terminal" and "execute_code" BEFORE any surface ever calls
-        // `register_intercepted_or_replace` (which permanently moves the name from
-        // the `tools` map into `intercepts` on first use). Captured once here so
-        // every turn's gating closure — built fresh per turn by CLI/TUI/gateway —
-        // can invoke the SAME already-configured tool instance even on turn 2+,
-        // when the registry no longer has these names in its regular `tools` map.
-        let (terminal_tool_arc, execute_code_tool_arc) = {
+        // Phase 36.3.12 D-08/D-10/D-11, extended by Phase 36.8 CR-01 (D-16): capture
+        // the regular-tool Arcs for "terminal", "execute_code", "write_file" and
+        // "patch" BEFORE any surface ever calls `register_intercepted_or_replace`
+        // (which permanently moves the name from the `tools` map into `intercepts`
+        // on first use). Captured once here, in a SINGLE registry read-lock
+        // acquisition, so every turn's gating closure — built fresh per turn by
+        // CLI/TUI/gateway/ACP — can invoke the SAME already-configured tool
+        // instance even on turn 2+, when the registry no longer has these names in
+        // its regular `tools` map.
+        let (terminal_tool_arc, execute_code_tool_arc, write_file_tool_arc, patch_tool_arc) = {
             let reg = bundle.registry.read().await;
-            (reg.get_arc("terminal"), reg.get_arc("execute_code"))
+            (
+                reg.get_arc("terminal"),
+                reg.get_arc("execute_code"),
+                reg.get_arc("write_file"),
+                reg.get_arc("patch"),
+            )
         };
 
         Ok(Self {
@@ -362,6 +383,8 @@ impl AgentRuntime {
             bb_recorder,
             terminal_tool_arc,
             execute_code_tool_arc,
+            write_file_tool_arc,
+            patch_tool_arc,
         })
     }
 
@@ -376,6 +399,30 @@ impl AgentRuntime {
     /// Phase 36.3.12 D-08/D-11: same as `terminal_tool_arc`, for `"execute_code"`.
     pub fn execute_code_tool_arc(&self) -> Option<Arc<dyn ironhermes_tools::registry::Tool>> {
         self.execute_code_tool_arc.clone()
+    }
+
+    /// Phase 36.8 CR-01 (D-16): the regular `"write_file"` tool instance captured at
+    /// construction time, for surfaces building a gating closure
+    /// (`gate_workspace_write` in ACP's `handlers.rs`) that needs to invoke the real
+    /// dispatch after the name has been intercepted and later evicted from the
+    /// registry's `intercepts` map by the end-of-turn cleanup.
+    pub fn write_file_tool_arc(&self) -> Option<Arc<dyn ironhermes_tools::registry::Tool>> {
+        self.write_file_tool_arc.clone()
+    }
+
+    /// Phase 36.8 CR-01 (D-16): same as `write_file_tool_arc`, for `"patch"`.
+    pub fn patch_tool_arc(&self) -> Option<Arc<dyn ironhermes_tools::registry::Tool>> {
+        self.patch_tool_arc.clone()
+    }
+
+    /// Phase 36.8 plan 02 task 1: read-only introspection of the context-file
+    /// candidate paths resolved at construction time (identity files under
+    /// `IRONHERMES_HOME` + `CONTEXT_CANDIDATES` under `cwd`). Exists so the ACP
+    /// crate's CLI-08 cwd-isolation contract test can assert on the REAL resolved
+    /// paths of a per-session runtime, not a hand-rolled recomputation that would
+    /// pass even if a future regression reverted to one shared runtime per process.
+    pub fn context_file_paths(&self) -> &[PathBuf] {
+        &self.context_file_paths
     }
 
     /// Run one top-level agent turn. This is the budget lifecycle boundary:
@@ -1072,6 +1119,8 @@ impl AgentRuntime {
             // no "terminal"/"execute_code" tools registered — no capture needed.
             terminal_tool_arc: None,
             execute_code_tool_arc: None,
+            write_file_tool_arc: None,
+            patch_tool_arc: None,
         }
     }
 
@@ -1616,6 +1665,8 @@ mod tests {
             // no "terminal"/"execute_code" tools registered — no capture needed.
             terminal_tool_arc: None,
             execute_code_tool_arc: None,
+            write_file_tool_arc: None,
+            patch_tool_arc: None,
         };
 
         let result = runtime.resolved_extras_for_test_turn();

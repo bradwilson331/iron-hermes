@@ -26,6 +26,39 @@ fn bind_guard_allows(ip: std::net::IpAddr, auth_enabled: bool) -> bool {
     ip.is_loopback() || auth_enabled
 }
 
+/// Quick task 260818-t3y: compose the operator-facing refusal message for
+/// the provider-key startup guard. Pure (no logging, no panicking) so the
+/// message contents are provable by unit test — see `mod tests` below.
+///
+/// Names, in order: the main provider, its resolved endpoint `base_url`, the
+/// exact env var to set (falling back to a `providers.<provider>.api_key_env`
+/// instruction when no name is resolvable), the `~/.ironhermes/.env` path the
+/// value belongs in, and the container remedy. Never includes the key VALUE.
+#[cfg(feature = "server")]
+fn provider_key_guard_refusal_message(
+    provider: &str,
+    base_url: &str,
+    config: &ironhermes_core::config::Config,
+) -> String {
+    let env_path = ironhermes_core::config::Config::env_path();
+    match ironhermes_core::provider::main_provider_key_env_name(config) {
+        Some(env_name) => format!(
+            "refusing to start: main provider '{provider}' (endpoint {base_url}) has no \
+             resolvable API key. Set {env_name} — add it to {} (loaded at startup), or pass \
+             it as a container env var (`-e {env_name}=...` on `podman run` / `docker run`).",
+            env_path.display()
+        ),
+        None => format!(
+            "refusing to start: main provider '{provider}' (endpoint {base_url}) has no \
+             resolvable API key, and no `providers.{provider}.api_key_env` is configured to \
+             name one. Set `providers.{provider}.api_key_env` in config.yaml to the name of \
+             the env var holding your key, then set that variable in {} (loaded at startup) \
+             or pass it as a container env var.",
+            env_path.display()
+        ),
+    }
+}
+
 #[cfg(feature = "server")]
 #[tokio::main]
 async fn main() {
@@ -96,6 +129,48 @@ async fn main() {
         panic!("{msg}");
     }
 
+    // Quick task 260818-t3y: the provider-key startup guard. Runs AFTER the
+    // bind guard above so a config that fails both guards still reports the
+    // bind problem first, preserving existing behavior for deployments that
+    // already pass this guard today. Reuses `app_state.resolver` — already
+    // built by `ProviderResolver::build()` AND vault-fallback-applied inside
+    // `AppState::init()` — rather than re-running `ProviderResolver::build`
+    // here, which would silently drop any key resolved only via the vault
+    // and produce a false-positive refusal.
+    //
+    // Deliberately NOT enforced in `docker/entrypoint.sh` (the `ironhermes`
+    // CLI): `--help`, `version`, `doctor`, `web set-password`, and
+    // `provider list` must keep working with no key configured so operators
+    // can introspect a broken config. This guard is a property of the
+    // always-agent-serving web binary, which is the only thing
+    // `docker/web-entrypoint.sh` execs — do not "fix" that asymmetry.
+    let main_provider = app_state.config.model.provider.clone();
+    match app_state.resolver.resolve(&main_provider) {
+        Some(endpoint) => {
+            if !ironhermes_core::provider::provider_key_guard_allows(
+                endpoint.api_key.as_deref(),
+                &endpoint.base_url,
+            ) {
+                let msg = provider_key_guard_refusal_message(
+                    &main_provider,
+                    &endpoint.base_url,
+                    &app_state.config,
+                );
+                tracing::error!(target: "iron_hermes_ui", "{msg}");
+                panic!("{msg}");
+            }
+        }
+        None => {
+            let msg = format!(
+                "refusing to start: main provider '{main_provider}' (model.provider in \
+                 config.yaml) is not a known provider — define it under `providers:` in \
+                 config.yaml, or fix `model.provider` to name one that is."
+            );
+            tracing::error!(target: "iron_hermes_ui", "{msg}");
+            panic!("{msg}");
+        }
+    }
+
     let auth_routes = axum::Router::new()
         .route("/auth/login", axum::routing::post(server::auth::login))
         .route("/auth/session", axum::routing::get(server::auth::session_probe))
@@ -136,6 +211,26 @@ async fn main() {
         .route(
             "/chat-attachments/{session_id}/{id}",
             axum::routing::get(server::chat_attachment_route::serve_chat_attachment),
+        )
+        // Phase 50.1 Plan 04 (D-11/D-12): raw axum route for bot avatar
+        // serving (roster card / drawer / picker preview <img src>). Same
+        // JSON-number-array codec pitfall as the two routes above.
+        .route(
+            "/bot-avatars/{name}/{image_id}",
+            axum::routing::get(server::bot_avatar_route::serve_bot_avatar),
+        )
+        // Phase 48.2 Plan 09 (D-03/T-48.2-09-01): raw axum route for the MCP
+        // OAuth web callback (path must match
+        // `mcp_admin_api::MCP_OAUTH_CALLBACK_PATH` and `auth::is_public`'s
+        // matching arm exactly). An authorization server redirects a
+        // *browser* here with an ordinary GET that must return HTML, which
+        // the server-fn codec cannot serve — same rationale as the three raw
+        // routes above. Public (see `auth::is_public` and this route
+        // module's own doc comment for why); mounted here, BEFORE the auth
+        // layer below, exactly like every other route in this block.
+        .route(
+            "/oauth/mcp/callback",
+            axum::routing::get(server::mcp_oauth_callback_route::serve_mcp_oauth_callback),
         )
         // Phase 47.3 Plan 01: /auth/login, /auth/session, /auth/logout —
         // raw axum routes (same server-fn JSON-codec pitfall precedent).
@@ -275,6 +370,49 @@ mod tests {
         assert!(
             !bind_guard_allows(ip, false),
             "wildcard bind is not loopback"
+        );
+    }
+
+    // Quick task 260818-t3y: behavior Test 1 — the composed refusal message
+    // reaches this module without spawning a process and names the env var
+    // the operator must set. Reachable via `cargo test -p iron_hermes_ui
+    // --features server provider_key` (mirrors the bind_guard invocation
+    // pattern above).
+    #[test]
+    fn provider_key_guard_refusal_message_names_env_var() {
+        let config = ironhermes_core::config::Config::default();
+        let msg = super::provider_key_guard_refusal_message(
+            "openrouter",
+            "https://openrouter.ai/api/v1",
+            &config,
+        );
+        assert!(
+            msg.contains("OPENROUTER_API_KEY"),
+            "refusal message must name the exact env var to set, got: {msg}"
+        );
+        assert!(
+            msg.contains("openrouter"),
+            "refusal message must name the provider, got: {msg}"
+        );
+        assert!(
+            msg.contains("https://openrouter.ai/api/v1"),
+            "refusal message must name the endpoint base_url, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn provider_key_guard_refusal_message_unknown_provider_names_config_key() {
+        let mut config = ironhermes_core::config::Config::default();
+        config.model.provider = "totally_unknown".to_string();
+        let msg = super::provider_key_guard_refusal_message(
+            "totally_unknown",
+            "https://example.com/v1",
+            &config,
+        );
+        assert!(
+            msg.contains("providers.totally_unknown.api_key_env"),
+            "with no resolvable env var name, the message must point at the config key \
+             instead, got: {msg}"
         );
     }
 }

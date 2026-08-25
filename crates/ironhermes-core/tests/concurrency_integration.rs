@@ -233,6 +233,169 @@ async fn per_session_cap() {
 }
 
 // ---------------------------------------------------------------------------
+// api_server_surface_renders_its_own_name (Phase 36.7.1 Plan 06 Task 1)
+// ---------------------------------------------------------------------------
+
+/// The REST API server's `Surface` variant renders a display string distinct
+/// from all four pre-existing surfaces.
+#[test]
+fn api_server_surface_renders_its_own_name() {
+    let names: Vec<String> = [
+        Surface::Web,
+        Surface::Gateway,
+        Surface::Cli,
+        Surface::Realtime,
+        Surface::ApiServer,
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+
+    let mut unique = names.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        names.len(),
+        "every Surface variant must render a distinct display string: {names:?}"
+    );
+    assert_eq!(Surface::ApiServer.to_string(), "api_server");
+}
+
+// ---------------------------------------------------------------------------
+// get_one (Phase 36.7.1 Plan 06 Task 1)
+// ---------------------------------------------------------------------------
+
+/// Looking up a registered identifier yields a summary carrying the same
+/// identifier, session and surface, with a non-negative elapsed measurement.
+#[tokio::test]
+async fn get_one_returns_a_summary_for_a_registered_turn() {
+    let registry = TurnRegistry::new();
+    let turn_id = Uuid::new_v4();
+    registry
+        .register(make_entry(
+            turn_id,
+            "session-get-one",
+            Surface::ApiServer,
+            CancellationToken::new(),
+        ))
+        .await;
+
+    let summary = registry
+        .get_one(turn_id)
+        .await
+        .expect("registered turn must be found");
+
+    // Destructuring EVERY field with no `..` is a compile-time proof that
+    // `TurnSummary` carries exactly these four fields — in particular, no
+    // `cancel`/token field. If a token field were ever added to
+    // `TurnSummary`, this destructure would fail to compile, catching the
+    // D-08/T-36.7.1-46-style regression at build time rather than at review
+    // time (`get_one_does_not_expose_the_cancellation_token`).
+    let ironhermes_core::concurrency::TurnSummary {
+        turn_id: got_id,
+        session_id,
+        surface,
+        elapsed_ms: _,
+    } = summary;
+    assert_eq!(got_id, turn_id);
+    assert_eq!(session_id, "session-get-one");
+    assert_eq!(surface, Surface::ApiServer);
+}
+
+/// An identifier that was never registered, or was deregistered, yields
+/// nothing rather than a default-valued summary.
+#[tokio::test]
+async fn get_one_returns_nothing_for_an_unknown_id() {
+    let registry = TurnRegistry::new();
+
+    // Never registered.
+    assert!(registry.get_one(Uuid::new_v4()).await.is_none());
+
+    // Registered then deregistered.
+    let turn_id = Uuid::new_v4();
+    registry
+        .register(make_entry(
+            turn_id,
+            "session-deregistered",
+            Surface::ApiServer,
+            CancellationToken::new(),
+        ))
+        .await;
+    assert!(registry.get_one(turn_id).await.is_some());
+    registry.deregister(turn_id).await;
+    assert!(
+        registry.get_one(turn_id).await.is_none(),
+        "a deregistered turn must not still be found"
+    );
+}
+
+/// `TurnSummary` is the wire-safe projection with no cancellation-token
+/// field — see the destructure in `get_one_returns_a_summary_for_a_registered_turn`
+/// for the compile-time proof this test's name promises.
+#[tokio::test]
+async fn get_one_does_not_expose_the_cancellation_token() {
+    let registry = TurnRegistry::new();
+    let turn_id = Uuid::new_v4();
+    registry
+        .register(make_entry(
+            turn_id,
+            "session-no-token",
+            Surface::ApiServer,
+            CancellationToken::new(),
+        ))
+        .await;
+    let summary = registry.get_one(turn_id).await.expect("must be found");
+    // `TurnSummary` is `Clone + Debug + PartialEq + Eq` and holds no token —
+    // a `CancellationToken` is neither `PartialEq` nor `Eq`, so this
+    // reconstruction-and-compare only compiles because the type is token-free.
+    assert_eq!(summary.clone(), summary);
+}
+
+/// Turns registered under all five surfaces are listed together and each
+/// reports its own surface.
+#[tokio::test]
+async fn surfaces_remain_distinguishable_in_a_mixed_listing() {
+    let registry = TurnRegistry::new();
+    let surfaces = [
+        Surface::Web,
+        Surface::Gateway,
+        Surface::Cli,
+        Surface::Realtime,
+        Surface::ApiServer,
+    ];
+    let mut ids = Vec::new();
+    for (i, surface) in surfaces.iter().enumerate() {
+        let turn_id = Uuid::new_v4();
+        ids.push((turn_id, *surface));
+        registry
+            .register(make_entry(
+                turn_id,
+                &format!("session-mixed-{i}"),
+                *surface,
+                CancellationToken::new(),
+            ))
+            .await;
+    }
+
+    let all = registry.list_all().await;
+    assert_eq!(all.len(), surfaces.len());
+    for (turn_id, surface) in ids {
+        let found = all
+            .iter()
+            .find(|s| s.turn_id == turn_id)
+            .unwrap_or_else(|| panic!("turn {turn_id} should be listed"));
+        assert_eq!(found.surface, surface);
+
+        let single = registry
+            .get_one(turn_id)
+            .await
+            .unwrap_or_else(|| panic!("get_one({turn_id}) should find it"));
+        assert_eq!(single.surface, surface);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // agents_list_command (R39.1-09, optional integration)
 // ---------------------------------------------------------------------------
 

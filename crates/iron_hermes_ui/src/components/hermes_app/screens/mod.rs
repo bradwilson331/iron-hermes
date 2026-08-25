@@ -9,6 +9,14 @@
 
 pub mod agents;
 pub mod agents_diff;
+// Phase 50.1 Plan 01 (D-08/D-09): bot roster section mounted by
+// `ScreenAgents`, above the pre-existing subagent-turn grid.
+pub mod bot_roster;
+// Phase 50.1 Plan 02 (D-10): shared profile create wizard, detail drawer and
+// switcher — the one implementation consumed by both `kanban.rs` and the
+// bot roster / agents screen. The old `screens/kanban/{wizard,
+// profile_drawer,profile_switcher}.rs` paths remain as thin re-export shims.
+pub mod profile_shared;
 // Phase 46.6 Plan 05 (D-07): lean artifacts gallery + sandboxed viewer,
 // reached from the Sessions screen's `▤ ARTIFACTS` affordance.
 pub mod artifact_viewer;

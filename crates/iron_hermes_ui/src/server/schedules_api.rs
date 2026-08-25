@@ -51,6 +51,15 @@ pub struct ScheduleRow {
     /// `render_timestamp_block` resolution), or `None` if the job has never
     /// run.
     pub last_run_at: Option<String>,
+    /// Phase 50.1 Plan 08 (D-22): formatted next-run timestamp, same
+    /// timezone-resolution rule as `last_run_at`. Only ever `Some` when the
+    /// job is `enabled` — `JobStore::toggle_job` leaves a disabled job's
+    /// stale `next_run_at` on disk rather than clearing it (verified
+    /// against the store's own source), so this field is deliberately
+    /// gated on `enabled` at build time rather than passed through
+    /// verbatim; a disabled job's row must never claim a next-run time
+    /// (UI-SPEC E8 partial backstop).
+    pub next_run_at: Option<String>,
     pub enabled: bool,
     pub is_valid: bool,
 }
@@ -120,8 +129,11 @@ fn is_stored_job_valid(job: &ironhermes_cron::CronJob) -> bool {
 ///
 /// `%Z` includes a zone abbreviation/offset so the displayed time is
 /// unambiguous (replaces the prior literal `" UTC"` suffix).
+///
+/// Phase 50.1 Plan 08: shared by both `last_run_at` and `next_run_at` —
+/// same display rule for either timestamp.
 #[cfg(not(target_arch = "wasm32"))]
-fn format_last_run_at(dt: chrono::DateTime<chrono::Utc>, tz_name: Option<&str>) -> String {
+fn format_run_at(dt: chrono::DateTime<chrono::Utc>, tz_name: Option<&str>) -> String {
     match tz_name {
         Some(name) => match name.parse::<chrono_tz::Tz>() {
             Ok(tz) => dt
@@ -147,6 +159,17 @@ fn format_last_run_at(dt: chrono::DateTime<chrono::Utc>, tz_name: Option<&str>) 
 
 #[cfg(not(target_arch = "wasm32"))]
 fn build_schedule_row(job: &ironhermes_cron::CronJob, tz_name: Option<&str>) -> ScheduleRow {
+    // Phase 50.1 Plan 08: `JobStore::toggle_job(false)` leaves the job's
+    // last-computed `next_run_at` on disk rather than clearing it (verified
+    // against `store.rs`), so a disabled job's stale value is gated out
+    // here rather than passed through — the wire contract is "disabled
+    // jobs never carry a next-run time", not "whatever the store happens
+    // to still hold".
+    let next_run_at = if job.enabled {
+        job.next_run_at.map(|dt| format_run_at(dt, tz_name))
+    } else {
+        None
+    };
     ScheduleRow {
         id: job.id.clone(),
         name: job.name.clone(),
@@ -154,7 +177,8 @@ fn build_schedule_row(job: &ironhermes_cron::CronJob, tz_name: Option<&str>) -> 
         schedule_raw: schedule_raw_of(&job.schedule),
         prompt: job.prompt.clone(),
         deliver: job.deliver.clone(),
-        last_run_at: job.last_run_at.map(|dt| format_last_run_at(dt, tz_name)),
+        last_run_at: job.last_run_at.map(|dt| format_run_at(dt, tz_name)),
+        next_run_at,
         enabled: job.enabled,
         is_valid: is_stored_job_valid(job),
     }
@@ -593,6 +617,37 @@ mod schedules_api_tests {
 
         delete_schedule_in_store(&mut store, &created.id).expect("delete");
         assert!(list_schedules_in_store(&store, None).is_empty());
+    }
+
+    /// Phase 50.1 Plan 08 (UI-SPEC E8 partial backstop): an enabled job's
+    /// row carries a next-run time; disabling it clears the DISPLAYED
+    /// next-run time even though the store itself still holds a stale
+    /// value internally (verified directly against `store.rs`'s own
+    /// `toggle_job`, which never clears `next_run_at` on disable).
+    #[test]
+    fn next_run_at_present_when_enabled_absent_when_disabled() {
+        let (_dir, mut store) = tmp_store();
+        let created = create_schedule_in_store(
+            &mut store,
+            "next-run-row".to_string(),
+            "every 60m".to_string(),
+            "check".to_string(),
+            "local".to_string(),
+            None,
+        )
+        .expect("create");
+        let rows = list_schedules_in_store(&store, None);
+        assert!(rows[0].next_run_at.is_some(), "enabled job must carry a next-run time");
+
+        set_schedule_enabled_in_store(&mut store, &created.id, false).expect("disable");
+        // The store itself still has a stale next_run_at (toggle_job does
+        // not clear it) — the row-building layer must gate it out anyway.
+        assert!(store.get_job(&created.id).unwrap().next_run_at.is_some());
+        let rows = list_schedules_in_store(&store, None);
+        assert!(
+            rows[0].next_run_at.is_none(),
+            "disabled job's row must never carry a next-run time"
+        );
     }
 
     /// `add_job` itself validates the cron expression eagerly (via

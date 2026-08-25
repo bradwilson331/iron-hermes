@@ -31,6 +31,14 @@ pub struct McpTool {
     schema: ToolSchema,
     /// Sender side of the channel to the server task dispatch loop.
     call_tx: mpsc::Sender<McpCallRequest>,
+    /// Phase 48.2 Plan 01 (D-20): precomputed `Tool::display_group()` value —
+    /// `mcp__{sanitize_server_name(server_name)}`, so the group suffix always
+    /// agrees with the `server__tool` prefix already baked into
+    /// `prefixed_name` (both derive from the same `sanitize_server_name`
+    /// call). This is a UI-facing catalog grouping override ONLY —
+    /// `Tool::toolset()` below is untouched and keeps reporting the flat
+    /// `MCP_TOOLSET` sentinel every LLM-facing filter keys on.
+    toolset_group: String,
 }
 
 impl McpTool {
@@ -52,6 +60,10 @@ impl McpTool {
         // D-11: prepend [MCP: server_name] to description for LLM context
         let description = format!("[MCP: {server_name}] {original_description}");
         let schema = ToolSchema::new(&prefixed_name, &description, input_schema);
+        // Phase 48.2 Plan 01 (D-20): reuse the crate's own sanitize_server_name
+        // so the display-group suffix always agrees with the server__tool
+        // prefix already baked into prefixed_name above.
+        let toolset_group = format!("mcp__{}", sanitize_server_name(server_name));
         Self {
             prefixed_name,
             server_name: server_name.to_string(),
@@ -59,6 +71,7 @@ impl McpTool {
             description,
             schema,
             call_tx,
+            toolset_group,
         }
     }
 }
@@ -151,6 +164,14 @@ impl Tool for McpTool {
 
     fn schema(&self) -> ToolSchema {
         self.schema.clone()
+    }
+
+    /// Phase 48.2 Plan 01 (D-20): UI-facing display group override — groups
+    /// this tool's Tools-page card under `mcp__{sanitized_server_name}`. Does
+    /// NOT affect `toolset()` above (still the flat `MCP_TOOLSET` sentinel)
+    /// or any LLM-facing filter.
+    fn display_group(&self) -> Option<&str> {
+        Some(&self.toolset_group)
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {

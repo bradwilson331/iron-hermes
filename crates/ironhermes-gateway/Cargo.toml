@@ -15,6 +15,11 @@ ironhermes-exec = { path = "../ironhermes-exec" }
 ironhermes-state = { path = "../ironhermes-state" }
 ironhermes-cron = { path = "../ironhermes-cron" }
 ironhermes-cron-runner = { path = "../ironhermes-cron-runner" }
+# Phase 36.7.1 Plan 01: the inbound webhook adapter, constructed and spawned
+# from GatewayRunner::start() alongside Telegram/Discord/Slack/Buzz. Safe
+# direction (no cycle) — ironhermes-restgw does NOT depend back on this
+# crate; see ironhermes_core::adapter's module doc.
+ironhermes-restgw = { path = "../ironhermes-restgw" }
 # Phase 36.3.7 (D-09): gateway-embedded kanban dispatcher
 ironhermes-kanban = { path = "../ironhermes-kanban" }
 ironhermes-hooks = { path = "../ironhermes-hooks" }

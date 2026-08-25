@@ -2,17 +2,52 @@
 # IronHermes — Multi-stage OCI Build (Podman / Docker compatible)
 # =============================================================================
 # Builds the iron_hermes_ui Dioxus 0.7 fullstack app (WASM client + embedded
-# agent server) and runs it on 0.0.0.0:8080 — the HTTP endpoint the Hermes-AaaS
-# VPS stack (Caddy reverse-proxy + healthcheck) expects. The `ironhermes` CLI is
-# bundled alongside for management (e.g. `ironhermes web set-password`).
+# agent server). The `ironhermes` CLI is bundled alongside for management
+# (e.g. `ironhermes web set-password`).
 #
-# NOTE: iron_hermes_ui has a FAIL-CLOSED bind guard — it refuses a non-loopback
-# bind unless a web password hash is configured (IRONHERMES_WEB_PASSWORD_HASH
-# env, or config.yaml web_ui.auth.password_hash). Provide one at runtime.
+# NOTE: iron_hermes_ui has TWO fail-closed startup guards. Both exit non-zero
+# before the listening socket opens:
+#   1. Bind guard — a password is generated automatically on first start
+#      unless you supply one, and the container binds loopback until you opt
+#      into exposure. A non-loopback bind (-e IP=0.0.0.0) still refuses
+#      unless a web password hash is configured (IRONHERMES_WEB_PASSWORD_HASH
+#      env, or config.yaml web_ui.auth.password_hash).
+#   2. Provider-key guard — refuses to start if the main LLM provider
+#      (model.provider in config.yaml; OPENROUTER_API_KEY / OPENROUTER by
+#      default) has no resolvable API key. Exempt for a loopback base_url
+#      (local Ollama / vLLM), so keyless local dev is unaffected.
+#
+# RUNTIME PROCESSES (quick task 260825-dww): the container runs TWO processes.
+#   - `iron_hermes_ui` in the foreground as PID 1. Container health and
+#     lifecycle are tied to this process alone, unchanged from before.
+#   - `ironhermes gateway --non-interactive` in the background, best-effort,
+#     hosting the cron / kanban / notifier scheduler loops the UI server does
+#     not. It logs to $IRONHERMES_HOME/logs/gateway.log. The gateway refuses
+#     to boot when no messaging platform is configured (the normal first-run
+#     state); when that happens the entrypoint warns loudly and keeps serving
+#     the UI — it never takes the container down.
+#   Opt out with -e IRONHERMES_GATEWAY=0.
 #
 # Build: podman build -t ironhermes .
-# Run:   podman run -e IRONHERMES_WEB_PASSWORD_HASH=... -p 8080:8080 \
-#            -v ironhermes-data:/opt/data ironhermes
+#
+# Run (two-step flow — see docs/CONTAINER.md for the full walkthrough):
+#   # 1. First start. No IP override: binds loopback, mints a password,
+#   #    prints it once to the container log.
+#   podman run -d --name ironhermes -v ironhermes-data:/opt/data -p 8080:8080 \
+#       -e OPENROUTER_API_KEY=sk-or-... ironhermes
+#   podman logs ironhermes   # read the password now — never printed again
+#
+#   # 2. Expose it, explicitly (a recreate, since -e can't be added to a
+#   #    running container). The named volume carries the hash across.
+#   podman rm -f ironhermes
+#   podman run -d --name ironhermes -v ironhermes-data:/opt/data -p 8080:8080 \
+#       -e IP=0.0.0.0 -e OPENROUTER_API_KEY=sk-or-... ironhermes
+#
+# BREAKING CHANGE (quick task 260820-8h5): this image's default bind address
+# changed from 0.0.0.0 to loopback. Any existing deployment that relied on
+# the old wildcard default — notably the Hermes-AaaS VPS stack, where a
+# separate Caddy container reaches hermes:8080 — must add -e IP=0.0.0.0.
+# Once IP is passed, behavior is identical to before.
 # =============================================================================
 
 # --- Stage 0: gosu for privilege dropping ---
@@ -134,14 +169,28 @@ WORKDIR /opt/ironhermes
 
 ENV PYTHONUNBUFFERED=1
 ENV IRONHERMES_HOME=/opt/data
-# Bind all interfaces so Caddy (separate container) can reach hermes:8080.
-# Requires IRONHERMES_WEB_PASSWORD_HASH (fail-closed bind guard).
-ENV IP=0.0.0.0
+# Loopback by default (quick task 260820-8h5) so a freshly generated
+# first-run credential is never published before the operator has read it.
+# Any deployment needing external reachability — including the AaaS/Caddy
+# stack, which previously relied on the old wildcard default to let a
+# separate Caddy container reach hermes:8080 — must pass -e IP=0.0.0.0
+# explicitly. See docs/CONTAINER.md for the full two-step flow.
+ENV IP=127.0.0.1
 ENV PORT=8080
+# Launch `ironhermes gateway --non-interactive` in the background alongside
+# the web UI (quick task 260825-dww). Declared here rather than left to the
+# entrypoint's shell default so `podman inspect` / `docker inspect` surfaces
+# the effective setting next to IP and PORT when an operator is working out
+# why schedules did or did not run, and so the default is greppable in the
+# image config rather than buried in a shell expansion. 0, false, no, and off
+# (any case) all disable it. The entrypoint keeps its own `${...:-1}` default
+# regardless, for the case where the script runs outside this image.
+ENV IRONHERMES_GATEWAY=1
 
 VOLUME ["/opt/data"]
 
 EXPOSE 8080
 
-# Privilege-drop + seed ~/.ironhermes, then exec the web server on 0.0.0.0:8080.
+# Privilege-drop, seed ~/.ironhermes, launch the background gateway
+# (best-effort), then exec the web server on 0.0.0.0:8080.
 ENTRYPOINT ["/usr/local/bin/web-entrypoint.sh"]

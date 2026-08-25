@@ -1670,6 +1670,19 @@ mod tests {
         assert_eq!(tool.name(), "delegate_task");
     }
 
+    /// Phase 48.2 Plan 11 (G-48.2-6 slice a): `delegate_task` runs
+    /// in-process (no separate process executes its effects), so it must
+    /// declare NO runtime dependency — the exact assertion that stops a
+    /// later well-meaning edit from annotating it with the gateway anyway.
+    /// Test lives here rather than in a Plan 11 file because it needs
+    /// `make_delegate_tool()`'s `SubagentRunner` stub, which this module
+    /// already owns.
+    #[test]
+    fn test_delegate_task_declares_no_runtime_dependency() {
+        let tool = make_delegate_tool();
+        assert_eq!(tool.runtime_dependency(), None);
+    }
+
     #[test]
     fn test_delegate_task_schema_has_no_top_level_boolean_combinator() {
         // BUG-IRONHERMES-TOOLS-SCHEMA-COMPAT-01: top-level boolean schema
