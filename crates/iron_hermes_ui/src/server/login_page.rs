@@ -279,23 +279,59 @@ const BLAST_DOOR_PROVIDERS: [(&str, &str); 6] = [
     ("ollama", "http://127.0.0.1:8081/v1"),
 ];
 
-/// Phase 47.3 Plan 01: the single authoritative Content-Security-Policy for
+/// Phase 47.3 Plan 01, narrowed Phase 49.1 Plan 01 (D-17 / T-49.1-01-01 /
+/// T-49.1-01-03): the single authoritative Content-Security-Policy for
 /// login page responses. One const — never scattered string concatenation
 /// across call sites (RESEARCH.md Don't-Hand-Roll table; mirrors
-/// `artifact_route.rs`'s `ARTIFACT_CSP`). Admits the D-14 inline submit
-/// script (`script-src 'self' 'unsafe-inline'`) and, later, `login-rain.js`
-/// (same-origin `<script src>`, already covered by `script-src 'self'`).
-const LOGIN_CSP: &str = "default-src 'self'; script-src 'self' 'unsafe-inline'; \
+/// `artifact_route.rs`'s `ARTIFACT_CSP`).
+///
+/// `frame-ancestors 'none'` (added this phase): the directive that actually
+/// blocks clickjacking. `frame-src 'none'` below restricts what the login
+/// page may EMBED, which is the opposite direction — D-17 registered this
+/// gap because the page shipped only the wrong-direction directive.
+///
+/// `script-src 'self' 'sha256-...'` (narrowed this phase from a blanket
+/// `'unsafe-inline'`): admits same-origin `<script src>` (covers
+/// `login-rain.js`) plus exactly one pinned hash of the D-14 inline submit
+/// script's own body (see [`inline_submit_script_body`]). The hash below is
+/// hardcoded — CI Gate 7 (`scripts/ci-gates.sh`) greps this const's literal
+/// source text, so the value here must be real source, not a runtime
+/// computation — and `login_csp_script_hash_matches_inline_script_body`
+/// (this module's test suite) recomputes the SHA-256 of the live script
+/// body on every test run and fails if it no longer matches this literal,
+/// so the hash and the script cannot silently drift apart.
+/// `style-src` stays `'unsafe-inline'` deliberately: D-17 names *script*
+/// execution as the containment risk, the login page's style attributes are
+/// generated (not attacker-influenceable), and a style hash would add no
+/// XSS containment the script hash does not already provide.
+const LOGIN_CSP: &str = "default-src 'self'; script-src 'self' 'sha256-Lau0kihm/KZ3OJsoZlGbk8qAovtUPxeBbGKRzMmTBxI='; \
      style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self'; \
-     font-src 'self'; frame-src 'none'; form-action 'none'; base-uri 'none'";
+     font-src 'self'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'; base-uri 'none'";
 
-/// Build a response carrying the load-bearing CSP + an explicit single
-/// `Content-Type` — every login-page response, success or error, goes
-/// through this one chokepoint (mirrors `artifact_route.rs::respond`).
+/// Build a response carrying the load-bearing CSP, HSTS, `X-Frame-Options`,
+/// and an explicit single `Content-Type` — every login-page response,
+/// success or error, goes through this one chokepoint (mirrors
+/// `artifact_route.rs::respond`).
+///
+/// D-17 / T-49.1-01-02: HSTS is set at the APPLICATION layer even though
+/// Caddy terminates TLS at the sliplane edge, because the edge config is
+/// not in this repository (D-11 confirmed `grep -rn sliplane` is 0 hits
+/// repo-wide) — an application-side header is the only fix this phase can
+/// actually land and verify. The operator may additionally set HSTS at the
+/// Caddy edge; this does not replace that option, it is the one this
+/// repository can guarantee.
+/// D-17 / T-49.1-01-01: `X-Frame-Options: DENY` is the legacy-browser
+/// backstop for `frame-ancestors 'none'` above — belt-and-braces, both
+/// target the same clickjacking gap.
 fn respond(status: StatusCode, content_type: &'static str, body: Vec<u8>) -> Response {
     Response::builder()
         .status(status)
         .header(CONTENT_SECURITY_POLICY, LOGIN_CSP)
+        .header(
+            axum::http::header::STRICT_TRANSPORT_SECURITY,
+            "max-age=31536000; includeSubDomains",
+        )
+        .header(axum::http::header::X_FRAME_OPTIONS, "DENY")
         .header(CONTENT_TYPE, content_type)
         .body(Body::from(body))
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
@@ -366,8 +402,15 @@ const RETRY_WINDOW_FALLBACK_SECS: u32 = 60;
 /// The `↻ REPLAY` chip (`1b` only; harmless no-op elsewhere since the
 /// generic query simply finds nothing) re-triggers every `[data-anim]`
 /// element's CSS animation via the standard remove/reflow/re-add technique.
-fn submit_script() -> String {
-    const TEMPLATE: &str = r#"<script>
+/// D-17 / T-49.1-01-03: the inline script body WITHOUT the enclosing
+/// `<script>`/`</script>` tags — split out so [`LOGIN_CSP`]'s pinned
+/// `'sha256-...'` script-src token is computed from exactly the bytes a
+/// browser hashes (the script element's text content, not the tags around
+/// it), and so `submit_script()` (which wraps this in tags for rendering)
+/// and the hash test below can never structurally diverge without a test
+/// catching it.
+fn inline_submit_script_body() -> String {
+    const TEMPLATE: &str = r#"
 (function () {
   var ERR_401 = "__ERR_401__";
   var RETRY_FALLBACK = __RETRY_FALLBACK__;
@@ -501,10 +544,18 @@ fn submit_script() -> String {
     });
   }
 })();
-</script>"#;
+"#;
     TEMPLATE
         .replace("__ERR_401__", LOGIN_ERROR_MESSAGE)
         .replace("__RETRY_FALLBACK__", &RETRY_WINDOW_FALLBACK_SECS.to_string())
+}
+
+/// Wraps [`inline_submit_script_body`] in the `<script>` tags every login
+/// document embeds. Kept as a thin wrapper so every existing call site
+/// (`render_basic`, `render_fade`, etc.) is unaffected by the D-17 split
+/// above.
+fn submit_script() -> String {
+    format!("<script>{}</script>", inline_submit_script_body())
 }
 
 /// `1a` Basic (D-01 default): static terminal auth, no motion beyond the
@@ -1237,7 +1288,27 @@ mod tests {
             .to_string()
     }
 
+    /// Phase 49.1 Plan 04 (D-07 weakness 3): `AuthState::new` now persists
+    /// login-attempt state under `IRONHERMES_HOME`. Point it at an
+    /// isolated tempdir — once per test binary process (same `OnceLock`
+    /// pattern as `ensure_public_path_env` above) — so this never touches
+    /// the operator's real `~/.ironhermes` (D-06). `AuthState` caches the
+    /// resolved path at construction, so setting this once per process is
+    /// sufficient; no restore is needed since each nextest test already
+    /// runs in its own process.
+    fn ensure_login_attempts_home_env() {
+        static LOGIN_ATTEMPTS_HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
+        let dir =
+            LOGIN_ATTEMPTS_HOME.get_or_init(|| tempfile::tempdir().expect("tempdir for IRONHERMES_HOME"));
+        // SAFETY: test-only; set exactly once (OnceLock) before any test
+        // constructs an AuthState, never mutated again.
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", dir.path());
+        }
+    }
+
     fn auth_state_with_password(pw: &str) -> Arc<AuthState> {
+        ensure_login_attempts_home_env();
         AuthState::new(AuthConfig {
             password_hash: Some(hash_password(pw)),
             ..Default::default()
@@ -1714,12 +1785,173 @@ mod tests {
 
     #[test]
     fn csp_permits_inline_submit_script() {
-        assert!(LOGIN_CSP.contains("script-src"));
-        assert!(LOGIN_CSP.contains("'unsafe-inline'"));
+        // D-17 / T-49.1-01-03: script-src no longer admits a blanket
+        // 'unsafe-inline' — narrowed to 'self' + a pinned sha256- hash (see
+        // the d17_* tests below). Updated alongside that narrowing so this
+        // test asserts the current, correct contract rather than the
+        // pre-49.1 one.
+        assert!(LOGIN_CSP.contains("script-src 'self' 'sha256-"));
+        assert!(!LOGIN_CSP.contains("script-src 'self' 'unsafe-inline'"));
         // header/document agreement: the doc must actually ship an inline
         // <script> for the CSP allowance to be meaningful.
         assert!(login_html("basic").contains("<script>"));
         assert!(login_html("fade").contains("<script>"));
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 49.1 Plan 01 (D-17): the three pre-auth header findings
+    // (T-49.1-01-01 clickjacking, T-49.1-01-02 HSTS, T-49.1-01-03 inline
+    // script containment) plus the single-chokepoint invariant `respond()`
+    // exists to hold. Extends the existing LOGIN_CSP assertion family above
+    // rather than starting a new one, per this task's own instruction.
+    // -------------------------------------------------------------------
+
+    /// Test 1 (D-17 / T-49.1-01-01): `LOGIN_CSP` carries `frame-ancestors
+    /// 'none'` — the directive that actually blocks clickjacking (as
+    /// opposed to `frame-src 'none'`, which restricts what the page may
+    /// embed, not who may embed it).
+    #[test]
+    fn d17_csp_has_frame_ancestors_none() {
+        assert!(
+            LOGIN_CSP.contains("frame-ancestors 'none'"),
+            "LOGIN_CSP must carry frame-ancestors 'none' (D-17/T-49.1-01-01): {LOGIN_CSP:?}"
+        );
+    }
+
+    /// Test 2 (D-09 additive-fix guard): every directive `LOGIN_CSP` carried
+    /// BEFORE this phase is still present — this phase's fix must be
+    /// additive and must not silently drop a 47.3 D-13a invariant.
+    /// `script-src 'unsafe-inline'` is deliberately excluded from this list:
+    /// that specific token is the one this phase narrows away (see
+    /// `d17_csp_script_src_is_pinned_hash_only` below).
+    #[test]
+    fn d17_csp_preserves_prior_directives() {
+        let preserved = [
+            "default-src 'self'",
+            "connect-src 'self'",
+            "img-src 'self'",
+            "font-src 'self'",
+            "frame-src 'none'",
+            "form-action 'none'",
+            "base-uri 'none'",
+        ];
+        for directive in preserved {
+            assert!(
+                LOGIN_CSP.contains(directive),
+                "LOGIN_CSP must still contain pre-existing directive {directive:?}: {LOGIN_CSP:?}"
+            );
+        }
+    }
+
+    /// Test 3 (D-17 / T-49.1-01-03): `LOGIN_CSP`'s `script-src` directive
+    /// lists `'self'` plus one or more `'sha256-` hash tokens, and no other
+    /// source keyword (in particular, no `'unsafe-inline'`).
+    #[test]
+    fn d17_csp_script_src_is_pinned_hash_only() {
+        let script_src_directive = LOGIN_CSP
+            .split(';')
+            .map(str::trim)
+            .find(|d| d.starts_with("script-src"))
+            .expect("LOGIN_CSP must have a script-src directive");
+        let sources: Vec<&str> = script_src_directive
+            .strip_prefix("script-src")
+            .expect("checked by find() above")
+            .split_whitespace()
+            .collect();
+        assert!(
+            sources.contains(&"'self'"),
+            "script-src must include 'self': {script_src_directive:?}"
+        );
+        assert!(
+            sources.iter().any(|s| s.starts_with("'sha256-")),
+            "script-src must include at least one 'sha256- hash token: {script_src_directive:?}"
+        );
+        for source in &sources {
+            assert!(
+                *source == "'self'" || source.starts_with("'sha256-"),
+                "script-src admits an unexpected source keyword {source:?} (only 'self' and 'sha256-*' are allowed): {script_src_directive:?}"
+            );
+        }
+    }
+
+    /// Drift guard for the hardcoded hash in [`LOGIN_CSP`]: recomputes the
+    /// SHA-256 of the LIVE [`inline_submit_script_body`] output and asserts
+    /// it matches the pinned token — CI Gate 7 (`scripts/ci-gates.sh`) greps
+    /// `LOGIN_CSP`'s source text for a literal, so the hash cannot be a
+    /// runtime computation there; this test is what keeps that literal
+    /// honest whenever the inline script body changes.
+    #[test]
+    fn login_csp_script_hash_matches_inline_script_body() {
+        use base64::engine::general_purpose::STANDARD;
+        use base64::Engine as _;
+        use sha2::{Digest, Sha256};
+
+        let body = inline_submit_script_body();
+        let digest = Sha256::digest(body.as_bytes());
+        let expected_token = format!("'sha256-{}'", STANDARD.encode(digest));
+        assert!(
+            LOGIN_CSP.contains(&expected_token),
+            "LOGIN_CSP's pinned hash {expected_token:?} does not match the live inline_submit_script_body() output — recompute and update the LOGIN_CSP const literal"
+        );
+    }
+
+    /// Test 4 (D-17 / T-49.1-01-02): a response built by `respond()` carries
+    /// a `strict-transport-security` header whose value includes `max-age=`
+    /// with a value of at least 31536000 (one year).
+    #[test]
+    fn d17_respond_sets_hsts_with_one_year_max_age() {
+        let resp = render_login_page("basic");
+        let hsts = resp
+            .headers()
+            .get(axum::http::header::STRICT_TRANSPORT_SECURITY)
+            .expect("respond() must set Strict-Transport-Security")
+            .to_str()
+            .expect("HSTS header must be valid ASCII");
+        let max_age: u64 = hsts
+            .split(';')
+            .map(str::trim)
+            .find_map(|part| part.strip_prefix("max-age="))
+            .expect("HSTS header must carry a max-age directive")
+            .parse()
+            .expect("max-age value must be a positive integer");
+        assert!(
+            max_age >= 31_536_000,
+            "HSTS max-age {max_age} must be at least 31536000 (one year): {hsts:?}"
+        );
+    }
+
+    /// Test 5 (D-17 / T-49.1-01-01): a response built by `respond()` carries
+    /// `x-frame-options: DENY`.
+    #[test]
+    fn d17_respond_sets_x_frame_options_deny() {
+        let resp = render_login_page("basic");
+        let xfo = resp
+            .headers()
+            .get(axum::http::header::X_FRAME_OPTIONS)
+            .expect("respond() must set X-Frame-Options")
+            .to_str()
+            .expect("X-Frame-Options header must be valid ASCII");
+        assert_eq!(xfo, "DENY");
+    }
+
+    /// Test 6 (single-chokepoint invariant `respond()` exists to hold): a
+    /// response built by `respond()` still carries exactly one
+    /// `content-security-policy` header and exactly one `content-type`
+    /// header — adding the two new D-17 headers must not duplicate an
+    /// existing one.
+    #[test]
+    fn d17_respond_carries_exactly_one_csp_and_content_type_header() {
+        let resp = render_login_page("basic");
+        assert_eq!(
+            resp.headers().get_all(CONTENT_SECURITY_POLICY).iter().count(),
+            1,
+            "respond() must set exactly one content-security-policy header"
+        );
+        assert_eq!(
+            resp.headers().get_all(CONTENT_TYPE).iter().count(),
+            1,
+            "respond() must set exactly one content-type header"
+        );
     }
 
     /// T-47.3-17 / D-19, expressed as a rendered-body assertion (not just

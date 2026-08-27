@@ -203,7 +203,7 @@ else
         if [ "$SKIP_WASM_CHECK" -eq 1 ]; then
             WEB_BUILD_ARGS+=(--skip-wasm-check)
         fi
-        if ! run "$SOURCE_DIR/web-build.sh" "${WEB_BUILD_ARGS[@]}"; then
+        if ! run "$SOURCE_DIR/web-build.sh" "${WEB_BUILD_ARGS[@]+"${WEB_BUILD_ARGS[@]}"}"; then
             die "web build failed — aborting before any install/restart"
         fi
     fi
@@ -223,7 +223,7 @@ if [ "$DO_GATEWAY" -eq 1 ]; then
     if [ "$FORCE" -eq 1 ]; then
         INSTALL_ARGS+=(--force)
     fi
-    if ! run "$SOURCE_DIR/install.sh" "${INSTALL_ARGS[@]}"; then
+    if ! run "$SOURCE_DIR/install.sh" "${INSTALL_ARGS[@]+"${INSTALL_ARGS[@]}"}"; then
         die "gateway install failed"
     fi
 fi
@@ -236,7 +236,7 @@ if [ "$DO_WEB" -eq 1 ]; then
     if [ "$FORCE" -eq 1 ]; then
         WEB_INSTALL_ARGS+=(--force)
     fi
-    if ! run "$SOURCE_DIR/web-install.sh" "${WEB_INSTALL_ARGS[@]}"; then
+    if ! run "$SOURCE_DIR/web-install.sh" "${WEB_INSTALL_ARGS[@]+"${WEB_INSTALL_ARGS[@]}"}"; then
         die "web install failed"
     fi
 fi

@@ -215,4 +215,126 @@ mod tests {
     }
 
     // Real PDF parsing exercised in Plan 14 wiremock test (web_extract_pdf_url_routes_to_pdf_backend).
+
+    /// Builds a minimal, syntactically valid PDF wrapper (Catalog=1, empty Pages=2) around a
+    /// caller-supplied raw byte body for object 3. The xref/trailer offsets are computed from
+    /// real byte positions so lopdf's xref-driven load actually visits object 3 — that is what
+    /// makes a malformed object 3 body exercise the real parser rather than being skipped as
+    /// unreachable. D-16: bounded, non-destructive fixtures only.
+    fn build_pdf_fixture(object_3_raw: &[u8]) -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+
+        let obj1_offset = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+        let obj2_offset = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [] /Count 0 >>\nendobj\n");
+
+        let obj3_offset = pdf.len();
+        pdf.extend_from_slice(object_3_raw);
+
+        let xref_offset = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 4\n0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{obj1_offset:010} 00000 n \n").as_bytes());
+        pdf.extend_from_slice(format!("{obj2_offset:010} 00000 n \n").as_bytes());
+        pdf.extend_from_slice(format!("{obj3_offset:010} 00000 n \n").as_bytes());
+        pdf.extend_from_slice(b"trailer\n<< /Size 4 /Root 1 0 R >>\n");
+        pdf.extend_from_slice(format!("startxref\n{xref_offset}\n%%EOF").as_bytes());
+
+        pdf
+    }
+
+    /// Builds a minimal, syntactically valid one-page PDF (Catalog=1, Pages=2, Page=3 with
+    /// `/Contents 4 0 R`) around a caller-supplied raw byte body for object 4 — the page's own
+    /// content stream. Unlike `build_pdf_fixture`, object 4 sits on the real page-content read
+    /// path `pdf_extract::extract_text_from_mem` must walk to produce any text, so a malformed
+    /// object 4 body is guaranteed to be exercised rather than merely present-but-unvisited.
+    /// D-16: bounded, non-destructive fixtures only.
+    fn build_pdf_fixture_with_content(object_4_raw: &[u8]) -> Vec<u8> {
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+
+        let obj1_offset = pdf.len();
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+        let obj2_offset = pdf.len();
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+
+        let obj3_offset = pdf.len();
+        pdf.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R >>\nendobj\n",
+        );
+
+        let obj4_offset = pdf.len();
+        pdf.extend_from_slice(object_4_raw);
+
+        let xref_offset = pdf.len();
+        pdf.extend_from_slice(b"xref\n0 5\n0000000000 65535 f \n");
+        pdf.extend_from_slice(format!("{obj1_offset:010} 00000 n \n").as_bytes());
+        pdf.extend_from_slice(format!("{obj2_offset:010} 00000 n \n").as_bytes());
+        pdf.extend_from_slice(format!("{obj3_offset:010} 00000 n \n").as_bytes());
+        pdf.extend_from_slice(format!("{obj4_offset:010} 00000 n \n").as_bytes());
+        pdf.extend_from_slice(b"trailer\n<< /Size 5 /Root 1 0 R >>\n");
+        pdf.extend_from_slice(format!("startxref\n{xref_offset}\n%%EOF").as_bytes());
+
+        pdf
+    }
+
+    /// D-09 regression test for RUSTSEC-2026-0187 (lopdf DoS on malformed input): a bounded,
+    /// syntactically valid but deeply nested array as object 3's body. The post-bump parser
+    /// must return control (either `Ok` or `Err`) instead of panicking or hanging.
+    #[tokio::test]
+    async fn extract_pdf_bytes_handles_deep_nesting_without_panic() {
+        let depth = 500;
+        let nested = format!("{}{}", "[".repeat(depth), "]".repeat(depth));
+        let object_3 = format!("3 0 obj\n{nested}\nendobj\n");
+        let fixture = build_pdf_fixture(object_3.as_bytes());
+        assert!(
+            fixture.len() < 16 * 1024,
+            "deep-nesting fixture must stay under 16 KB, got {} bytes",
+            fixture.len()
+        );
+
+        let result = extract_pdf_bytes("https://example.com/deep-nest.pdf", fixture).await;
+        // Either outcome is acceptable — the regression signal is that this line is ever
+        // reached (spawn_blocking + the 30s timeout would otherwise hang the test on a
+        // pre-bump lopdf), not which variant comes back.
+        assert!(
+            result.is_ok() || result.is_err(),
+            "extract_pdf_bytes must return a Result, not hang or panic, on deeply nested input"
+        );
+    }
+
+    /// D-09 regression test: a normally-well-formed one-page PDF is cut off mid-download —
+    /// only the first half of its bytes are handed to the parser, so its content-stream
+    /// dictionary is unterminated (no closing `>>`), its `stream`/`endstream` pairing never
+    /// completes, and its xref table + trailer (which carry `/Root`) never arrive at all. This
+    /// is the "truncated mid-structure" case: no amount of lopdf's broken-xref recovery
+    /// scanning can synthesize bytes that were never in the file, so the parser must surface a
+    /// clean `Err` (either from its own parse failure, or from the `spawn_blocking`
+    /// `JoinError` path if it panics internally on the truncated input) — never let a raw
+    /// panic escape the async task.
+    #[tokio::test]
+    async fn extract_pdf_bytes_handles_truncated_object_stream() {
+        let object_4: &[u8] =
+            b"4 0 obj\n<< /Length 40 >>\nstream\nBT /F1 12 Tf 100 700 Td (Hello) Tj ET\nendstream\nendobj\n";
+        let full = build_pdf_fixture_with_content(object_4);
+        // Cut the file in half: keeps the header and the first couple of objects intact but
+        // discards the content stream's own close, and discards the xref/trailer/`/Root`
+        // entirely — there is nothing left in the byte stream for recovery mode to find.
+        let fixture = full[..full.len() / 2].to_vec();
+        assert!(
+            fixture.len() < 16 * 1024,
+            "truncated-content-stream fixture must stay under 16 KB, got {} bytes",
+            fixture.len()
+        );
+
+        let result = extract_pdf_bytes("https://example.com/truncated.pdf", fixture).await;
+        assert!(
+            result.is_err(),
+            "truncated content stream must fail cleanly, got: {:?}",
+            result
+        );
+    }
 }

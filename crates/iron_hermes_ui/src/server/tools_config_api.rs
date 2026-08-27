@@ -1389,7 +1389,6 @@ mod tests {
 
         let cfg = Config {
             security: SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },
@@ -1467,7 +1466,6 @@ mod tests {
 
         let root_cfg = Config {
             security: SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },
@@ -1559,7 +1557,6 @@ mod tests {
 
         let cfg = Config {
             security: SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },
@@ -1609,7 +1606,6 @@ mod tests {
 
         let cfg = Config {
             security: SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },
@@ -1818,7 +1814,6 @@ mod tests {
 
         let cfg = Config {
             security: SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },
@@ -1863,7 +1858,6 @@ mod tests {
 
         let cfg = Config {
             security: SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },
@@ -1940,7 +1934,6 @@ mod tests {
 
         let root_cfg = Config {
             security: SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },
@@ -2044,7 +2037,6 @@ mod tests {
 
         let root_cfg = Config {
             security: SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },
@@ -2103,7 +2095,6 @@ mod tests {
 
         let root_cfg = Config {
             security: SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },
@@ -2251,7 +2242,6 @@ mod tests {
     fn seed_config_with_gate_open() -> Config {
         Config {
             security: SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },

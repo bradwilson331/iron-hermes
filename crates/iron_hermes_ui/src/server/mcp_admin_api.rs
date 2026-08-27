@@ -2208,7 +2208,6 @@ mod tests {
 
         let cfg = ironhermes_core::config::Config {
             security: ironhermes_core::config::SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },
@@ -2417,7 +2416,6 @@ mod tests {
 
         let root_cfg = ironhermes_core::config::Config {
             security: ironhermes_core::config::SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },
@@ -2521,7 +2519,6 @@ mod tests {
         // below is the actual reason the commit fails, not a closed gate.
         let root_cfg = ironhermes_core::config::Config {
             security: ironhermes_core::config::SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },
@@ -2573,7 +2570,6 @@ mod tests {
 
         let root_cfg = ironhermes_core::config::Config {
             security: ironhermes_core::config::SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },

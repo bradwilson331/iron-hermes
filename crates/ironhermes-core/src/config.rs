@@ -3239,6 +3239,27 @@ pub struct CronConfig {
     /// behavior). The `IRONHERMES_CRON_MAX_PARALLEL` env var overrides this
     /// when set. Default 2.
     pub max_parallel: usize,
+    /// D-05 (revised, Phase 49.2 Plan 02) grace window: an occurrence missed
+    /// while the host was down fires **once** on the next tick when it fell
+    /// within this many minutes of now; older occurrences are skipped and
+    /// `next_run_at` rolls forward as before (pre-phase behavior). At most
+    /// one catch-up run happens per job per backlog pass regardless of how
+    /// many occurrences were missed. `0` disables catch-up entirely and
+    /// restores pure-skip behavior. Default 120 (2 hours).
+    ///
+    /// **Scope (WR-02): this lookback applies at gateway BOOT only.** It is
+    /// wired exclusively into `fast_forward_backlog` (`ironhermes-gateway`'s
+    /// `runner.rs`), which runs exactly once per gateway start. It has no
+    /// effect on the separate, per-tick stale-fast-forward that
+    /// `JobStore::get_due_jobs` runs on *every* tick (`ironhermes-cron`'s
+    /// `store.rs`), which uses its own shorter, schedule-specific,
+    /// **non-configurable** grace window (`compute_grace_seconds`: 3600s for
+    /// `Cron`, 120s for `Once`) and always skips — never catches up — an
+    /// occurrence that drifts stale between ticks without a restart. If the
+    /// gateway stays running continuously (e.g. through a laptop sleep/wake
+    /// cycle), this field does not apply; only the boot-time backlog pass
+    /// consults it.
+    pub catchup_lookback_minutes: u64,
 }
 
 impl Default for CronConfig {
@@ -3246,14 +3267,14 @@ impl Default for CronConfig {
         Self {
             wrap_response: true,
             max_parallel: 2,
+            catchup_lookback_minutes: 120,
         }
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SecurityConfig {
-    pub redact_secrets: bool,
     /// Phase 36.17.10 Plan 01 (D — config write-back security): DEFCON-tiered gate that
     /// allows browser-initiated writes to `config.yaml`. Defaults `false` (closed) so
     /// web config writes are disabled until the operator explicitly opts in.
@@ -3269,16 +3290,12 @@ pub struct SecurityConfig {
     /// neither one alone suffices (`gateway_control_api::process_control_gate_message`).
     pub web_process_control_enabled: bool,
 }
-
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        Self {
-            redact_secrets: true,
-            web_config_write_enabled: false,
-            web_process_control_enabled: false,
-        }
-    }
-}
+// Phase 49.1 Plan 07 Task 4: the manual `impl Default for SecurityConfig` this
+// struct carried while `redact_secrets: true` was a field (a non-derivable
+// default, since `true != bool::default()`) became clippy::derivable_impls
+// the moment `redact_secrets` was removed -- both remaining fields default
+// to `false`, `bool`'s own Default::default(). `#[derive(Default)]` above
+// replaces it; behavior is identical (both fields still default `false`).
 
 /// Per-user inbound rate limiting configuration (D-22).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -6110,8 +6127,7 @@ voice:
 
         // Deserialization without the field must also yield false
         let yaml = r#"
-security:
-  redact_secrets: true
+security: {}
 "#;
         let config: Config = serde_yaml::from_str(yaml).expect("parse");
         assert!(
@@ -6134,7 +6150,6 @@ security:
 
         let yaml = r#"
 security:
-  redact_secrets: true
   web_config_write_enabled: true
 "#;
         let config: Config = serde_yaml::from_str(yaml).expect("parse");
@@ -6145,6 +6160,35 @@ security:
              are independent"
         );
         assert!(config.security.web_config_write_enabled);
+    }
+
+    /// Phase 49.1 Plan 07 Task 4 (D-06/D-09 backward-compat requirement):
+    /// `SecurityConfig::redact_secrets` was removed as a dead config flag
+    /// (nothing ever read it -- see `API-DATA-003`) but the key had shipped
+    /// in the sample `config.yaml` since Phase 49.1 Plan 03, so an
+    /// operator's EXISTING config.yaml may still carry
+    /// `security: { redact_secrets: true }`. Removing a documented key
+    /// must not turn a previously-valid config into a parse error --
+    /// `SecurityConfig` carries no `#[serde(deny_unknown_fields)]`
+    /// (grep-confirmed absent from this file), so serde's default
+    /// behavior of silently ignoring unrecognized keys is what this test
+    /// proves holds, not merely assumes.
+    #[test]
+    fn security_config_tolerates_removed_redact_secrets_key() {
+        let yaml = r#"
+security:
+  redact_secrets: true
+  web_config_write_enabled: true
+  web_process_control_enabled: true
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect(
+            "a config.yaml carrying the now-removed redact_secrets key must still parse",
+        );
+        assert!(
+            config.security.web_config_write_enabled,
+            "the other security fields in the same YAML block must still deserialize correctly"
+        );
+        assert!(config.security.web_process_control_enabled);
     }
 }
 
@@ -6582,5 +6626,29 @@ display:
         assert_eq!(roundtripped.web_search.chain, cfg.web_search.chain);
         assert_eq!(roundtripped.web_answer.chain, cfg.web_answer.chain);
         assert_eq!(roundtripped.web_extract.chain, cfg.web_extract.chain);
+    }
+
+    // =========================================================================
+    // Phase 49.2 Plan 02 D-05 (revised): CronConfig::catchup_lookback_minutes
+    // =========================================================================
+
+    #[test]
+    fn catchup_lookback_minutes_defaults_to_120() {
+        assert_eq!(CronConfig::default().catchup_lookback_minutes, 120);
+
+        // Deserializing an empty mapping must also hit the `120` default via
+        // the struct's `#[serde(default)]` container attribute, not just
+        // `Default::default()`.
+        let cfg: CronConfig = serde_yaml::from_str("{}").expect("empty mapping deserializes");
+        assert_eq!(cfg.catchup_lookback_minutes, 120);
+    }
+
+    #[test]
+    fn catchup_lookback_minutes_zero_disables_and_leaves_siblings_default() {
+        let yaml = "catchup_lookback_minutes: 0\n";
+        let cfg: CronConfig = serde_yaml::from_str(yaml).expect("partial mapping deserializes");
+        assert_eq!(cfg.catchup_lookback_minutes, 0);
+        assert_eq!(cfg.max_parallel, 2);
+        assert!(cfg.wrap_response);
     }
 }

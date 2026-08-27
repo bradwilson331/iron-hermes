@@ -107,6 +107,19 @@ impl JobStore {
         Self::open(get_hermes_home().join("cron"))
     }
 
+    /// The directory holding this store's `jobs.json` — the parent of
+    /// `self.path`. Used so store-side heartbeat writes (the runtime
+    /// grace-skip record in [`JobStore::get_due_jobs`]) target the directory
+    /// this store was actually opened at, rather than re-deriving it from
+    /// [`get_hermes_home`]: a store opened at a temp dir in a test must never
+    /// write into the operator's real `~/.ironhermes`.
+    pub fn dir(&self) -> PathBuf {
+        self.path
+            .parent()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
     /// Load (or initialise) the job store at a specific directory.
     pub fn open(dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&dir)
@@ -391,6 +404,15 @@ impl JobStore {
         // Track which jobs had their next_run_at recomputed (for best-effort save)
         let mut needs_save = false;
 
+        // D-03/D-05 (Plan 04): the stale fast-forward branch below is a
+        // second, independent silent-skip site (distinct from the gateway's
+        // boot-time `fast_forward_backlog`). It rolls a job forward during
+        // normal ticking, not just at boot. Collect each occurrence here and
+        // record it to the heartbeat after the pass so it is visible from a
+        // separate `cron status` process — the skip DECISION itself
+        // (`grace_secs`/`age_secs`/the recompute) is unchanged.
+        let mut grace_skip_events: Vec<crate::heartbeat::BacklogEvent> = Vec::new();
+
         // Pass 1: recovery + stale fast-forward
         for job in self.jobs.iter_mut() {
             if job.state != JobState::Scheduled || !job.enabled {
@@ -429,6 +451,13 @@ impl JobStore {
                             "Fast-forwarding stale job '{}' from {} to {}",
                             job.name, next_run_at, new_next
                         );
+                        grace_skip_events.push(crate::heartbeat::BacklogEvent {
+                            job_id: job.id.clone(),
+                            job_name: job.name.clone(),
+                            missed_at: next_run_at,
+                            action: crate::heartbeat::BacklogAction::Skipped,
+                            rescheduled_to: Some(new_next),
+                        });
                         job.next_run_at = Some(new_next);
                         needs_save = true;
                     }
@@ -442,6 +471,13 @@ impl JobStore {
                 "get_due_jobs: failed to persist recovered next_run_at: {}",
                 e
             );
+        }
+
+        // Best-effort heartbeat write of the runtime grace-skip events. Must
+        // never abort or fail get_due_jobs — a broken heartbeat must not stop
+        // jobs from running.
+        if let Err(e) = crate::heartbeat::record_grace_skips_at(&self.dir(), grace_skip_events) {
+            warn!("get_due_jobs: failed to record grace-skip heartbeat: {}", e);
         }
 
         // Pass 2: collect due jobs
@@ -678,6 +714,7 @@ fn parse_jobs_with_repair(raw: &str, path: &std::path::Path) -> ParseResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::heartbeat::{read_tick_state_at, BacklogAction};
     use crate::job::ScheduleParsed;
     use chrono::Duration;
     use std::path::PathBuf;
@@ -981,6 +1018,82 @@ mod tests {
         // And next_run_at should now be in the future
         let next = store.jobs[0].next_run_at.unwrap();
         assert!(next > Utc::now() - Duration::minutes(1));
+    }
+
+    // --- dir() (Phase 49.2 Plan 04) ---
+
+    #[test]
+    fn job_store_dir_returns_parent_of_jobs_json() {
+        let (dir, cron_dir) = tmp_store_dir();
+        let store = JobStore::open(cron_dir.clone()).expect("open");
+        assert_eq!(store.dir(), cron_dir);
+        drop(dir);
+    }
+
+    // --- get_due_jobs() grace-skip heartbeat (Phase 49.2 Plan 04, D-03) ---
+
+    #[test]
+    fn get_due_jobs_records_grace_skip_event() {
+        let (_dir, mut store) = tmp_store();
+        let job = store
+            .add_job(
+                "cron-job",
+                "do something",
+                cron_sched("* * * * *"),
+                "every minute",
+                "local",
+                vec![],
+                None,
+            )
+            .expect("add_job");
+
+        // Backdate beyond the Cron grace window (3600s).
+        let missed_at = Utc::now() - Duration::hours(2);
+        store.jobs[0].next_run_at = Some(missed_at);
+
+        let due = store.get_due_jobs();
+        assert!(due.is_empty(), "stale job must be fast-forwarded, not returned as due");
+
+        // The policy is unchanged: next_run_at still moves into the future.
+        let next = store.jobs[0].next_run_at.expect("next_run_at set");
+        assert!(next > Utc::now() - Duration::minutes(1));
+
+        let state = read_tick_state_at(&store.dir()).expect("heartbeat written");
+        assert_eq!(state.recent_skips.len(), 1);
+        let event = &state.recent_skips[0];
+        assert_eq!(event.job_id, job.id);
+        assert_eq!(event.job_name, "cron-job");
+        assert_eq!(event.action, BacklogAction::Skipped);
+        assert_eq!(event.missed_at, missed_at);
+        assert!(event.rescheduled_to.is_some());
+    }
+
+    #[test]
+    fn get_due_jobs_inside_grace_window_records_no_skip_event() {
+        let (_dir, mut store) = tmp_store();
+        store
+            .add_job(
+                "cron-job-fresh",
+                "do something",
+                cron_sched("* * * * *"),
+                "every minute",
+                "local",
+                vec![],
+                None,
+            )
+            .expect("add_job");
+
+        // Backdate by 10 minutes — well inside the 3600s Cron grace window.
+        store.jobs[0].next_run_at = Some(Utc::now() - Duration::minutes(10));
+
+        let due = store.get_due_jobs();
+        assert_eq!(due.len(), 1, "a job inside the grace window is due, not skipped");
+
+        let state = read_tick_state_at(&store.dir());
+        assert!(
+            state.is_none_or(|s| s.recent_skips.is_empty()),
+            "no grace-skip event should be recorded for a job inside its grace window"
+        );
     }
 
     // --- find_job() ---

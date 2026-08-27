@@ -1040,7 +1040,6 @@ mod tests {
     fn seeded_config(write_enabled: bool) -> Config {
         Config {
             security: SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: write_enabled,
                 web_process_control_enabled: false,
             },

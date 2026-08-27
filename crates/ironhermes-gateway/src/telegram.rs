@@ -856,6 +856,44 @@ pub struct TgDocument {
     pub file_size: Option<i64>,
 }
 
+/// D-08 (Phase 49.1 Plan 05): the empty-whitelist deny-all decision,
+/// extracted out of `runner.rs`'s Telegram dispatch loop so it is directly
+/// testable without constructing the full dispatch pipeline (mpsc channel,
+/// semaphore, per-chat workers, ...). The loop calls this exact function as
+/// its early-continue guard — see `tests/whitelist_deny_all.rs`'s header
+/// comment for the extraction rationale shared with the Discord and Slack
+/// arms.
+///
+/// CANONICAL: mirrors `discord.rs`'s `discord_whitelist_allows` +
+/// `config.rs:731` (D-12 empty = deny all).
+pub fn telegram_whitelist_allows(whitelist: &[String], sender_id: &str) -> bool {
+    if whitelist.is_empty() {
+        false
+    } else {
+        whitelist.iter().any(|w| w == sender_id)
+    }
+}
+
+#[cfg(test)]
+mod whitelist_gate_tests {
+    use super::*;
+
+    /// D-08 (Phase 49.1 Plan 05): local unit coverage for the extracted
+    /// gate. Cross-adapter deny-all proofs live in
+    /// `tests/whitelist_deny_all.rs`.
+    #[test]
+    fn telegram_whitelist_allows_denies_on_empty_whitelist() {
+        assert!(!telegram_whitelist_allows(&[], "123456"));
+    }
+
+    #[test]
+    fn telegram_whitelist_allows_admits_listed_sender_only() {
+        let wl = vec!["123456".to_string()];
+        assert!(telegram_whitelist_allows(&wl, "123456"));
+        assert!(!telegram_whitelist_allows(&wl, "999999"));
+    }
+}
+
 pub fn tg_message_to_event(msg: &TgMessage) -> MessageEvent {
     let mut attachments: Vec<Attachment> = Vec::new();
 

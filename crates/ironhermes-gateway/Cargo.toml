@@ -116,6 +116,20 @@ tracing-subscriber = { workspace = true }
 # (already resolved elsewhere in the workspace dependency graph) plus the
 # `futures` promoted to [dependencies] above.
 tokio-tungstenite = "0.28"
+# Phase 49.1 Plan 05 (T-49.1-05-SC): `webhook_and_restgw_deny_all.rs` builds
+# a real generic_v2 HMAC-SHA256 signature to drive
+# `ironhermes-restgw`'s webhook verifier end to end (D-08 gap 2's "the
+# webhook path authenticates by signature, not the whitelist" proof needs a
+# request that genuinely carries a VALID signature, not `signature: none`).
+# All three crates are already fully resolved in this workspace's lockfile
+# as transitive dependencies of `ironhermes-restgw` (which this crate
+# already depends on) — this adds no new package to the dependency graph,
+# only a direct-dependency declaration for an already-vetted, already-pinned
+# workspace crate, mirroring the `tokio-tungstenite` precedent immediately
+# above.
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [features]
 buzz = ["dep:nostr-sdk", "dep:nostr", "dep:futures", "dep:dotenvy", "dep:rustls"]

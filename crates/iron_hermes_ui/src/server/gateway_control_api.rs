@@ -861,7 +861,6 @@ mod tests {
 
     fn sec(write: bool, control: bool) -> ironhermes_core::config::SecurityConfig {
         ironhermes_core::config::SecurityConfig {
-            redact_secrets: true,
             web_config_write_enabled: write,
             web_process_control_enabled: control,
         }

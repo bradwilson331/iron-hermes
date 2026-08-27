@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# =============================================================================
+# scripts/hooks/pre-commit — Phase 49.1 D-06: opt-in commit-time secret scan
+# =============================================================================
+# NOT the authoritative D-06 enforcement point — see scripts/ci-gates.sh's
+# header for the recorded decision: Gate 8 there is authoritative (runs on
+# every push, cannot be bypassed); this hook adds genuine but OPT-IN
+# commit-time feedback on top, sharing scripts/lib/secret-scan.sh's single
+# scan function so the two invocation points cannot drift.
+#
+# Install with: scripts/install-git-hooks.sh
+# (this file is tracked; .git/hooks/pre-commit is NOT — a fresh clone has no
+# hook installed until install-git-hooks.sh is run once.)
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+# shellcheck source=../lib/secret-scan.sh
+source "${REPO_ROOT}/scripts/lib/secret-scan.sh"
+
+STAGED_FILES=()
+while IFS= read -r _pc_f; do
+    STAGED_FILES+=("${_pc_f}")
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
+if [ "${#STAGED_FILES[@]}" -eq 0 ]; then
+    # Nothing staged that adds/copies/modifies content (e.g. a
+    # deletion-only commit) — nothing to scan. secret_scan_tracked's own
+    # fail-closed rule is for the CI-time full-tree scan, where an empty
+    # `git ls-files` result would be a genuine anomaly; an empty STAGED set
+    # here is the ordinary case, not evidence of a broken scan.
+    exit 0
+fi
+
+if ! secret_scan_tracked "${STAGED_FILES[@]}"; then
+    echo "" >&2
+    echo "pre-commit: secret scan failed (D-06) — see offending file:line above." >&2
+    echo "This hook is opt-in commit-time feedback; scripts/ci-gates.sh Gate 8 is" >&2
+    echo "the authoritative enforcement point and will also catch this on push." >&2
+    exit 1
+fi

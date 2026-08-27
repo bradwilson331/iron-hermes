@@ -491,7 +491,7 @@ mod profile_verify_classification_tests {
 
     #[test]
     fn error_summary_removes_secret_substring_before_truncating() {
-        let secret = "sk-VeryUniqueSecretXyz123";
+        let secret = "sk-VeryUniqueSecretXyz123"; // secret-scan:allow
         let err = format!("authentication failed for key {secret}: invalid");
         let summary = summarize_probe_error(&err, Some(secret));
         assert!(
@@ -678,7 +678,7 @@ mod profile_verify_disk_checks_tests {
         let profile_dir = crate::server::profile_api::profile_dir_for("name-not-value");
         fs::create_dir_all(&profile_dir).expect("mkdir profile dir");
         let env_path = profile_dir.join(".env");
-        let secret_value = "sk-Z9f3kQ7xN2mP8wL4vR6tY1uJ5hG0bC3eA";
+        let secret_value = "sk-Z9f3kQ7xN2mP8wL4vR6tY1uJ5hG0bC3eA"; // secret-scan:allow
         fs::write(&env_path, format!("ANTHROPIC_API_KEY={secret_value}\n")).expect("write .env");
         set_mode_0600(&env_path);
 
@@ -728,7 +728,7 @@ mod profile_verify_disk_checks_tests {
         let env_path = profile_dir.join(".env");
         // High-entropy fixture value so a partial-match leak check is
         // meaningful — no MOONSHOT_API_KEY at all.
-        let openrouter_secret = "sk-OrHighEntropyFixtureValueQ7xN2mP8wL4vR6tY1u";
+        let openrouter_secret = "sk-OrHighEntropyFixtureValueQ7xN2mP8wL4vR6tY1u"; // secret-scan:allow
         fs::write(&env_path, format!("OPENROUTER_API_KEY={openrouter_secret}\n"))
             .expect("write .env");
         set_mode_0600(&env_path);
@@ -796,7 +796,7 @@ mod profile_verify_disk_checks_tests {
         let env_path = profile_dir.join(".env");
         // High-entropy fixture value, distinct from the process-env value
         // below — a partial-match leak check between the two is meaningful.
-        let anthropic_secret = "sk-AnthropicHighEntropyFixtureValueM3nQ8xR1uJ5h";
+        let anthropic_secret = "sk-AnthropicHighEntropyFixtureValueM3nQ8xR1uJ5h"; // secret-scan:allow
         fs::write(&env_path, format!("ANTHROPIC_API_KEY={anthropic_secret}\n"))
             .expect("write .env");
         set_mode_0600(&env_path);
@@ -805,7 +805,7 @@ mod profile_verify_disk_checks_tests {
         // the value a root `.env` loaded into the server process would
         // supply, which the spawned worker's scrubbed environment never
         // sees.
-        let openrouter_process_secret = "sk-OpenrouterProcessEnvOnlyFixtureP9wY2mK6vT4b";
+        let openrouter_process_secret = "sk-OpenrouterProcessEnvOnlyFixtureP9wY2mK6vT4b"; // secret-scan:allow
         let _key_guard = ScopedEnv::set("OPENROUTER_API_KEY", openrouter_process_secret);
 
         let setup = build_probe_setup(name).expect("build_probe_setup should not error");

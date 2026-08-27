@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
 use clap::Subcommand;
 use colored::Colorize;
-use ironhermes_cron::display::{format_cron_status, format_job_detail, format_job_list};
+use ironhermes_cron::display::{format_cron_status_with_tick, format_job_detail, format_job_list};
 use ironhermes_cron::{
     CronJob, JobStore, JobUpdate, ScheduleParsed, parse_schedule, scan_cron_prompt,
 };
@@ -77,9 +77,13 @@ pub enum CronCommands {
         /// Job ID or name
         job_id: String,
     },
-    /// Manually trigger a job
+    /// Force-run a job now: sets `next_run_at = now` in the store so the
+    /// gateway's tick runner picks it up on its next cycle. Warns if no
+    /// tick has been observed recently (nothing may be consuming the queue).
     Run {
-        /// Job ID or name
+        /// Job ID or name (case-insensitive). A multi-word name must be
+        /// quoted — an unquoted multi-word name is split into separate
+        /// positional tokens by the shell/clap and will not resolve.
         job_id: String,
     },
     /// Remove a job
@@ -413,31 +417,140 @@ fn cmd_resume(job_id: String) -> Result<()> {
 // cmd_run
 // ---------------------------------------------------------------------------
 
-/// Note: `cmd_run` does NOT execute the job inline. It acknowledges the
-/// request — actual execution is deferred to the tick runner (gateway).
+/// Force-run a job now: mutates the store (`next_run_at = now`) via
+/// `trigger_job` — the same, already-tested store mutation `cmd_trigger`
+/// uses — so the gateway's tick runner actually picks the job up on its next
+/// cycle. `find_job`/`trigger_job` already resolve a job by id or by a
+/// (quoted) name case-insensitively; no new lookup code is needed here.
+///
+/// D-04: the store mutation always happens — force-run is not gated on
+/// heartbeat freshness — but the printed message honestly reflects whether
+/// anything currently appears to be consuming the cron queue.
 fn cmd_run(job_id: String) -> Result<()> {
-    let store = open_store()?;
+    let mut store = open_store()?;
 
     let job = store
         .find_job(&job_id)
         .ok_or_else(|| anyhow!("Job not found: {}", job_id))?;
     let name = job.name.clone();
 
+    store.trigger_job(&job_id)?;
+
+    let tick = ironhermes_cron::read_tick_state();
+    let message = cron_run_message(&name, tick.as_ref(), chrono::Utc::now());
+
+    println!("{}", message.primary);
+    if let Some(warning) = message.warning {
+        println!("{}", warning.yellow());
+    }
     println!(
         "{}",
-        format!(
-            "Job queued: {} — execution is deferred to the tick runner (gateway).",
-            name
-        )
-        .yellow()
-    );
-    println!(
-        "{}",
-        "The job will run on the next tick cycle. Check `ironhermes cron status` for details."
-            .dimmed()
+        "Check `ironhermes cron status` for details.".dimmed()
     );
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// cron_run_message — D-04 honesty message builder (pure, directly testable)
+// ---------------------------------------------------------------------------
+
+/// The message `cmd_run` prints after successfully mutating the store.
+pub(crate) struct CronRunMessage {
+    pub primary: String,
+    pub warning: Option<String>,
+}
+
+/// Build the honest post-trigger message for `cron run`.
+///
+/// The store mutation has already happened by the time this is called — this
+/// function only decides what to *say* about it. When the heartbeat is fresh
+/// (within `ironhermes_cron::TICK_STALE_SECONDS`), `primary` reports the
+/// observed tick age and `warning` is `None`. When the heartbeat is stale or
+/// absent, `primary` still confirms the store was updated (the mutation
+/// genuinely happened and survives a later gateway start), and `warning`
+/// names the job, states that no tick has been observed within the
+/// threshold, and points the operator at `ironhermes gateway`.
+pub(crate) fn cron_run_message(
+    job_name: &str,
+    tick: Option<&ironhermes_cron::TickState>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> CronRunMessage {
+    let stale = ironhermes_cron::is_tick_stale(tick, now);
+
+    if !stale {
+        // Safe: is_tick_stale returning false means tick and last_tick_at are Some.
+        let last_tick_at = tick.and_then(|t| t.last_tick_at).expect(
+            "is_tick_stale returned false, so tick and last_tick_at must be present",
+        );
+        let age_secs = (now - last_tick_at).num_seconds().max(0);
+        return CronRunMessage {
+            primary: format!(
+                "Job triggered: {} — next run set to now (last tick observed {}s ago; gateway tick runner executes it on its next cycle).",
+                job_name, age_secs
+            ),
+            warning: None,
+        };
+    }
+
+    let primary = format!(
+        "Job triggered: {} — next run set to now in the store.",
+        job_name
+    );
+
+    // WR-05: `run_tick_loop`'s very first tick after gateway boot is
+    // deliberately skipped (a fast-forward boot guard), so the first REAL
+    // tick heartbeat write only lands on the second tick, ~60-90s after the
+    // gateway starts. Without this check, "no `last_tick_at` at all" and
+    // "tick observed but stale" print the identical "nothing is consuming
+    // the queue — start the gateway" warning, which is a guaranteed false
+    // negative for that boot window — exactly the sequence an operator
+    // testing this fix follows ("start the gateway, then force-run the job
+    // to check it works"). `last_boot_at` is recorded by
+    // `record_backlog_at` at the very start of boot, before the tick loop
+    // even starts, so a recent `last_boot_at` with no `last_tick_at` yet is
+    // reliable evidence the gateway is alive and simply hasn't ticked yet —
+    // print an honest "started, first tick pending" message instead. The
+    // genuine stale/dead-tick warning below (a `last_tick_at` that IS
+    // present but old, or a `last_boot_at` that is ALSO stale) is untouched.
+    let recent_boot_before_first_tick = tick
+        .and_then(|t| t.last_tick_at)
+        .is_none()
+        .then(|| tick.and_then(|t| t.last_boot_at))
+        .flatten()
+        .map(|last_boot_at| (now - last_boot_at).num_seconds().max(0))
+        .filter(|&secs| secs <= ironhermes_cron::TICK_STALE_SECONDS);
+
+    if let Some(boot_age_secs) = recent_boot_before_first_tick {
+        let warning = format!(
+            "Gateway started {}s ago and hasn't completed its first tick yet — \
+             {} will run once the tick loop catches up (within ~60s).",
+            boot_age_secs, job_name
+        );
+        return CronRunMessage {
+            primary,
+            warning: Some(warning),
+        };
+    }
+
+    let warning = match tick.and_then(|t| t.last_tick_at) {
+        Some(last_tick_at) => {
+            let age_secs = (now - last_tick_at).num_seconds().max(0);
+            format!(
+                "Warning: no cron tick observed for {} for {}s (threshold {}s) — nothing appears to be consuming the cron queue right now. Start `ironhermes gateway` so this job actually runs.",
+                job_name, age_secs, ironhermes_cron::TICK_STALE_SECONDS
+            )
+        }
+        None => format!(
+            "Warning: no cron tick has ever been observed for {} — nothing appears to be consuming the cron queue right now. Start `ironhermes gateway` so this job actually runs.",
+            job_name
+        ),
+    };
+
+    CronRunMessage {
+        primary,
+        warning: Some(warning),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -481,8 +594,11 @@ fn cmd_remove(job_id: String, force: bool) -> Result<()> {
 fn cmd_status() -> Result<()> {
     let store = open_store()?;
     let jobs = store.list_jobs();
+    // D-03: include the tick-loop heartbeat so a healthy-but-idle tick is
+    // distinguishable from a dead one.
+    let state = ironhermes_cron::read_tick_state();
     // D-06: delegate to shared pure-text formatter; CLI parity with slash /cron status.
-    let plain = format_cron_status(jobs);
+    let plain = format_cron_status_with_tick(jobs, state.as_ref());
     print!("{}", plain);
     Ok(())
 }
@@ -780,6 +896,79 @@ mod tests_phase_32_1 {
         let _daemon = CronCommands::Daemon;
         // If these compile, the variants exist
     }
+
+    // Phase 49.2 Plan 01 Task 1 (D-01b): cmd_run mutates the store, cloning
+    // the test1/test2/test3 template used above for cmd_trigger.
+
+    #[test]
+    fn cmd_run_by_id_sets_next_run_at() {
+        let _guard = env_guard();
+        let dir = TempDir::new().expect("tmpdir");
+        let (_store, job) = make_store_with_job(&dir);
+
+        unsafe { std::env::set_var("IRONHERMES_HOME", dir.path()) };
+        let result = cmd_run(job.id.clone());
+        unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+        assert!(result.is_ok(), "cmd_run by id should succeed: {:?}", result);
+
+        let cron_dir = dir.path().join("cron");
+        let reloaded = JobStore::open(cron_dir).expect("reload");
+        let j = reloaded.get_job(&job.id).expect("job present");
+        let nra = j.next_run_at.expect("next_run_at should be set");
+        let diff = (chrono::Utc::now() - nra).abs();
+        assert!(
+            diff < chrono::Duration::seconds(5),
+            "next_run_at should be within 5s of now, got diff={}s",
+            diff.num_seconds()
+        );
+    }
+
+    #[test]
+    fn cmd_run_by_quoted_name_sets_next_run_at() {
+        let _guard = env_guard();
+        let dir = TempDir::new().expect("tmpdir");
+        let (_store, job) = make_store_with_job(&dir);
+
+        unsafe { std::env::set_var("IRONHERMES_HOME", dir.path()) };
+        // "daily-sync" mirrors a quoted multi-word job name resolving through
+        // the existing find_job id-or-name lookup — no new matching code.
+        let result = cmd_run("daily-sync".to_string());
+        unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+        assert!(
+            result.is_ok(),
+            "cmd_run by name should succeed: {:?}",
+            result
+        );
+
+        let cron_dir = dir.path().join("cron");
+        let reloaded = JobStore::open(cron_dir).expect("reload");
+        let j = reloaded.get_job(&job.id).expect("job present");
+        let nra = j.next_run_at.expect("next_run_at set");
+        let diff = (chrono::Utc::now() - nra).abs();
+        assert!(diff < chrono::Duration::seconds(5));
+    }
+
+    #[test]
+    fn cmd_run_nonexistent_returns_err() {
+        let _guard = env_guard();
+        let dir = TempDir::new().expect("tmpdir");
+        let cron_dir = dir.path().join("cron");
+        JobStore::open(cron_dir).expect("open empty store");
+
+        unsafe { std::env::set_var("IRONHERMES_HOME", dir.path()) };
+        let result = cmd_run("nope".to_string());
+        unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+        assert!(result.is_err(), "should fail for nonexistent job");
+        let err_msg = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_msg.to_lowercase().contains("not found"),
+            "error should mention not found: {}",
+            err_msg
+        );
+    }
 }
 
 #[cfg(test)]
@@ -883,5 +1072,108 @@ mod tests {
             )
             .unwrap();
         assert!(updated.skills.is_empty(), "skills should be cleared");
+    }
+
+    // Phase 49.2 Plan 01 Task 2 (D-04): cron_run_message honesty warning.
+
+    #[test]
+    fn cron_run_message_warns_when_no_recent_tick() {
+        let now = chrono::Utc::now();
+        let msg = cron_run_message("Daily Weather Briefing", None, now);
+        assert!(msg.warning.is_some(), "expected a warning when tick is None");
+        let warning = msg.warning.unwrap();
+        assert!(
+            warning.contains("Daily Weather Briefing"),
+            "warning should name the job: {}",
+            warning
+        );
+        assert!(
+            warning.to_lowercase().contains("no cron tick")
+                || warning.to_lowercase().contains("not been observed")
+                || warning.to_lowercase().contains("never been observed"),
+            "warning should say no tick has been observed: {}",
+            warning
+        );
+        assert!(
+            warning.to_lowercase().contains("consuming"),
+            "warning should say nothing is consuming the queue: {}",
+            warning
+        );
+        assert!(
+            warning.contains("gateway"),
+            "warning should mention the gateway: {}",
+            warning
+        );
+    }
+
+    #[test]
+    fn cron_run_message_confirms_when_tick_recent() {
+        let now = chrono::Utc::now();
+        let tick = ironhermes_cron::TickState {
+            last_tick_at: Some(now - chrono::Duration::seconds(5)),
+            ..Default::default()
+        };
+        let msg = cron_run_message("Daily Weather Briefing", Some(&tick), now);
+        assert!(
+            msg.warning.is_none(),
+            "no warning expected when tick is fresh"
+        );
+        assert!(
+            msg.primary.contains("Daily Weather Briefing"),
+            "primary should name the job: {}",
+            msg.primary
+        );
+    }
+
+    // WR-05: cron_run_message must not false-negative "no gateway is
+    // consuming the queue" during the ~60-90s window between gateway boot
+    // and its first real tick heartbeat.
+
+    #[test]
+    fn cron_run_message_no_false_negative_shortly_after_boot() {
+        let now = chrono::Utc::now();
+        let tick = ironhermes_cron::TickState {
+            last_tick_at: None,
+            last_boot_at: Some(now - chrono::Duration::seconds(10)),
+            ..Default::default()
+        };
+        let msg = cron_run_message("Daily Weather Briefing", Some(&tick), now);
+        let warning = msg
+            .warning
+            .expect("a heads-up message is still expected before the first tick");
+        assert!(
+            !warning.to_lowercase().contains("start `ironhermes gateway`"),
+            "must not tell the operator to start the gateway when last_boot_at is recent: {}",
+            warning
+        );
+        assert!(
+            warning.to_lowercase().contains("started"),
+            "should acknowledge the gateway has started: {}",
+            warning
+        );
+        assert!(
+            warning.contains("Daily Weather Briefing"),
+            "warning should name the job: {}",
+            warning
+        );
+    }
+
+    #[test]
+    fn cron_run_message_still_warns_when_boot_and_tick_both_stale() {
+        let now = chrono::Utc::now();
+        let tick = ironhermes_cron::TickState {
+            last_tick_at: None,
+            last_boot_at: Some(now - chrono::Duration::minutes(30)),
+            ..Default::default()
+        };
+        let msg = cron_run_message("Daily Weather Briefing", Some(&tick), now);
+        let warning = msg
+            .warning
+            .expect("expected a warning when both boot and tick are stale");
+        assert!(
+            warning.to_lowercase().contains("consuming"),
+            "genuine stale-tick warning must still fire when last_boot_at is also old: {}",
+            warning
+        );
     }
 }

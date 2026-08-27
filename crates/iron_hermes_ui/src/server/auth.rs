@@ -21,6 +21,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -45,9 +46,36 @@ pub const SESSION_COOKIE: &str = "ih_session";
 /// routes additionally carry their own DefaultBodyLimit(4096), see main.rs).
 const MAX_PASSWORD_LEN: usize = 1024;
 
-/// Fixed-window login rate limit: 5 attempts per 60s per peer IP.
-const LOGIN_WINDOW: Duration = Duration::from_secs(60);
+/// Free budget before the growing backoff engages: this many consecutive
+/// failed login attempts are met with a uniform 401, no `Retry-After`.
 const LOGIN_MAX_ATTEMPTS: u32 = 5;
+
+// D-07 / read_first: `ironhermes-gateway::rate_limiter::PerUserRateLimiter`
+// was evaluated as the primitive for this curve and deliberately NOT
+// reused, nor mirrored. That limiter is a continuous token bucket for
+// smoothing inbound MESSAGE throughput (refill-per-second, D-20/D-21) — a
+// different domain from a discrete, monotonically growing punitive delay
+// keyed on CREDENTIAL-guess failures that must also survive a process
+// restart (Task 2's persistence). Mirroring its shape would not reduce
+// this file's own logic, and a dependency edge from `iron_hermes_ui` to
+// `ironhermes-gateway` for one struct is not justified by that saving.
+// This is a deliberately separate, second limiter — not undocumented
+// drift of the kind this project's history warns against.
+
+/// D-07 weakness 1 (growing, capped backoff — the operator's actual
+/// request): the base delay for the first attempt past
+/// `LOGIN_MAX_ATTEMPTS`. 2 seconds is imperceptible to a human who
+/// mistyped their own password, but seeds a curve that reaches
+/// `LOGIN_BACKOFF_CAP` in nine failures (doubling each time).
+const LOGIN_BACKOFF_BASE: Duration = Duration::from_secs(2);
+
+/// D-07 weakness 1: the delay never exceeds this, however many attempts
+/// are made. 15 minutes makes an automated online guessing campaign
+/// against the single operator password economically dead, while also
+/// bounding — per T-49.1-04-05's accepted trade — how long a hammering
+/// attacker can extend the (eventually global, Task 2) lockout: at most
+/// this long, and cleared entirely by the next successful login.
+const LOGIN_BACKOFF_CAP: Duration = Duration::from_secs(900);
 
 /// Uniform failure delay — no timing oracle between "bad password" and
 /// "rate limited but not yet tripped" paths.
@@ -132,6 +160,168 @@ struct SessionEntry {
     last_seen: Instant,
 }
 
+/// Attempt bookkeeping — a monotonically growing `count` plus the
+/// `Instant` of the most recent failure, never a fixed per-window boolean.
+/// Two independent uses (D-07 weakness 2): [`AuthState::login_attempts`]
+/// holds exactly ONE of these — the single GLOBAL entry that drives the
+/// 401/429 verdict — while [`AuthState::login_attempt_sources`] holds one
+/// PER SOURCE IP, for diagnostics only, never consulted for the verdict.
+/// `last_failure` drives only the decay logic in
+/// `AuthState::check_rate_limit`; the backoff curve itself is a pure
+/// function of `count` (see `login_backoff_delay`), never of real elapsed
+/// time.
+struct LoginAttemptEntry {
+    count: u32,
+    last_failure: Instant,
+}
+
+/// D-07 weakness 3: the on-disk shape of the persisted global attempt
+/// state. Wall-clock (`u64` seconds since `UNIX_EPOCH`), never `Instant`
+/// — `Instant`'s epoch is arbitrary per process and cannot be
+/// reconstructed after the very restart this state exists to survive.
+/// Deliberately just these two fields: never anything derived from the
+/// presented password (acceptance criterion: the serialised form has
+/// exactly these two keys, asserted in
+/// `tests::login_attempt_state_file_is_mode_0600`).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PersistedLoginAttempts {
+    count: u32,
+    last_failure_unix_secs: u64,
+}
+
+/// D-07 weakness 3: where the persisted global attempt state lives — under
+/// the resolved IronHermes home (`ironhermes_core::get_hermes_home()`, env
+/// var `IRONHERMES_HOME`; the older single-word `HERMES_HOME` form was
+/// removed from this codebase and must never be reintroduced), never next
+/// to the binary. Resolved once, at `AuthState::new` time, and cached in
+/// `AuthState::login_attempts_path` — never re-resolved per request, so a
+/// test-only env var override only needs to be in effect during
+/// construction, not for the returned `AuthState`'s whole lifetime.
+fn login_attempts_path() -> PathBuf {
+    ironhermes_core::get_hermes_home().join("login_attempts.json")
+}
+
+/// D-07 weakness 3: loads the persisted global attempt state, failing
+/// CLOSED on anything but a clean "file does not exist yet" (first-ever
+/// use — no attack surface, genuinely zero). A corrupt or unreadable file
+/// is treated as already at-or-past the threshold, never as zero:
+/// resetting to zero on a parse failure would hand an attacker a bypass
+/// (corrupt the file, get a fresh budget) — T-49.1-04-07.
+fn load_persisted_login_attempts(path: &Path) -> LoginAttemptEntry {
+    let now = Instant::now();
+    match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => LoginAttemptEntry { count: 0, last_failure: now },
+        Err(e) => {
+            tracing::warn!(
+                target: "iron_hermes_ui::auth",
+                path = %path.display(),
+                error = %e,
+                "login attempt state file unreadable — failing closed (treating as at the threshold)"
+            );
+            LoginAttemptEntry {
+                count: LOGIN_MAX_ATTEMPTS + 1,
+                last_failure: now,
+            }
+        }
+        Ok(contents) => match serde_json::from_str::<PersistedLoginAttempts>(&contents) {
+            Ok(p) => LoginAttemptEntry {
+                count: p.count,
+                last_failure: now,
+            },
+            Err(e) => {
+                tracing::warn!(
+                    target: "iron_hermes_ui::auth",
+                    path = %path.display(),
+                    error = %e,
+                    "login attempt state file corrupt — failing closed (treating as at the threshold)"
+                );
+                LoginAttemptEntry {
+                    count: LOGIN_MAX_ATTEMPTS + 1,
+                    last_failure: now,
+                }
+            }
+        },
+    }
+}
+
+/// D-07 weakness 3: writes the global attempt state on every change (not
+/// on a timer — the write is tiny and infrequent by definition). Contains
+/// exactly a count and a wall-clock timestamp, nothing derived from the
+/// presented password. Best-effort: a write failure is logged, never
+/// panics the request path.
+fn persist_login_attempts(path: &Path, entry: &LoginAttemptEntry) {
+    let last_failure_unix_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let persisted = PersistedLoginAttempts {
+        count: entry.count,
+        last_failure_unix_secs,
+    };
+    let Ok(json) = serde_json::to_string(&persisted) else {
+        tracing::warn!(target: "iron_hermes_ui::auth", "failed to serialize login attempt state");
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!(
+                target: "iron_hermes_ui::auth",
+                path = %parent.display(),
+                error = %e,
+                "failed to create login attempt state directory"
+            );
+            return;
+        }
+    }
+    if let Err(e) = std::fs::write(path, json) {
+        tracing::warn!(
+            target: "iron_hermes_ui::auth",
+            path = %path.display(),
+            error = %e,
+            "failed to persist login attempt state"
+        );
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!(
+                target: "iron_hermes_ui::auth",
+                path = %path.display(),
+                error = %e,
+                "failed to set login attempt state file permissions"
+            );
+        }
+    }
+}
+
+/// Verdict from [`AuthState::check_rate_limit`]. `Limited` carries the
+/// caller-facing delay, already clamped to `LOGIN_BACKOFF_CAP`.
+/// `verify_password` is never invoked on this path — even a correct
+/// password is rejected while the caller is over budget, matching the
+/// pre-existing threshold-boundary contract.
+enum RateLimitVerdict {
+    /// Under the free budget — proceed to password verification.
+    Allowed,
+    /// Over budget — reject with this `Retry-After` delay.
+    Limited(Duration),
+}
+
+/// D-07 weakness 1: exponential curve, base `LOGIN_BACKOFF_BASE`, doubling
+/// once per failure past `LOGIN_MAX_ATTEMPTS`, clamped to
+/// `LOGIN_BACKOFF_CAP`. `count` is the just-incremented persistent failure
+/// count (always `> LOGIN_MAX_ATTEMPTS` when this is called), so the very
+/// first over-threshold failure (`count == LOGIN_MAX_ATTEMPTS + 1`) yields
+/// exponent 0, i.e. exactly `LOGIN_BACKOFF_BASE`.
+fn login_backoff_delay(count: u32) -> Duration {
+    debug_assert!(count > LOGIN_MAX_ATTEMPTS);
+    let exponent = count - LOGIN_MAX_ATTEMPTS - 1;
+    let multiplier = 1u64.checked_shl(exponent).unwrap_or(u64::MAX);
+    let secs = LOGIN_BACKOFF_BASE.as_secs().saturating_mul(multiplier);
+    Duration::from_secs(secs).min(LOGIN_BACKOFF_CAP)
+}
+
 /// Shared auth state — one per process, injected into the middleware and
 /// the /auth/* handlers via `from_fn_with_state` / `State`, and into
 /// `root_handler` via `Extension`.
@@ -142,12 +332,30 @@ pub struct AuthState {
     /// never a rebuild (RESEARCH.md Pattern 2).
     login_assets: HashSet<String>,
     sessions: RwLock<HashMap<String, SessionEntry>>,
-    login_attempts: RwLock<HashMap<IpAddr, (Instant, u32)>>,
+    /// D-07 weakness 2: the 401/429 VERDICT is driven by this single
+    /// global counter, never by source IP — IronHermes has exactly one
+    /// operator password, so per-IP keying is the multi-tenant shape
+    /// applied to a single-tenant system, and lets an attacker rotating
+    /// source addresses reset their own budget for free. Persisted to
+    /// `login_attempts_path` on every change (D-07 weakness 3).
+    login_attempts: RwLock<LoginAttemptEntry>,
+    /// Diagnostics ONLY — which source addresses have attempted, and when.
+    /// NEVER consulted for the verdict, and never persisted: only the
+    /// punitive global count itself needs to survive a restart.
+    login_attempt_sources: RwLock<HashMap<IpAddr, LoginAttemptEntry>>,
+    /// `login_attempts_path()` resolved once, here, and cached — see that
+    /// function's doc for why re-resolving per request is unnecessary and
+    /// why tests can rely on a construction-scoped env var override.
+    login_attempts_path: PathBuf,
 }
 
 impl AuthState {
     /// Validates the PHC string eagerly. Returns Err on a malformed hash so
     /// startup fails loudly instead of locking the operator out at login.
+    ///
+    /// D-07 weakness 3: also rehydrates the persisted global attempt state
+    /// from `login_attempts_path()` — this is the "construction" main.rs
+    /// calls this from, so no separate rehydration step is needed there.
     pub fn new(config: AuthConfig) -> Result<Arc<Self>, String> {
         if let Some(h) = &config.password_hash {
             PasswordHash::new(h)
@@ -157,11 +365,15 @@ impl AuthState {
             crate::server::login_page::public_asset_paths(&config.login_theme)
                 .into_iter()
                 .collect();
+        let login_attempts_path = login_attempts_path();
+        let login_attempts = load_persisted_login_attempts(&login_attempts_path);
         Ok(Arc::new(Self {
             config,
             login_assets,
             sessions: RwLock::new(HashMap::new()),
-            login_attempts: RwLock::new(HashMap::new()),
+            login_attempts: RwLock::new(login_attempts),
+            login_attempt_sources: RwLock::new(HashMap::new()),
+            login_attempts_path,
         }))
     }
 
@@ -250,18 +462,65 @@ impl AuthState {
         self.sessions.write().remove(token);
     }
 
-    /// Fixed-window limiter. Returns false when the caller is over budget.
-    fn check_rate_limit(&self, ip: IpAddr) -> bool {
+    /// Growing, capped backoff limiter (D-07 weaknesses 1-3). Every call
+    /// advances the persistent GLOBAL failure count by one — including
+    /// calls that are themselves rejected, since a rejection is itself the
+    /// signal that the caller is still hammering. `ip` is recorded ONLY in
+    /// the diagnostic side-map below; the verdict never consults it
+    /// (weakness 2). The curve is a pure function of the global count,
+    /// never of real elapsed time: `login_backoff_delay` clamps it to
+    /// `LOGIN_BACKOFF_CAP`, which is what actually bounds how far a
+    /// hammering caller can push the delay — not a real-time "have you
+    /// waited long enough" gate, which would either have to block the
+    /// never-`.await`-a-sleep-on-this-path request handler (D-07's
+    /// explicit prohibition) or need a background task to enforce.
+    fn check_rate_limit(&self, ip: IpAddr) -> RateLimitVerdict {
         let now = Instant::now();
-        let mut attempts = self.login_attempts.write();
-        // Lazy prune keeps the map bounded without a background task.
-        attempts.retain(|_, (start, _)| now.duration_since(*start) < LOGIN_WINDOW);
-        let entry = attempts.entry(ip).or_insert((now, 0));
-        if now.duration_since(entry.0) >= LOGIN_WINDOW {
-            *entry = (now, 0);
+        let verdict = {
+            let mut attempts = self.login_attempts.write();
+            // Full decay: a whole LOGIN_BACKOFF_CAP of silence resets the
+            // count to zero — same spirit as the old per-key retain
+            // sweep, now applied to the single global entry.
+            if now.duration_since(attempts.last_failure) >= LOGIN_BACKOFF_CAP {
+                attempts.count = 0;
+            }
+            attempts.count += 1;
+            attempts.last_failure = now;
+            if attempts.count <= LOGIN_MAX_ATTEMPTS {
+                RateLimitVerdict::Allowed
+            } else {
+                RateLimitVerdict::Limited(login_backoff_delay(attempts.count))
+            }
+        };
+        // D-07 weakness 3: persist the new global state on every change,
+        // not on a timer — the write is tiny and infrequent by definition.
+        persist_login_attempts(&self.login_attempts_path, &self.login_attempts.read());
+
+        // Diagnostics ONLY (D-07 weakness 2, Test 2): recorded for every
+        // call regardless of verdict, but never read back to decide 401
+        // vs 429 — no operational signal is lost by moving the verdict to
+        // a global counter.
+        let mut sources = self.login_attempt_sources.write();
+        let source = sources.entry(ip).or_insert(LoginAttemptEntry { count: 0, last_failure: now });
+        source.count += 1;
+        source.last_failure = now;
+
+        verdict
+    }
+
+    /// D-07 weakness 1, Test 5 / weakness 3: a successful login clears the
+    /// GLOBAL attempt state entirely, and persists the clear — the next
+    /// failure starts back at 401, not 429. Also drops `ip`'s diagnostic
+    /// record, since it just proved itself legitimate; other sources'
+    /// diagnostic history is left alone.
+    fn clear_login_attempts(&self, ip: IpAddr) {
+        {
+            let mut attempts = self.login_attempts.write();
+            attempts.count = 0;
+            attempts.last_failure = Instant::now();
         }
-        entry.1 += 1;
-        entry.1 <= LOGIN_MAX_ATTEMPTS
+        persist_login_attempts(&self.login_attempts_path, &self.login_attempts.read());
+        self.login_attempt_sources.write().remove(&ip);
     }
 }
 
@@ -367,6 +626,33 @@ pub async fn require_auth(
                 );
                 return StatusCode::FORBIDDEN.into_response();
             }
+            // D-14 websocket-security (T-49.1-08-05): CSWSH defense-in-depth
+            // on the WS upgrade endpoints (path list + predicate owned by
+            // kanban_ws.rs — see that module's doc for why the check lives
+            // here rather than inside ws_kanban's own body). Checked here,
+            // after the session is proven valid, so a rejected upgrade
+            // never reaches ws_kanban/ws_chat and never completes the WS
+            // handshake. Scoped to the two known WS paths only — every
+            // other route is unaffected.
+            if let Some(host) = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()) {
+                let expected =
+                    crate::server::kanban_ws::expected_ws_origin(host, auth.config.cookie_secure);
+                let origin = req.headers().get(header::ORIGIN).and_then(|v| v.to_str().ok());
+                if crate::server::kanban_ws::is_cross_origin_ws_upgrade(
+                    req.uri().path(),
+                    origin,
+                    &expected,
+                ) {
+                    tracing::warn!(
+                        target: "iron_hermes_ui::auth",
+                        path = %req.uri().path(),
+                        origin = origin.unwrap_or("<none>"),
+                        expected = %expected,
+                        "rejected cross-origin WebSocket upgrade (CSWSH defense-in-depth)"
+                    );
+                    return StatusCode::FORBIDDEN.into_response();
+                }
+            }
             next.run(req).await
         }
         _ => StatusCode::UNAUTHORIZED.into_response(),
@@ -401,11 +687,24 @@ pub async fn login(
         // Auth disabled => nothing to log into; treat as success-shaped no-op.
         return StatusCode::NO_CONTENT.into_response();
     }
-    if !auth.check_rate_limit(peer.ip()) {
-        tracing::warn!(target: "iron_hermes_ui::auth", ip = %peer.ip(), "login rate limit tripped");
+    if let RateLimitVerdict::Limited(retry_after) = auth.check_rate_limit(peer.ip()) {
+        // D-07: the delay is ADVERTISED via Retry-After, never enforced by
+        // holding this response open — that would turn the defence into a
+        // connection-exhaustion vector (T-49.1-04-04). FAILURE_SLEEP below
+        // is the pre-existing uniform anti-timing-oracle delay (500ms),
+        // unrelated to and far shorter than the computed backoff.
+        tracing::warn!(
+            target: "iron_hermes_ui::auth",
+            ip = %peer.ip(),
+            retry_after_secs = retry_after.as_secs(),
+            "login rate limit tripped"
+        );
         tokio::time::sleep(FAILURE_SLEEP).await;
+        let retry_after_header = HeaderValue::from_str(&retry_after.as_secs().to_string())
+            .expect("a whole-second integer formats as valid ASCII");
         return (
             StatusCode::TOO_MANY_REQUESTS,
+            [(header::RETRY_AFTER, retry_after_header)],
             Json(serde_json::json!({"error": "too many attempts"})),
         )
             .into_response();
@@ -420,6 +719,9 @@ pub async fn login(
         )
             .into_response();
     }
+    // D-07 weakness 1, Test 5: a successful login is a true reset, not
+    // just a bypass of this check — the next failure must start at 401.
+    auth.clear_login_attempts(peer.ip());
     let token = auth.mint_session();
     tracing::info!(target: "iron_hermes_ui::auth", ip = %peer.ip(), "login ok");
     let max_age = auth.config.session_ttl.as_secs() as i64;
@@ -466,13 +768,56 @@ mod tests {
     use axum::body::to_bytes;
     use tower::ServiceExt as _;
 
-    fn state_with_password(pw: &str) -> Arc<AuthState> {
+    /// RAII guard that sets an env var and restores the previous value on
+    /// drop. Copied verbatim from `ironhermes-kanban/src/paths.rs:449-475`
+    /// (same pattern `profile_api.rs`'s own test module copies),
+    /// including its safety comment.
+    struct ScopedEnv {
+        key: String,
+        prev: Option<String>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: single-threaded test context; no concurrent env access.
+            unsafe { std::env::set_var(key, value) };
+            Self {
+                key: key.to_string(),
+                prev,
+            }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            // SAFETY: single-threaded test context; no concurrent env access.
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var(&self.key, v) },
+                None => unsafe { std::env::remove_var(&self.key) },
+            }
+        }
+    }
+
+    /// D-07 weakness 3: `AuthState::new` resolves and CACHES the persisted
+    /// login-attempt state path at construction time (never re-resolved
+    /// per request) — so `IRONHERMES_HOME` only needs to be correct for
+    /// the duration of this one call, not for the returned `AuthState`'s
+    /// whole lifetime; the `ScopedEnv` guard is dropped (restoring the
+    /// real value) before this function returns. `home` must stay valid
+    /// for as long as the caller uses the returned `AuthState`, since the
+    /// cached path points into it — callers that need explicit control
+    /// over `home` (persistence round-trip tests) use this directly;
+    /// `state_with_password` below is the common case with a fresh,
+    /// intentionally-leaked tempdir per call.
+    fn state_with_password_at(pw: &str, home: &std::path::Path) -> Arc<AuthState> {
         use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
         let salt = SaltString::generate(&mut OsRng);
         let hash = Argon2::default()
             .hash_password(pw.as_bytes(), &salt)
             .unwrap()
             .to_string();
+        let _env_guard = ScopedEnv::set("IRONHERMES_HOME", home.to_str().expect("tempdir path is valid UTF-8"));
         AuthState::new(AuthConfig {
             password_hash: Some(hash),
             ..Default::default()
@@ -480,8 +825,26 @@ mod tests {
         .unwrap()
     }
 
+    /// Every test in this module must NEVER touch the real operator
+    /// `~/.ironhermes` (D-06) — `.keep()` deliberately disables the
+    /// tempdir's auto-delete-on-drop, since the path stays cached inside
+    /// the returned `AuthState` for the rest of whichever test called
+    /// this helper (see `state_with_password_at`'s doc for why that's
+    /// sound even though the env var itself is only set momentarily).
+    fn state_with_password(pw: &str) -> Arc<AuthState> {
+        let home = tempfile::tempdir().expect("tempdir").keep();
+        state_with_password_at(pw, &home)
+    }
+
     #[test]
     fn disabled_when_no_hash() {
+        // Auth is disabled here (no password hash), so check_rate_limit /
+        // persist_login_attempts are never reached — but AuthState::new
+        // itself still resolves login_attempts_path() and attempts a
+        // (read-only) rehydration, so this still gets the same isolated
+        // home as every other test in this module.
+        let home = tempfile::tempdir().expect("tempdir").keep();
+        let _env_guard = ScopedEnv::set("IRONHERMES_HOME", home.to_str().expect("tempdir path is valid UTF-8"));
         let s = AuthState::new(AuthConfig::default()).unwrap();
         assert!(!s.enabled());
     }
@@ -556,9 +919,9 @@ mod tests {
         let s = state_with_password("x");
         let ip: IpAddr = "127.0.0.1".parse().unwrap();
         for _ in 0..LOGIN_MAX_ATTEMPTS {
-            assert!(s.check_rate_limit(ip));
+            assert!(matches!(s.check_rate_limit(ip), RateLimitVerdict::Allowed));
         }
-        assert!(!s.check_rate_limit(ip));
+        assert!(matches!(s.check_rate_limit(ip), RateLimitVerdict::Limited(_)));
     }
 
     // -------------------------------------------------------------------
@@ -851,6 +1214,438 @@ mod tests {
             last_401_body.unwrap(),
             body_429.unwrap(),
             "429 body must be distinct from the 401 body"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 49.1 Plan 04 Task 1 (D-07 weakness 1): growing, capped backoff
+    // advertised via Retry-After. Extends the login_sixth_attempt_returns_429
+    // family above rather than replacing it — that test already covers
+    // "attempts 1-5 are 401, the 6th is 429" (behavior Test 1).
+    // -------------------------------------------------------------------
+
+    /// Test 2: attempts 6, 7 and 8 each return 429 with a `Retry-After`
+    /// header, and the values strictly increase — proves the curve grows
+    /// with each failure past the threshold, not a flat re-trip of a fixed
+    /// window.
+    #[tokio::test]
+    async fn login_retry_after_strictly_increases_past_threshold() {
+        let auth = state_with_password("hunter2");
+        let peer = SocketAddr::from(([127, 0, 0, 1], 45200));
+
+        let mut retry_afters = Vec::new();
+        for i in 0..8 {
+            let resp = login(
+                State(auth.clone()),
+                ConnectInfo(peer),
+                Json(LoginRequest {
+                    password: "wrong".to_string(),
+                }),
+            )
+            .await;
+            if i >= 5 {
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "attempt {} must be 429",
+                    i + 1
+                );
+                let value: u64 = resp
+                    .headers()
+                    .get(header::RETRY_AFTER)
+                    .expect("429 response must carry Retry-After")
+                    .to_str()
+                    .expect("Retry-After must be ASCII")
+                    .parse()
+                    .expect("Retry-After must be a whole-second integer, not a string compare");
+                retry_afters.push(value);
+            }
+        }
+        assert_eq!(retry_afters.len(), 3, "attempts 6, 7, 8 must all be 429");
+        assert!(
+            retry_afters[1] > retry_afters[0],
+            "retry_after(7) must exceed retry_after(6): {retry_afters:?}"
+        );
+        assert!(
+            retry_afters[2] > retry_afters[1],
+            "retry_after(8) must exceed retry_after(7): {retry_afters:?}"
+        );
+    }
+
+    /// Test 3: the `Retry-After` value never exceeds the declared cap,
+    /// however many attempts are made — drives 20 attempts and checks the
+    /// last value equals `LOGIN_BACKOFF_CAP`.
+    #[tokio::test]
+    async fn login_retry_after_caps_at_declared_max() {
+        let auth = state_with_password("hunter2");
+        let peer = SocketAddr::from(([127, 0, 0, 1], 45201));
+
+        let mut last_retry_after = None;
+        for _ in 0..20 {
+            let resp = login(
+                State(auth.clone()),
+                ConnectInfo(peer),
+                Json(LoginRequest {
+                    password: "wrong".to_string(),
+                }),
+            )
+            .await;
+            if resp.status() == StatusCode::TOO_MANY_REQUESTS {
+                let value: u64 = resp
+                    .headers()
+                    .get(header::RETRY_AFTER)
+                    .expect("429 response must carry Retry-After")
+                    .to_str()
+                    .expect("Retry-After must be ASCII")
+                    .parse()
+                    .expect("Retry-After must be a whole-second integer");
+                last_retry_after = Some(value);
+            }
+        }
+        assert_eq!(
+            last_retry_after,
+            Some(LOGIN_BACKOFF_CAP.as_secs()),
+            "after 20 attempts the delay must have reached the declared cap"
+        );
+    }
+
+    /// Test 4 (47.3 D-18 re-asserted): the 429 body stays distinct from the
+    /// 401 body, and neither ever echoes the presented password.
+    #[tokio::test]
+    async fn login_429_body_distinct_and_never_echoes_password() {
+        let auth = state_with_password("hunter2");
+        let peer = SocketAddr::from(([127, 0, 0, 1], 45202));
+        let secret_guess = "definitely-not-hunter2-xyz";
+
+        let mut body_401 = None;
+        let mut body_429 = None;
+        for i in 0..7 {
+            let resp = login(
+                State(auth.clone()),
+                ConnectInfo(peer),
+                Json(LoginRequest {
+                    password: secret_guess.to_string(),
+                }),
+            )
+            .await;
+            let status = resp.status();
+            let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            let body_str = String::from_utf8_lossy(&body);
+            assert!(
+                !body_str.contains(secret_guess),
+                "response body must never echo the presented password (attempt {i})"
+            );
+            if status == StatusCode::UNAUTHORIZED {
+                body_401 = Some(body);
+            } else if status == StatusCode::TOO_MANY_REQUESTS {
+                body_429 = Some(body);
+            }
+        }
+        assert_ne!(
+            body_401.expect("must have seen at least one 401"),
+            body_429.expect("must have seen at least one 429"),
+            "429 body must remain distinct from the 401 body"
+        );
+    }
+
+    /// Test 5: a successful login clears the attempt state, so the next
+    /// failed attempt starts back at 401, not 429. Drives 4 failures (all
+    /// still under the free budget, so this diverges from the pre-fix
+    /// binary only via the reset — without a reset the 6th call below
+    /// would tip the persistent counter from 5 to 6 and return 429).
+    #[tokio::test]
+    async fn login_success_resets_attempt_state() {
+        let auth = state_with_password("hunter2");
+        let peer = SocketAddr::from(([127, 0, 0, 1], 45203));
+
+        for i in 0..4 {
+            let resp = login(
+                State(auth.clone()),
+                ConnectInfo(peer),
+                Json(LoginRequest {
+                    password: "wrong".to_string(),
+                }),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "attempt {i} must be 401");
+        }
+
+        let resp = login(
+            State(auth.clone()),
+            ConnectInfo(peer),
+            Json(LoginRequest {
+                password: "hunter2".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT, "correct password must succeed");
+
+        let resp = login(
+            State(auth.clone()),
+            ConnectInfo(peer),
+            Json(LoginRequest {
+                password: "wrong-again".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "the next failure after a success must start at 401, not 429 — success must reset state"
+        );
+    }
+
+    /// Test 6: the delay is advertised, never enforced by blocking — the
+    /// handler returns promptly even once the computed delay has reached
+    /// the multi-minute cap.
+    #[tokio::test]
+    async fn login_never_blocks_on_computed_backoff() {
+        let auth = state_with_password("hunter2");
+        let peer = SocketAddr::from(([127, 0, 0, 1], 45204));
+
+        // Drive well past the point where the curve caps at LOGIN_BACKOFF_CAP.
+        for _ in 0..15 {
+            let _ = login(
+                State(auth.clone()),
+                ConnectInfo(peer),
+                Json(LoginRequest {
+                    password: "wrong".to_string(),
+                }),
+            )
+            .await;
+        }
+
+        let start = std::time::Instant::now();
+        let resp = login(
+            State(auth.clone()),
+            ConnectInfo(peer),
+            Json(LoginRequest {
+                password: "wrong".to_string(),
+            }),
+        )
+        .await;
+        let elapsed = start.elapsed();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            resp.headers().get(header::RETRY_AFTER).is_some(),
+            "429 must still advertise Retry-After even at the cap"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "handler must return promptly regardless of the computed delay; took {elapsed:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 49.1 Plan 04 Task 2 (D-07 weaknesses 2/3): global keying and
+    // restart-surviving attempt state.
+    // -------------------------------------------------------------------
+
+    /// Test 1: two different peer IPs contribute to the SAME attempt
+    /// counter — five failures from `127.0.0.1` followed by one failure
+    /// from a DIFFERENT `ConnectInfo` address returns 429, not 401. This
+    /// is the source-rotation weakness: IronHermes has exactly one
+    /// operator password, so a global counter is the correct primitive.
+    #[tokio::test]
+    async fn login_global_counter_spans_source_addresses() {
+        let auth = state_with_password("hunter2");
+        let peer_a = SocketAddr::from(([127, 0, 0, 1], 45300));
+        let peer_b = SocketAddr::from(([10, 0, 0, 7], 45301));
+
+        for i in 0..5 {
+            let resp = login(
+                State(auth.clone()),
+                ConnectInfo(peer_a),
+                Json(LoginRequest {
+                    password: "wrong".to_string(),
+                }),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "attempt {i} from peer_a must be 401"
+            );
+        }
+
+        let resp = login(
+            State(auth.clone()),
+            ConnectInfo(peer_b),
+            Json(LoginRequest {
+                password: "wrong".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "the 6th failure, from a DIFFERENT address, must still trip the global counter"
+        );
+    }
+
+    /// Test 2: the per-IP detail is still recorded for diagnostics (which
+    /// addresses attempted, and when), but it never gates the verdict —
+    /// asserted directly against `AuthState::login_attempt_sources`, and
+    /// re-confirmed by a subsequent call still returning 401 (3 total
+    /// failures across two addresses is under `LOGIN_MAX_ATTEMPTS`).
+    #[tokio::test]
+    async fn login_per_ip_diagnostics_recorded_but_not_gating() {
+        let auth = state_with_password("hunter2");
+        let peer_a = SocketAddr::from(([127, 0, 0, 1], 45302));
+        let peer_b = SocketAddr::from(([203, 0, 113, 9], 45303));
+
+        for _ in 0..2 {
+            let _ = login(
+                State(auth.clone()),
+                ConnectInfo(peer_a),
+                Json(LoginRequest {
+                    password: "wrong".to_string(),
+                }),
+            )
+            .await;
+        }
+        let _ = login(
+            State(auth.clone()),
+            ConnectInfo(peer_b),
+            Json(LoginRequest {
+                password: "wrong".to_string(),
+            }),
+        )
+        .await;
+
+        {
+            let sources = auth.login_attempt_sources.read();
+            assert_eq!(
+                sources.get(&peer_a.ip()).map(|e| e.count),
+                Some(2),
+                "peer_a's diagnostic count must reflect its own 2 attempts"
+            );
+            assert_eq!(
+                sources.get(&peer_b.ip()).map(|e| e.count),
+                Some(1),
+                "peer_b's diagnostic count must reflect its own 1 attempt"
+            );
+        }
+
+        let resp = login(
+            State(auth.clone()),
+            ConnectInfo(peer_a),
+            Json(LoginRequest {
+                password: "wrong".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "3 total failures across 2 addresses is still under budget — the per-IP records above are bookkeeping only"
+        );
+    }
+
+    /// Test 3: attempt state round-trips through persistence — a FRESH
+    /// `AuthState` constructed from the SAME home directory (simulating a
+    /// process restart) continues the backoff rather than restarting at
+    /// 401.
+    #[tokio::test]
+    async fn login_attempt_state_survives_reconstruction() {
+        let home = tempfile::tempdir().expect("tempdir").keep();
+        let peer = SocketAddr::from(([127, 0, 0, 1], 45304));
+
+        {
+            let auth_a = state_with_password_at("hunter2", &home);
+            for _ in 0..6 {
+                let _ = login(
+                    State(auth_a.clone()),
+                    ConnectInfo(peer),
+                    Json(LoginRequest {
+                        password: "wrong".to_string(),
+                    }),
+                )
+                .await;
+            }
+        } // auth_a dropped — simulates the process exiting.
+
+        let auth_b = state_with_password_at("hunter2", &home);
+        let resp = login(
+            State(auth_b.clone()),
+            ConnectInfo(peer),
+            Json(LoginRequest {
+                password: "wrong".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "reconstructing AuthState from the same home must continue the backoff, not restart it"
+        );
+    }
+
+    /// Test 4: the persisted state file is written at mode 0600, and its
+    /// serialised form contains EXACTLY the count + timestamp fields — no
+    /// credential material.
+    #[tokio::test]
+    async fn login_attempt_state_file_is_mode_0600_and_credential_free() {
+        let home = tempfile::tempdir().expect("tempdir").keep();
+        let auth = state_with_password_at("hunter2", &home);
+        let peer = SocketAddr::from(([127, 0, 0, 1], 45305));
+
+        let _ = login(
+            State(auth.clone()),
+            ConnectInfo(peer),
+            Json(LoginRequest {
+                password: "wrong".to_string(),
+            }),
+        )
+        .await;
+
+        let path = home.join("login_attempts.json");
+        let meta = std::fs::metadata(&path).expect("state file must exist after a failed attempt");
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            meta.permissions().mode() & 0o777,
+            0o600,
+            "login_attempts.json must be written at mode 0600"
+        );
+
+        let contents = std::fs::read_to_string(&path).expect("read state file");
+        let value: serde_json::Value = serde_json::from_str(&contents).expect("state file must be valid JSON");
+        let obj = value.as_object().expect("state file must be a JSON object");
+        let keys: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys,
+            ["count", "last_failure_unix_secs"].into_iter().collect(),
+            "persisted state must contain exactly count + timestamp, no credential material"
+        );
+    }
+
+    /// Test 5: a corrupt or unreadable state file does not panic, and
+    /// does NOT silently reset the counter to zero — it fails closed by
+    /// treating the state as already at-or-past the threshold (T-49.1-04-07).
+    #[tokio::test]
+    async fn login_corrupt_attempt_state_fails_closed() {
+        let home = tempfile::tempdir().expect("tempdir").keep();
+        std::fs::write(home.join("login_attempts.json"), b"not valid json{{{")
+            .expect("write corrupt fixture");
+
+        let auth = state_with_password_at("hunter2", &home);
+        let peer = SocketAddr::from(([127, 0, 0, 1], 45306));
+
+        // The VERY FIRST attempt on this fresh AuthState must already be
+        // rejected — proving the fail-closed treatment kicked in at load
+        // time, not after genuinely accumulating 6 failures.
+        let resp = login(
+            State(auth.clone()),
+            ConnectInfo(peer),
+            Json(LoginRequest {
+                password: "wrong".to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::TOO_MANY_REQUESTS,
+            "a corrupt state file must fail closed (429), never reset to a fresh budget (401)"
         );
     }
 

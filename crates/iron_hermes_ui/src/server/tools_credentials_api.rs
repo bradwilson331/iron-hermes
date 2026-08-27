@@ -864,7 +864,6 @@ mod tests {
     fn write_gate_open_when_enabled() {
         let config = Config {
             security: SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },
@@ -949,7 +948,6 @@ mod tests {
 
         let cfg = Config {
             security: SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },
@@ -1004,7 +1002,6 @@ mod tests {
         };
         let cfg = Config {
             security: SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },
@@ -1051,7 +1048,6 @@ mod tests {
         assert_eq!(vault.backend, "env-var");
         let cfg = Config {
             security: SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },
@@ -1089,7 +1085,6 @@ mod tests {
     fn seed_root_config_write_enabled(home: &std::path::Path) {
         let cfg = Config {
             security: SecurityConfig {
-                redact_secrets: true,
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
             },

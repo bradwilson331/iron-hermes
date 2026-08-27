@@ -12,6 +12,7 @@ use tracing::debug;
 pub mod adapter;
 pub mod delivery;
 pub mod display;
+pub mod heartbeat;
 pub mod job;
 pub mod parser;
 pub mod scanner;
@@ -20,6 +21,7 @@ pub mod tick;
 
 pub use adapter::{DeliveryRegistry, DeliverySend, TgSendApi};
 pub use delivery::*;
+pub use heartbeat::*;
 pub use job::*;
 pub use parser::*;
 pub use scanner::scan_cron_prompt;

@@ -1,7 +1,9 @@
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
+use tracing::debug;
 
 use crate::delivery::{DeliveryTarget, is_silent, resolve_delivery_target, save_job_output};
+use crate::heartbeat::{TickSummary, record_tick_best_effort};
 use crate::job::CronJob;
 use crate::store::JobStore;
 use crate::{LockGuard, acquire_tick_lock};
@@ -33,7 +35,48 @@ pub struct TickResult {
 ///
 /// The returned `LockGuard` keeps the lock held until dropped by the caller.
 /// Due jobs are cloned so the caller can use them without holding the store lock.
+///
+/// CR-01: the fallible prefix (tick-lock acquisition, store-mutex lock, or
+/// `store.reload()`) used to propagate its `Err` before the heartbeat write
+/// below ever ran, so the exact failure class this phase exists to diagnose
+/// (an unrepairable `jobs.json`, or a poisoned store mutex from an earlier
+/// panic) wrote NO heartbeat at all — `cron status` kept showing a stale but
+/// otherwise normal-looking last *successful* tick forever. This wrapper
+/// ensures a heartbeat with `error: Some(..)` is always recorded before the
+/// error propagates, so `TickState::last_tick_error` / `cron status`'s
+/// "Tick error:" line become reachable in production.
 pub async fn run_tick_check(
+    store: &Arc<Mutex<JobStore>>,
+) -> Result<(Vec<CronJob>, TickResult, Option<LockGuard>)> {
+    match run_tick_check_inner(store).await {
+        Ok(ok) => Ok(ok),
+        Err(e) => {
+            // WR-04: resolve the heartbeat directory from the store itself
+            // rather than a freshly re-resolved `get_hermes_home()` call.
+            // Even a poisoned mutex's guard is safe to read `.dir()` from —
+            // that's just the JobStore's own `path` field, never touched by
+            // whatever panicked while holding the lock. Best-effort: this
+            // must never itself fail the tick (swallowed by
+            // record_tick_best_effort).
+            let cron_dir = match store.lock() {
+                Ok(guard) => guard.dir(),
+                Err(poisoned) => poisoned.into_inner().dir(),
+            };
+            record_tick_best_effort(
+                &cron_dir,
+                TickSummary {
+                    jobs_checked: 0,
+                    jobs_due: 0,
+                    jobs_idle: 0,
+                    error: Some(e.to_string()),
+                },
+            );
+            Err(e)
+        }
+    }
+}
+
+async fn run_tick_check_inner(
     store: &Arc<Mutex<JobStore>>,
 ) -> Result<(Vec<CronJob>, TickResult, Option<LockGuard>)> {
     // Try to acquire the tick lock — skip if held by another process
@@ -50,7 +93,7 @@ pub async fn run_tick_check(
         ));
     }
 
-    let (due_jobs, total_enabled) = {
+    let (due_jobs, total_enabled, cron_dir) = {
         let mut store_guard = store
             .lock()
             .map_err(|e| anyhow::anyhow!("store lock poisoned: {}", e))?;
@@ -62,7 +105,13 @@ pub async fn run_tick_check(
         store_guard.reload()?;
         let total_enabled = store_guard.list_jobs().iter().filter(|j| j.enabled).count();
         let due_jobs: Vec<CronJob> = store_guard.get_due_jobs().into_iter().cloned().collect();
-        (due_jobs, total_enabled)
+        // WR-04: resolve the heartbeat directory from the locked store
+        // instance itself (matching the pattern Plan 04 established in
+        // `store.rs`'s own grace-skip heartbeat write) so the heartbeat
+        // always targets wherever THIS store was actually opened, not a
+        // freshly re-resolved global path.
+        let cron_dir = store_guard.dir();
+        (due_jobs, total_enabled, cron_dir)
     };
 
     let jobs_run = due_jobs.len();
@@ -73,6 +122,24 @@ pub async fn run_tick_check(
         jobs_run,
         jobs_idle,
     };
+
+    // D-03: record a heartbeat on every tick that acquired the lock, even
+    // when zero jobs are due — a healthy idle tick must be distinguishable
+    // from a dead one. Best-effort: a failed write is logged and swallowed,
+    // never fails the tick.
+    record_tick_best_effort(
+        &cron_dir,
+        TickSummary {
+            jobs_checked: result.jobs_checked,
+            jobs_due: result.jobs_run,
+            jobs_idle: result.jobs_idle,
+            error: None,
+        },
+    );
+    debug!(
+        "Tick heartbeat: checked={} due={} idle={}",
+        result.jobs_checked, result.jobs_run, result.jobs_idle
+    );
 
     Ok((due_jobs, result, lock_guard))
 }
@@ -278,6 +345,116 @@ mod tests {
         assert_eq!(due2[0].name, "external-due");
 
         // Restore env var
+        // SAFETY: test harness, single-threaded tokio runtime
+        unsafe {
+            match original_home {
+                Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+                None => std::env::remove_var("IRONHERMES_HOME"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn run_tick_check_writes_heartbeat_with_zero_due() {
+        use crate::heartbeat::read_tick_state_at;
+        use crate::store::JobStore;
+        use std::sync::{Arc, Mutex};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("tempdir");
+        let cron_dir = dir.path().join("cron");
+        let store = Arc::new(Mutex::new(
+            JobStore::open(cron_dir.clone()).expect("open store"),
+        ));
+
+        let _env_guard = crate::test_env_lock().lock().await;
+        let original_home = std::env::var("IRONHERMES_HOME").ok();
+        // SAFETY: test harness, single-threaded tokio runtime
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", dir.path());
+        }
+
+        let (due, result, _lock) = run_tick_check(&store).await.expect("tick");
+        assert!(due.is_empty(), "expected no due jobs on empty store");
+        assert_eq!(result.jobs_run, 0);
+
+        let state = read_tick_state_at(&cron_dir).expect("heartbeat should be recorded");
+        assert_eq!(state.jobs_due, 0);
+        assert!(state.last_tick_at.is_some());
+
+        // SAFETY: test harness, single-threaded tokio runtime
+        unsafe {
+            match original_home {
+                Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+                None => std::env::remove_var("IRONHERMES_HOME"),
+            }
+        }
+    }
+
+    /// CR-01 regression: `run_tick_check`'s `Err` path (a poisoned store
+    /// mutex, simulating a prior panic while a store guard was held) must
+    /// still write a heartbeat with a non-`None` `last_tick_error`, and
+    /// `cron status` (via `format_cron_status_with_tick`) must render a
+    /// "Tick error:" line from that heartbeat. Before this fix, the only
+    /// production `TickSummary` construction site hardcoded `error: None`
+    /// and lived on the success path only, so this exact failure class wrote
+    /// no heartbeat at all.
+    #[tokio::test]
+    async fn run_tick_check_records_error_heartbeat_on_poisoned_store() {
+        use crate::display::format_cron_status_with_tick;
+        use crate::heartbeat::read_tick_state_at;
+        use crate::store::JobStore;
+        use std::sync::{Arc, Mutex};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("tempdir");
+        let cron_dir = dir.path().join("cron");
+        let store = Arc::new(Mutex::new(
+            JobStore::open(cron_dir.clone()).expect("open store"),
+        ));
+
+        let _env_guard = crate::test_env_lock().lock().await;
+        let original_home = std::env::var("IRONHERMES_HOME").ok();
+        // SAFETY: test harness, single-threaded tokio runtime
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", dir.path());
+        }
+
+        // Poison the mutex the same way a prior panic-while-holding-the-lock
+        // would: acquire the guard on a spawned thread, then panic while it
+        // is still held.
+        let poison_store = store.clone();
+        let joined = std::thread::spawn(move || {
+            let _guard = poison_store.lock().unwrap();
+            panic!("CR-01 regression test: intentional poison");
+        })
+        .join();
+        assert!(joined.is_err(), "the poisoning thread must have panicked");
+        assert!(
+            store.lock().is_err(),
+            "the store mutex must now be poisoned"
+        );
+
+        let result = run_tick_check(&store).await;
+        assert!(
+            result.is_err(),
+            "run_tick_check must surface the poisoned-mutex error, not swallow it"
+        );
+
+        let state = read_tick_state_at(&cron_dir)
+            .expect("a heartbeat must be written even on run_tick_check's Err path");
+        let err = state
+            .last_tick_error
+            .as_deref()
+            .expect("last_tick_error must be Some(..) after a failed tick");
+        assert!(!err.is_empty(), "the recorded tick error must be non-empty");
+
+        let rendered = format_cron_status_with_tick(&[], Some(&state));
+        assert!(
+            rendered.contains("Tick error:"),
+            "cron status must render a 'Tick error:' line from the recorded heartbeat, got:\n{rendered}"
+        );
+
         // SAFETY: test harness, single-threaded tokio runtime
         unsafe {
             match original_home {

@@ -116,7 +116,7 @@ cron = "0.13"
 # Async utilities
 tokio-util = { version = "0.7", features = ["rt"] }
 # PDF extraction
-pdf-extract = "0.10"
+pdf-extract = "0.12"
 # Base64 encoding
 base64 = "0.22"
 # File locking

@@ -208,6 +208,23 @@ struct SlackAdapterState {
     adapter: Arc<dyn PlatformAdapter>,
 }
 
+/// D-08 (Phase 49.1 Plan 05): the empty-whitelist deny-all decision,
+/// extracted out of `on_push_event` below so it is directly testable
+/// without a live Socket Mode connection. `on_push_event` calls this exact
+/// function as its early-return guard — see `tests/whitelist_deny_all.rs`'s
+/// header comment for the extraction rationale shared with the Telegram and
+/// Discord arms.
+///
+/// CANONICAL: mirrors `runner.rs`'s Telegram check + `config.rs:731` (D-12
+/// empty = deny all).
+pub fn slack_whitelist_allows(whitelist: &[String], sender_id: &str) -> bool {
+    if whitelist.is_empty() {
+        false
+    } else {
+        whitelist.iter().any(|w| w == sender_id)
+    }
+}
+
 /// Socket Mode push-events callback — must be a fn pointer (not a closure).
 ///
 /// State (whitelist, handler, cancel, adapter) is retrieved from `state_storage`.
@@ -255,17 +272,18 @@ async fn on_push_event(
     };
 
     // CANONICAL whitelist check — mirrors runner.rs:601-611 + config.rs:731 (D-12).
-    // Empty whitelist = deny all messages (D-12).
-    if !state.whitelist.is_empty() {
-        if !state.whitelist.contains(&sender_id) {
+    // Empty whitelist = deny all messages (D-12). Phase 49.1 Plan 05: the
+    // boolean decision now runs through `slack_whitelist_allows`, the exact
+    // function `whitelist_deny_all.rs` drives directly.
+    if !slack_whitelist_allows(&state.whitelist, &sender_id) {
+        if state.whitelist.is_empty() {
+            tracing::warn!("Whitelist is empty — denying all messages (D-12)");
+        } else {
             tracing::warn!(
                 sender_id = %sender_id,
                 "Sender not in whitelist, ignoring"
             );
-            return Ok(());
         }
-    } else {
-        tracing::warn!("Whitelist is empty — denying all messages (D-12)");
         return Ok(());
     }
 
@@ -403,5 +421,19 @@ mod tests {
     #[test]
     fn classify_slack_channel_type_group_starts_with_g() {
         assert_eq!(classify_slack_channel_type("G0123ABC"), "group");
+    }
+
+    /// D-08 (Phase 49.1 Plan 05): local unit coverage for the extracted
+    /// gate. Cross-adapter deny-all proofs live in
+    /// `tests/whitelist_deny_all.rs`.
+    #[test]
+    fn slack_whitelist_allows_denies_on_empty_whitelist() {
+        assert!(!slack_whitelist_allows(&[], "U123"));
+    }
+
+    #[test]
+    fn slack_whitelist_allows_admits_listed_sender_only() {
+        assert!(slack_whitelist_allows(&["U123".to_string()], "U123"));
+        assert!(!slack_whitelist_allows(&["U123".to_string()], "U999"));
     }
 }

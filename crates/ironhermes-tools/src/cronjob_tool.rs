@@ -1,6 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use ironhermes_core::ToolSchema;
 use ironhermes_cron::parse_schedule;
 use ironhermes_cron::{JobOrigin, JobStore, JobUpdate, ScheduleParsed, scan_cron_prompt};
@@ -71,6 +72,46 @@ fn job_to_json(job: &ironhermes_cron::CronJob) -> Value {
             "thread_id": o.thread_id,
         })),
     })
+}
+
+// ---------------------------------------------------------------------------
+// schedule_notice — D-09/Axis 4: surface the resolved UTC instant and lead
+// time for a cron-scheduled create/update, so a mis-authored near-term
+// schedule (e.g. a local-time hour mistaken for UTC) is visible in the same
+// tool result rather than silently landing a day forward.
+// ---------------------------------------------------------------------------
+
+/// Return `Some(notice)` for a `Cron` schedule with a resolved `next_run_at`,
+/// naming the expression, stating it was interpreted with UTC hour/minute
+/// fields, and giving the resolved instant plus lead time from `now`.
+/// Returns `None` for `Interval`/`Once` (neither carries the timezone-
+/// authoring hazard) and for a `Cron` schedule whose `next_run_at` is `None`.
+fn schedule_notice(
+    schedule: &ScheduleParsed,
+    next_run_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> Option<String> {
+    let ScheduleParsed::Cron { expr, .. } = schedule else {
+        return None;
+    };
+    let next_run_at = next_run_at?;
+
+    let lead = next_run_at - now;
+    let total_minutes = lead.num_minutes().max(0);
+    let hours = total_minutes / 60;
+    let minutes = total_minutes % 60;
+    let lead_str = if hours > 0 {
+        format!("{}h {}m", hours, minutes)
+    } else {
+        format!("{}m", minutes)
+    };
+
+    Some(format!(
+        "Schedule '{}' was interpreted with UTC hour and minute fields. Resolved next run: {} (in {} from now). If this is not the intended local time, convert your desired wall-clock time to UTC and re-author the schedule, or use an ISO-8601 instant for a one-shot run.",
+        expr,
+        next_run_at.to_rfc3339(),
+        lead_str
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -184,13 +225,21 @@ fn handle_create(store: &mut JobStore, args: &Value) -> Value {
     match store.add_job(
         name,
         prompt,
-        schedule,
+        schedule.clone(),
         schedule_display,
         deliver,
         skills,
         origin_opt,
     ) {
-        Ok(job) => json!({"status": "created", "job": job_to_json(&job)}),
+        Ok(job) => {
+            let mut response = json!({"status": "created", "job": job_to_json(&job)});
+            if let Some(notice) = schedule_notice(&schedule, job.next_run_at, chrono::Utc::now())
+                && let Value::Object(ref mut map) = response
+            {
+                map.insert("schedule_notice".to_string(), json!(notice));
+            }
+            response
+        }
         Err(e) => json!({"status": "error", "message": format!("Failed to create job: {}", e)}),
     }
 }
@@ -272,6 +321,8 @@ fn handle_update(store: &mut JobStore, args: &Value) -> Value {
         return json!({"status": "error", "message": msg});
     }
 
+    let schedule_for_notice = new_schedule.clone();
+
     let updates = JobUpdate {
         name: args
             .get("name")
@@ -288,7 +339,16 @@ fn handle_update(store: &mut JobStore, args: &Value) -> Value {
     };
 
     match store.update_job(&canonical_id, updates) {
-        Ok(job) => json!({"status": "updated", "job": job_to_json(&job)}),
+        Ok(job) => {
+            let mut response = json!({"status": "updated", "job": job_to_json(&job)});
+            if let Some(schedule) = schedule_for_notice
+                && let Some(notice) = schedule_notice(&schedule, job.next_run_at, chrono::Utc::now())
+                && let Value::Object(ref mut map) = response
+            {
+                map.insert("schedule_notice".to_string(), json!(notice));
+            }
+            response
+        }
         Err(e) => json!({"status": "error", "message": format!("Failed to update job: {}", e)}),
     }
 }
@@ -336,23 +396,46 @@ fn handle_resume(store: &mut JobStore, args: &Value) -> Value {
     }
 }
 
-/// Note: `run` acknowledges the request but does NOT execute the job inline.
-/// Execution is deferred to the next tick runner cycle. The status "queued"
-/// indicates the request was accepted; check `last_run_at` / `last_status`
-/// after the tick runner processes it.
-fn handle_run(store: &JobStore, args: &Value) -> Value {
+/// Force-run a job now: mutates the store (`next_run_at = now`) via
+/// `trigger_job` — the same, already-tested store mutation `ironhermes cron
+/// run` now uses (Phase 49.2 Plan 01) — so the gateway's tick runner actually
+/// picks the job up on its next cycle. `find_job`/`trigger_job` already
+/// resolve a job by id or by name case-insensitively; no new lookup code is
+/// needed here.
+///
+/// D-04: the response is honest about what happened — the next run has been
+/// set to now in the store, and the gateway tick runner executes it on its
+/// next cycle. The tool itself never executes the job inline.
+fn handle_run(store: &mut JobStore, args: &Value) -> Value {
     let job_id = match args.get("job_id").and_then(|v| v.as_str()) {
         Some(id) => id.to_string(),
         None => return json!({"status": "error", "message": "Missing required parameter 'job_id'"}),
     };
 
-    match store.find_job(&job_id) {
-        Some(job) => json!({
-            "status": "queued",
-            "job_id": job.id,
-            "message": "Job run request queued. Execution is deferred to the tick runner (gateway)."
-        }),
-        None => json!({"status": "error", "message": format!("Job not found: {}", job_id)}),
+    let (canonical_id, job_name) = match store.find_job(&job_id) {
+        Some(j) => (j.id.clone(), j.name.clone()),
+        None => return json!({"status": "error", "message": format!("Job not found: {}", job_id)}),
+    };
+
+    match store.trigger_job(&canonical_id) {
+        Ok(()) => {
+            let next_run_at = store
+                .find_job(&canonical_id)
+                .and_then(|j| j.next_run_at)
+                .map(|t| t.to_rfc3339())
+                .unwrap_or_default();
+            json!({
+                "status": "triggered",
+                "job_id": canonical_id,
+                "name": job_name,
+                "next_run_at": next_run_at,
+                "message": format!(
+                    "Job triggered: {} — next run set to now in the store. The gateway tick runner executes it on its next cycle; this tool does not execute the job inline.",
+                    job_name
+                )
+            })
+        }
+        Err(e) => json!({"status": "error", "message": format!("Failed to run job: {}", e)}),
     }
 }
 
@@ -407,7 +490,7 @@ impl Tool for CronjobTool {
                     "action": {
                         "type": "string",
                         "enum": ["create", "list", "get", "update", "pause", "resume", "run", "remove"],
-                        "description": "Action to perform on scheduled tasks. Note: 'run' queues the job for the next tick runner cycle — it does not execute inline."
+                        "description": "Action to perform on scheduled tasks. Note: 'run' sets the job's next run to now in the store — the gateway tick runner executes it on its next cycle; it does not execute inline."
                     },
                     "job_id": {
                         "type": "string",
@@ -419,7 +502,7 @@ impl Tool for CronjobTool {
                     },
                     "schedule": {
                         "type": "string",
-                        "description": "Schedule expression. Examples: 'every 2h', 'every 30m', '0 9 * * *', '2026-04-10T09:00:00Z'. Required for create."
+                        "description": "Schedule expression. Accepted forms: an interval such as 'every 2h' or 'every 30m'; a 5- or 6-field cron expression such as '0 9 * * *'; or an ISO-8601 instant such as '2026-04-10T09:00:00Z'. IMPORTANT: the hour and minute fields of a cron expression are evaluated as UTC, not the machine's local time — convert your desired local wall-clock time to UTC before writing the expression. A one-shot 'run once in N minutes' or 'run once at a specific time' request MUST be authored as an ISO-8601 instant with an explicit offset (unambiguous by construction), NOT as a recurring cron expression — a bare cron expression for a single occurrence is exactly the shape that silently rolls a day forward when its hour is read as UTC. The create/update response reports the resolved next_run_at in UTC; check it against your intent before telling the user the job is scheduled. Required for create."
                     },
                     "prompt": {
                         "type": "string",
@@ -458,7 +541,7 @@ impl Tool for CronjobTool {
                 "update" => handle_update(&mut store, &args),
                 "pause" => handle_pause(&mut store, &args),
                 "resume" => handle_resume(&mut store, &args),
-                "run" => handle_run(&store, &args),
+                "run" => handle_run(&mut store, &args),
                 "remove" => handle_remove(&mut store, &args),
                 other => {
                     json!({"status": "error", "message": format!("Unknown action '{}'. Valid actions: create, list, get, update, pause, resume, run, remove", other)})
@@ -817,8 +900,221 @@ mod tests {
 
     // --- run ---
 
+    /// D-01b: the `run` action mutates the store the same way `ironhermes
+    /// cron run` now does — the response is no longer a no-op reassurance.
     #[tokio::test]
-    async fn test_run_queues() {
+    async fn cronjob_run_action_sets_next_run_at() {
+        let (tool, dir) = make_tool();
+        let created = parse_response(
+            &tool
+                .execute(
+                    json!({"action": "create", "name": "run-me", "schedule": "every 1h", "prompt": "p"}),
+                )
+                .await
+                .unwrap(),
+        );
+        let job_id = created["job"]["id"].as_str().unwrap().to_string();
+
+        let result = tool
+            .execute(json!({"action": "run", "job_id": job_id.clone()}))
+            .await
+            .unwrap();
+        let v = parse_response(&result);
+        assert_eq!(v["status"], "triggered");
+        assert_eq!(v["job_id"], job_id);
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap()
+                .contains("next run set to now")
+        );
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap()
+                .contains("gateway tick runner")
+        );
+
+        // Reopen the store from disk to prove the mutation was persisted.
+        let reopened = JobStore::open(dir.path().join("cron")).unwrap();
+        let job = reopened.find_job(&job_id).expect("job persists");
+        let next_run_at = job.next_run_at.expect("next_run_at set");
+        let age = (chrono::Utc::now() - next_run_at).num_seconds().abs();
+        assert!(age < 5, "next_run_at should be within 5s of now, got {age}s");
+    }
+
+    /// Same behavior, resolved by name instead of id — `find_job`'s existing
+    /// id-or-name lookup is reused with no new matching code.
+    #[tokio::test]
+    async fn cronjob_run_action_sets_next_run_at_by_name() {
+        let (tool, dir) = make_tool();
+        parse_response(
+            &tool
+                .execute(
+                    json!({"action": "create", "name": "run-by-name", "schedule": "every 1h", "prompt": "p"}),
+                )
+                .await
+                .unwrap(),
+        );
+
+        let result = tool
+            .execute(json!({"action": "run", "job_id": "run-by-name"}))
+            .await
+            .unwrap();
+        let v = parse_response(&result);
+        assert_eq!(v["status"], "triggered");
+        assert_eq!(v["name"], "run-by-name");
+
+        let reopened = JobStore::open(dir.path().join("cron")).unwrap();
+        let job = reopened.find_job("run-by-name").expect("job persists");
+        let next_run_at = job.next_run_at.expect("next_run_at set");
+        let age = (chrono::Utc::now() - next_run_at).num_seconds().abs();
+        assert!(age < 5, "next_run_at should be within 5s of now, got {age}s");
+    }
+
+    #[tokio::test]
+    async fn cronjob_run_action_unknown_job_returns_error() {
+        let (tool, _dir) = make_tool();
+        let result = tool
+            .execute(json!({"action": "run", "job_id": "does-not-exist"}))
+            .await
+            .unwrap();
+        let v = parse_response(&result);
+        assert_eq!(v["status"], "error");
+        assert!(v["message"].as_str().unwrap().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn test_run_missing_job_id_returns_error() {
+        let (tool, _dir) = make_tool();
+        let result = tool.execute(json!({"action": "run"})).await.unwrap();
+        let v = parse_response(&result);
+        assert_eq!(v["status"], "error");
+        assert!(v["message"].as_str().unwrap().contains("job_id"));
+    }
+
+    // --- schema documents the UTC contract (D-09/Axis 4) ---
+
+    #[test]
+    fn cronjob_schedule_schema_documents_utc() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::open(dir.path().join("cron")).unwrap();
+        let tool = CronjobTool::new(Arc::new(Mutex::new(store)));
+        let schema_json = serde_json::to_string(&tool.schema().function.parameters).unwrap();
+        assert!(
+            schema_json.contains("UTC"),
+            "schedule schema must document the UTC contract"
+        );
+    }
+
+    #[test]
+    fn cronjob_schedule_schema_steers_oneshot_to_iso() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JobStore::open(dir.path().join("cron")).unwrap();
+        let tool = CronjobTool::new(Arc::new(Mutex::new(store)));
+        let schema_json = serde_json::to_string(&tool.schema().function.parameters).unwrap();
+        assert!(
+            schema_json.contains("ISO-8601"),
+            "schedule schema must steer one-shot requests to the ISO-8601 form"
+        );
+        assert!(
+            schema_json.to_lowercase().contains("run once"),
+            "schedule schema must call out the 'run once' one-shot case"
+        );
+    }
+
+    // --- schedule_notice (D-09/Axis 4) ---
+
+    #[test]
+    fn schedule_notice_reports_utc_resolution_for_cron() {
+        let now = chrono::Utc::now();
+        let next_run_at = now + chrono::Duration::hours(23) + chrono::Duration::minutes(58);
+        let schedule = ScheduleParsed::Cron {
+            expr: "26 15 * * *".to_string(),
+            display: "26 15 * * *".to_string(),
+        };
+        let notice = schedule_notice(&schedule, Some(next_run_at), now);
+        let text = notice.expect("cron schedule with resolved next_run_at must produce a notice");
+        assert!(text.contains("UTC"), "notice must mention UTC: {text}");
+        assert!(
+            text.contains(&next_run_at.to_rfc3339()),
+            "notice must contain the resolved RFC3339 timestamp: {text}"
+        );
+        assert!(
+            text.contains("23h") || text.contains("h 58m") || text.contains("58m"),
+            "notice must state the lead time: {text}"
+        );
+    }
+
+    #[test]
+    fn schedule_notice_absent_for_interval() {
+        let now = chrono::Utc::now();
+        let interval = ScheduleParsed::Interval {
+            minutes: 60,
+            display: "every 60m".to_string(),
+        };
+        assert!(schedule_notice(&interval, Some(now), now).is_none());
+
+        let once = ScheduleParsed::Once {
+            run_at: now,
+            display: "once at ...".to_string(),
+        };
+        assert!(schedule_notice(&once, Some(now), now).is_none());
+    }
+
+    #[test]
+    fn schedule_notice_absent_for_cron_with_no_next_run() {
+        let now = chrono::Utc::now();
+        let schedule = ScheduleParsed::Cron {
+            expr: "0 9 * * *".to_string(),
+            display: "0 9 * * *".to_string(),
+        };
+        assert!(schedule_notice(&schedule, None, now).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_create_cron_schedule_includes_notice() {
+        let (tool, _dir) = make_tool();
+        let result = tool
+            .execute(json!({
+                "action": "create",
+                "name": "cron-job",
+                "schedule": "0 9 * * *",
+                "prompt": "do stuff"
+            }))
+            .await
+            .unwrap();
+        let v = parse_response(&result);
+        assert_eq!(v["status"], "created");
+        assert!(
+            v.get("schedule_notice").is_some(),
+            "cron-scheduled create must carry a schedule_notice"
+        );
+        assert!(v["schedule_notice"].as_str().unwrap().contains("UTC"));
+    }
+
+    #[tokio::test]
+    async fn test_create_interval_schedule_omits_notice() {
+        let (tool, _dir) = make_tool();
+        let result = tool
+            .execute(json!({
+                "action": "create",
+                "name": "interval-job",
+                "schedule": "every 2h",
+                "prompt": "do stuff"
+            }))
+            .await
+            .unwrap();
+        let v = parse_response(&result);
+        assert_eq!(v["status"], "created");
+        assert!(
+            v.get("schedule_notice").is_none(),
+            "interval-scheduled create must not carry a schedule_notice"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_update_to_cron_schedule_includes_notice() {
         let (tool, _dir) = make_tool();
         let created = parse_response(
             &tool
@@ -831,12 +1127,15 @@ mod tests {
         let job_id = created["job"]["id"].as_str().unwrap().to_string();
 
         let result = tool
-            .execute(json!({"action": "run", "job_id": job_id}))
+            .execute(json!({"action": "update", "job_id": job_id, "schedule": "0 9 * * *"}))
             .await
             .unwrap();
         let v = parse_response(&result);
-        assert_eq!(v["status"], "queued");
-        assert!(v["message"].as_str().unwrap().contains("deferred"));
+        assert_eq!(v["status"], "updated");
+        assert!(
+            v.get("schedule_notice").is_some(),
+            "update to a cron schedule must carry a schedule_notice"
+        );
     }
 
     // --- remove ---

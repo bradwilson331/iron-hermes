@@ -3206,8 +3206,8 @@ mod profile_scaffold_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
 
-        let legit_value = "sk-Legit9f3kQ7xN2mP8wL4vR6tY1uJ5hG0bC";
-        let forged_value = "sk-Forged3eA9f3kQ7xN2mP8wL4vR6tY1uJ5h";
+        let legit_value = "sk-Legit9f3kQ7xN2mP8wL4vR6tY1uJ5hG0bC"; // secret-scan:allow
+        let forged_value = "sk-Forged3eA9f3kQ7xN2mP8wL4vR6tY1uJ5h"; // secret-scan:allow
         let manual = vec![(
             "OPENROUTER_API_KEY".to_string(),
             SecretString::from(format!("{legit_value}\nINJECTED_KEY={forged_value}")),
@@ -3237,7 +3237,7 @@ mod profile_scaffold_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
 
-        let legit_value = "sk-NameCase9f3kQ7xN2mP8wL4vR6tY1uJ5hG0";
+        let legit_value = "sk-NameCase9f3kQ7xN2mP8wL4vR6tY1uJ5hG0"; // secret-scan:allow
         let manual = vec![(
             "OPENROUTER_API_KEY\nINJECTED_KEY".to_string(),
             SecretString::from(legit_value.to_string()),
@@ -3374,7 +3374,7 @@ mod profile_scaffold_tests {
         let _guard = home(&dir);
         // A distinctive high-entropy value so a partial match cannot slip
         // through.
-        let secret_value = "sk-Z9f3kQ7xN2mP8wL4vR6tY1uJ5hG0bC3eA";
+        let secret_value = "sk-Z9f3kQ7xN2mP8wL4vR6tY1uJ5hG0bC3eA"; // secret-scan:allow
         fs::write(
             dir.path().join(".env"),
             format!("OPENROUTER_API_KEY={secret_value}\n"),
@@ -3416,7 +3416,7 @@ mod profile_scaffold_tests {
 
     #[test]
     fn mask_key_value_never_embeds_input_characters() {
-        let secret = "sk-VeryUniqueSubstringXyz123";
+        let secret = "sk-VeryUniqueSubstringXyz123"; // secret-scan:allow
         let masked = mask_key_value(secret);
         assert!(
             !masked.contains(secret),
@@ -3571,7 +3571,7 @@ mod profile_scaffold_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
 
-        let secret_value = "sk-TreeWalkSecretZ9f3kQ7xN2mP8wL4vR6tY1u";
+        let secret_value = "sk-TreeWalkSecretZ9f3kQ7xN2mP8wL4vR6tY1u"; // secret-scan:allow
         let source_dir = profile_dir_for("secret-bot");
         write_fixture_file(
             &source_dir.join("config.yaml"),
@@ -4401,8 +4401,8 @@ mod profile_key_masking_tests {
         fs::create_dir_all(&profile_dir).expect("mkdir profile dir");
         // Distinctive, high-entropy fixture values so a partial match
         // cannot slip through by coincidence.
-        let root_secret = "sk-R00tHighEntropyValueQ7xN2mP8wL4vR6tY1u";
-        let profile_secret = "sk-Pr0fileHighEntropyValueZ9f3kQ7xN2mP8wL";
+        let root_secret = "sk-R00tHighEntropyValueQ7xN2mP8wL4vR6tY1u"; // secret-scan:allow
+        let profile_secret = "sk-Pr0fileHighEntropyValueZ9f3kQ7xN2mP8wL"; // secret-scan:allow
         fs::write(
             dir.path().join(".env"),
             format!("OPENROUTER_API_KEY={root_secret}\n"),
@@ -4747,7 +4747,7 @@ mod profile_key_masking_tests {
         fs::create_dir_all(&profile_dir).expect("mkdir profile dir");
         fs::write(profile_dir.join(".env"), "").expect("write empty .env");
 
-        let secret_value = "sk-Z9f3kQ7xN2mP8wL4vR6tY1uJ5hG0bC3eA-distinctive";
+        let secret_value = "sk-Z9f3kQ7xN2mP8wL4vR6tY1uJ5hG0bC3eA-distinctive"; // secret-scan:allow
         let secret = SecretString::from(secret_value.to_string());
         let row = save_profile_key_impl("save-key-no-leak", "OPENROUTER_API_KEY", &secret)
             .expect("save_profile_key_impl should succeed");

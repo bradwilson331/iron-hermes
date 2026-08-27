@@ -427,6 +427,9 @@
   .\[bot\:scout\] {
     bot: scout;
   }
+  .\[bot\:zig\] {
+    bot: zig;
+  }
 }
 @property --tw-rotate-x {
   syntax: "*";

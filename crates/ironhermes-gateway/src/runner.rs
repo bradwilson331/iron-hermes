@@ -1671,14 +1671,16 @@ impl GatewayRunner {
                                 "Received message from dispatch channel"
                             );
 
-                            // Whitelist check (D-10/D-11/D-12)
-                            if !whitelist.is_empty() {
-                                if !whitelist.contains(&event.sender_id) {
+                            // Whitelist check (D-10/D-11/D-12). Phase 49.1 Plan 05: the
+                            // boolean decision now runs through
+                            // `crate::telegram::telegram_whitelist_allows`, the exact
+                            // function `tests/whitelist_deny_all.rs` drives directly.
+                            if !crate::telegram::telegram_whitelist_allows(&whitelist, &event.sender_id) {
+                                if whitelist.is_empty() {
+                                    warn!("Whitelist is empty — denying all messages (D-12)");
+                                } else {
                                     warn!(sender_id = %event.sender_id, "Sender not in whitelist, ignoring");
-                                    continue;
                                 }
-                            } else {
-                                warn!("Whitelist is empty — denying all messages (D-12)");
                                 continue;
                             }
 
@@ -2004,16 +2006,76 @@ impl GatewayRunner {
             let buzz_adapter_tick = buzz_adapter.clone();
 
             join_set.spawn(async move {
+                // D-05 (revised): resolve the catch-up lookback window from
+                // config BEFORE config_tick is moved into cron_ctx below.
+                // WR-06: catchup_lookback_minutes is an operator-editable
+                // u64; clamp to i64::MAX before the cast so an absurd config
+                // value can't silently wrap negative (which would silently
+                // disable catch-up instead of the operator seeing a huge —
+                // but sane-signed — lookback window).
+                let catchup_lookback = chrono::Duration::minutes(
+                    config_tick.cron.catchup_lookback_minutes.min(i64::MAX as u64) as i64,
+                );
+
+                // WR-03: fast_forward_backlog's heartbeat write (record_backlog)
+                // is the one heartbeat writer NOT covered by the cross-process
+                // `.tick.lock` the other two writers (record_tick_at inside
+                // run_tick_check, record_grace_skips_at inside get_due_jobs)
+                // hold for their whole read-modify-write. Acquire the same
+                // lock here so a concurrently-launched `cron tick`/`cron
+                // daemon` process (a real, code-supported fallback path, not
+                // hypothetical) can't interleave its own tick_state.json
+                // read-modify-write with this boot-time-only pass and lose an
+                // update. This is boot-time-only contention, so retry briefly
+                // rather than block gateway startup indefinitely if the lock
+                // is held unexpectedly long; fail open (proceed without the
+                // lock, best-effort) rather than skip the backlog pass.
+                let mut backlog_lock = None;
+                for _ in 0..20 {
+                    match ironhermes_cron::acquire_tick_lock() {
+                        Ok(Some(guard)) => {
+                            backlog_lock = Some(guard);
+                            break;
+                        }
+                        Ok(None) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        }
+                        Err(e) => {
+                            warn!("First-tick burst guard: failed to acquire tick lock: {}", e);
+                            break;
+                        }
+                    }
+                }
+                if backlog_lock.is_none() {
+                    warn!(
+                        "First-tick burst guard: proceeding without the cross-process \
+                         tick lock after repeated contention — a concurrent `cron tick`/\
+                         `cron daemon` invocation may race this boot-time backlog pass's \
+                         heartbeat write"
+                    );
+                }
+
                 // UAT gap 2 / test 13: first-tick-after-boot burst guard.
                 // Fast-forward any stale scheduled jobs BEFORE entering the
                 // run_tick_loop so a gateway restart doesn't burst-fire jobs
-                // whose next_run_at drifted into the recent past.
-                match fast_forward_backlog(&job_store_tick).await {
-                    Ok(n) if n > 0 => {
-                        info!("First-tick burst guard fast-forwarded {} job(s)", n);
+                // whose next_run_at drifted into the recent past. D-05
+                // (revised): occurrences within the lookback window catch up
+                // once instead of being skipped.
+                match fast_forward_backlog(&job_store_tick, catchup_lookback).await {
+                    Ok(outcome) if outcome.forwarded > 0 || outcome.caught_up > 0 => {
+                        info!(
+                            "First-tick burst guard: {} job(s) skipped, {} job(s) caught up",
+                            outcome.forwarded, outcome.caught_up
+                        );
+                        if let Err(e) = ironhermes_cron::record_backlog(outcome.events) {
+                            warn!("failed to record backlog heartbeat: {}", e);
+                        }
                     }
-                    Ok(_) => {
+                    Ok(outcome) => {
                         debug!("First-tick burst guard: no backlog");
+                        if let Err(e) = ironhermes_cron::record_backlog(outcome.events) {
+                            warn!("failed to record backlog heartbeat: {}", e);
+                        }
                     }
                     Err(e) => {
                         error!("First-tick burst guard error: {}", e);
@@ -2021,6 +2083,9 @@ impl GatewayRunner {
                         // to skip the tick loop.
                     }
                 }
+                // Release the tick lock (if held) now that both the backlog
+                // pass and its heartbeat write have completed.
+                drop(backlog_lock);
 
                 // Phase 47.6 Plan 07: platform-keyed text-delivery registry —
                 // "telegram" when the adapter is present, "buzz" likewise.
@@ -2056,7 +2121,43 @@ impl GatewayRunner {
                         .map(|a| a as Arc<dyn ironhermes_tools::AudioDispatcher>),
                     delivery_registry: delivery_registry_tick,
                 });
-                ironhermes_cron_runner::run_tick_loop(cron_ctx, tick_cancel).await;
+                // D-03: close the fire-and-forget blind spot. join_next() is
+                // only called during the shutdown drain, so nothing else ever
+                // inspects this task again — if run_tick_loop returns without
+                // the cancel token having been tripped, scheduled jobs stop
+                // firing silently until the gateway is restarted.
+                //
+                // WR-01: a panic anywhere inside run_tick_loop (or any job it
+                // drives) used to unwind straight through the `if` below, so
+                // the error!() never ran — the only trace was a discarded
+                // JoinError at graceful shutdown, since join_set's own drain
+                // loop ignores its Result. Spawning run_tick_loop as its own
+                // tokio task and inspecting the returned JoinHandle here
+                // (tokio's spawn already catches panics) makes a panicked
+                // tick task just as loud as a quiet return, without changing
+                // graceful-shutdown semantics: this outer join_set task still
+                // completes normally (after logging) either way, so the
+                // shutdown drain loop's behavior is unaffected.
+                let tick_cancel_guard = tick_cancel.clone();
+                let tick_task_handle =
+                    tokio::spawn(ironhermes_cron_runner::run_tick_loop(cron_ctx, tick_cancel));
+                match tick_task_handle.await {
+                    Ok(()) => {
+                        if !tick_cancel_guard.is_cancelled() {
+                            error!(
+                                "Cron tick loop exited without a shutdown request — \
+                                 scheduled jobs will no longer fire until the gateway restarts"
+                            );
+                        }
+                    }
+                    Err(join_err) => {
+                        error!(
+                            "Cron tick loop task panicked ({}) — scheduled jobs will no \
+                             longer fire until the gateway restarts",
+                            join_err
+                        );
+                    }
+                }
             });
             info!("Cron tick task started (60s interval, delegating to ironhermes-cron-runner)");
         }
@@ -2354,7 +2455,19 @@ pub(crate) fn resolve_skill_context(
 /// fast-forwards every Scheduled+enabled job whose `next_run_at <= now` by
 /// recomputing its next run time from `now`. The fast-forwarded jobs are NOT
 /// executed on the current tick — they'll fire on their natural next cadence.
-async fn fast_forward_backlog(store: &Arc<Mutex<ironhermes_cron::JobStore>>) -> Result<usize> {
+/// Outcome of a single [`fast_forward_backlog`] pass: how many jobs were
+/// skipped (rolled forward, pre-phase behavior) vs. caught up (D-05 revised
+/// lookback window), plus the per-job events for the heartbeat.
+pub struct BacklogOutcome {
+    pub forwarded: usize,
+    pub caught_up: usize,
+    pub events: Vec<ironhermes_cron::BacklogEvent>,
+}
+
+async fn fast_forward_backlog(
+    store: &Arc<Mutex<ironhermes_cron::JobStore>>,
+    lookback: chrono::Duration,
+) -> Result<BacklogOutcome> {
     use chrono::Utc;
 
     let mut guard = store
@@ -2368,6 +2481,8 @@ async fn fast_forward_backlog(store: &Arc<Mutex<ironhermes_cron::JobStore>>) -> 
 
     let now = Utc::now();
     let mut forwarded = 0usize;
+    let mut caught_up = 0usize;
+    let mut events: Vec<ironhermes_cron::BacklogEvent> = Vec::new();
     for job in guard.jobs.iter_mut() {
         if job.state != ironhermes_cron::JobState::Scheduled || !job.enabled {
             continue;
@@ -2378,6 +2493,36 @@ async fn fast_forward_backlog(store: &Arc<Mutex<ironhermes_cron::JobStore>>) -> 
         if next_run_at > now {
             continue; // future — leave alone
         }
+
+        // D-05 (revised): a single, structural fire-once catch-up — never a
+        // loop over missed occurrences. Catch up when ALL hold: lookback > 0;
+        // the occurrence fell within the window; and this occurrence has not
+        // already run (a crash between execution and persist must not be
+        // replayed).
+        let already_ran = job.last_run_at.is_some_and(|t| t >= next_run_at);
+        if lookback > chrono::Duration::zero()
+            && (now - next_run_at) <= lookback
+            && !already_ran
+        {
+            info!(
+                "Grace-window catch-up: firing job '{}' missed at {} ({}s ago, within {}m lookback)",
+                job.name,
+                next_run_at,
+                (now - next_run_at).num_seconds(),
+                lookback.num_minutes()
+            );
+            job.next_run_at = Some(now);
+            caught_up += 1;
+            events.push(ironhermes_cron::BacklogEvent {
+                job_id: job.id.clone(),
+                job_name: job.name.clone(),
+                missed_at: next_run_at,
+                action: ironhermes_cron::BacklogAction::CaughtUp,
+                rescheduled_to: Some(now),
+            });
+            continue;
+        }
+
         // Stale-on-boot: recompute from now
         match ironhermes_cron::compute_next_run(&job.schedule, now) {
             Ok(Some(new_next)) => {
@@ -2387,6 +2532,13 @@ async fn fast_forward_backlog(store: &Arc<Mutex<ironhermes_cron::JobStore>>) -> 
                 );
                 job.next_run_at = Some(new_next);
                 forwarded += 1;
+                events.push(ironhermes_cron::BacklogEvent {
+                    job_id: job.id.clone(),
+                    job_name: job.name.clone(),
+                    missed_at: next_run_at,
+                    action: ironhermes_cron::BacklogAction::Skipped,
+                    rescheduled_to: Some(new_next),
+                });
             }
             Ok(None) => {
                 // Once-kind job whose run_at is past — drop next_run_at so it
@@ -2398,6 +2550,13 @@ async fn fast_forward_backlog(store: &Arc<Mutex<ironhermes_cron::JobStore>>) -> 
                 );
                 job.next_run_at = None;
                 forwarded += 1;
+                events.push(ironhermes_cron::BacklogEvent {
+                    job_id: job.id.clone(),
+                    job_name: job.name.clone(),
+                    missed_at: next_run_at,
+                    action: ironhermes_cron::BacklogAction::Dropped,
+                    rescheduled_to: None,
+                });
             }
             Err(e) => {
                 warn!(
@@ -2408,10 +2567,14 @@ async fn fast_forward_backlog(store: &Arc<Mutex<ironhermes_cron::JobStore>>) -> 
         }
     }
 
-    if forwarded > 0 {
+    if forwarded > 0 || caught_up > 0 {
         guard.save()?;
     }
-    Ok(forwarded)
+    Ok(BacklogOutcome {
+        forwarded,
+        caught_up,
+        events,
+    })
 }
 
 // Plan 32.1-07: execute_cron_job + dispatch_delivery moved to
@@ -3182,9 +3345,13 @@ gateway:
 
         let store = Arc::new(Mutex::new(raw_store));
 
-        // Invoke the burst guard directly
-        let forwarded = fast_forward_backlog(&store).await.expect("guard");
-        assert_eq!(forwarded, 1, "expected 1 job fast-forwarded");
+        // Invoke the burst guard directly with a 0-minute lookback — this is
+        // the legacy skip-only path, D-05's pre-phase behavior.
+        let outcome = fast_forward_backlog(&store, Duration::minutes(0))
+            .await
+            .expect("guard");
+        assert_eq!(outcome.forwarded, 1, "expected 1 job fast-forwarded");
+        assert_eq!(outcome.caught_up, 0, "0-minute lookback must never catch up");
 
         // Assert: next_run_at is now in the future (not in the past)
         {
@@ -3209,6 +3376,239 @@ gateway:
                 due.len()
             );
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Phase 49.2 Plan 02 (D-05 revised): lookback-window catch-up tests
+    // -------------------------------------------------------------------------
+
+    /// Shared fixture: a JobStore with one enabled interval job whose
+    /// `next_run_at` is backdated by `age` from now.
+    fn backlog_test_fixture(
+        age: chrono::Duration,
+    ) -> (tempfile::TempDir, std::path::PathBuf, ironhermes_cron::CronJob) {
+        use ironhermes_cron::{JobStore, ScheduleParsed};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("tempdir");
+        let cron_dir = dir.path().join("cron");
+        let mut raw_store = JobStore::open(cron_dir.clone()).expect("open");
+        let job = raw_store
+            .add_job(
+                "backlog-job",
+                "hi",
+                ScheduleParsed::Interval {
+                    minutes: 5,
+                    display: "every 5m".to_string(),
+                },
+                "every 5m",
+                "local",
+                vec![],
+                None,
+            )
+            .expect("add");
+        let past = chrono::Utc::now() - age;
+        raw_store.jobs[0].next_run_at = Some(past);
+        raw_store.save().expect("save");
+        (dir, cron_dir, job)
+    }
+
+    #[tokio::test]
+    async fn fast_forward_backlog_catches_up_within_lookback_window() {
+        use chrono::{Duration, Utc};
+        use ironhermes_cron::JobStore;
+        use std::sync::{Arc, Mutex};
+
+        let (_dir, cron_dir, job) = backlog_test_fixture(Duration::minutes(30));
+        let raw_store = JobStore::open(cron_dir.clone()).expect("reopen");
+        let store = Arc::new(Mutex::new(raw_store));
+
+        let outcome = fast_forward_backlog(&store, Duration::minutes(120))
+            .await
+            .expect("guard");
+        assert_eq!(outcome.caught_up, 1);
+        assert_eq!(outcome.forwarded, 0);
+
+        let mut guard = store.lock().unwrap();
+        let updated = guard.get_job(&job.id).expect("job still present");
+        let new_next = updated.next_run_at.expect("next_run_at present");
+        let diff = (Utc::now() - new_next).abs();
+        assert!(
+            diff < Duration::seconds(5),
+            "caught-up next_run_at should be within 5s of now, got diff={}s",
+            diff.num_seconds()
+        );
+
+        let due = guard.get_due_jobs();
+        assert_eq!(due.len(), 1, "the caught-up job must be due on the next tick");
+    }
+
+    #[tokio::test]
+    async fn fast_forward_backlog_skips_beyond_lookback_window() {
+        use chrono::{Duration, Utc};
+        use ironhermes_cron::JobStore;
+        use std::sync::{Arc, Mutex};
+
+        let (_dir, cron_dir, _job) = backlog_test_fixture(Duration::minutes(200));
+        let raw_store = JobStore::open(cron_dir.clone()).expect("reopen");
+        let store = Arc::new(Mutex::new(raw_store));
+
+        let outcome = fast_forward_backlog(&store, Duration::minutes(120))
+            .await
+            .expect("guard");
+        assert_eq!(outcome.forwarded, 1);
+        assert_eq!(outcome.caught_up, 0);
+
+        let mut guard = store.lock().unwrap();
+        let due = guard.get_due_jobs();
+        assert!(
+            due.is_empty(),
+            "a job skipped beyond the lookback window must not be due"
+        );
+        let _ = Utc::now();
+    }
+
+    #[tokio::test]
+    async fn fast_forward_backlog_disabled_lookback_matches_legacy_skip() {
+        use chrono::Duration;
+        use ironhermes_cron::JobStore;
+        use std::sync::{Arc, Mutex};
+
+        let (_dir, cron_dir, _job) = backlog_test_fixture(Duration::minutes(30));
+        let raw_store = JobStore::open(cron_dir.clone()).expect("reopen");
+        let store = Arc::new(Mutex::new(raw_store));
+
+        let outcome = fast_forward_backlog(&store, Duration::minutes(0))
+            .await
+            .expect("guard");
+        assert_eq!(
+            outcome.forwarded, 1,
+            "a 0-minute lookback must reproduce the pre-phase skip-only behavior"
+        );
+        assert_eq!(outcome.caught_up, 0);
+    }
+
+    #[tokio::test]
+    async fn fast_forward_backlog_catches_up_at_most_once_per_job() {
+        use chrono::Duration;
+        use ironhermes_cron::JobStore;
+        use std::sync::{Arc, Mutex};
+
+        // 3 days stale, on a 5-minute interval schedule — many occurrences
+        // were missed, but the catch-up must be structural fire-once, not an
+        // enumeration/replay of intervening occurrences.
+        let (_dir, cron_dir, _job) = backlog_test_fixture(Duration::days(3));
+        let raw_store = JobStore::open(cron_dir.clone()).expect("reopen");
+        let store = Arc::new(Mutex::new(raw_store));
+
+        // A lookback window large enough to include a 3-day-stale occurrence.
+        let outcome = fast_forward_backlog(&store, Duration::days(4))
+            .await
+            .expect("guard");
+        assert_eq!(outcome.caught_up, 1, "must catch up exactly once, not replay every missed occurrence");
+        assert_eq!(outcome.events.len(), 1, "exactly one BacklogEvent for the stale job");
+    }
+
+    #[tokio::test]
+    async fn fast_forward_backlog_records_backlog_events() {
+        use chrono::Duration;
+        use ironhermes_cron::{JobStore, ScheduleParsed};
+        use std::sync::{Arc, Mutex};
+        use tempfile::TempDir;
+
+        let dir = TempDir::new().expect("tempdir");
+        let cron_dir = dir.path().join("cron");
+        let mut raw_store = JobStore::open(cron_dir.clone()).expect("open");
+
+        // One job within the lookback window (catches up).
+        raw_store
+            .add_job(
+                "catch-up-job",
+                "hi",
+                ScheduleParsed::Interval {
+                    minutes: 5,
+                    display: "every 5m".to_string(),
+                },
+                "every 5m",
+                "local",
+                vec![],
+                None,
+            )
+            .expect("add");
+        raw_store.jobs[0].next_run_at = Some(chrono::Utc::now() - Duration::minutes(30));
+
+        // One job beyond the lookback window (skipped).
+        raw_store
+            .add_job(
+                "skipped-job",
+                "hi",
+                ScheduleParsed::Interval {
+                    minutes: 5,
+                    display: "every 5m".to_string(),
+                },
+                "every 5m",
+                "local",
+                vec![],
+                None,
+            )
+            .expect("add");
+        raw_store.jobs[1].next_run_at = Some(chrono::Utc::now() - Duration::minutes(200));
+        raw_store.save().expect("save");
+
+        let store = Arc::new(Mutex::new(raw_store));
+        let outcome = fast_forward_backlog(&store, Duration::minutes(120))
+            .await
+            .expect("guard");
+
+        assert_eq!(outcome.events.len(), 2);
+        let caught_up_event = outcome
+            .events
+            .iter()
+            .find(|e| e.job_name == "catch-up-job")
+            .expect("catch-up-job event present");
+        assert_eq!(caught_up_event.action, ironhermes_cron::BacklogAction::CaughtUp);
+        let skipped_event = outcome
+            .events
+            .iter()
+            .find(|e| e.job_name == "skipped-job")
+            .expect("skipped-job event present");
+        assert_eq!(skipped_event.action, ironhermes_cron::BacklogAction::Skipped);
+
+        ironhermes_cron::record_backlog_at(&cron_dir, outcome.events).expect("record backlog");
+        let state = ironhermes_cron::read_tick_state_at(&cron_dir).expect("state present");
+        assert_eq!(state.backlog.len(), 2);
+        assert!(state.last_boot_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn fast_forward_backlog_does_not_catch_up_an_already_run_job() {
+        use chrono::{Duration, Utc};
+        use ironhermes_cron::JobStore;
+        use std::sync::{Arc, Mutex};
+
+        let (_dir, cron_dir, job) = backlog_test_fixture(Duration::minutes(30));
+        let mut raw_store = JobStore::open(cron_dir.clone()).expect("reopen");
+        // Simulate a crash between execution and next_run_at persist: the job
+        // already ran (last_run_at >= the stale next_run_at) but next_run_at
+        // was never advanced.
+        let stale_next = raw_store.jobs[0].next_run_at.expect("seeded next_run_at");
+        raw_store.jobs[0].last_run_at = Some(stale_next + Duration::seconds(1));
+        raw_store.save().expect("save");
+
+        let store = Arc::new(Mutex::new(raw_store));
+        let outcome = fast_forward_backlog(&store, Duration::minutes(120))
+            .await
+            .expect("guard");
+        assert_eq!(
+            outcome.caught_up, 0,
+            "a job whose last_run_at is at/after the stale next_run_at must not be caught up"
+        );
+        assert_eq!(outcome.forwarded, 1, "it must instead be rolled forward as already-run");
+
+        let guard = store.lock().unwrap();
+        let updated = guard.get_job(&job.id).expect("job still present");
+        let new_next = updated.next_run_at.expect("next_run_at present");
+        assert!(new_next > Utc::now(), "rolled-forward next_run_at must be in the future");
     }
 
     // -------------------------------------------------------------------------

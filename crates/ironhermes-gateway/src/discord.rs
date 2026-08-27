@@ -133,6 +133,28 @@ impl PlatformAdapter for DiscordAdapter {
 // discord_message_to_event — message conversion helper
 // =============================================================================
 
+/// D-08 (Phase 49.1 Plan 05): the empty-whitelist deny-all decision,
+/// extracted out of `EventHandler::message` below so it is directly
+/// testable without constructing a live `serenity::prelude::Context` (which
+/// cannot be built outside a real gateway connection — there is no
+/// in-repo/serenity-provided synthetic constructor). `message()` calls this
+/// exact function as its early-return guard, so a test driving this
+/// function IS driving the production decision, not a parallel
+/// reimplementation of it — see `tests/whitelist_deny_all.rs`'s header
+/// comment for the full extraction rationale across all three adapters that
+/// needed one (Telegram, Discord, Slack).
+///
+/// CANONICAL: mirrors `runner.rs`'s Telegram check + `config.rs:731` (D-12
+/// empty = deny all). Empty whitelist denies every sender, including one
+/// that would otherwise match on an empty needle.
+pub fn discord_whitelist_allows(whitelist: &[u64], sender_id: u64) -> bool {
+    if whitelist.is_empty() {
+        false
+    } else {
+        whitelist.contains(&sender_id)
+    }
+}
+
 /// Classifies the chat type from the Discord guild_id field.
 ///
 /// Discord DMs have no guild_id (None); all guild channels have Some(guild_id).
@@ -199,14 +221,17 @@ impl EventHandler for DiscordEventHandler {
             return;
         }
 
-        // CANONICAL: matches runner.rs:601-611 + config.rs:731 (D-12 empty = deny all)
-        if !self.whitelist.is_empty() {
-            if !self.whitelist.contains(&msg.author.id.get()) {
+        // CANONICAL: matches runner.rs:601-611 + config.rs:731 (D-12 empty = deny all).
+        // Phase 49.1 Plan 05: the boolean decision now runs through
+        // `discord_whitelist_allows`, the exact function `whitelist_deny_all.rs`
+        // drives directly — logging stays inline so the two distinct warn
+        // messages (empty vs. non-empty-but-unlisted) are unchanged.
+        if !discord_whitelist_allows(&self.whitelist, msg.author.id.get()) {
+            if self.whitelist.is_empty() {
+                tracing::warn!("Whitelist is empty — denying all messages (D-12)");
+            } else {
                 tracing::warn!(sender_id = %msg.author.id, "Sender not in whitelist, ignoring");
-                return;
             }
-        } else {
-            tracing::warn!("Whitelist is empty — denying all messages (D-12)");
             return;
         }
 
@@ -300,5 +325,20 @@ mod tests {
         let child = token.child_token();
         drop(child);
         drop(token);
+    }
+
+    /// D-08 (Phase 49.1 Plan 05): local unit coverage for the extracted gate.
+    /// The cross-adapter deny-all proofs live in
+    /// `tests/whitelist_deny_all.rs`; these two cases are the fast,
+    /// in-crate companion.
+    #[test]
+    fn discord_whitelist_allows_denies_on_empty_whitelist() {
+        assert!(!discord_whitelist_allows(&[], 123456789));
+    }
+
+    #[test]
+    fn discord_whitelist_allows_admits_listed_sender_only() {
+        assert!(discord_whitelist_allows(&[42], 42));
+        assert!(!discord_whitelist_allows(&[42], 99));
     }
 }
