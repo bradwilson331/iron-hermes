@@ -526,10 +526,25 @@ fn build_tools_page_state(
 /// panicking.
 #[cfg(not(target_arch = "wasm32"))]
 async fn live_catalog_rows() -> Vec<ironhermes_tools::registry::ToolCatalogRow> {
-    match crate::server::state::try_global_app_state() {
-        Some(state) => state.runtime.registry().read().await.catalog_rows(),
-        None => Vec::new(),
+    // 49.4-02 fix (folded todo 2026-08-28): `crate::server::state` itself
+    // stays `feature = "server"`-gated (it needs `tokio::sync::RwLock`,
+    // only available via `tokio/full`, which only the `server` feature
+    // enables) — unlike `profile_api`'s pure helpers, it cannot be widened
+    // to `not(target_arch = "wasm32")`. This fn's own gate is (correctly)
+    // just `not(target_arch = "wasm32")` since ALL its callers assume that
+    // much, so the `state` access is split internally instead: when
+    // `server` is off (e.g. `cargo test --workspace`, which never requests
+    // it for this non-default-member crate), behave exactly like the
+    // already-handled "no AppState installed" `None` arm below.
+    #[cfg(feature = "server")]
+    {
+        match crate::server::state::try_global_app_state() {
+            Some(state) => state.runtime.registry().read().await.catalog_rows(),
+            None => Vec::new(),
+        }
     }
+    #[cfg(not(feature = "server"))]
+    Vec::new()
 }
 
 /// D-12: apply a saved toolset config to the LIVE, in-process registry so
@@ -544,10 +559,16 @@ async fn apply_live_toolset_config(scope: &ConfigScope, config: &ironhermes_core
     if !matches!(scope, ConfigScope::Root) {
         return;
     }
+    // 49.4-02 fix: same `state` split rationale as `live_catalog_rows`
+    // above — without `server`, behave like the already-handled "no
+    // AppState installed" no-op.
+    #[cfg(feature = "server")]
     if let Some(state) = crate::server::state::try_global_app_state() {
         let mut guard = state.runtime.registry().write().await;
         guard.set_toolset_config(Some(config.tools.clone()));
     }
+    #[cfg(not(feature = "server"))]
+    let _ = config;
 }
 
 /// T-48.2-01-03: validate a toolset TARGET name before any disk I/O.
@@ -1391,6 +1412,7 @@ mod tests {
             security: SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             ..Config::default()
         };
@@ -1468,6 +1490,7 @@ mod tests {
             security: SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             ..Config::default()
         };
@@ -1559,6 +1582,7 @@ mod tests {
             security: SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             ..Config::default()
         };
@@ -1608,6 +1632,7 @@ mod tests {
             security: SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             tools: ToolsConfig {
                 disabled: vec!["web_search".to_string(), "browser_navigate".to_string()],
@@ -1816,6 +1841,7 @@ mod tests {
             security: SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             ..Config::default()
         };
@@ -1860,6 +1886,7 @@ mod tests {
             security: SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             tools: ToolsConfig {
                 toolsets: seed_toolsets.clone(),
@@ -1936,6 +1963,7 @@ mod tests {
             security: SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             ..Config::default()
         };
@@ -2039,6 +2067,7 @@ mod tests {
             security: SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             ..Config::default()
         };
@@ -2097,6 +2126,7 @@ mod tests {
             security: SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             ..Config::default()
         };
@@ -2244,6 +2274,7 @@ mod tests {
             security: SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             ..Config::default()
         }

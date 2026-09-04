@@ -246,9 +246,6 @@ pub fn ScreenTools(is_active: bool) -> Element {
                 div { class: "screen-header-left",
                     div { class: "screen-tag", "// MODULE 08" }
                     h1 { class: "screen-title", "Tools" }
-                    p { class: "screen-sub",
-                        "Enable or disable toolsets and individual tools available to the agent during conversations."
-                    }
                 }
                 // Phase 48.2 Plan 05 (D-08/D-18): the header PROFILE
                 // selector — ROOT first, then every enumerated profile.

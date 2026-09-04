@@ -109,13 +109,16 @@ fn respond(status: StatusCode, html: &'static str) -> Response {
 /// plan adds no new `Cargo.toml` dependency line.
 #[cfg(feature = "server")]
 fn reconstruct_callback_url(headers: &HeaderMap, uri: &Uri) -> String {
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(str::trim)
-        .filter(|v| *v == "http" || *v == "https")
-        .unwrap_or("http");
+    // D-05 (49.1.1): `web_ui.allowed_origins` is the future anchor for this
+    // route's own public identity; folding onto that shared resolver is
+    // deliberately deferred to its own phase (a proxy quirk here must not
+    // be able to take down OAuth login while WS security ships).
+    let scheme = crate::server::kanban_ws::parse_x_forwarded_proto(
+        headers
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok()),
+    )
+    .unwrap_or("http");
 
     let authority = headers
         .get(axum::http::header::HOST)
@@ -268,7 +271,10 @@ mod tests {
         let headers = headers_with(&[("host", "hermes.example.com evil")]);
         let uri = uri_for("/oauth/mcp/callback?code=abc&state=xyz");
         let url = reconstruct_callback_url(&headers, &uri);
-        assert_eq!(url, "http://127.0.0.1/oauth/mcp/callback?code=abc&state=xyz");
+        assert_eq!(
+            url,
+            "http://127.0.0.1/oauth/mcp/callback?code=abc&state=xyz"
+        );
     }
 
     /// A `Host` containing a slash is rejected as an authority candidate.
@@ -277,7 +283,10 @@ mod tests {
         let headers = headers_with(&[("host", "hermes.example.com/evil")]);
         let uri = uri_for("/oauth/mcp/callback?code=abc&state=xyz");
         let url = reconstruct_callback_url(&headers, &uri);
-        assert_eq!(url, "http://127.0.0.1/oauth/mcp/callback?code=abc&state=xyz");
+        assert_eq!(
+            url,
+            "http://127.0.0.1/oauth/mcp/callback?code=abc&state=xyz"
+        );
     }
 
     /// No `Host` header at all falls back to the fixed loopback base.
@@ -286,7 +295,10 @@ mod tests {
         let headers = HeaderMap::new();
         let uri = uri_for("/oauth/mcp/callback?code=abc&state=xyz");
         let url = reconstruct_callback_url(&headers, &uri);
-        assert_eq!(url, "http://127.0.0.1/oauth/mcp/callback?code=abc&state=xyz");
+        assert_eq!(
+            url,
+            "http://127.0.0.1/oauth/mcp/callback?code=abc&state=xyz"
+        );
     }
 
     /// An empty `Host` header falls back to the fixed loopback base.
@@ -295,7 +307,10 @@ mod tests {
         let headers = headers_with(&[("host", "")]);
         let uri = uri_for("/oauth/mcp/callback?code=abc&state=xyz");
         let url = reconstruct_callback_url(&headers, &uri);
-        assert_eq!(url, "http://127.0.0.1/oauth/mcp/callback?code=abc&state=xyz");
+        assert_eq!(
+            url,
+            "http://127.0.0.1/oauth/mcp/callback?code=abc&state=xyz"
+        );
     }
 
     /// A malformed callback with neither `error` nor `code` is refused

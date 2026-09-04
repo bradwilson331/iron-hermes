@@ -63,12 +63,90 @@ impl Default for SkillLock {
 // ============================================================================
 
 impl SkillLock {
+    /// Load `skills-lock.json`, self-healing a file that is not a valid `SkillLock`.
+    ///
+    /// `$IRONHERMES_HOME/skills-lock.json` shares its filename with the
+    /// `npx skills` TypeScript CLI, which writes `skills` as a
+    /// `Record<name, entry>` map into `cwd/skills-lock.json`. Running that tool
+    /// with `cwd = $IRONHERMES_HOME` overwrites our lock with a shape that
+    /// `serde_json` rejects (`invalid type: map, expected a sequence`), which
+    /// used to hard-fail step 1 of every install/update/uninstall.
+    ///
+    /// A file we cannot parse is therefore never propagated as an error and never
+    /// silently clobbered: it is moved aside to `skills-lock.json.foreign-backup`
+    /// (numbered if that exists), the entries that *do* match our schema are
+    /// salvaged, and the repaired lock is written back before returning. Foreign
+    /// entries are deliberately dropped rather than coerced — they describe skills
+    /// installed elsewhere (`.agents/skills/`), so claiming them here would report
+    /// them as ironhermes-installed.
     pub fn load_or_default() -> anyhow::Result<Self> {
         let p = crate::paths::skills_lock_path()?;
         if !p.exists() {
             return Ok(Self::default());
         }
-        Ok(serde_json::from_str(&std::fs::read_to_string(p)?)?)
+        let raw = std::fs::read_to_string(&p)?;
+        match serde_json::from_str::<Self>(&raw) {
+            Ok(lock) => Ok(lock),
+            Err(parse_err) => Self::repair_unreadable_lock(&p, &raw, &parse_err),
+        }
+    }
+
+    /// Quarantine an unreadable lock, salvage the ironhermes-shaped entries, and
+    /// persist the repaired file. Called only from `load_or_default`.
+    fn repair_unreadable_lock(
+        path: &Path,
+        raw: &str,
+        parse_err: &serde_json::Error,
+    ) -> anyhow::Result<Self> {
+        let mut salvaged = Self::salvage(raw);
+
+        let backup = unique_backup_path(path);
+        std::fs::rename(path, &backup)?;
+        tracing::warn!(
+            lock = %path.display(),
+            backup = %backup.display(),
+            salvaged = salvaged.skills.len(),
+            error = %parse_err,
+            "skills-lock.json was not a valid SkillLock (foreign or corrupt); moved aside and rebuilt"
+        );
+        salvaged.save_atomic()?;
+        Ok(salvaged)
+    }
+
+    /// Best-effort extraction of `SkillLockEntry` values from arbitrary JSON.
+    /// Anything that does not deserialize into our schema is skipped.
+    fn salvage(raw: &str) -> Self {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+            return Self::default();
+        };
+        let mut out = Self::default();
+        match value.get("skills") {
+            Some(serde_json::Value::Array(items)) => {
+                for item in items {
+                    if let Ok(entry) = serde_json::from_value::<SkillLockEntry>(item.clone()) {
+                        out.add_or_replace(entry);
+                    }
+                }
+            }
+            Some(serde_json::Value::Object(map)) => {
+                for (key, item) in map {
+                    let mut item = item.clone();
+                    // Map form keys the entry by skill name; a lock we wrote as an
+                    // array and another tool re-encoded as a map keys it by index,
+                    // in which case `name` is already present.
+                    if let Some(obj) = item.as_object_mut()
+                        && !obj.contains_key("name")
+                    {
+                        obj.insert("name".to_string(), serde_json::Value::String(key.clone()));
+                    }
+                    if let Ok(entry) = serde_json::from_value::<SkillLockEntry>(item) {
+                        out.add_or_replace(entry);
+                    }
+                }
+            }
+            _ => {}
+        }
+        out
     }
 
     /// D-12: sort skills alphabetically by name BEFORE serialize; D-25 atomic write.
@@ -100,6 +178,28 @@ impl SkillLock {
     pub fn get(&self, name: &str) -> Option<&SkillLockEntry> {
         self.skills.iter().find(|e| e.name == name)
     }
+}
+
+/// `skills-lock.json` -> `skills-lock.json.foreign-backup`, numbered on collision
+/// so a repeat incident never overwrites an earlier quarantined lock.
+fn unique_backup_path(path: &Path) -> std::path::PathBuf {
+    let base = {
+        let mut s = path.as_os_str().to_os_string();
+        s.push(".foreign-backup");
+        std::path::PathBuf::from(s)
+    };
+    if !base.exists() {
+        return base;
+    }
+    for n in 1..1000 {
+        let mut s = base.as_os_str().to_os_string();
+        s.push(format!(".{n}"));
+        let candidate = std::path::PathBuf::from(s);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    base
 }
 
 // ============================================================================
@@ -224,6 +324,86 @@ mod tests {
             !json.contains(r#""repo_path""#),
             "snake_case leaked: {json}"
         );
+    }
+
+    #[test]
+    fn load_or_default_repairs_foreign_map_shaped_lock() {
+        with_test_hermes_home(|home| {
+            // Exactly the shape `npx skills` writes into cwd/skills-lock.json:
+            // `skills` is a map, and its entries carry sourceType/skillPath
+            // instead of our identifier/repoPath/installedAt.
+            let raw = r#"{
+  "version": 1,
+  "skills": {
+    "0": {
+      "name": "ours",
+      "source": "skills-sh",
+      "identifier": "ours",
+      "repoPath": "SKILL.md",
+      "snapshotHash": "snap",
+      "computedHash": "abc",
+      "installedAt": "2026-04-22T19:02:58.870238Z"
+    },
+    "someone-elses-skill": {
+      "source": "owner/repo",
+      "sourceType": "github",
+      "skillPath": "skills/someone-elses-skill/SKILL.md",
+      "computedHash": "def"
+    }
+  }
+}"#;
+            let p = home.join("skills-lock.json");
+            std::fs::write(&p, raw).unwrap();
+
+            let lock = SkillLock::load_or_default().expect("a foreign lock must not hard-fail");
+
+            // Our own entry survives; the foreign one is dropped, not coerced.
+            assert_eq!(lock.skills.len(), 1);
+            assert_eq!(lock.skills[0].name, "ours");
+            assert_eq!(lock.skills[0].identifier, "ours");
+
+            // The original file is preserved verbatim beside the repaired one.
+            let backup = home.join("skills-lock.json.foreign-backup");
+            assert!(backup.exists(), "foreign lock must be moved aside");
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(), raw);
+
+            // The repair is persisted, so the next load is clean and identical.
+            let reloaded = SkillLock::load_or_default().expect("reload");
+            assert_eq!(reloaded, lock);
+            assert!(
+                !home.join("skills-lock.json.foreign-backup.1").exists(),
+                "a clean reload must not quarantine again"
+            );
+        });
+    }
+
+    #[test]
+    fn load_or_default_repairs_unparseable_lock_without_losing_it() {
+        with_test_hermes_home(|home| {
+            let raw = "{ this is not json at all";
+            let p = home.join("skills-lock.json");
+            std::fs::write(&p, raw).unwrap();
+
+            let lock = SkillLock::load_or_default().expect("corrupt lock must not hard-fail");
+            assert!(lock.skills.is_empty());
+
+            let backup = home.join("skills-lock.json.foreign-backup");
+            assert_eq!(std::fs::read_to_string(&backup).unwrap(), raw);
+        });
+    }
+
+    #[test]
+    fn repeat_repairs_do_not_overwrite_an_earlier_backup() {
+        with_test_hermes_home(|home| {
+            let p = home.join("skills-lock.json");
+            std::fs::write(&p, r#"{"version":1,"skills":{}}"#).unwrap();
+            let _ = SkillLock::load_or_default().unwrap();
+            std::fs::write(&p, r#"{"version":1,"skills":{"a":{"source":"x"}}}"#).unwrap();
+            let _ = SkillLock::load_or_default().unwrap();
+
+            assert!(home.join("skills-lock.json.foreign-backup").exists());
+            assert!(home.join("skills-lock.json.foreign-backup.1").exists());
+        });
     }
 
     #[test]

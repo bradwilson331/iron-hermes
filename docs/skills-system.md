@@ -119,6 +119,9 @@ compatibility: "Requires browser toolset"
 allowed-tools:               # Advisory pre-approved tool list
   - browser_navigate
   - browser_snapshot
+# Either YAML shape is accepted — the sequence above, or a comma-separated
+# scalar (the Claude Code convention), which is split on commas and trimmed:
+#   allowed-tools: browser_navigate, browser_snapshot
 
 # IronHermes-specific metadata
 metadata:

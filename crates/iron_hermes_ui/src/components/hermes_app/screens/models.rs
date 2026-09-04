@@ -182,6 +182,15 @@ pub fn ScreenModels(is_active: bool) -> Element {
     // write. Starts hidden (not shown on a plain read-only page load).
     let mut restart_banner_visible = use_signal(|| false);
 
+    // Phase 49.4 hotfix: `list_models()` returns the WHOLE model registry —
+    // for a large provider (e.g. OpenRouter, 300+ models) that is hundreds of
+    // read-only ModelCards. Rendering them all at once locked the
+    // single-threaded WASM client. The cards are informational (their EDIT
+    // button is inert; the interactive selects are the role cascades above),
+    // so each family renders at most CATALOG_CARD_CAP cards until the operator
+    // opts into the full list.
+    let mut show_all_models = use_signal(|| false);
+
     // Extract data and error flags BEFORE rsx! — signal borrow discipline
     // per iron_hermes_ui/clippy.toml (no GenerationalRef held across RSX).
     let models_list: Vec<crate::server::api::ModelInfo> = match models_resource() {
@@ -260,9 +269,6 @@ pub fn ScreenModels(is_active: bool) -> Element {
                 div { class: "screen-header-left",
                     div { class: "screen-tag", "// MODULE 05" }
                     h1 { class: "screen-title", "Models" }
-                    p { class: "screen-sub",
-                        "Saved language-model configurations grouped by provider. Each agent binds to one model at a time."
-                    }
                 }
                 div { class: "screen-actions",
                     // Phase 46.9 Plan 02 (UI-SPEC Models CTA note): D-05 wires the
@@ -367,25 +373,73 @@ pub fn ScreenModels(is_active: bool) -> Element {
                     }
                 }
 
-                for family in families.iter() {
-                    {
-                        // Snapshot rows for this family — owned Vec, no borrow into RSX.
-                        let family_name = family.clone();
-                        let rows: Vec<crate::server::api::ModelInfo> = models_list
-                            .iter()
-                            .filter(|m| m.family == family_name)
-                            .cloned()
-                            .collect();
-                        let count = rows.len();
-                        rsx! {
-                            div { key: "{family_name}", class: "model-family-group",
-                                div { class: "section-label",
-                                    "{family_name} "
-                                    span { class: "count", "· {count} configs" }
+                {
+                    // Phase 49.4 hotfix: single toggle gating the read-only
+                    // catalog card list (see `show_all_models`). Only shown
+                    // when the catalog is large enough to have been capped.
+                    const CATALOG_CARD_CAP: usize = 12;
+                    let total_models = models_list.len();
+                    let show_all = *show_all_models.read();
+                    let any_capped = !show_all
+                        && families.iter().any(|f| {
+                            models_list.iter().filter(|m| &m.family == f).count() > CATALOG_CARD_CAP
+                        });
+                    rsx! {
+                        if total_models > CATALOG_CARD_CAP {
+                            div {
+                                style: "display:flex;align-items:center;gap:10px;margin:14px 0 6px;flex-wrap:wrap;",
+                                span { class: "section-label", "MODEL CATALOG · {total_models} models" }
+                                button {
+                                    class: "btn btn--ghost btn--sm",
+                                    onclick: move |_| {
+                                        let cur = *show_all_models.read();
+                                        show_all_models.set(!cur);
+                                    },
+                                    if show_all { "SHOW FEWER" } else { "SHOW ALL" }
                                 }
-                                div { class: "grid wide",
-                                    for m in rows.iter() {
-                                        ModelCard { key: "{m.id}", model: m.clone() }
+                                if any_capped {
+                                    span { style: "color:var(--gray);font-size:11px;",
+                                        "showing {CATALOG_CARD_CAP} per family — SHOW ALL to render the full catalog"
+                                    }
+                                }
+                            }
+                        }
+                        for family in families.iter() {
+                            {
+                                // Snapshot rows for this family — owned Vec, no borrow into RSX.
+                                let family_name = family.clone();
+                                let rows: Vec<crate::server::api::ModelInfo> = models_list
+                                    .iter()
+                                    .filter(|m| m.family == family_name)
+                                    .cloned()
+                                    .collect();
+                                let count = rows.len();
+                                let hidden = if show_all {
+                                    0
+                                } else {
+                                    count.saturating_sub(CATALOG_CARD_CAP)
+                                };
+                                let shown: Vec<crate::server::api::ModelInfo> = if show_all {
+                                    rows.clone()
+                                } else {
+                                    rows.iter().take(CATALOG_CARD_CAP).cloned().collect()
+                                };
+                                rsx! {
+                                    div { key: "{family_name}", class: "model-family-group",
+                                        div { class: "section-label",
+                                            "{family_name} "
+                                            span { class: "count", "· {count} configs" }
+                                        }
+                                        div { class: "grid wide",
+                                            for m in shown.iter() {
+                                                ModelCard { key: "{m.id}", model: m.clone() }
+                                            }
+                                        }
+                                        if hidden > 0 {
+                                            div { style: "color:var(--gray);font-size:11px;margin:4px 0 2px;",
+                                                "· {hidden} more hidden"
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -456,6 +510,19 @@ fn ProviderModelCascade(
     let mut selected_model = use_signal(|| initial_model.clone());
     let mut saving = use_signal(|| false);
     let mut error_msg: Signal<Option<String>> = use_signal(|| None);
+    // Phase 49.4 hotfix: stable unique `<datalist>` id per cascade instance —
+    // the Models screen mounts one cascade per role (~7-8), and a native
+    // `<select>` of a large provider's full model list (300+ for OpenRouter)
+    // rendered that many times locked the single-threaded WASM client. The
+    // model picker below is a filterable input + capped datalist instead.
+    let list_id = use_hook(|| {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static CASCADE_SEQ: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "cascade-models-{}",
+            CASCADE_SEQ.fetch_add(1, Ordering::Relaxed)
+        )
+    });
 
     // GAP-1: the DEPENDENT model list — re-fetched whenever the provider
     // signal changes (read in the sync prefix so `use_resource` re-runs).
@@ -481,6 +548,20 @@ fn ProviderModelCascade(
         Some(model_val.as_str())
     };
     let model_options = compute_model_options(snapshot.as_ref(), assigned_ref);
+    // Phase 49.4 hotfix: render at most a bounded window of `<option>`s into
+    // the datalist, filtered by whatever is currently typed, so a 300+-model
+    // provider never renders 300 nodes per cascade. The assigned value is
+    // always kept in the list (compute_model_options already prepends it when
+    // absent), and typing narrows toward any model id.
+    const MODEL_DATALIST_CAP: usize = 50;
+    let model_filter = model_val.trim().to_ascii_lowercase();
+    let datalist_options: Vec<String> = model_options
+        .iter()
+        .filter(|id| model_filter.is_empty() || id.to_ascii_lowercase().contains(&model_filter))
+        .take(MODEL_DATALIST_CAP)
+        .cloned()
+        .collect();
+    let model_total = model_options.len();
 
     let can_save = write_enabled && !is_saving;
     let gate_title = if !write_enabled {
@@ -513,32 +594,31 @@ fn ProviderModelCascade(
                         }
                     }
                 }
-                // MODEL select — options are provider-sourced (compute_model_options),
-                // each option carries an explicit `selected` (no frozen value:-binding).
-                select {
+                // MODEL picker — a filterable input + capped datalist rather
+                // than a native <select> of the provider's entire model list.
+                // The datalist renders at most MODEL_DATALIST_CAP matches for
+                // the current text (see `datalist_options`), so a 300+-model
+                // provider can't lock the client; typing narrows to any id.
+                input {
                     class: "voice-settings-select",
+                    list: "{list_id}",
+                    value: "{model_val}",
                     disabled: !write_enabled || is_saving || models_loading,
                     title: "{gate_title}",
-                    onchange: move |evt| {
+                    placeholder: if allow_unset { "— uses default — (type to search)" } else { "type to search models…" },
+                    oninput: move |evt| {
                         error_msg.set(None);
                         selected_model.set(evt.value());
                     },
-                    if allow_unset {
-                        option {
-                            value: "",
-                            selected: model_val.trim().is_empty(),
-                            "— uses default —"
-                        }
-                    } else if model_val.trim().is_empty() {
-                        option { value: "", selected: true, "— select a model —" }
+                }
+                datalist { id: "{list_id}",
+                    for id in datalist_options.iter() {
+                        option { key: "{id}", value: "{id}" }
                     }
-                    for id in model_options.iter() {
-                        option {
-                            key: "{id}",
-                            value: "{id}",
-                            selected: id == &model_val,
-                            "{id}"
-                        }
+                }
+                if model_total > datalist_options.len() {
+                    span { style: "color:var(--gray);font-size:10px;white-space:nowrap;",
+                        "{datalist_options.len()}/{model_total} — type to filter"
                     }
                 }
                 button {

@@ -44,7 +44,7 @@ RSX specifics worth knowing:
 <!-- GSD:architecture-start source:ARCHITECTURE.md -->
 ## Architecture
 
-Read `src/` directly — it is a full module tree (`app.rs`, `components/`, `server/`, `kanban/`, `platform/`, `mocks/`), not a single file. `HermesApp` (in `components/hermes_app/mod.rs`) is the active root; `legacy-shell` is opt-in and not the default tree.
+Read `src/` directly — it is a full module tree (`app.rs`, `components/`, `server/`, `kanban/`, `platform/`, `mocks/`), not a single file. `HermesApp` (in `components/hermes_app/mod.rs`) is the crate's only root component — there is no compile-time branch selecting a different one.
 
 ### Design vocabulary (the prototype contract — not derivable from code)
 

@@ -478,7 +478,6 @@ Tool modules (each exports one or more `Tool` implementations):
 | `mobile` | iOS/Android via Dioxus mobile |
 | `server` | Add Axum + fullstack Dioxus; embed agent crates (non-WASM only) |
 | `demo` | Use mock responses instead of live agent |
-| `legacy-shell` | Mount `WarpHermes` shell instead of the default `HermesApp` |
 
 **Sibling dependencies (server/non-WASM target only):** `ironhermes-core`, `ironhermes-agent`, `ironhermes-exec`, `ironhermes-hooks`, `ironhermes-state`, `ironhermes-tools`
 

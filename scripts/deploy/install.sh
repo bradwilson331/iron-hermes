@@ -56,6 +56,38 @@ log()  { printf '[install] %s\n' "$*"; }
 die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
 warn() { printf '[install] WARN: %s\n' "$*" >&2; }
 
+# 48.3 D-06 / T-48.3-21 / T-48.3-22 / T-48.3-23: ensure the canonical gateway
+# log exists with owner-only permissions BEFORE any supervisor opens it —
+# systemd's `append:` and launchd's StandardOutPath create a missing append
+# target with default (typically 0644) permissions, and gateway startup
+# errors can quote provider keys. Also installs the $IRONHERMES_HOME_DIR
+# compatibility symlink so the path operators have always grepped resolves
+# to the same file every supervisor now writes to. Never deletes operator
+# data: a pre-existing regular file (or any non-canonical symlink) at the
+# alias path is moved aside as gateway.log.pre-48.3, not removed.
+prepare_gateway_log() {
+    local canonical="$LOGS_DIR/gateway.log"
+    local alias_path="$IRONHERMES_HOME_DIR/gateway.log"
+
+    if [ ! -e "$canonical" ]; then
+        : >"$canonical"
+    fi
+    chmod 600 "$canonical"
+
+    if [ -L "$alias_path" ] && [ "$(readlink -f -- "$alias_path" 2>/dev/null)" = "$(readlink -f -- "$canonical")" ]; then
+        return 0
+    fi
+
+    if [ -e "$alias_path" ] || [ -L "$alias_path" ]; then
+        local moved="$IRONHERMES_HOME_DIR/gateway.log.pre-48.3"
+        mv -- "$alias_path" "$moved"
+        log "moved pre-existing $alias_path -> $moved (48.3 unified gateway log; operator data preserved, not deleted)"
+    fi
+
+    ln -s -- "$canonical" "$alias_path"
+    log "installed compatibility symlink $alias_path -> $canonical"
+}
+
 # ---------- install binary ----------
 # The service execs $BIN (see gateway-run.sh) — a rebuild does nothing until it
 # lands there, so copy the release build in as the first real install step.
@@ -85,6 +117,7 @@ log "running 'ironhermes doctor' as a sanity check"
 
 # ---------- stage scripts ----------
 mkdir -p "$SCRIPTS_DIR" "$LOGS_DIR"
+prepare_gateway_log
 install -m 755 "$SOURCE_DIR/gateway-run.sh"      "$SCRIPTS_DIR/gateway-run.sh"
 install -m 755 "$SOURCE_DIR/gateway-watchdog.sh" "$SCRIPTS_DIR/gateway-watchdog.sh"
 log "staged scripts in $SCRIPTS_DIR"
@@ -118,7 +151,7 @@ install_macos() {
 
 Installed via launchd. Verify with:
   launchctl print gui/$UID/$LABEL | grep -E 'state|pid|last exit'
-  tail -f $LOGS_DIR/gateway.err.log
+  tail -f $LOGS_DIR/gateway.log
 
 Stop:    launchctl bootout gui/$UID/$LABEL
 Restart: launchctl kickstart -k gui/$UID/$LABEL
@@ -142,7 +175,8 @@ install_linux() {
 
 Installed via systemd --user. Verify with:
   systemctl --user status ironhermes-gateway
-  journalctl --user -u ironhermes-gateway -f
+  tail -f $LOGS_DIR/gateway.log
+  journalctl --user -u ironhermes-gateway -f  (unit lifecycle only now; application output goes to the file above)
 
 Stop:    systemctl --user stop ironhermes-gateway
 Restart: systemctl --user restart ironhermes-gateway

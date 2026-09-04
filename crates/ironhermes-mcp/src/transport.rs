@@ -1,8 +1,84 @@
 use crate::config::McpServerConfig;
 use crate::security::build_safe_env;
 use anyhow::Result;
+use http::{HeaderName, HeaderValue};
 use rmcp::service::RunningService;
 use rmcp::{RoleClient, ServiceExt};
+use std::collections::HashMap;
+use std::str::FromStr;
+
+/// D-02/T-48.3-04: header keys reserved by the MCP transport itself. rmcp
+/// rejects a `custom_headers` entry whose name collides with one of these
+/// (case-insensitive); this is a local mirror of rmcp's own private
+/// `RESERVED_HEADERS` constant (`rmcp-1.8.0/src/transport/common/http_header.rs:11-16`)
+/// so ironhermes can name the offending header in its own error rather than
+/// surfacing rmcp's generic connect failure. Deliberately OMITS
+/// `mcp-protocol-version` — rmcp allows that one through. Must be re-checked
+/// if the `rmcp` pin ever moves off `=1.8.0`.
+pub const RESERVED_HEADER_KEYS: &[&str] = &["accept", "mcp-session-id", "last-event-id"];
+
+/// D-01: build the typed header map `StreamableHttpClientTransportConfig::custom_headers`
+/// expects from `McpServerConfig.headers`, and report whether the operator set an
+/// explicit `Authorization` entry (consumed by `connect_http`'s D-02 precedence
+/// resolution).
+///
+/// Pure and network-free so it is unit-testable in isolation. Header conversion
+/// failures name the offending KEY only, never the VALUE (T-48.3-02: a malformed
+/// header value must never be echoed into an error that could reach a log or the
+/// wizard). A key matching [`RESERVED_HEADER_KEYS`] (case-insensitive) is rejected
+/// by name (T-48.3-04) rather than left to fail generically at connect time.
+pub fn build_custom_headers(
+    config: &McpServerConfig,
+) -> Result<(HashMap<HeaderName, HeaderValue>, bool)> {
+    let mut custom_headers: HashMap<HeaderName, HeaderValue> = HashMap::new();
+    let mut has_explicit_authorization = false;
+
+    for (k, v) in &config.headers {
+        if RESERVED_HEADER_KEYS
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(k))
+        {
+            anyhow::bail!(
+                "header '{k}' is managed by the MCP transport and cannot be set explicitly"
+            );
+        }
+
+        let name = HeaderName::from_str(k)
+            .map_err(|_| anyhow::anyhow!("header key '{k}' is not a valid HTTP header name"))?;
+        if name.as_str().eq_ignore_ascii_case("authorization") {
+            has_explicit_authorization = true;
+        }
+        let value = HeaderValue::from_str(v).map_err(|_| {
+            anyhow::anyhow!("header key '{k}' has a value that is not valid for an HTTP header")
+        })?;
+        custom_headers.insert(name, value);
+    }
+
+    Ok((custom_headers, has_explicit_authorization))
+}
+
+/// D-02: normalize the `auth:` shorthand value. rmcp's `.auth_header(v)` funnels
+/// into `bearer_auth(v)`, which itself prepends `Bearer `. Strip a single leading
+/// case-insensitive `Bearer ` prefix (and surrounding whitespace) so an operator
+/// who writes `auth: "Bearer abc"` gets one `Bearer abc` on the wire rather than a
+/// doubled prefix. A whitespace-only value is treated as absent (fail-safe,
+/// matching how `allowed_issuer` already treats empty/whitespace at config.rs:47).
+fn normalize_auth_shorthand(auth: &str) -> Option<String> {
+    let trimmed = auth.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let stripped = trimmed
+        .strip_prefix("Bearer ")
+        .or_else(|| trimmed.strip_prefix("bearer "))
+        .map(str::trim_start)
+        .unwrap_or(trimmed);
+    if stripped.is_empty() {
+        None
+    } else {
+        Some(stripped.to_string())
+    }
+}
 
 /// Connect to a stdio MCP server. Returns the running service AND an optional
 /// external handle on the spawned child process.
@@ -87,6 +163,12 @@ pub async fn connect_stdio(
 /// GAP-8 (Phase 21.2 Plan 11): signature symmetric with `connect_stdio` — HTTP
 /// has no external child process, so the `Option<tokio::process::Child>` is
 /// always `None`. Kept for call-site uniformity in `server_task::connect_and_serve`.
+///
+/// D-01: builds the transport via `StreamableHttpClientTransportConfig::with_uri`
+/// carrying `config.headers` through `.custom_headers(...)`, mirroring the
+/// authenticated sibling [`connect_http_oauth`]'s builder chain shape. Before this
+/// fix, `config.headers` was parsed, env-expanded, and unit-tested but never
+/// reached the wire — every request went out unauthenticated.
 pub async fn connect_http(
     config: &McpServerConfig,
 ) -> Result<(
@@ -99,7 +181,30 @@ pub async fn connect_http(
         .ok_or_else(|| anyhow::anyhow!("HTTP transport requires 'url' field"))?;
 
     use rmcp::transport::StreamableHttpClientTransport;
-    let transport = StreamableHttpClientTransport::from_uri(url.as_str());
+    use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+
+    let (custom_headers, has_explicit_authorization) = build_custom_headers(config)?;
+
+    let mut cfg = StreamableHttpClientTransportConfig::with_uri(url.as_str())
+        .custom_headers(custom_headers)
+        .reinit_on_expired_session(true);
+
+    // D-02: `auth:` shorthand only applies when no explicit Authorization header
+    // was set. Never call `.auth_header(...)` and pass a `custom_headers` map
+    // containing an `Authorization` entry to the same
+    // `StreamableHttpClientTransportConfig` — RESEARCH.md empirically verified
+    // against the pinned reqwest 0.12.28 that rmcp applies `bearer_auth()` first
+    // and then `.header()` per custom entry, and reqwest's `.header()` APPENDS,
+    // producing two `Authorization` values on the wire and undefined server
+    // behavior. The explicit header always wins; the shorthand never silently
+    // overrides a literal operator instruction.
+    if !has_explicit_authorization
+        && let Some(token) = config.auth.as_deref().and_then(normalize_auth_shorthand)
+    {
+        cfg = cfg.auth_header(token);
+    }
+
+    let transport = StreamableHttpClientTransport::from_config(cfg);
     let client = ().serve(transport).await?;
     Ok((client, None))
 }
@@ -540,6 +645,84 @@ mod tests {
             captured.contains("usage: this-must-not-hit-parent-terminal"),
             "GAP-6b: child stderr bytes must be captured on the piped handle, not \
              inherited by the parent. captured={captured:?}"
+        );
+    }
+
+    /// D-01/D-08: region-scoped static-grep regression for `connect_http`'s
+    /// transport construction shape.
+    ///
+    /// Scoped to ONLY `connect_http`'s own body (from its `fn` signature to the
+    /// next function's) via the same region-slicing idiom
+    /// `mcp_admin_api.rs::task3_behavior_7_probe_machinery_never_touches_a_tool_registry`
+    /// uses — an unscoped whole-file grep would be satisfied by the OAuth
+    /// sibling's own builder chain and would prove nothing about `connect_http`
+    /// specifically.
+    ///
+    /// This proves CONSTRUCTION only — construction was never the problem here.
+    /// The transmission proof (that a configured header actually reaches a
+    /// listening server) is `tests/mcp_mock_handshake.rs` (D-08); the two are
+    /// complements, not substitutes.
+    #[test]
+    fn connect_http_uses_custom_headers() {
+        let src = include_str!("transport.rs");
+
+        let start = src
+            .find("pub async fn connect_http(")
+            .expect("D-01: connect_http must exist in transport.rs");
+        let end = src
+            .find("pub async fn connect_http_oauth")
+            .expect("D-01: connect_http_oauth must exist in transport.rs, after connect_http");
+        assert!(
+            start < end,
+            "D-01: connect_http must be defined before connect_http_oauth in this file"
+        );
+        let region = &src[start..end];
+
+        assert!(
+            region.contains(".custom_headers("),
+            "D-01: connect_http must build its transport with \
+             StreamableHttpClientTransportConfig::custom_headers(...) so config.headers \
+             reaches the wire. region={region}"
+        );
+        assert!(
+            region.contains(".reinit_on_expired_session(true)"),
+            "connect_http should set reinit_on_expired_session(true), matching the OAuth \
+             sibling's session-resume behavior. region={region}"
+        );
+        assert!(
+            !region.contains("StreamableHttpClientTransport::from_uri(url.as_str())"),
+            "D-01 REGRESSION: connect_http must NOT construct its transport via the \
+             unauthenticated from_uri(url) single-argument constructor — this is the exact \
+             pre-fix defect that dropped every configured header silently. region={region}"
+        );
+    }
+
+    /// D-01: unit test over the pure `build_custom_headers` fn — no network, no
+    /// async runtime needed.
+    #[test]
+    fn build_custom_headers_reports_explicit_authorization() {
+        // A map containing `authorization` in any casing sets the boolean.
+        let mut config = crate::config::McpServerConfig {
+            headers: [("Authorization".to_string(), "Bearer x".to_string())].into(),
+            ..Default::default()
+        };
+        let (_, has_auth) = super::build_custom_headers(&config).expect("must build");
+        assert!(has_auth, "an Authorization header (any casing) must set the flag");
+
+        config.headers = [("AUTHORIZATION".to_string(), "Bearer x".to_string())].into();
+        let (_, has_auth) = super::build_custom_headers(&config).expect("must build");
+        assert!(has_auth, "AUTHORIZATION (uppercase) must also set the flag");
+
+        // A map without it does not.
+        config.headers = [("X-Custom".to_string(), "value".to_string())].into();
+        let (_, has_auth) = super::build_custom_headers(&config).expect("must build");
+        assert!(!has_auth, "a non-Authorization header must not set the flag");
+
+        // A map whose key is a reserved name returns Err.
+        config.headers = [("Mcp-Session-Id".to_string(), "x".to_string())].into();
+        assert!(
+            super::build_custom_headers(&config).is_err(),
+            "a reserved header key must be rejected"
         );
     }
 

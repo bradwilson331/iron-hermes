@@ -44,6 +44,11 @@ rusty-vault = ["ironhermes-vault/rusty-vault"]
 
 [dev-dependencies]
 tempfile = "3"
+# Phase 49.5 Plan 05: test-only mirror of ironhermes-cron::parser::parse_schedule's
+# Cron-branch validation in blueprint.rs's tests (see assert_parseable_cron_expr).
+# Dev-only — does NOT participate in the production dep graph, same reasoning as
+# the ironhermes-kanban dev-dep below.
+cron = { workspace = true }
 # Phase 43 Wave-0 RED scaffolds — mock OAuth HTTP endpoints
 wiremock = { workspace = true }
 serde_json = { workspace = true }

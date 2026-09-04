@@ -38,6 +38,15 @@ use ironhermes_kanban::{KANBAN_GUIDANCE, KanbanStore};
 
 mod auth_cmd;
 mod batch;
+// Phase 49.6 Plan 03: `BlueprintSaverImpl` for `/blueprint save`. This bin
+// target's own copy is never called directly — `main.rs` builds its
+// `CommandContext` through `tui_rata::commands::build_command_context`
+// (this crate's LIBRARY target, see `lib.rs`'s `pub mod blueprint_save;`),
+// which is the one that wires `with_blueprint_saver`. Declared here anyway,
+// mirroring `setup.rs`'s dual-declaration pattern, so the module compiles
+// (and its own tests run) under `cargo test --bin ironhermes` too.
+#[allow(dead_code)]
+mod blueprint_save;
 // Phase 47.6 Plan 04 (D-06/D-07): gated behind the same `buzz` feature as
 // `ironhermes-gateway`'s Nostr adapter — the default CLI build never sees
 // this module.

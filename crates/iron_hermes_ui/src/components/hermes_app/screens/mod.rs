@@ -4,8 +4,18 @@
 //! Plan 04 added the `kanban` module as a minimal placeholder; Plan 01
 //! of that phase will replace its body with the live KanbanBoard.
 //!
-//! Per RESEARCH Pattern 7 every screen is always mounted; the active
-//! one carries the `is-active` class supplied by `ScreenRouter`.
+//! RESEARCH Pattern 7 originally mounted EVERY screen at once, with the active
+//! one carrying an `is-active` class. That is no longer true: the Phase 49.4
+//! hotfix in `ScreenRouter` renders ONLY the active screen, because mounting all
+//! 16 at once ran every screen's fetches, polls, and WebGL loops simultaneously
+//! and froze the single-threaded WASM client.
+//!
+//! Anything that relied on "screen X is always mounted" must therefore not
+//! depend on X being rendered. The known instance was CSS: `kanban.css` was
+//! reached only via `ScreenKanban`, yet it owns the shared `.kn-modal-*` /
+//! `.kn-drawer-*` dialog shell every screen's modals use (see the comments in
+//! `components.css` and `bots.css`). It is now linked unconditionally from
+//! `app.rs`. Screen-specific CSS may still be linked by its own screen.
 
 pub mod agents;
 pub mod agents_diff;
@@ -31,6 +41,9 @@ pub mod schedules;
 pub mod sessions;
 pub mod settings;
 pub mod skills;
+// Phase 49.4 Plan 07 (D-05..D-09): the IMPORT / NEW SKILL / SKILL.md-editor
+// wizard components mounted from `ScreenSkills` (`skills.rs`).
+pub mod skills_import;
 pub mod soul;
 pub mod tools;
 // Phase 36.3.7.11 Plan 04 added the `Screen::Kanban` variant + wheel-nav wedge;

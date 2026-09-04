@@ -110,6 +110,21 @@ fn schedules_api_scans_prompt_for_injection() {
     );
 }
 
+/// Phase 49.5 WR-01: the blueprint create path is a second surface that
+/// persists an agent prompt, and slot values substitute verbatim into
+/// `prompt_template`. It must carry the same `scan_cron_prompt` safeguard the
+/// manual create/edit path above does — otherwise a crafted slot value is
+/// written durably to jobs.json and only caught at tick time.
+#[test]
+fn blueprints_api_scans_prompt_for_injection() {
+    let src = read("src/server/blueprints_api.rs");
+    assert!(
+        src.contains("scan_cron_prompt"),
+        "blueprints_api.rs must call ironhermes_cron::scan_cron_prompt before \
+         persisting a blueprint-filled job — parity with schedules_api.rs"
+    );
+}
+
 /// The `iron_hermes_ui` Cargo.toml references the new native-only
 /// `ironhermes-cron` path dependency.
 #[test]

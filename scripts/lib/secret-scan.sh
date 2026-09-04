@@ -25,7 +25,13 @@
 #      63 chars total — the canary literal in canary-profile/env.canary is
 #      deliberately far shorter, see that file's own BUZZ_NSEC comment, so
 #      it does NOT match this pattern), Slack bot/app tokens (xox[baprs]-),
-#      Telegram bot tokens, and Discord bot tokens.
+#      Telegram bot tokens, Discord bot tokens, and bare Bearer credentials
+#      (case-tolerant `bearer` keyword followed by a uuid-shaped value or by
+#      32-plus opaque characters — the shape behind the 2026-08-27 Atomic
+#      Mail incident; see D-11). A short/labelled Bearer value such as
+#      documentation prose naming an env-var placeholder does NOT match —
+#      only the two precise shapes above do, deliberately, so this family
+#      does not turn into noise across the whole tracked tree.
 #
 #   An inline `secret-scan:allow` comment on the offending line suppresses
 #   that line's match (for the small number of legitimate test fixtures
@@ -62,8 +68,17 @@ _SECRET_SCAN_ALLOWLIST_PATTERNS=(
 )
 
 # Pattern family 2 (real-key-shaped strings), as separate alternatives so no
-# single expression has to do everything. Grepped with `grep -E`.
-_SECRET_SCAN_REALKEY_PATTERN='sk-[A-Za-z0-9]{20,}|nsec1[023456789acdefghjklmnpqrstuvwxyz]{50,}|xox[baprs]-[A-Za-z0-9-]{10,}|[0-9]{8,10}:AA[A-Za-z0-9_-]{30,}|(MT|OT|NT)[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{25,}'
+# single expression has to do everything. Grepped with `grep -E` (no `-i`,
+# so case-tolerance for "bearer" is spelled out in the alternatives below —
+# `grep -E` also has no `\s`, so POSIX `[[:space:]]` is used instead).
+# D-11: the last two alternatives are bare Bearer credentials — a
+# uuid-shaped value, and a 32-plus character opaque value — the exact
+# shapes behind the 2026-08-27 Atomic Mail incident. Deliberately NOT a
+# broad `bearer[[:space:]]+[^[:space:]]+` alternative: that would match
+# documentation prose across the whole tracked tree (e.g. "Bearer
+# FIRECRAWL_API_KEY"), and this pattern is enforced with NO allowlist
+# exemption, so a broad shape would turn the authoritative gate into noise.
+_SECRET_SCAN_REALKEY_PATTERN='sk-[A-Za-z0-9]{20,}|nsec1[023456789acdefghjklmnpqrstuvwxyz]{50,}|xox[baprs]-[A-Za-z0-9-]{10,}|[0-9]{8,10}:AA[A-Za-z0-9_-]{30,}|(MT|OT|NT)[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{25,}|[Bb]earer[[:space:]]+[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[Bb]earer[[:space:]]+[A-Za-z0-9_-]{32,}|[Aa][Uu][Tt][Hh][[:space:]]*[:=][[:space:]]*[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[Aa][Uu][Tt][Hh][[:space:]]*[:=][[:space:]]*[A-Za-z0-9_-]{32,}'
 
 # Pattern family 1 (canary markers).
 _SECRET_SCAN_CANARY_PATTERN='sk-CANARY-|nsec1canary'

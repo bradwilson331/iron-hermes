@@ -125,35 +125,43 @@ fn server_ws_disconnect_teardown_distinguishes_clean_recv_from_broken_send() {
 
 #[test]
 fn client_ws_receiver_retries_after_disconnect_and_resets_transient_state() {
-    let ui = read("src/components/warp_hermes.rs");
+    // Retargeted from legacy warp_hermes.rs to the active HermesApp websocket
+    // client (49.4-02: the legacy shell was deleted along with its `legacy-shell`
+    // Cargo feature). The outer reconnect loop's connect-failure arm is the
+    // active equivalent of the legacy receiver's disconnect/error path —
+    // `scanner_active`/`streaming_block_id` are legacy field names; the active
+    // shell resets `streaming_id`/`is_ws_connected` instead, and loops via
+    // `continue` (not `break`, which is the INNER receive loop's close/error
+    // arm, already covered by `client_ws_disconnect_resets_streaming_state_and_reconnects`).
+    let app = read("src/components/hermes_app/mod.rs");
     assert!(
-        ui.contains("crate::protocol::ChatRequest")
-            && ui.contains("crate::protocol::ChatStreamEvent"),
+        app.contains("crate::protocol::ChatRequest")
+            && app.contains("crate::protocol::ChatStreamEvent"),
         "client websocket protocol types must come from crate::protocol"
     );
     assert!(
-        !ui.contains("crate::server::ws::ChatRequest")
-            && !ui.contains("crate::server::ws::ChatStreamEvent"),
+        !app.contains("crate::server::ws::ChatRequest")
+            && !app.contains("crate::server::ws::ChatStreamEvent"),
         "client websocket code must not depend on server::ws protocol paths"
     );
     assert!(
-        ui.contains("with_automatic_reconnect()"),
+        app.contains("with_automatic_reconnect()"),
         "client websocket initialization must keep automatic reconnect enabled"
     );
     assert!(
-        ui.contains("loop {") && ui.contains("let state = ws.connect().await"),
+        app.contains("let _state = ws.connect().await"),
         "client receiver must use an outer reconnect cycle"
     );
     assert!(
-        ui.contains("Err(err) => {")
-            && ui.contains("scanner_active.set(false);")
-            && ui.contains("streaming_block_id.set(None);")
-            && ui.contains("continue;"),
-        "disconnect/error path must reset transient streaming UI state"
+        app.contains("if ws.is_err() {")
+            && app.contains("streaming_id.set(None);")
+            && app.contains("is_ws_connected.set(false);")
+            && app.contains("continue;"),
+        "the outer reconnect loop's connect-failure arm must reset transient streaming UI state"
     );
     assert!(
-        ui.contains("let _ = ws.send_raw("),
-        "submit/rerun websocket sends must remain non-panicking"
+        app.contains("ws.send_raw("),
+        "submit/rerun websocket sends must go through send_raw"
     );
 }
 
@@ -387,26 +395,17 @@ fn session_select_switches_id_and_clears_transcript() {
     );
 }
 
-#[test]
-fn tab_new_calls_create_session_and_appends_tab() {
-    let ui = read("src/components/warp_hermes.rs");
-    assert!(
-        ui.contains("let on_tab_new = move |_: ()|"),
-        "WarpHermes must define on_tab_new closure (D-09)"
-    );
-    assert!(
-        ui.contains("create_session().await"),
-        "on_tab_new must call the create_session server function (D-03)"
-    );
-    assert!(
-        ui.contains("\"New Session\".to_string()"),
-        "new tab must use \"New Session\" placeholder label (D-04)"
-    );
-    assert!(
-        ui.contains("tabs.write().push"),
-        "on_tab_new must push the new Tab onto the tabs signal (D-03)"
-    );
-}
+// `tab_new_calls_create_session_and_appends_tab` (legacy warp_hermes.rs
+// `on_tab_new` closure: create a session, push a new tab) was removed here
+// in 49.4-02, not retargeted. Unlike the other legacy tests in this file,
+// the multi-session "new tab" affordance it locked has no active-shell
+// equivalent to retarget to — a crate-wide grep for `create_session`
+// confirms `hermes_app/mod.rs` calls it exactly once, at mount-time
+// bootstrap (`src/components/hermes_app/mod.rs:407`), and no screen or the
+// command palette exposes an interactive "create another session" action.
+// This is a genuine capability gap versus the legacy shell, not a
+// same-feature relocation — flagged in this plan's SUMMARY.md rather than
+// silently dropped or faked with a passing assertion against nothing.
 
 #[test]
 fn session_delete_button_uses_stop_propagation() {

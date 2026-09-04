@@ -174,24 +174,35 @@ pub fn matrix_glb_url() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy-shell assets (only compiled when the `legacy-shell` feature is on)
+// Shared design-token CSS (49.4-02: the legacy-shell-only assets that used
+// to sit here — TAILWIND_CSS, MAIN_CSS, SCANNER_ANIM_CSS — were removed
+// along with the `legacy-shell` feature; folded todo 2026-05-29).
 // ---------------------------------------------------------------------------
 //
-// Kept compiling as a UAT fallback per D-25/D-26. Both the asset constants
-// and the Link tags below are gated so the default WASM bundle never
-// references them.
-
-#[cfg(feature = "legacy-shell")]
-const TAILWIND_CSS: Asset = asset!("/assets/tailwind.css");
-#[cfg(feature = "legacy-shell")]
-const MAIN_CSS: Asset = asset!("/assets/main.css");
-// Always-loaded — moved out of the legacy-shell gate so HermesApp can
-// resolve --w-bg-*, --accent-primary, --w-border, --w-radius-*, and
-// --w-shadow-* tokens (BUG-2 fix from 36.3.7.11 UAT).
+// DESIGN_TOKENS_CSS + WARP_IH_CSS load unconditionally on purpose — never
+// gate these behind a feature (a prior regression already broke this once;
+// BUG-2 fix from 36.3.7.11 UAT).
 const DESIGN_TOKENS_CSS: Asset = asset!("/assets/design-tokens.css");
 const WARP_IH_CSS: Asset = asset!("/assets/warp-ih.css");
-#[cfg(feature = "legacy-shell")]
-const SCANNER_ANIM_CSS: Asset = asset!("/assets/scanner-anim.css");
+
+// Phase 49.4 regression fix: `kanban.css` owns the shared `.kn-modal-*` /
+// `.kn-drawer-*` shell — `.kn-modal-overlay` is the `position: fixed; inset: 0;
+// z-index: 300` backdrop that centers EVERY dialog in the app, not just the
+// Kanban board's own. `components.css` says so in its own comment: those
+// classes are "loaded unconditionally — ScreenKanban is always mounted".
+//
+// That premise held only while the router mounted all 16 screens at once. When
+// the Phase 49.4 hotfix changed the router to render ONLY the active screen
+// (the fix for the client freezing), `kanban.css` stopped loading anywhere
+// except the Kanban screen — so every `kn-*` dialog on every other screen
+// rendered as an unstyled block below the fold: present in the DOM, invisible
+// to the operator, and indistinguishable from "the button didn't fire" (it hit
+// the skills IMPORT / NEW SKILL wizards and the create-profile wizard).
+//
+// Loading it here restores the guarantee the CSS was written against, for every
+// consumer at once, and matches this crate's rule that shared CSS loads
+// unconditionally and is never gated behind which screen happens to be mounted.
+const KANBAN_CSS: Asset = asset!("/assets/kanban.css");
 
 #[component]
 pub fn App() -> Element {
@@ -223,6 +234,10 @@ pub fn App() -> Element {
         document::Link { rel: "stylesheet", href: WHEEL_CSS }
         document::Link { rel: "stylesheet", href: SCREENS_CSS }
         document::Link { rel: "stylesheet", href: COMPONENTS_CSS }
+        // Shared `.kn-modal-*` / `.kn-drawer-*` dialog shell — see KANBAN_CSS.
+        // Every screen's modals depend on it, so it must not be tied to whether
+        // ScreenKanban happens to be the mounted screen.
+        document::Link { rel: "stylesheet", href: KANBAN_CSS }
         document::Link { rel: "stylesheet", href: VOICE_CSS }
 
         // Phase 36.17.9 Plan 03 (D-02): Three.js + orb.js ES modules.
@@ -240,45 +255,10 @@ pub fn App() -> Element {
         // orb_canvas.rs via `#[cfg(feature = "avatar")]`; the orb stays default.
         document::Script { src: AVATAR_JS, r#type: "module", defer: true }
 
-        // Legacy bundle CSS — only emitted when the legacy shell is mounted.
-        // Use a nested `legacy_links()` helper so the rsx! parser sees one
-        // expression slot; the helper itself is cfg-branched at item scope.
-        {legacy_links()}
-
-        // Root child — compile-time branch (not runtime) so the OFF shell is
-        // not pulled into the WASM binary. Same helper-fn pattern as above.
-        {root_shell()}
+        // Root child — HermesApp is the crate's only root component
+        // (49.4-02: the `legacy-shell`-gated compile-time branch that used
+        // to select between WarpHermes and HermesApp here was removed
+        // along with the feature; folded todo 2026-05-29).
+        crate::components::hermes_app::HermesApp {}
     }
-}
-
-// ---------------------------------------------------------------------------
-// Cfg-branched rsx fragments (compile-time selected — RESEARCH Pattern 1).
-// ---------------------------------------------------------------------------
-
-#[cfg(feature = "legacy-shell")]
-fn legacy_links() -> Element {
-    // DESIGN_TOKENS_CSS + WARP_IH_CSS moved to the always-loaded block
-    // above so non-legacy shells resolve --w-* / --accent-primary tokens
-    // (BUG-2 fix from 36.3.7.11 UAT). The remaining legacy-only sheets
-    // stay gated here.
-    rsx! {
-        document::Link { rel: "stylesheet", href: TAILWIND_CSS }
-        document::Link { rel: "stylesheet", href: MAIN_CSS }
-        document::Link { rel: "stylesheet", href: SCANNER_ANIM_CSS }
-    }
-}
-
-#[cfg(not(feature = "legacy-shell"))]
-fn legacy_links() -> Element {
-    rsx! {}
-}
-
-#[cfg(feature = "legacy-shell")]
-fn root_shell() -> Element {
-    rsx! { crate::components::warp_hermes::WarpHermes {} }
-}
-
-#[cfg(not(feature = "legacy-shell"))]
-fn root_shell() -> Element {
-    rsx! { crate::components::hermes_app::HermesApp {} }
 }

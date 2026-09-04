@@ -26,6 +26,56 @@ fn bind_guard_allows(ip: std::net::IpAddr, auth_enabled: bool) -> bool {
     ip.is_loopback() || auth_enabled
 }
 
+/// D-04 (49.1.1): a non-loopback bind with no configured
+/// `web_ui.allowed_origins` refuses to start — a SECOND, independent
+/// fail-closed startup guard alongside the D-10 credential guard above, not
+/// a widened `bind_guard_allows`. That function's own six-case test table
+/// pins its exact two-argument signature, and "is an origin allowlist
+/// configured" is logically independent of "is a password configured", so
+/// this is a sibling predicate rather than a third argument. Pure and
+/// side-effect-free (no logging, no panicking, no env reads) so the
+/// invariant is provable by unit test without spawning a process — see
+/// `mod tests` below, same contract as `bind_guard_allows`.
+/// `["*"]` (`AllowedOriginsConfig::Any`, i.e. `origins_configured == true`)
+/// satisfies this guard: it is the typed escape hatch for a trusted LAN,
+/// converting a silent zero-config default into a recorded operator
+/// decision rather than an off switch.
+#[cfg(feature = "server")]
+fn origin_guard_allows(ip: std::net::IpAddr, origins_configured: bool) -> bool {
+    ip.is_loopback() || origins_configured
+}
+
+/// D-07 (49.1.1): compose the operator-facing refusal message for the
+/// origin startup guard. Pure (no logging, no panicking) so the message
+/// contents are provable by unit test — see `mod tests` below, following
+/// the `provider_key_guard_refusal_message` precedent immediately below of
+/// making a refusal message its own testable function.
+///
+/// Reproduces docs/DEPLOYMENT.md's § Cross-site origin allowlist refusal
+/// text near-verbatim (operator-authored). Preserve the wording, the
+/// ordering (real remedy first, the env override named second because the
+/// deployment that hit this bug configures through a hosting dashboard and
+/// cannot edit `config.yaml` at all, and the wildcard last with its
+/// explicit "accepts any browser origin" label), and the YAML indentation
+/// of both examples. Do not compress, reorder, or "improve" this text.
+#[cfg(feature = "server")]
+fn origin_guard_refusal_message(address: &std::net::SocketAddr) -> String {
+    format!(
+        "FATAL: Refusing to bind non-loopback address {address} without origin protection.
+To secure this deployment, configure `web_ui.allowed_origins` with your public URL(s).
+Example (config.yaml):
+  web_ui:
+    allowed_origins: [\"https://iron-hermes.sliplane.app\"]
+
+Or set IRONHERMES_WEB_ALLOWED_ORIGINS='https://iron-hermes.sliplane.app'
+(comma-separated for multiple) — use this on platforms that only expose env vars.
+
+Alternatively, to accept any browser origin on a trusted LAN, use:
+  web_ui:
+    allowed_origins: [\"*\"]"
+    )
+}
+
 /// Quick task 260818-t3y: compose the operator-facing refusal message for
 /// the provider-key startup guard. Pure (no logging, no panicking) so the
 /// message contents are provable by unit test — see `mod tests` below.
@@ -108,6 +158,11 @@ async fn main() {
     let auth_config = server::auth::auth_config_from(&app_state.config)
         .await
         .expect("failed to resolve web_ui.auth config (sealed/corrupt vault, or malformed hash)");
+    // D-04 (49.1.1): capture whether an origin allowlist is configured BEFORE
+    // `auth_config` is moved into `AuthState::new` below. `AuthState` stores
+    // `config` as a private field with no accessor, so this is the only
+    // point at which the resolved `AllowedOriginsConfig` can be read back.
+    let origins_configured = auth_config.allowed_origins.is_configured();
     let auth_state = server::auth::AuthState::new(auth_config)
         .expect("web_ui.auth.password_hash is not a valid argon2id PHC string");
 
@@ -125,6 +180,25 @@ async fn main() {
              web_ui.auth.password_hash in config.yaml), or bind to a loopback \
              address (127.0.0.1 / ::1) instead."
         );
+        tracing::error!(target: "iron_hermes_ui", "{msg}");
+        panic!("{msg}");
+    }
+
+    // D-04 (49.1.1): a second, independent fail-closed startup guard —
+    // origin protection rather than credentials. Kept as its own `if` block
+    // with its own message rather than folded into the D-10 guard above:
+    // RESEARCH.md Pitfall 3 names a merged condition as the specific
+    // failure mode to avoid, since an operator seeing one generic refusal
+    // has no way to tell which precondition failed — exactly the
+    // diagnostic vacuum that let the original outage run for weeks. Runs
+    // AFTER the D-10 guard so a config that fails both still reports the
+    // pre-existing bind problem first, the same reasoning the provider-key
+    // guard's own placement below records. `allowed_origins: ["*"]`
+    // (`origins_configured == true`) satisfies this guard as a recorded
+    // operator decision — it is the typed escape hatch for a trusted LAN,
+    // not a silent default.
+    if !origin_guard_allows(address.ip(), origins_configured) {
+        let msg = origin_guard_refusal_message(&address);
         tracing::error!(target: "iron_hermes_ui", "{msg}");
         panic!("{msg}");
     }
@@ -173,7 +247,10 @@ async fn main() {
 
     let auth_routes = axum::Router::new()
         .route("/auth/login", axum::routing::post(server::auth::login))
-        .route("/auth/session", axum::routing::get(server::auth::session_probe))
+        .route(
+            "/auth/session",
+            axum::routing::get(server::auth::session_probe),
+        )
         .route("/auth/logout", axum::routing::post(server::auth::logout))
         // /auth/* carries its own tight body limit — the global 16MB limit
         // below is sized for attachments, not a ~1KB login POST.
@@ -329,7 +406,8 @@ fn main() {
 #[cfg(all(test, feature = "server"))]
 mod tests {
     use super::bind_guard_allows;
-    use std::net::IpAddr;
+    use super::{origin_guard_allows, origin_guard_refusal_message};
+    use std::net::{IpAddr, SocketAddr};
 
     #[test]
     fn bind_guard_loopback_v4_no_auth_allowed() {
@@ -370,6 +448,119 @@ mod tests {
         assert!(
             !bind_guard_allows(ip, false),
             "wildcard bind is not loopback"
+        );
+    }
+
+    // D-04 (49.1.1): the origin_guard_allows predicate cases named in this
+    // plan's <behavior> block, mirroring the six bind_guard_* cases above.
+    #[test]
+    fn origin_guard_loopback_v4_unconfigured_allowed() {
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(origin_guard_allows(ip, false));
+    }
+
+    #[test]
+    fn origin_guard_loopback_v6_unconfigured_allowed() {
+        let ip: IpAddr = "::1".parse().unwrap();
+        assert!(origin_guard_allows(ip, false));
+    }
+
+    #[test]
+    fn origin_guard_loopback_v4_configured_allowed() {
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(origin_guard_allows(ip, true));
+    }
+
+    #[test]
+    fn origin_guard_public_bind_configured_allowed() {
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(
+            origin_guard_allows(ip, true),
+            "a public bind with origins configured is exactly the posture this phase enables"
+        );
+    }
+
+    #[test]
+    fn origin_guard_public_bind_unconfigured_refused() {
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        assert!(
+            !origin_guard_allows(ip, false),
+            "the one refused combination on a LAN address"
+        );
+    }
+
+    #[test]
+    fn origin_guard_wildcard_bind_unconfigured_refused() {
+        let ip: IpAddr = "0.0.0.0".parse().unwrap();
+        assert!(
+            !origin_guard_allows(ip, false),
+            "wildcard bind is not loopback — this is the sliplane case"
+        );
+    }
+
+    // D-07 (49.1.1): the origin_guard_refusal_message content assertions
+    // named in this plan's <behavior> block.
+    #[test]
+    fn origin_guard_message_substitutes_the_bind_address() {
+        let address: SocketAddr = "0.0.0.0:8080".parse().unwrap();
+        let msg = origin_guard_refusal_message(&address);
+        assert!(
+            msg.contains("0.0.0.0:8080"),
+            "message must contain the substituted bind address, got: {msg}"
+        );
+        let remainder = msg.replacen("0.0.0.0:8080", "", 1);
+        assert!(
+            !remainder.contains("0.0.0.0"),
+            "no literal 0.0.0.0 should remain outside the substituted address, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn origin_guard_message_names_the_config_key_before_the_env_override() {
+        let address: SocketAddr = "0.0.0.0:8080".parse().unwrap();
+        let msg = origin_guard_refusal_message(&address);
+        let config_key_offset = msg
+            .find("web_ui.allowed_origins")
+            .expect("message must name the config key");
+        let env_var_offset = msg
+            .find("IRONHERMES_WEB_ALLOWED_ORIGINS")
+            .expect("message must name the env override");
+        let wildcard_offset = msg
+            .find("allowed_origins: [\"*\"]")
+            .expect("message must name the wildcard entry");
+        assert!(
+            config_key_offset < env_var_offset,
+            "config key must appear before the env override, got: {msg}"
+        );
+        assert!(
+            env_var_offset < wildcard_offset,
+            "env override must appear before the wildcard entry, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn origin_guard_message_names_the_wildcard_last() {
+        let address: SocketAddr = "0.0.0.0:8080".parse().unwrap();
+        let msg = origin_guard_refusal_message(&address);
+        assert!(
+            msg.contains("accept any browser origin on a trusted LAN"),
+            "message must label the wildcard as accepting any browser origin, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn origin_guard_message_example_is_yaml() {
+        let address: SocketAddr = "0.0.0.0:8080".parse().unwrap();
+        let msg = origin_guard_refusal_message(&address);
+        assert!(msg.contains("Example (config.yaml):"), "got: {msg}");
+        assert!(
+            msg.contains("\n  web_ui:\n    allowed_origins:"),
+            "must contain a two-space-indented web_ui: line followed by a \
+             four-space-indented allowed_origins: line (YAML, not TOML), got: {msg}"
+        );
+        assert!(
+            !msg.contains("password_hash"),
+            "must not collide with the existing D-10 guard's message, got: {msg}"
         );
     }
 

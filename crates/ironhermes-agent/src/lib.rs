@@ -33,7 +33,8 @@ pub mod transcript;
 
 pub use agent_loop::{AgentLoop, AgentResult, AggregatedUsage};
 pub use agent_runtime::{
-    AgentRuntime, AgentRuntimeInput, MessagingPerTurnWiring, TtsPerTurnWiring, TurnRequest,
+    AgentRuntime, AgentRuntimeInput, MessagingPerTurnWiring, SkillRegistryReload, TtsPerTurnWiring,
+    TurnRequest,
 };
 pub use agent_wiring::attach_context_engine;
 pub use anthropic_client::AnthropicClient;

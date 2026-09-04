@@ -263,6 +263,7 @@ async fn update(
         schedule,
         schedule_display,
         skills: req.skills,
+        ..Default::default()
     };
 
     match store.update_job(&canonical_id, updates) {

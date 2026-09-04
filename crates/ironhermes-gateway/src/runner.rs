@@ -30,6 +30,49 @@ use crate::user_queue::{DispatchOutcome, UserQueueManager};
 use ironhermes_core::MessageEvent;
 use ironhermes_cron::{DeliveryRegistry, DeliverySend, TgSendApi};
 
+/// Resolves when the process receives SIGTERM (POSIX / container shutdown) or
+/// SIGINT (terminal Ctrl-C).
+///
+/// SIGTERM is the signal a container runtime, systemd, and `hermes gateway
+/// stop` (`pid::request_stop`, which sends SIGTERM and nothing else) all use.
+/// Without an explicit handler its default disposition terminates the process
+/// immediately: no unwinding, so `PidLockGuard::Drop` never runs and a stale
+/// `gateway.pid` is left behind for the next start to reconcile. Listening for
+/// it here routes SIGTERM through the same orderly path Ctrl-C already took —
+/// MCP teardown, cancellation propagation, JoinSet drain, then the pid guard
+/// drop.
+///
+/// Mirrors `iron_hermes_ui`'s `shutdown_signal` (crates/iron_hermes_ui/src/main.rs)
+/// deliberately, so both long-lived processes in the container image react to
+/// `podman stop` identically.
+async fn shutdown_signal() -> &'static str {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+        "SIGINT (Ctrl+C)"
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+                "SIGTERM"
+            }
+            // Registration failure must not resolve the select arm — that
+            // would fake a shutdown request and stop the gateway instantly.
+            Err(_) => std::future::pending::<&'static str>().await,
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<&'static str>();
+
+    tokio::select! {
+        sig = ctrl_c => sig,
+        sig = terminate => sig,
+    }
+}
+
 /// Runs the Telegram gateway: long polling, per-user dispatch, JoinSet supervision,
 /// Semaphore concurrency control, and CancellationToken-based graceful shutdown.
 pub struct GatewayRunner {
@@ -1248,6 +1291,16 @@ impl GatewayRunner {
         // is absent or token does not resolve — existing Telegram-only deployments
         // are unaffected. Empty whitelist is passed through to the adapter, which
         // enforces canonical deny-all semantics (config.rs:731 + runner.rs:601-611 D-12).
+        //
+        // Phase 49.3 Plan 06 (D-08): unlike Telegram/Buzz/webhook/api_server,
+        // Discord/Slack have no persistent `Option<Arc<Adapter>>` local that
+        // survives past their spawn block — the adapter is constructed and
+        // handed straight into `join_set.spawn(async move { ... })`, which
+        // moves it away. `*_enabled_flag` is captured here, BEFORE that
+        // move, as the "was this platform successfully constructed and
+        // spawned at boot" signal the status heartbeat (9c below) uses as
+        // its `connected` proxy for these two platforms.
+        let mut discord_enabled_flag = false;
         let discord_config = self
             .config
             .gateway
@@ -1306,6 +1359,7 @@ impl GatewayRunner {
                 whitelist_len = whitelist_d.len(),
                 "Discord adapter spawning"
             );
+            discord_enabled_flag = true;
             join_set.spawn(async move {
                 if let Err(e) = crate::discord::run_discord_adapter(
                     &discord_token,
@@ -1325,6 +1379,10 @@ impl GatewayRunner {
         // --- 7c. Optional Slack adapter (D-11) ---
         // Requires BOTH app_token (xapp-...) and bot_token (xoxb-...) per Pitfall 2.
         // Either token missing → silent skip. Empty whitelist enforced by adapter (D-12).
+        //
+        // Phase 49.3 Plan 06 (D-08): see the `discord_enabled_flag` comment
+        // in 7b immediately above — same reasoning, same pattern.
+        let mut slack_enabled_flag = false;
         let slack_config = self
             .config
             .gateway
@@ -1360,6 +1418,7 @@ impl GatewayRunner {
             let whitelist_s: Vec<String> = slack_config.whitelist.clone();
             // Empty whitelist propagates to adapter — D-12 deny-all enforced in callback.
             tracing::info!(whitelist_len = whitelist_s.len(), "Slack adapter spawning");
+            slack_enabled_flag = true;
             join_set.spawn(async move {
                 if let Err(e) = crate::slack::run_slack_adapter(
                     &slack_app,
@@ -1983,6 +2042,116 @@ impl GatewayRunner {
             }
         });
 
+        // --- 9c. Gateway status heartbeat task (Phase 49.3 Plan 06, D-08) ---
+        //
+        // ONE shared periodic task — not N racing per-adapter writers
+        // (T-49.3-06-02, RESEARCH A1) — that each tick snapshots every
+        // adapter's connected state and its per-platform live session count
+        // (from `SessionStore`, grouped by `SessionKey::platform` — the
+        // canonical `Platform` enum field, no string parsing needed) and
+        // writes it atomically via `pid::write_gateway_status` (the same
+        // NamedTempFile-in-same-dir-then-persist shape `write_gateway_pid`
+        // uses, T-49.3-06-02).
+        //
+        // `connected` for Telegram/Buzz/webhook/api_server is each
+        // adapter's `Option<Arc<..>>.is_some()` — a real signal, captured
+        // once here (these Options are `Arc`s that live for the whole
+        // function and are already cloned into other tasks below, e.g.
+        // `adapter_tick` at the top of the cron task). Discord/Slack have
+        // no such persistent local (their adapter is moved directly into
+        // their own `join_set.spawn` in 7b/7c above), so `connected` for
+        // those two is `discord_enabled_flag`/`slack_enabled_flag`,
+        // captured immediately before that move — "was this platform
+        // successfully constructed and spawned at boot", not a live
+        // per-tick reconnect probe. PlatformAdapter is deliberately not
+        // given a status method for this (out of scope — see the plan's
+        // action text); a richer live-reconnect signal is a natural future
+        // extension of this same heartbeat, not required for D-08.
+        let status_cancel = self.cancel.clone();
+        let session_store_status = self.session_store.clone();
+        let status_home = home.clone();
+        let telegram_status_flag = telegram_adapter.is_some();
+        #[cfg(feature = "buzz")]
+        let buzz_status_flag = buzz_adapter.is_some();
+        #[cfg(not(feature = "buzz"))]
+        let buzz_status_flag = false;
+        let webhook_status_flag = webhook_adapter.is_some();
+        let api_server_status_flag = api_server_adapter.is_some();
+        let discord_status_flag = discord_enabled_flag;
+        let slack_status_flag = slack_enabled_flag;
+        join_set.spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+            loop {
+                tokio::select! {
+                    _ = status_cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        let mut counts: std::collections::HashMap<Platform, usize> =
+                            std::collections::HashMap::new();
+                        {
+                            let store = session_store_status.read().await;
+                            for session in store.list() {
+                                *counts.entry(session.key.platform.clone()).or_insert(0) += 1;
+                            }
+                        }
+                        let mut platforms = std::collections::BTreeMap::new();
+                        platforms.insert(
+                            "telegram".to_string(),
+                            ironhermes_core::gateway_status::PlatformStatusEntry {
+                                connected: telegram_status_flag,
+                                session_count: counts.get(&Platform::Telegram).copied().unwrap_or(0),
+                            },
+                        );
+                        platforms.insert(
+                            "discord".to_string(),
+                            ironhermes_core::gateway_status::PlatformStatusEntry {
+                                connected: discord_status_flag,
+                                session_count: counts.get(&Platform::Discord).copied().unwrap_or(0),
+                            },
+                        );
+                        platforms.insert(
+                            "slack".to_string(),
+                            ironhermes_core::gateway_status::PlatformStatusEntry {
+                                connected: slack_status_flag,
+                                session_count: counts.get(&Platform::Slack).copied().unwrap_or(0),
+                            },
+                        );
+                        platforms.insert(
+                            "buzz".to_string(),
+                            ironhermes_core::gateway_status::PlatformStatusEntry {
+                                connected: buzz_status_flag,
+                                session_count: counts.get(&Platform::Buzz).copied().unwrap_or(0),
+                            },
+                        );
+                        platforms.insert(
+                            "webhook".to_string(),
+                            ironhermes_core::gateway_status::PlatformStatusEntry {
+                                connected: webhook_status_flag,
+                                session_count: counts.get(&Platform::Webhook).copied().unwrap_or(0),
+                            },
+                        );
+                        platforms.insert(
+                            "api_server".to_string(),
+                            ironhermes_core::gateway_status::PlatformStatusEntry {
+                                connected: api_server_status_flag,
+                                session_count: counts.get(&Platform::ApiServer).copied().unwrap_or(0),
+                            },
+                        );
+                        let status = ironhermes_core::gateway_status::GatewayPlatformStatus::new(platforms);
+                        let home_for_write = status_home.clone();
+                        let write_result = tokio::task::spawn_blocking(move || {
+                            crate::pid::write_gateway_status(&home_for_write, &status)
+                        })
+                        .await;
+                        match write_result {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => warn!("Gateway status heartbeat write failed: {e:#}"),
+                            Err(e) => warn!("Gateway status heartbeat write task failed: {e}"),
+                        }
+                    }
+                }
+            }
+        });
+
         // --- 10. Cron tick task ---
         if let Some(ref job_store) = self.job_store {
             let tick_cancel = self.cancel.clone();
@@ -2334,9 +2503,10 @@ impl GatewayRunner {
         }
 
         // --- 12. Run dispatch loop concurrently with shutdown signal ---
-        // dispatch_future processes messages; ctrl+c or cancel token stops everything.
+        // dispatch_future processes messages; a shutdown signal (SIGTERM or
+        // SIGINT, see `shutdown_signal`) or the cancel token stops everything.
         // Phase 47.6 Plan 03 (P0-1): `dispatch_future_boxed` is `None` when
-        // Telegram is absent — the ctrl_c/cancel arms are byte-identical
+        // Telegram is absent — the signal/cancel arms are byte-identical
         // either way; only the dispatch-future arm is skipped.
         match dispatch_future_boxed {
             Some(dispatch_future) => {
@@ -2344,8 +2514,8 @@ impl GatewayRunner {
                     _ = dispatch_future => {
                         info!("Dispatch loop exited");
                     }
-                    _ = tokio::signal::ctrl_c() => {
-                        info!("Ctrl+C received, initiating graceful shutdown");
+                    sig = shutdown_signal() => {
+                        info!("{sig} received, initiating graceful shutdown");
                     }
                     _ = self.cancel.cancelled() => {
                         info!("Cancellation token fired, shutting down");
@@ -2354,8 +2524,8 @@ impl GatewayRunner {
             }
             None => {
                 tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {
-                        info!("Ctrl+C received, initiating graceful shutdown");
+                    sig = shutdown_signal() => {
+                        info!("{sig} received, initiating graceful shutdown");
                     }
                     _ = self.cancel.cancelled() => {
                         info!("Cancellation token fired, shutting down");

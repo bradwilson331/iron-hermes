@@ -863,6 +863,7 @@ mod tests {
         ironhermes_core::config::SecurityConfig {
             web_config_write_enabled: write,
             web_process_control_enabled: control,
+            remote_blueprint_run_enabled: false,
         }
     }
 

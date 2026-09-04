@@ -13,6 +13,7 @@ pub mod installer;
 pub mod local_dir;
 pub mod lock;
 pub mod manifest;
+pub mod pasted;
 pub mod paths;
 pub mod sanitize;
 pub mod scanner;
@@ -54,6 +55,7 @@ pub use lock::{
     MigrationOutcome, SkillLock, SkillLockEntry, compute_folder_hash, migrate_from_hub_manifest,
 };
 pub use manifest::{HubManifest, ManifestEntry};
+pub use pasted::PastedSkillSource;
 pub use sanitize::{
     assert_temp_contained, is_contained_in, is_path_safe, sanitize_metadata, sanitize_name,
     sanitize_subpath, strict_yaml_delimiter, strip_terminal_escapes, to_skill_slug,

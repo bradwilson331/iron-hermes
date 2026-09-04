@@ -17,7 +17,20 @@ pub mod logging;
 /// `chat_attachments_api::chat_attachment_upload_tests` raced each other and
 /// failed intermittently. Every test that mutates `IRONHERMES_HOME` (or other
 /// process-global env) must hold THIS lock instead of a module-local one.
-#[cfg(all(test, feature = "server"))]
+///
+/// Gated on `not(target_arch = "wasm32")` rather than `feature = "server"`
+/// (49.4-02 fix, folded todo 2026-08-28): the body is pure `std::sync`, with
+/// no dependency on the `server` feature's `tokio/full`/`dep:axum`, and a
+/// dozen `server/*.rs` test modules across the crate call
+/// `crate::server::test_support::env_lock()` from a
+/// `#[cfg(all(test, not(target_arch = "wasm32")))]` `mod tests` that never
+/// required the `server` feature either — so gating this module on
+/// `feature = "server"` broke `cargo test --workspace` (no consumer in that
+/// invocation requests the `server` feature for this crate, which is
+/// excluded from workspace `default-members`). `state` (below) genuinely
+/// needs `tokio::sync::RwLock`, gated behind `tokio/full` (only enabled by
+/// `feature = "server"`) — this module has no such requirement.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test_support {
     use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -59,6 +72,13 @@ pub mod provider_secrets_api;
 // macro handles the client/server split, internal helper fns are gated with
 // `#[cfg(not(target_arch = "wasm32"))]`.
 pub mod schedules_api;
+// Phase 49.5 Plan 01 (D-02/D-04/D-05): Blueprints tab server surface —
+// `list_blueprints`/`create_schedule_from_blueprint` over the compiled-in
+// `ironhermes_cron::blueprint` catalog, writing through the SAME `JobStore`
+// path `schedules_api::create_schedule` uses. Unconditional like
+// `schedules_api` — the `#[server]` macro handles the client/server split,
+// internal helper fns are gated with `#[cfg(not(target_arch = "wasm32"))]`.
+pub mod blueprints_api;
 // Phase 46.7 Plan 04 (D-09): web-chat attachment upload transport. Like
 // `kanban_api`, unconditional — the `#[server]` macro handles the
 // client/server split, and the impl fns/tests are internally gated with
@@ -121,6 +141,15 @@ pub mod login_page;
 // macro handles the client/server split, and internal helper fns are gated
 // with `#[cfg(feature = "server")]`.
 pub mod profile_api;
+// Phase 49.4 Plan 08 (D-14): persisted profile activation-with-scope —
+// `activate_profile`/`get_active_profile`/`resolve_active_profile_for`.
+// Unconditional like `profile_api` — the `#[server]` macro handles the
+// client/server split, and internal helper fns are gated with
+// `#[cfg(feature = "server")]` (same convention as `profile_api`'s own
+// `create_profile_impl`/`check_profile_write_gate` — real `Config`
+// read/write logic, not the narrower widened-pure-fn class like
+// `profile_dir_for`).
+pub mod profile_activation_api;
 // Phase 47.4 Plan 06 (D-09/D-11/D-14): the real, profile-scoped judge probe
 // — `verify_profile`. Unconditional like `profile_api` — the `#[server]`
 // macro handles the client/server split, and internal helper fns are gated
@@ -135,6 +164,17 @@ pub mod profile_verify_api;
 // with `#[cfg(feature = "server")]`. Its own sibling store/mutex, isolated
 // from `state_store` (module doc has the full persistence-shape record).
 pub mod bot_meta_api;
+// Phase 49.4 Plan 12 (D-16): the profile-to-bot binding store —
+// `list_bot_bindings`/`set_bot_binding`/`clear_bot_binding` plus the
+// internal `resolve_profile_for_bot`/`revert_bindings_for_archived_profile`
+// primitives. Unconditional like `bot_meta_api` — the `#[server]` macro
+// handles the client/server split, and internal helper fns are gated with
+// `#[cfg(feature = "server")]`. Its own sibling store/mutex
+// (`bot-bindings.json` at the home root), isolated from `state_store`,
+// `BOT_META_LOCK`, and every other module's own lock (module doc has the
+// full persistence-shape record and the honest "known gap" section on
+// production gateway-spawn wiring).
+pub mod bot_binding_api;
 // Phase 50.1 Plan 03 (D-04/D-05/D-06/D-20): process-isolated bot message
 // dispatch — `dispatch_bot_message` spawns an `ironhermes` subprocess for a
 // non-live bot, reusing the kanban worker path's `.env_clear()` + allowlist
@@ -276,4 +316,33 @@ pub mod gateway_control_api;
 // client/server split, internal helper fns are gated with
 // `#[cfg(not(target_arch = "wasm32"))]`. Never touches `BUZZ_NSEC` — that
 // stays entirely in `tools_credentials_api`/`buzz_npub_api` (module doc).
+// Phase 49.3 Plan 01 extends this SAME file with the Telegram tracer slice
+// (`TelegramPlatformView`/`get_telegram_platform_view`/
+// `set_telegram_enabled`) — Discord/Slack land in later 49.3 plans.
 pub mod platform_config_api;
+// Phase 49.3 Plan 01: sibling server-fn module skeleton for the Gateway
+// screen's expansion plans (02/04/05/06), so each owns a disjoint file and
+// none of them re-touches this `mod.rs` concurrently. Each module is an
+// empty compiling stub as of this plan — filled by its owning plan:
+// `gateway_env_secret_api` (plan 02, root/profile `.env` writer for bot
+// tokens + the REST API key), `webhook_route_api` (plan 04, webhook route
+// CRUD), `api_server_config_api` (plan 05, REST API server host/port/
+// public_opt_in), `gateway_platform_status_api` (plan 06, D-08 heartbeat
+// status reader). Unconditional like `platform_config_api` — the
+// `#[server]` macro (once each module has fns) handles the client/server
+// split.
+pub mod gateway_env_secret_api;
+pub mod webhook_route_api;
+pub mod api_server_config_api;
+pub mod gateway_platform_status_api;
+// Phase 49.4 Plan 05 (D-05..D-09): the Skills IMPORT / NEW SKILL server
+// surface — `preview_skill_import`/`install_previewed_skill`/`create_skill`/
+// `fork_bundled_skill`, plus the two new `HubSource` adapters (URL fetch,
+// pasted content) that close the gaps `ironhermes-hub` doesn't cover.
+// Unconditional like `tools_config_api` — the `#[server]` macro handles the
+// client/server split; internal helper fns and both adapters are gated with
+// `#[cfg(feature = "server")]` (they depend on `ironhermes-hub`, `reqwest`
+// and `tokio`, none of which the wasm client build should see). The pure
+// classifier (`classify_import_source`/`normalize_github_identifier`) stays
+// ungated so it compiles on both targets and the client can reuse it.
+pub mod skills_import_api;

@@ -23,6 +23,21 @@
 //! the SAME boolean `probe_mcp_server` computed server-side. The client
 //! never re-derives "did the probe succeed" from status matching; it only
 //! adds the `is_probing` bit (never enabled mid-flight).
+//!
+//! # D-07 disclosure is scoped to the paste path
+//!
+//! [`snippet_entry_label`] discloses a sanitized-rename only for entries
+//! that came from the paste path (`McpSnippetEntry.sanitized_name`, set
+//! server-side by `mcp_admin_api::parse_snippet_text`). [`name_is_sanitized`]
+//! and [`draft_ready_for_verify`] are deliberately UNCHANGED by D-07: the
+//! manual DEFINE-form NAME field still visibly disables NEXT the moment an
+//! operator types a hyphen or other character outside `[A-Za-z0-9_]`. This
+//! is not an oversight — D-07's incident is specifically that the wizard
+//! rejected a Claude-Desktop-style pasted snippet it advertises accepting;
+//! the manual-form gate governs a different surface (an operator directly
+//! typing a name) and keeping it strict is the D-03 "disabled controls are
+//! visibly disabled, never live-but-silent" discipline this file already
+//! established.
 
 use crate::server::mcp_admin_api::{
     McpDiscoveredTool, McpProbeResult, McpServerDraft, McpSnippetEntry, McpSnippetParse,
@@ -89,8 +104,50 @@ fn parse_kv_lines(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Parse a textarea of HTTP-header-style lines into ordered pairs. Splits
+/// each line on the FIRST occurrence of EITHER `:` or `=`, whichever
+/// appears earlier — so both `Authorization: Bearer <token>` (the shape a
+/// Claude-Desktop snippet or curl example shows) and `X-Foo=value` (the
+/// same `KEY=VALUE` shape [`parse_kv_lines`] uses for `env`) parse
+/// correctly, including when the value itself contains the OTHER
+/// delimiter (`Authorization: Bearer abc=def` keeps `abc=def` as the
+/// value; `X-Foo=a:b` keeps `a:b` as the value). Blank lines and keyless
+/// lines are dropped, mirroring [`parse_kv_lines`]; never panics on
+/// malformed input. This is the fix for the defect where a header entered
+/// as `Authorization: Bearer <key>` — standard HTTP header syntax, with no
+/// `=` — became a single keyless line under the old `=`-only parser,
+/// silently discarding the whole header.
+#[allow(dead_code)] // used inside ImportWizard/build_manual_draft; dead_code fires on test target (tools.rs TOOLS_CSS precedent)
+fn parse_header_lines(text: &str) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() {
+                return None;
+            }
+            let colon_pos = line.find(':');
+            let eq_pos = line.find('=');
+            let split_pos = match (colon_pos, eq_pos) {
+                (Some(c), Some(e)) => Some(c.min(e)),
+                (Some(c), None) => Some(c),
+                (None, Some(e)) => Some(e),
+                (None, None) => None,
+            };
+            let (key, value) = match split_pos {
+                Some(pos) => {
+                    (line[..pos].trim().to_string(), line[pos + 1..].trim().to_string())
+                }
+                None => (line.to_string(), String::new()),
+            };
+            if key.is_empty() { None } else { Some((key, value)) }
+        })
+        .collect()
+}
+
 /// Render `KEY=VALUE` pairs back into the same textarea shape
-/// [`parse_kv_lines`] reads, so re-selecting an entry round-trips cleanly.
+/// [`parse_kv_lines`]/[`parse_header_lines`] read, so re-selecting an entry
+/// round-trips cleanly. The `=` form is re-parsed correctly by both
+/// parsers regardless of which syntax the operator originally typed.
 #[allow(dead_code)] // used inside ImportWizard/apply_draft_to_manual_signals; dead_code fires on test target (tools.rs TOOLS_CSS precedent)
 fn kv_pairs_to_text(pairs: &[(String, String)]) -> String {
     pairs
@@ -140,7 +197,7 @@ fn build_manual_draft(
         } else {
             None
         },
-        headers: if is_stdio { Vec::new() } else { parse_kv_lines(headers_text) },
+        headers: if is_stdio { Vec::new() } else { parse_header_lines(headers_text) },
         enabled,
         timeout,
         connect_timeout,
@@ -168,6 +225,24 @@ fn build_manual_draft(
 #[allow(dead_code)] // used inside ImportWizard/draft_ready_for_verify; dead_code fires on test target (tools.rs TOOLS_CSS precedent)
 fn name_is_sanitized(name: &str) -> bool {
     !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// D-07: the snippet-list label for one entry. When `sanitized_name` is
+/// `None` (the pasted key already round-tripped through sanitization),
+/// returns the plain name — no disclosure noise when nothing was renamed.
+/// When `Some(stored)`, returns the disclosure form naming the pasted key,
+/// the stored name it was renamed to, and the tool prefix that stored name
+/// produces, per `48.3-CONTEXT.md` D-07's exact wording: "imported as
+/// `atomic_mail` (tools: `atomic_mail__*`)". A pure fn — same
+/// `#[allow(dead_code)]`-plus-pure-helper convention as `name_is_sanitized`
+/// / `draft_ready_for_verify` / `commit_is_enabled` in this file, letting it
+/// be unit-tested without rendering.
+#[allow(dead_code)] // used inside ImportWizard/SnippetEntryList; dead_code fires on test target (tools.rs TOOLS_CSS precedent)
+fn snippet_entry_label(name: &str, sanitized_name: Option<&str>) -> String {
+    match sanitized_name {
+        None => name.to_string(),
+        Some(stored) => format!("{name} — imported as `{stored}` (tools: `{stored}__*`)"),
+    }
 }
 
 /// DEFINE→VERIFY gate: a name plus the transport's required field
@@ -564,7 +639,7 @@ pub fn ImportWizard(
                                 }
                             }
                             div { class: "tools-settings-field-group",
-                                label { class: "tools-settings-label", "HEADERS — ONE KEY=VALUE PER LINE" }
+                                label { class: "tools-settings-label", "HEADERS — ONE PER LINE, Key: value OR Key=value" }
                                 textarea {
                                     class: "mcp-wizard-textarea mcp-wizard-textarea--sm",
                                     value: "{headers_val}",
@@ -590,6 +665,15 @@ pub fn ImportWizard(
                         }
                     } else if current_step == WizardStep::Verify {
                         div { class: "tools-settings-label", "VERIFY — {name_val}" }
+                        // D-07: shown unconditionally, one click from COMMIT
+                        // — the tool prefix is useful even when no rename
+                        // happened, and threading the selected entry's
+                        // `sanitized_name` through to VERIFY for a
+                        // conditional line would add signal plumbing for no
+                        // gain. `name_val` already holds the sanitized name
+                        // (copied out of `draft.name` by
+                        // `apply_draft_to_manual_signals`).
+                        div { class: "tools-empty-body", "tools will be prefixed \"{name_val}__*\"" }
                         if is_probing {
                             div { class: "mcp-wizard-probing",
                                 div { class: "mcp-wizard-probing-bar" }
@@ -731,6 +815,9 @@ fn SnippetEntryList(
             for entry in parse.entries.iter().cloned() {
                 {
                     let is_selected = selected_entry_name.as_deref() == Some(entry.name.as_str());
+                    // D-07: disclose the stored name and tool prefix at
+                    // selection time when the pasted key was sanitized.
+                    let label = snippet_entry_label(&entry.name, entry.sanitized_name.as_deref());
                     match entry.draft.clone() {
                         Some(draft) => rsx! {
                             button {
@@ -738,7 +825,7 @@ fn SnippetEntryList(
                                 class: if is_selected { "mcp-wizard-snippet-entry mcp-wizard-snippet-entry--selected" } else { "mcp-wizard-snippet-entry" },
                                 r#type: "button",
                                 onclick: move |_| on_select.call(draft.clone()),
-                                "✓ {entry.name}"
+                                "✓ {label}"
                             }
                         },
                         None => rsx! {
@@ -857,6 +944,64 @@ mod tests {
         assert_eq!(parse_kv_lines(&text), pairs);
     }
 
+    // --- parse_header_lines --------------------------------------------------
+    // Regression coverage for the defect this plan fixes: a header entered
+    // as `Authorization: Bearer <key>` (standard HTTP header syntax, no
+    // `=`) was previously swallowed whole by the `=`-only `parse_kv_lines`,
+    // becoming a keyless line and silently dropping the credential.
+
+    #[test]
+    fn parse_header_lines_colon_form() {
+        let parsed = parse_header_lines("Authorization: Bearer sk-test");
+        assert_eq!(
+            parsed,
+            vec![("Authorization".to_string(), "Bearer sk-test".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_header_lines_equals_form() {
+        let parsed = parse_header_lines("X-Foo=bar");
+        assert_eq!(parsed, vec![("X-Foo".to_string(), "bar".to_string())]);
+    }
+
+    #[test]
+    fn parse_header_lines_colon_key_with_equals_in_value() {
+        // The `:` comes before the `=`, so the split happens at the `:`
+        // and the `=` inside the value is preserved untouched.
+        let parsed = parse_header_lines("Authorization: Bearer abc=def");
+        assert_eq!(
+            parsed,
+            vec![("Authorization".to_string(), "Bearer abc=def".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_header_lines_equals_key_with_colon_in_value() {
+        // The `=` comes before the `:`, so the split happens at the `=`
+        // and the `:` inside the value is preserved untouched.
+        let parsed = parse_header_lines("X-Foo=a:b");
+        assert_eq!(parsed, vec![("X-Foo".to_string(), "a:b".to_string())]);
+    }
+
+    #[test]
+    fn parse_header_lines_drops_blank_and_keyless_lines() {
+        let parsed = parse_header_lines(
+            "Authorization: Bearer x\n\n  \n=novalue\n:alsonovalue",
+        );
+        assert_eq!(
+            parsed,
+            vec![("Authorization".to_string(), "Bearer x".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_header_lines_round_trips_through_kv_pairs_to_text() {
+        let parsed = parse_header_lines("Authorization: Bearer abc=def\nX-Foo=a:b");
+        let text = kv_pairs_to_text(&parsed);
+        assert_eq!(parse_header_lines(&text), parsed);
+    }
+
     // --- build_manual_draft / draft_ready_for_verify ------------------------
 
     #[test]
@@ -919,6 +1064,25 @@ mod tests {
             !draft_ready_for_verify(&draft),
             "a name containing characters outside [A-Za-z0-9_] must block NEXT, \
              mirroring commit_mcp_server's server-side CR-01 gate"
+        );
+    }
+
+    // --- D-07: snippet_entry_label -----------------------------------------
+
+    #[test]
+    fn snippet_entry_label_discloses_stored_name_when_renamed() {
+        let label = snippet_entry_label("atomic-mail", Some("atomic_mail"));
+        assert!(label.contains("atomic-mail"), "must name the pasted key; got: {label}");
+        assert!(label.contains("atomic_mail"), "must name the stored name; got: {label}");
+        assert!(label.contains("atomic_mail__*"), "must name the tool prefix; got: {label}");
+    }
+
+    #[test]
+    fn snippet_entry_label_omits_disclosure_when_unchanged() {
+        let label = snippet_entry_label("clean_name", None);
+        assert_eq!(
+            label, "clean_name",
+            "no disclosure noise when nothing was renamed"
         );
     }
 }

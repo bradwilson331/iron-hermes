@@ -29,6 +29,8 @@ oauth2 = { workspace = true }
 ironhermes-core = { path = "../ironhermes-core" }
 ironhermes-tools = { path = "../ironhermes-tools" }
 open = { workspace = true }
+# Phase 48.3 D-01: HeaderName/HeaderValue for connect_http's custom_headers() map.
+http = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -38,3 +40,5 @@ rmcp = { version = "=1.8.0", features = [
     "transport-streamable-http-client-reqwest",
     "auth",
 ] }
+# Phase 48.3 D-08: header-gated mock MCP server for tests/mcp_mock_handshake.rs.
+wiremock = { workspace = true }

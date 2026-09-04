@@ -1357,7 +1357,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                         // handler.rs:1229-1230). On no match, keep today's
                                         // chat-passthrough.
                                         if let Some(run) = plan_web_skill_run(
-                                            app_state.runtime.skill_registry(),
+                                            &app_state.runtime.skill_registry(),
                                             &message,
                                         ) {
                                             app_state.push_web_skill_overlay(

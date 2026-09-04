@@ -882,6 +882,25 @@ impl GatewayMessageHandler {
             ctx.with_kanban_store_writer(writer)
         };
 
+        // Phase 49.5 Plan 05: attach CronJobWriterImpl so `/blueprint run`
+        // can create scheduled jobs from gateway chat. CronJobWriterImpl
+        // lives in ironhermes-cron (not ironhermes-cli — the latter depends
+        // on ironhermes-gateway, so a gateway -> cli dep would be circular),
+        // the same crate-direction reasoning KanbanStoreWriterImpl's
+        // placement in ironhermes-kanban follows above.
+        //
+        // Wiring this handle is NOT itself authorization: the gate that
+        // admits or refuses a remote `/blueprint run` lives in
+        // cmd_blueprint's run arm, checked against ctx.platform and
+        // security.remote_blueprint_run_enabled. A future reader must not
+        // mistake this handle's presence for permission.
+        let ctx = {
+            use ironhermes_core::commands::context::CronJobWriter;
+            let writer: std::sync::Arc<dyn CronJobWriter> =
+                std::sync::Arc::new(ironhermes_cron::CronJobWriterImpl::new());
+            ctx.with_cron_job_writer(writer)
+        };
+
         // Phase 39.1 (R39.1-09 / D-09): TurnRegistry visibility for /agents turns,
         // /stop, and /agents cancel <id> is now wired via CoreContextHandles above
         // (turn_registry: Some(self.turn_registry.clone())) — no separate chain call

@@ -114,10 +114,9 @@ pub fn ScreenSessions(is_active: bool) -> Element {
                 div { class: "screen-header-left",
                     div { class: "screen-tag", "// MODULE 02" }
                     h1 { class: "screen-title", "Sessions" }
-                    p { class: "screen-sub",
-                        "Browse and resume past conversations. {count} live transcript",
+                    span { class: "screen-status",
+                        "· {count} live transcript",
                         if count == 1 { "" } else { "s" },
-                        " from this profile."
                     }
                 }
                 div { class: "screen-actions",

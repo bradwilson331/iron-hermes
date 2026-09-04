@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::job::CronJob;
 
@@ -303,9 +303,18 @@ pub fn is_silent(output: &str) -> bool {
 // save_job_output
 // ---------------------------------------------------------------------------
 
+/// Retention depth for a job's per-run output directory (D-21): the reader
+/// ([`crate` docs on `resolve_context_from`] in `ironhermes-cron-runner`)
+/// only ever consumes the newest output, so this many leaves useful depth
+/// for `context_from` without unbounded growth. Referenced from the prune in
+/// [`save_job_output`]; do not repeat this number anywhere else.
+pub const CRON_OUTPUT_RETENTION: usize = 10;
+
 /// Save job output to `{hermes_home}/cron/output/{job_id}/{timestamp}.md`.
 /// Uses atomic temp+rename write pattern with fsync before rename.
 /// Applies `chmod 0700` to the output directory and `chmod 0600` to the file on Unix.
+/// Prunes the directory to [`CRON_OUTPUT_RETENTION`] entries after the write
+/// (D-21) — a prune failure is logged and does not fail the write itself.
 /// Returns the path that was written.
 pub fn save_job_output(job_id: &str, output: &str) -> Result<PathBuf> {
     // Reject any job_id that could escape the output directory via path traversal
@@ -326,7 +335,16 @@ pub fn save_job_output(job_id: &str, output: &str) -> Result<PathBuf> {
         let _ = fs::set_permissions(&output_dir, fs::Permissions::from_mode(0o700));
     }
 
-    let timestamp = Utc::now().format("%Y%m%d_%H%M%S").to_string();
+    // Fixed-width millisecond precision (`%3f`, zero-padded 3 digits, no
+    // leading dot) appended directly to the existing second-precision
+    // pattern. Lexical sort order must stay equal to chronological order —
+    // `resolve_context_from` picks the newest via
+    // `entries.sort_by_key(|e| e.file_name())` then `.last()` — and this
+    // fixed-width suffix preserves that. It also keeps every file written
+    // before this change sorting before every file written after it: the
+    // old format's `.` immediately after seconds (`0x2E`) sorts before the
+    // new format's `_` (`0x5F`) at that same position.
+    let timestamp = Utc::now().format("%Y%m%d_%H%M%S_%3f").to_string();
     let file_path = output_dir.join(format!("{}.md", timestamp));
     let tmp_path = output_dir.join(format!("{}.md.tmp", timestamp));
 
@@ -354,7 +372,62 @@ pub fn save_job_output(job_id: &str, output: &str) -> Result<PathBuf> {
         let _ = fs::set_permissions(&file_path, fs::Permissions::from_mode(0o600));
     }
 
+    // D-21 retention prune. The output has already been durably renamed
+    // into place above, so losing a run's output because a stale sibling
+    // could not be unlinked is a worse outcome than a directory that is one
+    // file over the cap — log and keep going, never fail the write.
+    if let Err(e) = prune_output_dir(&output_dir, &file_path) {
+        tracing::warn!(
+            output_dir = %output_dir.display(),
+            error = %e,
+            "failed to prune cron output directory"
+        );
+    }
+
     Ok(file_path)
+}
+
+/// Remove all but the newest [`CRON_OUTPUT_RETENTION`] `.md` output files in
+/// `output_dir`, sorted by file name — the same key `resolve_context_from`
+/// reads by, so a divergence here would delete the file the reader is about
+/// to pick. `output_dir` is always the path [`save_job_output`] already
+/// computed under its own path-traversal guard on `job_id`; this function
+/// never re-derives a path from `job_id` itself.
+///
+/// Only ever removes regular files: each entry's own file type is read
+/// without following symlinks, so a symlink or a subdirectory placed inside
+/// the job's output directory is skipped rather than followed or removed.
+/// `just_written` (by construction the newest entry, and therefore last
+/// after the sort) is never removed even if bookkeeping elsewhere were to
+/// disagree — asserted explicitly rather than left to follow implicitly
+/// from the sort order alone.
+fn prune_output_dir(output_dir: &Path, just_written: &Path) -> Result<()> {
+    let mut entries: Vec<_> = fs::read_dir(output_dir)
+        .with_context(|| format!("failed to list output dir: {}", output_dir.display()))?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_type().map(|t| t.is_file()).unwrap_or(false)
+                && e.file_name().to_string_lossy().ends_with(".md")
+        })
+        .collect();
+
+    if entries.len() <= CRON_OUTPUT_RETENTION {
+        return Ok(());
+    }
+
+    entries.sort_by_key(|e| e.file_name());
+
+    let excess = entries.len() - CRON_OUTPUT_RETENTION;
+    for entry in entries.into_iter().take(excess) {
+        let path = entry.path();
+        if path == just_written {
+            continue;
+        }
+        fs::remove_file(&path)
+            .with_context(|| format!("failed to prune output file: {}", path.display()))?;
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -429,6 +502,7 @@ mod tests {
             enabled_toolsets: None,
             workdir: None,
             last_delivery_error: None,
+            continuity: false,
         }
     }
 
@@ -634,6 +708,7 @@ mod multi_target_tests {
             enabled_toolsets: None,
             workdir: None,
             last_delivery_error: None,
+            continuity: false,
         }
     }
 
@@ -1012,6 +1087,278 @@ mod save_job_output_tests_phase_32_1 {
         let read_back = fs::read_to_string(&path).expect("read back");
         assert_eq!(read_back, content);
     }
+
+    // --- D-21: retention prune ---
+
+    #[test]
+    fn retention_keeps_only_the_newest_n() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let job_id = "test-retention-keeps-n-id";
+        let total = CRON_OUTPUT_RETENTION + 5;
+        let mut all_paths = Vec::new();
+        for i in 0..total {
+            all_paths.push(save_job_output(job_id, &format!("output {i}")).expect("save must succeed"));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        let output_dir = all_paths.last().expect("at least one write").parent().expect("parent dir");
+
+        let mut entries: Vec<_> = fs::read_dir(output_dir)
+            .expect("list output dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".md"))
+            .collect();
+        assert_eq!(
+            entries.len(),
+            CRON_OUTPUT_RETENTION,
+            "must keep exactly the retention depth"
+        );
+
+        entries.sort_by_key(|e| e.file_name());
+        let surviving: Vec<_> = entries.into_iter().map(|e| e.path()).collect();
+
+        // The plan's own <behavior> spec requires "the surviving set is the
+        // newest ones" — not merely that the count matches and the single
+        // newest survives. Prove the FULL surviving set, in order, is
+        // exactly the last CRON_OUTPUT_RETENTION paths written (the oldest
+        // 5 of the 15 writes were the ones pruned).
+        let expected_surviving = &all_paths[all_paths.len() - CRON_OUTPUT_RETENTION..];
+        assert_eq!(
+            surviving, expected_surviving,
+            "the surviving set must be exactly the newest {CRON_OUTPUT_RETENTION} writes, in order"
+        );
+    }
+
+    #[test]
+    fn retention_at_exactly_the_cap_deletes_nothing() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let job_id = "test-retention-exact-cap-id";
+        let mut last_path = None;
+        for i in 0..CRON_OUTPUT_RETENTION {
+            last_path = Some(save_job_output(job_id, &format!("output {i}")).expect("save must succeed"));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        let output_dir = last_path.expect("at least one write");
+        let output_dir = output_dir.parent().expect("parent dir");
+        let count = fs::read_dir(output_dir)
+            .expect("list output dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".md"))
+            .count();
+        assert_eq!(
+            count, CRON_OUTPUT_RETENTION,
+            "writing exactly the cap must delete nothing"
+        );
+    }
+
+    #[test]
+    fn retention_below_the_cap_deletes_nothing() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let job_id = "test-retention-below-cap-id";
+        let p1 = save_job_output(job_id, "one").expect("save 1 must succeed");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let p2 = save_job_output(job_id, "two").expect("save 2 must succeed");
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        assert!(p1.exists(), "first file must survive");
+        assert!(p2.exists(), "second file must survive");
+        let output_dir = p2.parent().expect("parent dir");
+        let count = fs::read_dir(output_dir)
+            .expect("list output dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".md"))
+            .count();
+        assert_eq!(count, 2, "writing two, well under the cap, must delete nothing");
+    }
+
+    #[test]
+    fn retention_never_deletes_the_file_just_written() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let job_id = "test-retention-never-current-id";
+        let mut last_path = None;
+        for i in 0..(CRON_OUTPUT_RETENTION + 1) {
+            last_path = Some(save_job_output(job_id, &format!("output {i}")).expect("save must succeed"));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        let last_path = last_path.expect("at least one write");
+        assert!(
+            last_path.exists(),
+            "the path this call returned must still exist after its own prune ran"
+        );
+        let content = fs::read_to_string(&last_path).expect("read back");
+        assert_eq!(content, format!("output {CRON_OUTPUT_RETENTION}"));
+    }
+
+    #[test]
+    fn two_writes_in_the_same_second_produce_distinct_files() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let job_id = "test-same-second-id";
+        let p1 = save_job_output(job_id, "first").expect("save 1 must succeed");
+        let p2 = save_job_output(job_id, "second").expect("save 2 must succeed");
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        assert_ne!(
+            p1, p2,
+            "back-to-back completions must not collide on a filename"
+        );
+        assert_eq!(fs::read_to_string(&p1).expect("read p1"), "first");
+        assert_eq!(fs::read_to_string(&p2).expect("read p2"), "second");
+    }
+
+    #[test]
+    fn output_filenames_sort_lexically_in_chronological_order() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let job_id = "test-lexical-order-id";
+        let mut paths = Vec::new();
+        for i in 0..5 {
+            paths.push(save_job_output(job_id, &format!("output {i}")).expect("save must succeed"));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        let output_dir = paths[0].parent().expect("parent dir");
+        let mut entries: Vec<_> = fs::read_dir(output_dir)
+            .expect("list output dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".md"))
+            .collect();
+        entries.sort_by_key(|e| e.file_name());
+        let newest = entries.last().expect("at least one entry").path();
+        assert_eq!(
+            &newest,
+            paths.last().expect("at least one write"),
+            "the lexically-last entry must be the most recently written file — the exact \
+             selection resolve_context_from performs"
+        );
+    }
+
+    #[test]
+    fn empty_output_still_writes_a_file() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let result = save_job_output("test-empty-output-id", "");
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        let path = result.expect("save_job_output must succeed for empty output");
+        assert!(path.exists(), "output file must exist even for empty content");
+        let content = fs::read_to_string(&path).expect("read back");
+        assert_eq!(content, "");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn prune_ignores_a_subdirectory_and_a_symlink() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let job_id = "test-prune-ignores-id";
+
+        // Write past the cap so at least one prune pass actually runs.
+        let mut last_path = None;
+        for i in 0..(CRON_OUTPUT_RETENTION + 1) {
+            last_path = Some(save_job_output(job_id, &format!("output {i}")).expect("save must succeed"));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        let output_dir = last_path.expect("at least one write").parent().expect("parent dir").to_path_buf();
+
+        // Plant a subdirectory and a (dangling) symlink, both named to sort
+        // lexically first — prune-eligible by name if the file-type filter
+        // did not correctly exclude non-regular-file entries.
+        let sub_dir = output_dir.join("00000000_000000_000_subdir");
+        fs::create_dir(&sub_dir).expect("create subdir");
+        let symlink_path = output_dir.join("00000000_000000_001.md");
+        std::os::unix::fs::symlink(output_dir.join("does-not-exist.md"), &symlink_path)
+            .expect("create symlink");
+
+        // One more write to trigger another prune pass with both present.
+        save_job_output(job_id, "trigger another prune").expect("save must succeed");
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+
+        assert!(sub_dir.exists(), "subdirectory must survive prune");
+        assert!(
+            symlink_path.symlink_metadata().is_ok(),
+            "symlink entry itself must survive prune"
+        );
+    }
+
+    #[test]
+    fn prune_is_scoped_to_the_job_directory() {
+        let _guard = env_lock();
+        let tmp = TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+
+        let job_a = "test-scope-job-a";
+        let job_b = "test-scope-job-b";
+
+        // Job B gets a handful of files, well under the cap.
+        let mut job_b_paths = Vec::new();
+        for i in 0..3 {
+            job_b_paths.push(save_job_output(job_b, &format!("b-output {i}")).expect("save b"));
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+
+        // Job A gets pushed past the cap, triggering a prune — for job A only.
+        for i in 0..(CRON_OUTPUT_RETENTION + 3) {
+            save_job_output(job_a, &format!("a-output {i}")).expect("save a");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+
+        for p in &job_b_paths {
+            assert!(
+                p.exists(),
+                "job B's files must be untouched by job A's prune: {}",
+                p.display()
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1063,6 +1410,7 @@ mod telegram_whitelist_fallback_tests {
             enabled_toolsets: None,
             workdir: None,
             last_delivery_error: None,
+            continuity: false,
         }
     }
 
@@ -1464,6 +1812,7 @@ mod buzz_delivery_platform_tests {
             enabled_toolsets: None,
             workdir: None,
             last_delivery_error: None,
+            continuity: false,
         };
         let targets = resolve_delivery_targets(&job);
         unsafe {

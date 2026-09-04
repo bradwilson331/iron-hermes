@@ -137,6 +137,7 @@ fn make_job(deliver: &str) -> CronJob {
         enabled_toolsets: None,
         workdir: None,
         last_delivery_error: None,
+        continuity: false,
     }
 }
 

@@ -30,18 +30,30 @@
   to   { opacity: 1; transform: translateX(0); }
 }
 
-/* Screen header */
+/* Screen header — Phase 49.4 Plan 01 (D-20/D-21): compacted to one line.
+   .screen-header-left is a row (tag + title + optional live-status span)
+   instead of a column stack; the explanatory .screen-sub paragraph is
+   removed screen-by-screen as each screen is migrated (Plan 03 finishes
+   the rollout). The .screen-sub RULE itself stays defined here until every
+   screen's markup is migrated. */
 .screen-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 24px;
-  padding-bottom: 18px;
+  padding-bottom: 12px;
   border-bottom: 1px solid var(--border-faint);
 }
-.screen-header-left { display: flex; flex-direction: column; gap: 6px; }
+.screen-header-left {
+  display: flex;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
 .screen-tag {
-  font-size: 9.5px;
+  font-size: 10px;
   letter-spacing: 0.28em;
   text-transform: uppercase;
   color: var(--teal);
@@ -50,16 +62,28 @@
 .screen-title {
   font-family: var(--font);
   font-weight: 700;
-  font-size: 36px;
+  font-size: 16px;
   letter-spacing: -0.01em;
   color: var(--text);
-  line-height: 1.05;
+  line-height: 1.2;
 }
 .screen-sub {
   font-size: 12px;
   color: var(--text-dim);
   letter-spacing: 0.02em;
   max-width: 640px;
+}
+/* D-21: the live inline status span appended after the title on the same
+   row (e.g. "1095 loaded · 0 enabled", "4 profiles · default active").
+   Truncates before it can push the action buttons off the row. */
+.screen-status {
+  font-size: 12px;
+  color: var(--text-dim);
+  letter-spacing: 0.02em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .screen-actions {
   display: flex;
@@ -255,9 +279,12 @@
 .search input::placeholder { color: var(--gray); }
 .search-glyph { color: var(--gray); }
 
-/* Tabs */
+/* Tabs — Phase 49.4 Plan 01 Task 3: flex-wrap so 5+ items (e.g. Soul
+   persona tabs) wrap to a second row instead of clipping or
+   horizontal-scrolling; .tab gets a max-width + ellipsis for long labels. */
 .tabs {
   display: flex;
+  flex-wrap: wrap;
   gap: 4px;
   border-bottom: 1px solid var(--border-faint);
 }
@@ -274,6 +301,10 @@
   cursor: pointer;
   font-family: var(--font);
   transition: color 0.18s, border-color 0.18s;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .tab:hover { color: var(--text-dim); }
 .tab.is-active { color: var(--teal); border-bottom-color: var(--teal); }
@@ -413,7 +444,10 @@ pre.code .s  { color: var(--teal-bright); }
 pre.code .n  { color: var(--amber); }
 pre.code .v  { color: var(--text); }
 
-/* Soul editor */
+/* Soul editor — Phase 49.4 Plan 01 Task 3: bounded height so a long
+   SOUL.md scrolls inside its own panel rather than growing the page; the
+   persona tabs and SAVE/REVERT buttons above .soul-grid are unaffected by
+   this panel's internal scroll. */
 .soul-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -430,10 +464,12 @@ pre.code .v  { color: var(--text); }
   flex-direction: column;
   gap: 10px;
   min-height: 480px;
+  max-height: 640px;
 }
-.soul-preview { background: rgba(22,27,34,0.55); }
+.soul-preview { background: rgba(22,27,34,0.55); overflow-y: auto; }
 .soul-editor textarea {
   flex: 1;
+  min-height: 0;
   background: transparent;
   border: none;
   outline: none;
@@ -442,6 +478,8 @@ pre.code .v  { color: var(--text); }
   font-family: var(--font);
   font-size: 12px;
   line-height: 1.7;
+  overflow-y: auto;
+  overflow-wrap: break-word;
 }
 .soul-preview-body {
   flex: 1;
@@ -506,10 +544,26 @@ pre.code .v  { color: var(--text); }
   line-height: 1.5;
 }
 
-/* Schedules table */
+/* Schedules table
+   Phase 49.4 Plan 09 (D-12/D-13): 8 columns — dot / JOB / SCHEDULE /
+   DELIVERY / LAST RUN / NEXT RUN (new) / STATE / ACTIONS. The JOB column
+   widened from a bare `1fr` to `minmax(160px, 1.6fr)` so the full job name
+   (no more 2-char truncation) has real room; SCHEDULE/DELIVERY/LAST
+   RUN/NEXT RUN narrowed slightly to make room. `ScheduleRowView` and
+   `ScheduleGhostRow` both render exactly 8 children matching this
+   template — verified in each component's doc comment.
+
+   Phase 49.6 Plan 02 (D-01/D-04, UI-SPEC Structural Note 1): widened to 9
+   columns — dot / JOB / SCHEDULE / DELIVERY / LAST RUN / NEXT RUN /
+   PROFILE (new, 90px) / STATE / ACTIONS. JOB's flex ratio narrowed from
+   1.6fr to 1.4fr to make room for the new track. All THREE sites that
+   declare children against this template — the head row
+   (`ScreenSchedules`), `ScheduleRowView`, and `ScheduleGhostRow` — moved
+   from 8 to 9 children together in the same commit, or the head labels
+   desync from the data cells. */
 .sched-row {
   display: grid;
-  grid-template-columns: 22px 1fr 150px 140px 110px 90px 220px;
+  grid-template-columns: 22px minmax(160px, 1.4fr) 140px 120px 100px 100px 90px 90px 200px;
   align-items: center;
   gap: 14px;
   padding: 12px 14px;
@@ -517,6 +571,24 @@ pre.code .v  { color: var(--text); }
   border: 1px solid var(--border-faint);
   border-radius: 8px;
   font-size: 11.5px;
+}
+/* Phase 49.6 Plan 02 (D-01, UI-SPEC E2): the PROFILE cell. Clips overflow
+   with an ellipsis rather than reflowing the 9-column grid (E2 overflow
+   backstop — a slug wider than the 90px column truncates, full name stays
+   reachable via the row's own title attribute path). --sp-1 only, per the
+   on-grid spacing discipline .sched-bp-* already established (screens.css
+   D-10 comment). No new CSS custom property. */
+.sched-profile-cell {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  overflow: hidden;
+  white-space: nowrap;
+}
+.sched-profile-cell .row-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .sched-row.head {
   background: none;
@@ -528,6 +600,17 @@ pre.code .v  { color: var(--text); }
   color: var(--gray);
 }
 .sched-row.is-invalid { opacity: 0.55; }
+/* D-12: the shared `.row-title` rule (line ~365) is nowrap+ellipsis — the
+   two-character truncation the operator screenshotted. Scoped override:
+   wraps to a second line instead, never re-truncates. More specific than
+   `.row-title` alone (descendant selector) so it wins regardless of source
+   order. */
+.sched-row .row-title {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  overflow-wrap: break-word;
+}
 .sched-cron {
   font-family: var(--font);
   color: var(--teal);
@@ -537,7 +620,11 @@ pre.code .v  { color: var(--text); }
   border-radius: 4px;
   border: 1px solid var(--border-faint);
   display: inline-block;
-  width: max-content;
+  max-width: 100%;
+  height: auto;
+  white-space: normal;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 /* Phase 46.9 Plan 04 (D-06): STATE column pill + .tgl toggle, ACTIONS column
    (RUN NOW / EDIT / DELETE). Added to wire the previously-static pill into a
@@ -555,6 +642,164 @@ pre.code .v  { color: var(--text); }
   justify-content: flex-end;
   gap: 6px;
   flex-wrap: wrap;
+}
+
+/* Phase 49.4 Plan 09 (D-11): schedule editor mode-picker tabs — reuses the
+   existing .tabs/.tab all-caps visual language (Skills screen) verbatim;
+   .sched-mode-tabs only adds this editor's own vertical spacing. */
+.sched-mode-tabs {
+  margin: 4px 0 2px;
+}
+/* Advanced mode's humanized next-run preview text and any other
+   long-cron/humanized-text surface in the editor — soft-wraps instead of
+   overflowing (D-11 long-text). */
+.sched-next-run {
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+.sched-cron-input {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  font-family: var(--font);
+  resize: vertical;
+}
+
+/* Phase 49.5 Plan 01 (D-02/D-10): Blueprints tab card grid + Set-up form.
+   New classes on-grid per D-10 (--sp-1/2/4 only — 4/8/16px). Accent teal is
+   reserved for CTA buttons/active-tab/module-tag/section-labels/focus, so
+   none of these introduces a teal border or icon. */
+.sched-bp-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+/* Phase 49.6 Plan 04 (D-10/D-13): curated-vs-saved badge (bare `.pill`, no
+   colour modifier — accent teal stays reserved per the comment above) sits
+   next to `.card-title` inside its own flex row, which is what lets the
+   title truncate independently of the Set-up/Cancel button. New class uses
+   `gap: var(--sp-1)` for spacing only, no new CSS custom property. */
+.sched-bp-saved {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+  flex: 1;
+  min-width: 0;
+}
+.sched-bp-head .card-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+/* Phase 49.6 Plan 04 (D-13, UI-SPEC E9): the saved-blueprint read-only
+   Set-up preview — clips within the card rather than expanding it past the
+   grid track (the prompt line arrives already truncated from the server,
+   so this is a backstop, not the primary length control). No new CSS
+   custom property. */
+.sched-bp-preview {
+  overflow: hidden;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+.sched-bp-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: var(--sp-1);
+}
+.sched-bp-tag {
+  display: inline-flex;
+  padding: 3px 8px;
+  font-size: 10px;
+  font-family: var(--font);
+  font-weight: 400;
+  color: var(--text-dim);
+  background: var(--bg-input);
+  border: 1px solid var(--border-faint);
+  border-radius: 4px;
+  letter-spacing: 0.02em;
+}
+/* Solid, not the app's usual dashed .card-footer treatment — a deliberate,
+   declared deviation, not an oversight (screenshots show a solid line).
+   Margin uses --sp-4 (16px), not the plan's literal 12px: UI-SPEC's
+   Spacing Scale locks every new class in this phase, .sched-bp-divider
+   named explicitly, to 4/8/16px only (checker-approved Dimension 5: PASS)
+   — the plan's own <read_first> names the UI-SPEC as binding. */
+.sched-bp-divider {
+  border-top: 1px solid var(--border-faint);
+  margin: var(--sp-4) 0;
+}
+.sched-bp-2col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--sp-4);
+}
+@media (max-width: 900px) {
+  .sched-bp-2col {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Phase 49.6 Plan 02 (D-02/D-04, UI-SPEC Structural Note 3): the Jobs-tab
+   store selector. Copies `ToolsProfileBar`'s trigger+dropdown INTERACTION
+   pattern (`tools/profile_bar.rs`) but is entirely net-new CSS here —
+   `tools.css`'s `tools-profile-*` classes are a scoped `document::Link` on
+   the Tools screen only and are never loaded on this screen. On-grid per
+   D-10's discipline (same as `.sched-bp-*` above): --sp-1/2/4 only, no new
+   CSS custom property. Accent teal stays reserved for CTA buttons, the
+   active-tab underline, `.pill.teal` badges and focus rings — never this
+   selector's closed-state label. */
+.sched-scope-bar {
+  position: relative;
+  display: inline-flex;
+}
+.sched-scope-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 6px 10px;
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border-faint);
+  border-radius: 6px;
+  cursor: pointer;
+}
+/* Long profile slug in the trigger truncates with ellipsis rather than
+   widening the screen header (UI-SPEC E1 long-text backstop). */
+.sched-scope-trigger span:first-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 160px;
+}
+.sched-scope-menu {
+  position: absolute;
+  top: calc(100% + var(--sp-1));
+  right: 0;
+  z-index: 20;
+  min-width: 180px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--bg-card, #161b22);
+  border: 1px solid var(--border-faint);
+  border-radius: 6px;
+  padding: var(--sp-1) 0;
+}
+.sched-scope-item {
+  padding: 8px 12px;
+  font-size: 11px;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.sched-scope-item:hover {
+  background: var(--bg-input);
 }
 
 /* Gateway platform cards */
@@ -586,6 +831,276 @@ pre.code .v  { color: var(--text); }
 .plat-name { font-size: 14px; font-weight: 700; color: var(--text); }
 .plat-state { font-size: 10px; letter-spacing: 0.16em; color: var(--gray); text-transform: uppercase; }
 .plat-card.connected .plat-state { color: var(--teal); }
+
+/* Phase 49.3 Plan 01 (D-06/D-07/E1): Gateway screen ghost skeleton + help
+   text + scope selector. New classes on-grid per D-10; .plat-card itself
+   keeps its pre-existing off-grid padding/gap unmodified. */
+.plat-card--ghost {
+  opacity: 0.35;
+  pointer-events: none;
+}
+.plat-card-help {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+  margin: 0;
+}
+.gw-scope-select {
+  margin-top: var(--sp-2);
+  background: rgba(22,27,34,0.65);
+  border: 1px solid var(--border-faint);
+  color: var(--text);
+  border-radius: 6px;
+  padding: var(--sp-1) var(--sp-2);
+  font: inherit;
+  max-width: 220px;
+  text-overflow: ellipsis;
+}
+.gw-scope-select:focus {
+  outline: none;
+  border-color: var(--teal-dim);
+  color: var(--teal);
+}
+.gw-scope-select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.tgl--disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* Phase 49.4 Plan 09 (D-10): Gateway schedules status card row list — the
+   card reuses .plat-card/.kv/.plat-card--ghost/.plat-card-help/.pill
+   verbatim (no second skeleton treatment); these are only the new
+   per-job-row layout inside the card. */
+.sched-card-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sched-card-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+}
+.sched-card-row-name {
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.sched-card-row-next {
+  color: var(--gray);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+/* Phase 49.3 Plan 05 (D-05/E5): REST API server card form — enable
+   toggle already covered by .tgl above; these are the new field/warning/
+   confirm classes the staged host/port/public_opt_in/key form needs. New
+   classes on-grid per D-10 — not a re-theme of .plat-card. */
+.gw-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.gw-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.gw-field label {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.gw-input--mono {
+  font-family: var(--font-mono);
+}
+/* Phase 49.3 Plan 03 (D-06/D-10/E2/E6): chat-platform config form overlay +
+   shared whitelist editor. New classes on-grid per D-10 (--sp-1/2/4/6/7/9
+   only — --sp-3/--sp-5 are reserved for .plat-card's own pre-existing
+   off-grid values, not reused here). */
+.gw-form-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+}
+.gw-form-modal {
+  background: var(--bg, #0d1117);
+  border: 1px solid var(--border-faint);
+  border-radius: 12px;
+  width: min(480px, calc(100% - var(--sp-6) * 2));
+  max-height: calc(100vh - var(--sp-9) * 2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-4);
+  padding: var(--sp-6);
+  overflow-y: auto;
+}
+.gw-form-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+}
+.gw-form-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text);
+}
+.gw-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+}
+.gw-field-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+.gw-field-help {
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--text-dim);
+  margin: 0;
+}
+.gw-input {
+  background: var(--bg-input, #11161d);
+  border: 1px solid var(--border, #2a3138);
+  border-radius: 8px;
+  color: var(--text);
+  padding: var(--sp-2) var(--sp-4);
+  font-size: 13px;
+  font: inherit;
+  width: 100%;
+  text-overflow: ellipsis;
+}
+.gw-input:focus {
+  outline: none;
+  border-color: var(--teal-dim);
+}
+.gw-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: 12px;
+  color: var(--text);
+}
+.gw-static-note {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  margin: 0;
+  padding: var(--sp-2);
+  border: 1px solid var(--border-faint);
+  border-radius: 6px;
+}
+.gw-warn {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--amber);
+  background: rgba(210, 153, 34, 0.08);
+  border: 1px solid rgba(210, 153, 34, 0.45);
+  border-radius: 6px;
+  padding: var(--sp-2);
+  margin: 0;
+  /* A warning banner must never be shrunk below its own text. `.gw-warn` is
+     used inside `.panel` (display:flex; flex-direction:column), and any
+     instance that also sets `overflow` (the aggregate degraded notice sets
+     `overflow-y:auto` for its scroll cap) has its automatic minimum size
+     computed as 0 rather than its content height — CSS Flexbox §4.5, where
+     min-height:auto resolves to 0 once overflow is not `visible`. That let
+     the degraded notice be squashed and clipped mid-glyph while the
+     overflow-free non-root banner beside it rendered correctly (UAT 49.6
+     test 5). `flex: none` opts every banner out of both grow and shrink, so
+     the fix cannot regress when a future banner adds its own overflow. */
+  flex: none;
+}
+.gw-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  border: 1px solid rgba(248, 81, 73, 0.42);
+  background: rgba(248, 81, 73, 0.06);
+  border-radius: 6px;
+}
+.gw-confirm p {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  margin: 0;
+}
+.gw-confirm-actions {
+  display: flex;
+  gap: var(--sp-2);
+}
+/* Duplicated from tools.css's .btn--danger — this screen does not load
+   tools.css (plan 01's CSS-scoping fix), same rationale as every other
+   class in this block. */
+.btn--danger {
+  color: var(--red);
+  background: rgba(248, 81, 73, 0.06);
+  border-color: rgba(248, 81, 73, 0.42);
+}
+.btn--danger:hover {
+  background: var(--red);
+  color: var(--bg);
+  border-color: var(--red);
+}
+.gw-advanced-toggle {
+  align-self: flex-start;
+}
+.gw-form-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-2);
+}
+.gw-form-errors {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+}
+.gw-whitelist-empty {
+  border: 1px solid var(--amber);
+  background: rgba(210, 153, 34, 0.1);
+  color: var(--amber);
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.gw-whitelist-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  max-height: 216px; /* ~6 rows, E6 overflow backstop */
+  overflow-y: auto;
+}
+.gw-whitelist-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.gw-whitelist-row-flag {
+  color: var(--red);
+  font-size: 11px;
+  white-space: nowrap;
+}
 
 /* Memory log */
 .mem-entry {
@@ -790,6 +1305,90 @@ pre.code .v  { color: var(--text); }
 .chat-progress-row .icon.spin { animation: rot 1.4s linear infinite; }
 .chat-progress-row .icon.done { color: var(--green); }
 @keyframes rot { to { transform: rotate(360deg); } }
+
+/* Phase 49.4 Plan 06 (D-01..D-04): tool-call containment. Every call
+   renders in its own capped, scrollable pane; three or more consecutive
+   calls collapse into one capped, scrollable group region under the same
+   contract. Default cap ~240px (~12 lines at this font-size/line-height);
+   expanded cap 45vh with a 320px floor — never unbounded, never a modal.
+   Chrome stays visually subordinate to the live conversation (Visual
+   Focal Points: Chat) — existing card/faint-border tokens only, never
+   the teal accent, so these panes never compete with the active stream. */
+.chat-progress-pane {
+  background: var(--bg-card);
+  border: 1px solid var(--border-faint);
+  border-radius: 6px;
+  padding: 6px 8px;
+  max-height: 240px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+.chat-progress-pane.is-expanded {
+  max-height: 45vh;
+  min-height: 320px;
+}
+/* A done-but-failed call keeps its error signal visible even collapsed
+   (D-03/T-49.4-06-03) — a left stripe on the pane itself, independent of
+   whether the pane is expanded. */
+.chat-progress-pane.has-error { border-left: 2px solid var(--red); }
+
+.chat-progress-group {
+  background: var(--bg-card);
+  border: 1px solid var(--border-faint);
+  border-radius: 6px;
+  padding: 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.chat-progress-group.is-expanded {
+  max-height: 45vh;
+  min-height: 320px;
+}
+/* A collapsed group can never hide a failure — see .chat-progress-group-head
+   error icon below, which renders regardless of scroll position. This
+   left stripe is the same at-a-glance signal the single-pane case gets. */
+.chat-progress-group.has-error { border-left: 2px solid var(--red); }
+
+.chat-progress-group-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0 4px;
+  background: var(--bg-card);
+  color: var(--text-dim);
+  font-size: 11px;
+}
+.chat-progress-group-head .tp-name { color: var(--text-dim); }
+
+.chat-progress-row .icon.error,
+.chat-progress-group-head .icon.error { color: var(--red); font-size: 10px; }
+
+/* Minimal ghost control — reuses the row's existing button vocabulary
+   (monospace, no accent color, no border-radius beyond neighbouring
+   controls, dim until hover). Right-aligned within the row/head via
+   margin-left: auto. */
+.chat-progress-toggle {
+  margin-left: auto;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-family: var(--font);
+  font-size: 11px;
+  line-height: 1;
+  padding: 0 4px;
+  cursor: pointer;
+  opacity: 0.55;
+}
+.chat-progress-toggle:hover { opacity: 1; }
 
 .chat-input-pill {
   display: flex;
@@ -1195,4 +1794,95 @@ pre.code .v  { color: var(--text); }
 @media (max-width: 900px) {
   .screen { padding: 96px 28px 60px; }
   .wheel-shell { position: fixed; top: 16px; left: 16px; }
+}
+
+/* Gateway schedules card — full-width top card + recent-failure disclosure.
+   The card spans every column of `.grid.wide` so it reads as one banner
+   across the top of the card scroll; `grid-column: 1 / -1` works against
+   the auto-fill track count without hardcoding a column number, so it
+   still spans correctly at every viewport width. */
+.plat-card--full {
+  grid-column: 1 / -1;
+}
+/* At full width the job rows would otherwise stretch their name and
+   timestamp to opposite edges of the viewport, which is unreadable on a
+   wide monitor. Cap the row list and let it wrap into columns instead. */
+.plat-card--full .sched-card-rows {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 6px 24px;
+}
+.plat-card--full .sched-card-rows > .kv,
+.plat-card--full .sched-card-rows > button {
+  grid-column: 1 / -1;
+}
+
+/* The recent-failure badge is a real button (it toggles the disclosure),
+   so it must not inherit the surrounding card's pointer/opacity chrome.
+   Keeps `.pill.red`'s own colours — only the affordance is added here. */
+.sched-fail-toggle {
+  cursor: pointer;
+  font: inherit;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.sched-fail-toggle:focus-visible {
+  outline: 2px solid var(--teal-dim);
+  outline-offset: 2px;
+}
+.sched-fail-caret {
+  font-size: 9px;
+  opacity: 0.8;
+}
+.sched-fail-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid rgba(248,81,73,0.35);
+  border-radius: 8px;
+  background: rgba(248,81,73,0.06);
+  cursor: default;
+}
+.sched-fail-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.sched-fail-item-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11px;
+}
+.sched-fail-item-name {
+  color: var(--text);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.sched-fail-item-when {
+  color: var(--text-dim);
+  white-space: nowrap;
+  flex: none;
+}
+/* Error text is arbitrary provider/script output: wrap and break long
+   unbroken tokens (URLs, paths) rather than letting one overflow the card
+   and force a horizontal scrollbar on the whole grid. */
+.sched-fail-item-err {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.sched-fail-item-err--none {
+  font-style: italic;
+  opacity: 0.75;
 }

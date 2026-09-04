@@ -1,4 +1,4 @@
-//! `hermes doctor` — configuration and dependency health check.
+//! `ironhermes doctor` — configuration and dependency health check.
 //!
 //! Extracted from main.rs `cmd_doctor` (Phase 35.1 D-03).
 //!
@@ -10,6 +10,8 @@ use ironhermes_core::config::{
     Config, WEB_ANSWER_PROVIDERS, WEB_EXTRACT_PROVIDERS, WEB_SEARCH_PROVIDERS,
 };
 use ironhermes_tools::credentials::ToolCredentials;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 /// Run the IronHermes doctor preflight check.
 ///
@@ -121,6 +123,11 @@ pub async fn run_doctor_check() -> Result<()> {
         print_check("Gateway PID (not running)", true);
     }
 
+    // 48.3-05 D-06: "is it running" and "where is its log" are the same
+    // question for an operator — report the gateway log path and freshness
+    // immediately after the PID liveness check above.
+    print_gateway_log_status(&home);
+
     // WR-03 (phase 47.4): flag profiles that may have been exfiltrated during the
     // CR-03 window, before plan 20 closed the `${...}` substitution path. A
     // pre-patch exploit persisted root's plaintext credential into the victim
@@ -170,6 +177,99 @@ fn print_profile_exposure_audit(home: &std::path::Path) {
 fn print_check(name: &str, ok: bool) {
     let icon = if ok { "OK".green() } else { "MISSING".yellow() };
     println!("  [{icon}] {name}");
+}
+
+// -----------------------------------------------------------------------
+// 48.3-05 D-06: gateway log status. Three supervision mechanisms
+// (systemd, launchd, the cron watchdog) now converge on ONE canonical
+// gateway log file — see `scripts/deploy/ironhermes-gateway.service`,
+// `scripts/deploy/com.ironhermes.gateway.plist`, and
+// `scripts/deploy/gateway-watchdog.sh`. This section names that path out
+// loud so an operator never again has to guess which file to grep.
+// -----------------------------------------------------------------------
+
+/// How long since the log's mtime before doctor reports it as stale. A
+/// stale log next to a live gateway PID is the exact false-negative shape
+/// that cost the 2026-08-27 investigation (48.3 D-06).
+const GATEWAY_LOG_FRESH_WINDOW: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// The single canonical resolver for the gateway's log path.
+///
+/// Must agree with the three writers: `scripts/deploy/ironhermes-gateway.service`
+/// (`StandardOutput=`/`StandardError=`), `scripts/deploy/com.ironhermes.gateway.plist`
+/// (`StandardOutPath`/`StandardErrorPath`), and `scripts/deploy/gateway-watchdog.sh`
+/// (`LOG_FILE`). If those move, this moves.
+fn gateway_log_path(home: &Path) -> PathBuf {
+    home.join("logs").join("gateway.log")
+}
+
+/// Render the gateway log status as lines, without printing.
+///
+/// `now` is a parameter rather than read from the clock so the stale/fresh
+/// boundary is testable without sleeping.
+fn gateway_log_lines(home: &Path, now: SystemTime) -> Vec<String> {
+    let path = gateway_log_path(home);
+    let path_str = path.display().to_string();
+    let mut lines = vec![format!("Gateway log: {path_str}")];
+
+    match std::fs::metadata(&path) {
+        Err(_) => {
+            lines.push(
+                "  does not exist yet — created by scripts/deploy/install.sh (or the cron watchdog) on first gateway start"
+                    .to_string(),
+            );
+        }
+        Ok(meta) => match meta.modified() {
+            Ok(modified) => {
+                let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
+                if age > GATEWAY_LOG_FRESH_WINDOW {
+                    let age_hours = age.as_secs() / 3600;
+                    let age_days = age_hours / 24;
+                    let age_desc = if age_days >= 1 {
+                        format!("{age_days}d old")
+                    } else {
+                        format!("{age_hours}h old")
+                    };
+                    lines.push(format!(
+                        "  stale — last written {age_desc} (older than the {}-hour freshness window)",
+                        GATEWAY_LOG_FRESH_WINDOW.as_secs() / 3600
+                    ));
+                } else {
+                    lines.push("  current — written within the last 24 hours".to_string());
+                }
+            }
+            Err(_) => {
+                lines.push("  exists, but its modification time could not be read".to_string());
+            }
+        },
+    }
+
+    lines
+}
+
+/// Print the gateway log status.
+///
+/// For the existence line, uses `print_check` (missing = healthy: a
+/// gateway that never ran has no log). For the stale case, follows
+/// `print_profile_exposure_audit`'s precedent and does NOT use
+/// `print_check`'s `false` branch — its `MISSING` rendering reads as "this
+/// check could not run" rather than "this is what I found."
+fn print_gateway_log_status(home: &Path) {
+    let path = gateway_log_path(home);
+    let lines = gateway_log_lines(home, SystemTime::now());
+    let label = format!("Gateway log ({})", path.display());
+
+    let is_stale = lines.iter().any(|l| l.to_lowercase().contains("stale"));
+    if is_stale {
+        println!("  [{}] {label}", "STALE".yellow().bold());
+    } else {
+        // Missing-file and current-file are both healthy/informational, not
+        // a failure: a gateway that has never run simply has no log yet.
+        print_check(&label, true);
+    }
+    for line in lines.into_iter().skip(1) {
+        println!("  {}", line.dimmed());
+    }
 }
 
 // -----------------------------------------------------------------------
@@ -802,6 +902,111 @@ mod tests {
         assert!(
             !lines.is_empty(),
             "doctor must still render provider status after a sealed vault"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // 48.3-05 D-06: gateway log status (`gateway_log_lines`) tests.
+    //
+    // `now` is always injected explicitly so the stale/fresh boundary is
+    // testable without sleeping — see `gateway_log_lines`'s doc comment.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn gateway_log_lines_always_names_the_absolute_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        let now = std::time::SystemTime::now();
+        let expected_path = gateway_log_path(home);
+        let expected_path_str = expected_path.to_string_lossy().to_string();
+
+        // Missing state.
+        let lines = gateway_log_lines(home, now);
+        assert!(
+            lines.iter().any(|l| l.contains(&expected_path_str)),
+            "missing-file lines must name the absolute canonical path: {lines:?}"
+        );
+
+        // Fresh state.
+        std::fs::create_dir_all(expected_path.parent().unwrap()).unwrap();
+        std::fs::write(&expected_path, b"log line\n").unwrap();
+        let lines = gateway_log_lines(home, now);
+        assert!(
+            lines.iter().any(|l| l.contains(&expected_path_str)),
+            "fresh-file lines must name the absolute canonical path: {lines:?}"
+        );
+
+        // Stale state.
+        let stale_now = now
+            .checked_add(GATEWAY_LOG_FRESH_WINDOW + std::time::Duration::from_secs(60))
+            .unwrap();
+        let lines = gateway_log_lines(home, stale_now);
+        assert!(
+            lines.iter().any(|l| l.contains(&expected_path_str)),
+            "stale-file lines must name the absolute canonical path: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn gateway_log_lines_reports_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        let now = std::time::SystemTime::now();
+
+        let lines = gateway_log_lines(home, now);
+        let joined = lines.join("\n").to_lowercase();
+        assert!(
+            joined.contains("does not exist") || joined.contains("not exist"),
+            "missing-file lines must say the file does not exist yet: {lines:?}"
+        );
+        assert!(
+            joined.contains("install.sh"),
+            "missing-file lines must name the installer as the thing that creates it: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn gateway_log_lines_reports_stale_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        let log_path = gateway_log_path(home);
+        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        std::fs::write(&log_path, b"old\n").unwrap();
+
+        // now is far enough past the file's mtime (roughly "now" at write
+        // time) to land outside the freshness window.
+        let now = std::time::SystemTime::now()
+            .checked_add(GATEWAY_LOG_FRESH_WINDOW + std::time::Duration::from_secs(3600))
+            .unwrap();
+
+        let lines = gateway_log_lines(home, now);
+        let joined = lines.join("\n").to_lowercase();
+        assert!(joined.contains("stale"), "stale lines must say stale: {lines:?}");
+        assert!(
+            joined.contains("age") || joined.contains("old") || joined.contains("hour") || joined.contains("day"),
+            "stale lines must state the age: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn gateway_log_lines_reports_fresh_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let home = dir.path();
+        let log_path = gateway_log_path(home);
+        std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+        std::fs::write(&log_path, b"fresh\n").unwrap();
+
+        let now = std::time::SystemTime::now();
+
+        let lines = gateway_log_lines(home, now);
+        let joined = lines.join("\n").to_lowercase();
+        assert!(
+            joined.contains("current"),
+            "fresh-file lines must report the log as current: {lines:?}"
+        );
+        assert!(
+            !joined.contains("stale"),
+            "fresh-file lines must not say stale: {lines:?}"
         );
     }
 }

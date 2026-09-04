@@ -11,6 +11,8 @@
 //! `chat-mini` + `chat-stream` + `chat-input-pill` layout that consumes
 //! these types via context.
 
+use std::collections::HashMap;
+
 #[cfg(target_arch = "wasm32")]
 use dioxus::core::use_drop;
 use dioxus::html::FileData;
@@ -23,13 +25,25 @@ use dioxus::prelude::*;
 use crate::protocol::ChatAttachmentRow;
 
 /// Assistant avatar — copper low-poly wings logo used on agent chat bubbles.
+// IN-01 (was stale): the item-level allows below used to cite the
+// `legacy-shell` Cargo feature ("dead under `--all-features`, where
+// `legacy-shell` mounts WarpHermes instead of HermesApp") — that feature and
+// WarpHermes were removed in this same phase (see `components/mod.rs`'s own
+// removal note), so that rationale no longer describes anything that exists.
 // The chat-screen types below (AVATAR_LOGO, ChatBubbleKind, ToolRow, ChatBubble +
 // its constructors) are all consumed by the HermesApp subtree (mod.rs receive
 // loop / send handler construct ChatBubble at 204/246/302/356/369, ToolRow at
-// 212; ScreenChat renders AVATAR_LOGO). In a binary crate `pub` does not keep
-// unreferenced items alive, so under `--all-features` — where `legacy-shell`
-// mounts WarpHermes instead of HermesApp — this whole cluster reads as dead.
-// Live in the default (non-legacy-shell) build; hence item-level allows below.
+// 212; ScreenChat renders AVATAR_LOGO) — HermesApp is now the crate's ONLY
+// root, unconditionally, so most of this cluster is live on every build and
+// its allow is vestigial. The genuinely still-dead members of this cluster
+// (the Audio/Image/Video bubble variant + constructors, and
+// `auto_follow_scrollable_progress_tail`'s native no-op) are constructed only
+// from `#[cfg(target_arch = "wasm32")]` branches of mod.rs's WebSocket
+// receive loop — a native (non-wasm32) compile of this crate, e.g. `cargo
+// clippy -p iron_hermes_ui --features server`, never reaches those branches,
+// so `pub` alone (this is a binary crate) does not keep them referenced
+// there. That wasm32-vs-native split, not any feature flag, is the real
+// reason an allow is still needed on those specific items.
 #[allow(dead_code)]
 const AVATAR_LOGO: Asset = asset!("/assets/i_hermes_logo.png");
 
@@ -40,7 +54,7 @@ const AVATAR_LOGO: Asset = asset!("/assets/i_hermes_logo.png");
 /// Bubble role — drives the CSS class that selects user / assistant /
 /// error styling. Maps 1:1 to `chat-msg.user`, `chat-msg.assistant`, and
 /// an error variant rendered as `chat-bubble is-error`.
-// dead under --all-features/legacy-shell; see AVATAR_LOGO note above.
+// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
 #[allow(dead_code)]
 #[derive(Clone, PartialEq, Debug)]
 pub enum ChatBubbleKind {
@@ -76,7 +90,7 @@ pub enum ChatBubbleKind {
 /// `done` flips to `true` when the matching `ChatStreamEvent::ToolCallEnd`
 /// arrives; `success` carries the server-reported outcome. Renders as
 /// `.chat-progress-row.is-running` / `.is-done.is-success` / `.is-done.is-error`.
-// dead under --all-features/legacy-shell; see AVATAR_LOGO note above.
+// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
 #[allow(dead_code)]
 #[derive(Clone, PartialEq, Debug)]
 pub struct ToolRow {
@@ -86,12 +100,101 @@ pub struct ToolRow {
     pub success: bool,
 }
 
+// ---------------------------------------------------------------------------
+// Tool-call grouping transform (Phase 49.4 Plan 06, D-01..D-04)
+// ---------------------------------------------------------------------------
+
+/// Threshold at which consecutive tool-call rows collapse into one counted,
+/// capped group region (D-04) instead of rendering as individual capped
+/// panes. Below this count, each row renders as its own pane.
+// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
+#[allow(dead_code)]
+pub const TOOL_GROUP_THRESHOLD: usize = 3;
+
+/// Output item of `group_tool_rows` — either one ungrouped tool call
+/// (renders as a single capped pane) or a run of
+/// [`TOOL_GROUP_THRESHOLD`] or more consecutive calls (renders as one
+/// capped, counted group region with each member as its own pane inside).
+// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
+#[allow(dead_code)]
+#[derive(Clone, PartialEq, Debug)]
+pub enum ToolGroup {
+    /// A single tool call, not part of a group.
+    Single(ToolRow),
+    /// Three or more consecutive tool calls, rendered as one grouped region.
+    Group(Vec<ToolRow>),
+}
+
+// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
+#[allow(dead_code)]
+impl ToolGroup {
+    /// True when any member (or the single row) has not yet completed.
+    pub fn is_running(&self) -> bool {
+        match self {
+            ToolGroup::Single(row) => !row.done,
+            ToolGroup::Group(rows) => rows.iter().any(|r| !r.done),
+        }
+    }
+
+    /// True when at least one completed member reported failure — used so
+    /// the group header can show the error icon without expanding, so a
+    /// collapsed group never hides a failure.
+    pub fn has_failure(&self) -> bool {
+        match self {
+            ToolGroup::Single(row) => row.done && !row.success,
+            ToolGroup::Group(rows) => rows.iter().any(|r| r.done && !r.success),
+        }
+    }
+
+    /// Number of tool calls this item represents (always 1 for `Single`).
+    pub fn member_count(&self) -> usize {
+        match self {
+            ToolGroup::Single(_) => 1,
+            ToolGroup::Group(rows) => rows.len(),
+        }
+    }
+
+    /// Human-readable group-header label carrying the live member count
+    /// (e.g. "3 tool calls"). `None` for an ungrouped single pane, which
+    /// has no group-head chrome to label.
+    pub fn group_label(&self) -> Option<String> {
+        match self {
+            ToolGroup::Single(_) => None,
+            ToolGroup::Group(rows) => Some(format!("{} tool calls", rows.len())),
+        }
+    }
+}
+
+/// Group consecutive tool-call rows per D-04.
+///
+/// Every row inside a single bubble's `tool_rows` is consecutive by
+/// construction (the receive loop only ever pushes onto the currently
+/// streaming bubble), so the rule reduces to a slice-length check rather
+/// than a run-detection pass over a mixed sequence: fewer than
+/// [`TOOL_GROUP_THRESHOLD`] rows each become their own [`ToolGroup::Single`];
+/// at or above the threshold, all rows become one [`ToolGroup::Group`].
+/// Written as a slice transform (not bubble-aware) so a future caller
+/// spanning multiple bubbles can reuse it unchanged. Member order within a
+/// group preserves input order.
+// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
+#[allow(dead_code)]
+pub fn group_tool_rows(rows: &[ToolRow]) -> Vec<ToolGroup> {
+    if rows.is_empty() {
+        return Vec::new();
+    }
+    if rows.len() < TOOL_GROUP_THRESHOLD {
+        rows.iter().cloned().map(ToolGroup::Single).collect()
+    } else {
+        vec![ToolGroup::Group(rows.to_vec())]
+    }
+}
+
 /// One bubble in the chat stream — user, assistant, or error.
 ///
 /// `tool_rows` is mutated in-place by the receive loop in `mod.rs` when
 /// `ChatStreamEvent::ToolCallStart` / `ToolCallEnd` arrive for the
 /// currently-streaming assistant bubble.
-// dead under --all-features/legacy-shell; see AVATAR_LOGO note above.
+// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
 #[allow(dead_code)]
 #[derive(Clone, PartialEq, Debug)]
 pub struct ChatBubble {
@@ -125,7 +228,7 @@ pub struct ChatBubble {
     pub mention_reply: Option<String>,
 }
 
-// constructors dead under --all-features/legacy-shell; see AVATAR_LOGO note above.
+// constructors: stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
 #[allow(dead_code)]
 impl ChatBubble {
     pub fn user(id: u64, text: String) -> Self {
@@ -807,6 +910,259 @@ fn is_unauthorized_error<T>(result: &dioxus::Result<T>) -> bool {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tool-call pane/group rendering + auto-follow-tail (Phase 49.4 Plan 06)
+// ---------------------------------------------------------------------------
+
+/// Record whether the operator has scrolled away from the tail of a
+/// running tool-call pane or group, so auto-follow-tail can suppress
+/// itself and never yank a manual scroll-up back to the bottom
+/// (UI-SPEC E1 loading). No-op off wasm — there is no scrollable DOM there.
+#[cfg(target_arch = "wasm32")]
+fn on_scrollable_progress_scroll(
+    dom_id: &str,
+    state_key: &str,
+    mut scrolled_away_state: Signal<HashMap<String, bool>>,
+) {
+    if let Some(window) = web_sys::window() {
+        if let Some(doc) = window.document() {
+            if let Some(el) = doc.get_element_by_id(dom_id) {
+                let distance_from_bottom =
+                    el.scroll_height() - (el.scroll_top() + el.client_height());
+                scrolled_away_state
+                    .write()
+                    .insert(state_key.to_string(), distance_from_bottom > 24);
+            }
+        }
+    }
+}
+
+// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
+#[allow(dead_code)]
+#[cfg(not(target_arch = "wasm32"))]
+fn on_scrollable_progress_scroll(
+    _dom_id: &str,
+    _state_key: &str,
+    _scrolled_away_state: Signal<HashMap<String, bool>>,
+) {
+}
+
+/// Pin a running tool-call pane/group's own scroll container to the tail
+/// as content grows. Scoped to that single element only (queried by id) —
+/// never the page; the page-level bubble-stream auto-scroll above this
+/// component is a separate, pre-existing effect. No-op off wasm.
+#[cfg(target_arch = "wasm32")]
+fn auto_follow_scrollable_progress_tail(dom_id: &str) {
+    if let Some(window) = web_sys::window() {
+        if let Some(doc) = window.document() {
+            if let Some(el) = doc.get_element_by_id(dom_id) {
+                el.set_scroll_top(el.scroll_height());
+            }
+        }
+    }
+}
+
+// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
+#[allow(dead_code)]
+#[cfg(not(target_arch = "wasm32"))]
+fn auto_follow_scrollable_progress_tail(_dom_id: &str) {}
+
+/// Walk every bubble's grouped tool rows and auto-follow the tail of every
+/// pane/group that is still running and that the operator has not
+/// scrolled away from. Called from a `use_effect` that subscribes to
+/// `bubbles` + the scrolled-away map, so it reruns as new tool rows
+/// stream in. wasm-only — there is no scrollable DOM to pin off wasm.
+#[cfg(target_arch = "wasm32")]
+fn auto_follow_running_tool_panes(bubbles: &[ChatBubble], scrolled_away: &HashMap<String, bool>) {
+    for b in bubbles.iter() {
+        let groups = group_tool_rows(&b.tool_rows);
+        for (idx, item) in groups.iter().enumerate() {
+            match item {
+                ToolGroup::Single(row) => {
+                    if row.done {
+                        continue;
+                    }
+                    let key = format!("{}-{idx}", b.id);
+                    if !*scrolled_away.get(&key).unwrap_or(&false) {
+                        auto_follow_scrollable_progress_tail(&format!("tool-pane-{key}"));
+                    }
+                }
+                ToolGroup::Group(members) => {
+                    let group_key = format!("{}-{idx}-group", b.id);
+                    if item.is_running() && !*scrolled_away.get(&group_key).unwrap_or(&false) {
+                        auto_follow_scrollable_progress_tail(&format!("tool-group-{group_key}"));
+                    }
+                    for (j, member) in members.iter().enumerate() {
+                        if member.done {
+                            continue;
+                        }
+                        let member_key = format!("{}-{idx}-{j}", b.id);
+                        if !*scrolled_away.get(&member_key).unwrap_or(&false) {
+                            auto_follow_scrollable_progress_tail(&format!("tool-pane-{member_key}"));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Render one tool-call row as a capped, scrollable pane with an inline
+/// expand toggle (D-01/D-02). Shared by an ungrouped single pane and a
+/// member pane inside a grouped region — the pane shape (and its toggle)
+/// is identical in both cases; only the surrounding chrome differs.
+///
+/// `key` must be stable across re-renders as new rows stream in — callers
+/// derive it from the bubble id plus the item's position (see
+/// `render_tool_group` and the `.chat-progress` render call site).
+// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
+#[allow(dead_code)]
+fn render_tool_pane(
+    tr: &ToolRow,
+    key: &str,
+    mut expanded_state: Signal<HashMap<String, bool>>,
+    scrolled_away_state: Signal<HashMap<String, bool>>,
+) -> Element {
+    let expanded = *expanded_state.read().get(key).unwrap_or(&false);
+    let state_class = if tr.done {
+        if tr.success {
+            "is-done is-success"
+        } else {
+            "is-done is-error"
+        }
+    } else {
+        "is-running"
+    };
+    // Fix: a done-but-failed call previously rendered the same green
+    // "done" icon as a success (icon color only ever keyed off `done`,
+    // never `success`) — the failure was visible only via `state_class`,
+    // which no CSS rule consumed. `icon error` restores the error signal
+    // the D-03/T-49.4-06-03 must-haves assume already exists.
+    let icon_class = if tr.done {
+        if tr.success {
+            "icon done"
+        } else {
+            "icon error"
+        }
+    } else {
+        "icon spin"
+    };
+    let icon_glyph = if tr.done { "\u{25cf}" } else { "\u{25d0}" };
+    let mut pane_class = String::from("chat-progress-pane");
+    if expanded {
+        pane_class.push_str(" is-expanded");
+    }
+    if tr.done && !tr.success {
+        pane_class.push_str(" has-error");
+    }
+    let dom_id = format!("tool-pane-{key}");
+    let scroll_dom_id = dom_id.clone();
+    let scroll_key = key.to_string();
+    let toggle_key = key.to_string();
+    rsx! {
+        div {
+            key: "{key}",
+            id: "{dom_id}",
+            class: "{pane_class}",
+            onscroll: move |_evt| {
+                on_scrollable_progress_scroll(&scroll_dom_id, &scroll_key, scrolled_away_state);
+            },
+            div {
+                class: "chat-progress-row {state_class}",
+                span { class: "{icon_class}", "{icon_glyph}" }
+                span { class: "tp-name", "{tr.name}" }
+                if !tr.args.is_empty() {
+                    span { class: "tp-args", " \u{b7} {tr.args}" }
+                }
+                button {
+                    class: "chat-progress-toggle",
+                    r#type: "button",
+                    "aria-label": if expanded { "Collapse tool output" } else { "Expand tool output" },
+                    onclick: move |_| {
+                        let cur = *expanded_state.read().get(&toggle_key).unwrap_or(&false);
+                        expanded_state.write().insert(toggle_key.clone(), !cur);
+                    },
+                    if expanded { "\u{2212}" } else { "+" }
+                }
+            }
+        }
+    }
+}
+
+/// Render a grouped region of [`TOOL_GROUP_THRESHOLD`] or more consecutive
+/// tool calls (D-04): a capped, scrollable `.chat-progress-group` with a
+/// sticky `.chat-progress-group-head` (live member count, running
+/// spinner, error icon) followed by each member as its own
+/// [`render_tool_pane`]. A collapsed group can never hide a failure — the
+/// header derives `has_failure` from every member, not just visible ones.
+// stale legacy-shell rationale removed (IN-01); see AVATAR_LOGO note above.
+#[allow(dead_code)]
+fn render_tool_group(
+    group: &ToolGroup,
+    key_prefix: &str,
+    mut expanded_state: Signal<HashMap<String, bool>>,
+    scrolled_away_state: Signal<HashMap<String, bool>>,
+) -> Element {
+    let members: &[ToolRow] = match group {
+        ToolGroup::Group(rows) => rows.as_slice(),
+        ToolGroup::Single(row) => std::slice::from_ref(row),
+    };
+    let group_key = format!("{key_prefix}-group");
+    let expanded = *expanded_state.read().get(&group_key).unwrap_or(&false);
+    let is_running = group.is_running();
+    let has_failure = group.has_failure();
+    let label = group.group_label().unwrap_or_default();
+    let mut group_class = String::from("chat-progress-group");
+    if expanded {
+        group_class.push_str(" is-expanded");
+    }
+    if has_failure {
+        group_class.push_str(" has-error");
+    }
+    let dom_id = format!("tool-group-{group_key}");
+    let scroll_dom_id = dom_id.clone();
+    let scroll_key = group_key.clone();
+    let toggle_key = group_key.clone();
+    rsx! {
+        div {
+            key: "{key_prefix}",
+            id: "{dom_id}",
+            class: "{group_class}",
+            onscroll: move |_evt| {
+                on_scrollable_progress_scroll(&scroll_dom_id, &scroll_key, scrolled_away_state);
+            },
+            div {
+                class: "chat-progress-group-head",
+                if is_running {
+                    span { class: "icon spin", "\u{25d0}" }
+                } else {
+                    span { class: "icon done", "\u{25cf}" }
+                }
+                span { class: "tp-name", "{label}" }
+                if has_failure {
+                    span { class: "icon error", "!" }
+                }
+                button {
+                    class: "chat-progress-toggle",
+                    r#type: "button",
+                    "aria-label": if expanded { "Collapse tool call group" } else { "Expand tool call group" },
+                    onclick: move |_| {
+                        let cur = *expanded_state.read().get(&toggle_key).unwrap_or(&false);
+                        expanded_state.write().insert(toggle_key.clone(), !cur);
+                    },
+                    if expanded { "\u{2212}" } else { "+" }
+                }
+            }
+            for (j , tr) in members.iter().enumerate() {
+                {
+                    let member_key = format!("{key_prefix}-{j}");
+                    render_tool_pane(tr, &member_key, expanded_state, scrolled_away_state)
+                }
+            }
+        }
+    }
+}
+
 #[component]
 pub fn ScreenChat(is_active: bool) -> Element {
     // Context lookups — every read drops its borrow before the rsx tree
@@ -896,6 +1252,20 @@ pub fn ScreenChat(is_active: bool) -> Element {
     let mut toast_msg: Signal<Option<String>> = use_signal(|| None);
     let toast_token: Signal<u64> = use_signal(|| 0_u64);
 
+    // Phase 49.4 Plan 06 (D-01/D-02): per-block expand-toggle state, keyed
+    // by "{bubble_id}-{item_index}" (see render_tool_pane/render_tool_group)
+    // so the key survives re-renders as new tool rows stream in. Local UI
+    // state only — no server round-trip — so a plain signal is enough; no
+    // optimistic/confirmed split (contrast skills.rs's toggle_states/
+    // confirmed_states, which exists there because that state reconciles
+    // against a server call). Claude's Discretion: expansion does NOT
+    // persist across a page reload — this map is in-memory only.
+    let tool_pane_expanded: Signal<HashMap<String, bool>> = use_signal(HashMap::new);
+    // Per-pane/group "operator scrolled away from the tail while running"
+    // flag, same key scheme — suppresses auto-follow-tail so a manual
+    // scroll-up inside a running pane is never yanked back to bottom.
+    let tool_pane_scrolled_away: Signal<HashMap<String, bool>> = use_signal(HashMap::new);
+
     // Fixed, single-instance id — ScreenChat is always-mounted exactly once
     // (unlike kanban's per-card ids, which need per-task uniqueness).
     const CHAT_ATTACH_INPUT_ID: &str = "chat-attach-input";
@@ -928,6 +1298,27 @@ pub fn ScreenChat(is_active: bool) -> Element {
             {
                 let _ = len; // suppress unused-variable on host builds
             }
+        }
+    });
+
+    // Phase 49.4 Plan 06 (D-01/D-02): auto-follow-tail for running
+    // tool-call panes/groups. Scoped to each pane/group's own scroll
+    // container by id — never the page (that is the effect above, left
+    // untouched). Subscribes to `bubbles` and the scrolled-away map so it
+    // reruns as new tool rows stream in or the operator scrolls within a
+    // running pane; there is no existing auto-scroll hook for this in the
+    // file to reuse, so this is implemented fresh.
+    use_effect(move || {
+        let bubbles_snapshot = bubbles.read().clone();
+        let scrolled_away_snapshot = tool_pane_scrolled_away.read().clone();
+        #[cfg(target_arch = "wasm32")]
+        {
+            auto_follow_running_tool_panes(&bubbles_snapshot, &scrolled_away_snapshot);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = bubbles_snapshot;
+            let _ = scrolled_away_snapshot;
         }
     });
 
@@ -1223,9 +1614,6 @@ pub fn ScreenChat(is_active: bool) -> Element {
                 div { class: "screen-header-left",
                     div { class: "screen-tag", "// MODULE 01" }
                     h1 { class: "screen-title", "Chat" }
-                    p { class: "screen-sub",
-                        "Streaming conversation with slash commands, live tool progress, and per-message token accounting."
-                    }
                 }
                 div { class: "screen-actions",
                     // Phase 46.7 Plan 05 (D-24): copyable workspace-path chip.
@@ -1584,27 +1972,36 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                             // out (rendered as the chip below instead).
                                             "{display_text}"
 
+                                            // Phase 49.4 Plan 06 (D-01..D-04): group_tool_rows
+                                            // runs BEFORE this render loop — grouping is a
+                                            // data transform, not a CSS effect. Each item
+                                            // renders as its own capped, scrollable pane
+                                            // (Single) or a capped, counted group region
+                                            // (Group), never as one unbounded `.chat-progress`
+                                            // dump — the fix for the operator's off-screen
+                                            // terminal-dump screenshots.
                                             if !b.tool_rows.is_empty() {
                                                 div { class: "chat-progress",
-                                                    for tr in b.tool_rows.iter() {
-                                                        {
-                                                            let state_class = if tr.done {
-                                                                if tr.success { "is-done is-success" } else { "is-done is-error" }
-                                                            } else {
-                                                                "is-running"
-                                                            };
-                                                            let icon_class = if tr.done { "icon done" } else { "icon spin" };
-                                                            let icon_glyph = if tr.done { "●" } else { "◐" };
-                                                            rsx! {
-                                                                div {
-                                                                    class: "chat-progress-row {state_class}",
-                                                                    span {
-                                                                        class: "{icon_class}",
-                                                                        "{icon_glyph}"
-                                                                    }
-                                                                    span { class: "tp-name", "{tr.name}" }
-                                                                    if !tr.args.is_empty() {
-                                                                        span { class: "tp-args", " · {tr.args}" }
+                                                    {
+                                                        let bubble_id = b.id;
+                                                        let groups = group_tool_rows(&b.tool_rows);
+                                                        rsx! {
+                                                            for (idx , item) in groups.iter().enumerate() {
+                                                                {
+                                                                    let key_prefix = format!("{bubble_id}-{idx}");
+                                                                    match item {
+                                                                        ToolGroup::Single(row) => render_tool_pane(
+                                                                            row,
+                                                                            &key_prefix,
+                                                                            tool_pane_expanded,
+                                                                            tool_pane_scrolled_away,
+                                                                        ),
+                                                                        ToolGroup::Group(_) => render_tool_group(
+                                                                            item,
+                                                                            &key_prefix,
+                                                                            tool_pane_expanded,
+                                                                            tool_pane_scrolled_away,
+                                                                        ),
                                                                     }
                                                                 }
                                                             }
@@ -2089,6 +2486,136 @@ pub fn ScreenChat(is_active: bool) -> Element {
                     },
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod group_tool_rows_tests {
+    use super::{group_tool_rows, ToolGroup, ToolRow, TOOL_GROUP_THRESHOLD};
+
+    fn row(name: &str, done: bool, success: bool) -> ToolRow {
+        ToolRow {
+            name: name.to_string(),
+            args: String::new(),
+            done,
+            success,
+        }
+    }
+
+    #[test]
+    fn threshold_is_three() {
+        assert_eq!(TOOL_GROUP_THRESHOLD, 3);
+    }
+
+    #[test]
+    fn empty_slice_produces_empty_output() {
+        let rows: Vec<ToolRow> = vec![];
+        assert_eq!(group_tool_rows(&rows), Vec::new());
+    }
+
+    #[test]
+    fn one_row_produces_one_single_pane_item() {
+        let rows = vec![row("read_file", true, true)];
+        let out = group_tool_rows(&rows);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0], ToolGroup::Single(_)));
+    }
+
+    #[test]
+    fn two_rows_produce_two_single_pane_items_no_group() {
+        let rows = vec![row("a", true, true), row("b", true, true)];
+        let out = group_tool_rows(&rows);
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|g| matches!(g, ToolGroup::Single(_))));
+    }
+
+    #[test]
+    fn three_rows_produce_one_group_item_with_member_count_three() {
+        let rows = vec![row("a", true, true), row("b", true, true), row("c", true, true)];
+        let out = group_tool_rows(&rows);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0], ToolGroup::Group(_)));
+        assert_eq!(out[0].member_count(), 3);
+    }
+
+    #[test]
+    fn five_rows_produce_one_group_item_with_member_count_five() {
+        let rows: Vec<ToolRow> = (0..5).map(|i| row(&format!("t{i}"), true, true)).collect();
+        let out = group_tool_rows(&rows);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].member_count(), 5);
+    }
+
+    #[test]
+    fn group_label_carries_live_member_count_for_three_and_five() {
+        let three: Vec<ToolRow> = (0..3).map(|i| row(&format!("t{i}"), true, true)).collect();
+        let five: Vec<ToolRow> = (0..5).map(|i| row(&format!("t{i}"), true, true)).collect();
+        assert_eq!(
+            group_tool_rows(&three)[0].group_label(),
+            Some("3 tool calls".to_string())
+        );
+        assert_eq!(
+            group_tool_rows(&five)[0].group_label(),
+            Some("5 tool calls".to_string())
+        );
+    }
+
+    #[test]
+    fn single_pane_has_no_group_label() {
+        let rows = vec![row("a", true, true)];
+        assert_eq!(group_tool_rows(&rows)[0].group_label(), None);
+    }
+
+    #[test]
+    fn group_reports_running_when_any_member_not_done() {
+        let rows = vec![row("a", true, true), row("b", false, false), row("c", true, true)];
+        let out = group_tool_rows(&rows);
+        assert!(out[0].is_running());
+    }
+
+    #[test]
+    fn group_reports_done_when_every_member_done() {
+        let rows = vec![row("a", true, true), row("b", true, true), row("c", true, true)];
+        let out = group_tool_rows(&rows);
+        assert!(!out[0].is_running());
+    }
+
+    #[test]
+    fn group_reports_has_failure_when_any_done_member_unsuccessful() {
+        let rows = vec![row("a", true, true), row("b", true, false), row("c", true, true)];
+        let out = group_tool_rows(&rows);
+        assert!(out[0].has_failure());
+    }
+
+    #[test]
+    fn group_reports_no_failure_when_all_done_members_succeeded() {
+        let rows = vec![row("a", true, true), row("b", true, true), row("c", true, true)];
+        let out = group_tool_rows(&rows);
+        assert!(!out[0].has_failure());
+    }
+
+    #[test]
+    fn grouping_is_stable_under_mid_turn_growth() {
+        let five: Vec<ToolRow> = (0..5).map(|i| row(&format!("t{i}"), true, true)).collect();
+        let first_three = &five[..3];
+        let out_three = group_tool_rows(first_three);
+        let out_five = group_tool_rows(&five);
+        assert_eq!(out_three.len(), 1);
+        assert_eq!(out_five.len(), 1);
+        assert!(matches!(out_three[0], ToolGroup::Group(_)));
+        assert!(matches!(out_five[0], ToolGroup::Group(_)));
+    }
+
+    #[test]
+    fn member_order_within_group_preserves_input_order() {
+        let rows = vec![row("first", true, true), row("second", true, true), row("third", true, true)];
+        let out = group_tool_rows(&rows);
+        if let ToolGroup::Group(members) = &out[0] {
+            let names: Vec<&str> = members.iter().map(|r| r.name.as_str()).collect();
+            assert_eq!(names, vec!["first", "second", "third"]);
+        } else {
+            panic!("expected a Group variant");
         }
     }
 }

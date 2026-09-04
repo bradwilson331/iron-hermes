@@ -31,6 +31,26 @@
 //! the parsed value, including a secret pasted into `env`/`headers`) is
 //! never forwarded — the same discipline `dotenvy::Error::LineParse`'s
 //! full-line-embed leak (CR-05/CR-06) established as precedent.
+//!
+//! ## D-05 probe-path carve-out
+//!
+//! One rule above is deliberately relaxed: raw transport `Display` output
+//! may now be forwarded into [`McpProbeResult::message`], but ONLY from the
+//! non-OAuth probe path — [`connect_and_list_non_oauth`] and [`run_probe`] —
+//! and nowhere else in this module. The paste/parse paths
+//! (`parse_one_entry`, `parse_snippet_text`) keep the fixed, constructed
+//! strings the discipline above describes; this carve-out does not touch
+//! them. Two controls, both pre-existing, permit it: the probe path is
+//! reachable only after an authenticated session AND
+//! `check_mcp_write_gate()` (`security.web_config_write_enabled`) —
+//! [`probe_mcp_server`] checks the gate before calling [`run_probe`] — and
+//! every forwarded string is passed through
+//! `ironhermes_mcp::security::sanitize_error` before being composed into
+//! `message`, so a credential-shaped substring (a pasted `headers` secret,
+//! for instance) is redacted rather than echoed back to the browser. It was
+//! worth relaxing: the generic "could not establish an MCP connection" this
+//! carve-out replaces turned a one-line 401 into a multi-hour investigation
+//! (see `48.3-CONTEXT.md` D-05).
 
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -76,6 +96,13 @@ pub struct McpSnippetEntry {
     pub name: String,
     pub draft: Option<McpServerDraft>,
     pub error: Option<String>,
+    /// D-07: `Some(stored_name)` when the pasted key did not survive
+    /// `sanitize_server_name` unchanged — `draft.name` (when `draft` is
+    /// `Some`) IS `stored_name`; this field exists so the wizard can show
+    /// "imported as `stored_name`" without re-deriving the comparison
+    /// itself. `None` when nothing was renamed, so the common case
+    /// discloses nothing extra.
+    pub sanitized_name: Option<String>,
 }
 
 /// The full result of [`parse_mcp_snippet`] — one entry per server name found
@@ -292,14 +319,26 @@ fn config_to_draft(
 /// panics, never embeds the raw parser `Display` (which can echo back a
 /// secret value in `env`/`headers`) or the raw snippet text in the returned
 /// message — only fixed, constructed strings naming the server/field.
+///
+/// D-07: a pasted key that does not survive `sanitize_server_name` unchanged
+/// (e.g. the hyphenated `atomic-mail`, or a URL-shaped key like
+/// `https://mcp.example.com/docs`) is no longer rejected — it is sanitized
+/// and imported under the sanitized name, which becomes `McpServerDraft.name`.
+/// A URL-shaped key sanitizing and importing (rather than erroring) is
+/// intentional: that is exactly the Claude-Desktop-snippet shape D-07 exists
+/// to accept. An empty or whitespace-only key IS still rejected — without
+/// this guard, `sanitize_server_name("")` returns `"_"`, which would
+/// silently import a server literally named `_`. Cross-entry collision
+/// detection (two pasted keys sanitizing to the same stored name) is NOT
+/// this function's job — it has no visibility into sibling entries — and is
+/// handled by [`parse_snippet_text`], which calls this function once per
+/// entry.
 #[cfg(not(target_arch = "wasm32"))]
 fn parse_one_entry(name: &str, raw: RawEntryValue) -> Result<McpServerDraft, String> {
-    if ironhermes_mcp::sanitize_server_name(name) != name {
-        return Err(format!(
-            "server name '{name}' contains characters outside [A-Za-z0-9_]; \
-             rename it before importing"
-        ));
+    if name.trim().is_empty() {
+        return Err("server name is empty or whitespace-only; provide a name before importing".to_string());
     }
+    let stored = ironhermes_mcp::sanitize_server_name(name);
 
     let cfg: ironhermes_mcp::McpServerConfig = match raw {
         RawEntryValue::Json(value) => serde_json::from_value(value).map_err(|_| {
@@ -310,26 +349,56 @@ fn parse_one_entry(name: &str, raw: RawEntryValue) -> Result<McpServerDraft, Str
         })?,
     };
 
-    config_to_draft(name, cfg)
+    config_to_draft(&stored, cfg)
 }
 
 /// Pure core of [`parse_mcp_snippet`] — no disk I/O, no global state, directly
 /// unit-testable with hand-built snippet text.
+///
+/// D-07 cross-entry collision detection: `commit_mcp_server`'s existing
+/// `mcp_group_server_key` check only compares an incoming draft against
+/// ALREADY-CONFIGURED servers — two pasted entries in the SAME snippet that
+/// both sanitize to the same stored name would otherwise both look fine at
+/// parse time, and the second would silently overwrite the first at commit.
+/// This tracks stored names seen so far within one paste and reports the
+/// second (and any later) colliding entry as an error naming BOTH the
+/// colliding pasted key and the key that claimed the stored name first —
+/// without aborting any other, non-colliding sibling entry.
 #[cfg(not(target_arch = "wasm32"))]
 fn parse_snippet_text(text: &str) -> Result<McpSnippetParse, String> {
     let raw_entries = extract_snippet_entries(text)?;
+    let mut claimed_by: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     let entries = raw_entries
         .into_iter()
         .map(|(name, raw)| match parse_one_entry(&name, raw) {
-            Ok(draft) => McpSnippetEntry {
-                name,
-                draft: Some(draft),
-                error: None,
-            },
+            Ok(draft) => {
+                let stored = draft.name.clone();
+                if let Some(first_claimant) = claimed_by.get(&stored) {
+                    let error = format!(
+                        "server name '{first_claimant}' and '{name}' both sanitize to \
+                         '{stored}'; rename one of them before importing"
+                    );
+                    return McpSnippetEntry {
+                        name,
+                        draft: None,
+                        error: Some(error),
+                        sanitized_name: None,
+                    };
+                }
+                claimed_by.insert(stored.clone(), name.clone());
+                let sanitized_name = if stored == name { None } else { Some(stored) };
+                McpSnippetEntry {
+                    name,
+                    draft: Some(draft),
+                    error: None,
+                    sanitized_name,
+                }
+            }
             Err(error) => McpSnippetEntry {
                 name,
                 draft: None,
                 error: Some(error),
+                sanitized_name: None,
             },
         })
         .collect();
@@ -503,8 +572,17 @@ async fn classify_status_live(
     name: &str,
     cfg: &ironhermes_mcp::McpServerConfig,
 ) -> McpServerStatus {
+    // 49.4-02 fix (folded todo 2026-08-28): `crate::server::state` stays
+    // `feature = "server"`-gated (needs `tokio::sync::RwLock`, only
+    // available via `tokio/full`), but this fn's own gate is (correctly)
+    // just `not(target_arch = "wasm32")` since its callers assume that much
+    // — so when `server` is off, behave like the already-handled "no
+    // manager installed" `None` arm below.
+    #[cfg(feature = "server")]
     let manager = crate::server::state::try_global_app_state()
         .and_then(|state| state.runtime.mcp_manager().cloned());
+    #[cfg(not(feature = "server"))]
+    let manager: Option<ironhermes_mcp::McpManager> = None;
     let (connected, has_token, failure_reason) = match &manager {
         Some(manager) => {
             let connected: std::collections::HashSet<String> =
@@ -593,25 +671,47 @@ async fn reload_mcp_and_report(
     if !matches!(scope, ConfigScope::Root) {
         return None;
     }
-    let manager = crate::server::state::try_global_app_state()
-        .and_then(|state| state.runtime.mcp_manager().cloned())?;
-    let new_configs: std::collections::HashMap<String, ironhermes_mcp::McpServerConfig> = config
-        .mcp_servers
-        .iter()
-        .filter_map(|(name, value)| {
-            server_config_from_value(value)
-                .ok()
-                .map(|cfg| (name.clone(), cfg))
-        })
-        .collect();
-    Some(manager.reload_and_report(new_configs).await)
+    // 49.4-02 fix: same `state`-split rationale as `classify_status_live`
+    // above (`server` off => behave like the "no manager installed" case,
+    // which this fn already handles via `?`/`None`).
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = config;
+        return None;
+    }
+    #[cfg(feature = "server")]
+    {
+        let manager = crate::server::state::try_global_app_state()
+            .and_then(|state| state.runtime.mcp_manager().cloned())?;
+        let new_configs: std::collections::HashMap<String, ironhermes_mcp::McpServerConfig> = config
+            .mcp_servers
+            .iter()
+            .filter_map(|(name, value)| {
+                server_config_from_value(value)
+                    .ok()
+                    .map(|cfg| (name.clone(), cfg))
+            })
+            .collect();
+        Some(manager.reload_and_report(new_configs).await)
+    }
 }
 
 /// Attempt a one-off stdio or plain-HTTP connection and list its tools.
-/// Returns `Err(())` deliberately opaque — the caller constructs every
-/// user-facing message from fixed text naming the server, never this
-/// function's internal error detail (which could echo the spawn environment,
-/// full command line, or a header value).
+///
+/// Returns `Err(String)` carrying the underlying transport failure's detail
+/// (D-05), sanitized for credentials via
+/// `ironhermes_mcp::security::sanitize_error`. This is a deliberate
+/// refinement of D-05's literal "raw error": it preserves every diagnostic
+/// the operator needs (HTTP status, DNS failure, TLS failure, connection
+/// refused) — via the `{:#}` alternate `Display` form so the full `anyhow`
+/// cause chain is included, not just the outermost message, which alone is
+/// often as uninformative as the fixed string this replaces — while
+/// replacing credential-shaped substrings with the redaction marker, so a
+/// secret pasted into `headers` cannot round-trip back into the browser
+/// through this new path. See the module header's "D-05 probe-path
+/// carve-out" section for the full trust-boundary reasoning; the discarded
+/// detail is no longer "deliberately opaque" as an earlier version of this
+/// doc comment asserted — it is now deliberately surfaced, behind a gate.
 ///
 /// No `ToolRegistry` is touched anywhere in this function — the discovered
 /// tools are returned as plain data (REVIEWS finding 3 / T-48.2-02-10): a
@@ -627,19 +727,22 @@ async fn reload_mcp_and_report(
 #[cfg(not(target_arch = "wasm32"))]
 async fn connect_and_list_non_oauth(
     cfg: &ironhermes_mcp::McpServerConfig,
-) -> Result<Vec<McpDiscoveredTool>, ()> {
+) -> Result<Vec<McpDiscoveredTool>, String> {
     let (client, _child) = if cfg.command.is_some() {
         ironhermes_mcp::transport::connect_stdio(cfg)
             .await
-            .map_err(|_| ())?
+            .map_err(|e| ironhermes_mcp::security::sanitize_error(&format!("{e:#}")))?
     } else if cfg.url.is_some() {
         ironhermes_mcp::transport::connect_http(cfg)
             .await
-            .map_err(|_| ())?
+            .map_err(|e| ironhermes_mcp::security::sanitize_error(&format!("{e:#}")))?
     } else {
-        return Err(());
+        return Err("neither command nor url is configured for this server".to_string());
     };
-    let mcp_tools = client.list_all_tools().await.map_err(|_| ())?;
+    let mcp_tools = client
+        .list_all_tools()
+        .await
+        .map_err(|e| ironhermes_mcp::security::sanitize_error(&format!("{e:#}")))?;
     let tools = mcp_tools
         .iter()
         .map(|t| McpDiscoveredTool {
@@ -715,15 +818,13 @@ async fn run_probe(name: &str, cfg: &ironhermes_mcp::McpServerConfig) -> McpProb
             tools,
             message: None,
         },
-        Ok(Err(())) => McpProbeResult {
+        Ok(Err(detail)) => McpProbeResult {
             passed: false,
             status: McpServerStatus::SpawnFailed {
                 reason: format!("probe of '{name}' failed to connect"),
             },
             tools: Vec::new(),
-            message: Some(format!(
-                "probe of '{name}' failed: could not establish an MCP connection"
-            )),
+            message: Some(format!("probe of '{name}' failed: {detail}")),
         },
         Err(_elapsed) => McpProbeResult {
             passed: false,
@@ -878,9 +979,19 @@ async fn perform_oauth_connect(
     cfg: &ironhermes_mcp::McpServerConfig,
     redirect_uri: &str,
 ) -> Result<(String, String), String> {
+    // 49.4-02 fix: same `state`-split rationale as `classify_status_live`
+    // above (`server` off => behave like the already-handled "no manager
+    // installed" error path).
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = (name, cfg, redirect_uri);
+        return Err("no MCP manager installed in this process".to_string());
+    }
+    #[cfg(feature = "server")]
     let manager = crate::server::state::try_global_app_state()
         .and_then(|state| state.runtime.mcp_manager().cloned())
         .ok_or_else(|| "no MCP manager installed in this process".to_string())?;
+    #[cfg(feature = "server")]
     await_with_oauth_timeout(
         async { manager.begin_oauth(name, cfg, redirect_uri).await.map(|start| (start.auth_url, start.state)) },
         || {
@@ -974,11 +1085,19 @@ async fn oauth_connect_watchdog(
 /// return and `mcp_oauth_callback_route.rs`'s 404-vs-400 status decision so
 /// the two spellings can never drift apart — the route matches on this exact
 /// string to decide "unknown state" (404) from every other failure (400).
-#[cfg(not(target_arch = "wasm32"))]
+// 49.4-02 fix (folded todo 2026-08-28): narrowed from `not(target_arch =
+// "wasm32")` alone to ALSO require `feature = "server"` — this const's and
+// `complete_oauth_from_callback`'s only caller, `mcp_oauth_callback_route.rs`,
+// is entirely `#[cfg(feature = "server")]`-gated already (per its module
+// doc), so this never removes real availability; it only excludes the
+// no-`server`-feature native build (e.g. `cargo test --workspace`) where
+// `complete_oauth_from_callback`'s own body's `crate::server::state` access
+// would otherwise fail to resolve.
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 pub(crate) const UNKNOWN_OAUTH_STATE_MESSAGE: &str =
     "unknown, already-used, or expired authorization state";
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 pub async fn complete_oauth_from_callback(callback_url: &str) -> Result<(), String> {
     let state = ironhermes_mcp::transport::oauth_state_from_url(callback_url)
         .map_err(|_| "callback URL is missing a valid state parameter".to_string())?;
@@ -1038,7 +1157,10 @@ pub async fn complete_oauth_from_callback(callback_url: &str) -> Result<(), Stri
 /// silent no-op (mirrors `McpManager::cancel_oauth`'s own no-op-on-unknown
 /// behavior) — never an error, since an operator re-visiting a stale denial
 /// page has nothing further to abandon.
-#[cfg(not(target_arch = "wasm32"))]
+// 49.4-02 fix: narrowed alongside `complete_oauth_from_callback` above —
+// same sole-caller (`mcp_oauth_callback_route.rs`, already `feature =
+// "server"`-gated) rationale.
+#[cfg(all(not(target_arch = "wasm32"), feature = "server"))]
 pub async fn abandon_oauth_from_callback(state: &str) {
     let entry = { oauth_state_index().lock().await.remove(state) };
     if let Some((scope, name)) = entry {
@@ -1330,6 +1452,16 @@ pub async fn commit_mcp_server(
         // `commit_mcp_server` is reached from BOTH the paste path and the
         // manual DEFINE-form path, and only the former was previously
         // checked.
+        //
+        // D-07 moved sanitization upstream: `parse_one_entry` now sanitizes
+        // a pasted key rather than rejecting it, so a draft arriving here
+        // from the paste path always already satisfies this check by
+        // construction. This gate is intentionally retained anyway — it is
+        // the write boundary's own defense-in-depth for the manual
+        // DEFINE-form path, which still requires an operator-typed name to
+        // already be sanitized (`name_is_sanitized` in `import_wizard.rs`
+        // keeps NEXT disabled client-side, but this server-side check is
+        // what actually enforces it).
         if ironhermes_mcp::sanitize_server_name(&draft.name) != draft.name {
             return Err(ServerFnError::new(format!(
                 "server name '{}' contains characters outside [A-Za-z0-9_]; \
@@ -1606,32 +1738,184 @@ mod tests {
     // Acceptance-criteria-specific tests.
     // -------------------------------------------------------------------
 
-    /// A server name that does not survive `sanitize_server_name` unchanged
-    /// (contains `/` or `:`) is rejected as that entry's parse error, and its
-    /// sibling entries still parse.
+    /// D-07: a server name that does not survive `sanitize_server_name`
+    /// unchanged (a hyphenated key, or a URL-shaped key containing `/` and
+    /// `:`) is NO LONGER rejected — it sanitizes and imports, with the
+    /// stored name disclosed via `sanitized_name`. Rewritten from the
+    /// pre-D-07 `server_name_failing_sanitize_round_trip_is_rejected_siblings_still_parse`,
+    /// which asserted the behavior this inverts; the two-entry snippet
+    /// shape and the "sibling still parses" assertion are kept, a third
+    /// entry for the primary `atomic-mail` incident case is added, and the
+    /// rejection assertion becomes a sanitize-and-disclose assertion.
     #[test]
-    fn server_name_failing_sanitize_round_trip_is_rejected_siblings_still_parse() {
+    fn hyphenated_paste_name_is_sanitized_not_rejected() {
         let text = r#"{
             "mcpServers": {
+                "atomic-mail": {"url": "https://mcp.atomicmail.ai/mcp"},
                 "https://mcp.example.com/docs": {"url": "https://mcp.example.com/docs"},
                 "clean_name": {"url": "https://example.test/mcp"}
             }
         }"#;
         let result = parse_snippet_text(text).expect("top-level JSON is valid");
-        assert_eq!(result.entries.len(), 2);
-        let bad = result
+        assert_eq!(result.entries.len(), 3);
+
+        let atomic_mail = result
+            .entries
+            .iter()
+            .find(|e| e.name == "atomic-mail")
+            .expect("atomic-mail entry must exist");
+        assert_eq!(
+            atomic_mail.draft.as_ref().map(|d| d.name.as_str()),
+            Some("atomic_mail"),
+            "hyphenated key must sanitize and import, not be rejected"
+        );
+        assert!(atomic_mail.error.is_none());
+        assert_eq!(atomic_mail.sanitized_name.as_deref(), Some("atomic_mail"));
+
+        // A URL-shaped key is exactly the Claude-Desktop-snippet shape D-07
+        // exists to accept — it now sanitizes and imports rather than
+        // erroring, a deliberate consequence of this change (not an
+        // oversight).
+        let url_shaped = result
             .entries
             .iter()
             .find(|e| e.name == "https://mcp.example.com/docs")
-            .expect("bad-name entry must exist");
-        assert!(bad.draft.is_none());
-        assert!(bad.error.is_some());
+            .expect("URL-shaped-key entry must exist");
+        assert_eq!(
+            url_shaped.draft.as_ref().map(|d| d.name.as_str()),
+            Some("https___mcp_example_com_docs")
+        );
+        assert!(url_shaped.error.is_none());
+        assert_eq!(
+            url_shaped.sanitized_name.as_deref(),
+            Some("https___mcp_example_com_docs")
+        );
+
         let good = result
             .entries
             .iter()
             .find(|e| e.name == "clean_name")
             .expect("sibling entry must still parse");
         assert!(good.draft.is_some());
+    }
+
+    /// D-07: a key that already round-trips through `sanitize_server_name`
+    /// discloses nothing extra — `sanitized_name` is `None`, not
+    /// `Some(same_value)`, so the common (unrenamed) case shows no noise.
+    #[test]
+    fn sanitized_name_is_none_when_key_already_round_trips() {
+        let text = r#"{"mcpServers": {"clean_name": {"url": "https://example.test/mcp"}}}"#;
+        let result = parse_snippet_text(text).expect("top-level JSON is valid");
+        assert_eq!(result.entries.len(), 1);
+        let entry = &result.entries[0];
+        assert!(entry.draft.is_some());
+        assert_eq!(entry.sanitized_name, None);
+    }
+
+    /// D-07: an empty or whitespace-only key is still rejected outright —
+    /// without this guard, `sanitize_server_name("")` returns `"_"`, which
+    /// would silently import a server literally named `_`.
+    #[test]
+    fn empty_paste_name_is_still_rejected() {
+        let text = r#"{"mcpServers": {"   ": {"url": "https://example.test/mcp"}}}"#;
+        let result = parse_snippet_text(text).expect("top-level JSON is valid");
+        assert_eq!(result.entries.len(), 1);
+        let entry = &result.entries[0];
+        assert!(entry.draft.is_none(), "whitespace-only key must not import");
+        assert!(entry.error.is_some(), "whitespace-only key must be reported as an error");
+    }
+
+    /// D-07: two pasted entries that sanitize to the same stored name do not
+    /// both silently import — the second is reported by name as a
+    /// collision, naming BOTH the colliding key and the key that claimed
+    /// the stored name first, and no other sibling entry is aborted.
+    #[test]
+    fn two_entries_colliding_after_sanitization_report_the_collision_by_name() {
+        let text = r#"{
+            "mcpServers": {
+                "atomic-mail": {"url": "https://mcp.atomicmail.ai/mcp"},
+                "atomic_mail": {"url": "https://mcp.atomicmail.ai/mcp"},
+                "clean_name": {"url": "https://example.test/mcp"}
+            }
+        }"#;
+        let result = parse_snippet_text(text).expect("top-level JSON is valid");
+        assert_eq!(result.entries.len(), 3);
+
+        let importable: Vec<_> = result.entries.iter().filter(|e| e.draft.is_some()).collect();
+        assert_eq!(
+            importable.len(),
+            2,
+            "exactly one of the two colliding entries imports, plus the clean sibling"
+        );
+
+        let colliding = result
+            .entries
+            .iter()
+            .find(|e| e.draft.is_none())
+            .expect("one of the two colliding entries must be the reported collision");
+        let error = colliding.error.as_ref().expect("collision must carry an error");
+        assert!(error.contains("atomic-mail"), "collision error must name 'atomic-mail'; got: {error}");
+        assert!(error.contains("atomic_mail"), "collision error must name 'atomic_mail'; got: {error}");
+
+        let good = result
+            .entries
+            .iter()
+            .find(|e| e.name == "clean_name")
+            .expect("non-colliding sibling entry must still parse");
+        assert!(good.draft.is_some());
+    }
+
+    /// D-07: the draft produced from a hyphenated paste key passes
+    /// `commit_mcp_server`'s CR-01 round-trip check unchanged (it is
+    /// already sanitized by construction), and the resulting row's
+    /// `toolset_group` agrees with the `mcp_servers` config key — both
+    /// derive from the same sanitized name (48.2 D-20).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn sanitized_draft_survives_commit_round_trip_gate_and_toolset_group_agrees() {
+        let text = r#"{"mcpServers": {"atomic-mail": {"url": "https://mcp.atomicmail.ai/mcp"}}}"#;
+        let parsed = parse_snippet_text(text).expect("top-level JSON is valid");
+        let draft = parsed.entries[0].draft.clone().expect("atomic-mail must import");
+        assert_eq!(draft.name, "atomic_mail");
+
+        let _g = crate::server::test_support::env_lock();
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("IRONHERMES_HOME", home_dir.path()) };
+
+        let root_cfg = ironhermes_core::config::Config {
+            security: ironhermes_core::config::SecurityConfig {
+                web_config_write_enabled: true,
+                web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
+            },
+            ..Default::default()
+        };
+        root_cfg.save().expect("seed root config.yaml");
+
+        let result = commit_mcp_server(
+            ConfigScope::Profile("atomic-mail-roundtrip-test".to_string()),
+            draft,
+        )
+        .await;
+
+        let profile_path = home_dir
+            .path()
+            .join("profiles")
+            .join("atomic-mail-roundtrip-test")
+            .join("config.yaml");
+
+        unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+        let row = result.expect("commit must succeed — the draft is already sanitized");
+        assert_eq!(row.toolset_group, "mcp__atomic_mail");
+        assert_eq!(row.name, "atomic_mail");
+
+        let saved = ironhermes_core::config::Config::load_from(&profile_path)
+            .expect("reload saved profile config");
+        assert!(
+            saved.mcp_servers.contains_key("atomic_mail"),
+            "mcp_servers config key must be the sanitized name 'atomic_mail'"
+        );
     }
 
     /// A snippet whose `env` contains a sentinel secret value produces an
@@ -1861,6 +2145,156 @@ mod tests {
         let result = run_probe("cf", &cfg).await;
         assert!(result.passed);
         assert_eq!(result.status, McpServerStatus::AuthRequired);
+        assert!(result.tools.is_empty());
+    }
+
+    /// D-05 Task 1: a probe against a closed loopback port (connection
+    /// refused, not a timeout) returns a `message` that carries real
+    /// transport detail — not byte-equal to the old fixed
+    /// "could not establish an MCP connection" string.
+    #[tokio::test]
+    async fn probe_failure_message_carries_transport_detail() {
+        // Bind an ephemeral port then drop the listener immediately: the
+        // port is guaranteed free (nothing else can have claimed it in the
+        // interim on loopback) but nothing is listening, producing a
+        // reliable, fast "connection refused" without any live network
+        // dependency.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        drop(listener);
+
+        let cfg = ironhermes_mcp::McpServerConfig {
+            url: Some(format!("http://127.0.0.1:{port}/mcp")),
+            connect_timeout: 5,
+            ..Default::default()
+        };
+        let result = run_probe("closed-port", &cfg).await;
+        assert!(!result.passed);
+        assert_eq!(
+            result.status,
+            McpServerStatus::SpawnFailed {
+                reason: "probe of 'closed-port' failed to connect".to_string()
+            },
+            "the short 'reason' classification stays fixed — only 'message' gains detail"
+        );
+        let message = result.message.expect("failed probe must carry a message");
+        let old_fixed_string =
+            "probe of 'closed-port' failed: could not establish an MCP connection".to_string();
+        assert_ne!(
+            message, old_fixed_string,
+            "message must no longer be the old fixed opaque string"
+        );
+        assert!(
+            message.len() > "probe of 'closed-port' failed: ".len(),
+            "message must carry substantive transport detail beyond the fixed prefix; got: {message}"
+        );
+    }
+
+    /// D-05 Task 1: a credential-shaped substring embedded in the underlying
+    /// transport error text is redacted before it reaches the probe's
+    /// operator-facing message — detail without echoing a secret. Asserts
+    /// directly on the same `sanitize_error` composition `run_probe`'s
+    /// `Ok(Err(detail))` arm performs (`format!("probe of '{name}' failed:
+    /// {detail}")` where `detail` is already `sanitize_error`d), per this
+    /// task's own fallback guidance for cases where driving a
+    /// credential-shaped substring through a live end-to-end transport
+    /// failure is not reliably reproducible. Uses a synthetic placeholder,
+    /// never a real token value.
+    #[test]
+    fn probe_failure_message_is_credential_sanitized() {
+        let raw_transport_error =
+            "connect error: header rejected: Authorization: Bearer synthetic-placeholder-token-123";
+        let detail = ironhermes_mcp::security::sanitize_error(raw_transport_error);
+        let message = format!("probe of '{}' failed: {}", "credential-test", detail);
+        assert!(
+            !message.contains("synthetic-placeholder-token-123"),
+            "credential-shaped substring must not survive sanitization into the probe message; got: {message}"
+        );
+    }
+
+    /// D-05 top-level must_haves truth: a probe of a server that returns 401
+    /// shows the operator something containing "401" — not merely "detail
+    /// exists", but the actual status code an operator would recognize.
+    /// Hand-rolled TCP stub (this crate has no `wiremock` dev-dependency),
+    /// mirroring the raw-`TcpListener` pattern already established in
+    /// `ironhermes-mcp/tests/oauth_integration.rs`.
+    #[tokio::test]
+    async fn probe_failure_message_contains_401_for_a_401_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+
+        let server = tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket
+                    .write_all(
+                        b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await;
+            }
+        });
+
+        let cfg = ironhermes_mcp::McpServerConfig {
+            url: Some(format!("http://127.0.0.1:{port}/mcp")),
+            connect_timeout: 5,
+            ..Default::default()
+        };
+        let result = run_probe("unauthorized", &cfg).await;
+        server.abort();
+
+        assert!(!result.passed);
+        let message = result.message.expect("failed probe must carry a message");
+        assert!(
+            message.contains("401"),
+            "message must name the 401 status the operator can recognize; got: {message}"
+        );
+    }
+
+    /// D-05: the timeout arm is unchanged — an elapsed probe still reports
+    /// the fixed "timed out" message and `SpawnFailed` reason, regardless of
+    /// Task 1's detail-carrying change to the connect-failure arm.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_timeout_arm_is_unchanged_by_detail_carrying_connect_failure_arm() {
+        let cfg = ironhermes_mcp::McpServerConfig {
+            command: Some("sh".to_string()),
+            args: vec!["-c".to_string(), "exec sleep 300".to_string()],
+            connect_timeout: 1,
+            ..Default::default()
+        };
+        let result = run_probe("timeout-test", &cfg).await;
+        assert!(!result.passed);
+        assert_eq!(
+            result.status,
+            McpServerStatus::SpawnFailed {
+                reason: "probe of 'timeout-test' timed out".to_string()
+            }
+        );
+        assert_eq!(
+            result.message,
+            Some("probe of 'timeout-test' timed out".to_string())
+        );
+    }
+
+    /// D-05: the OAuth early-return arm is unchanged — `oauth_provider:
+    /// Some(_)` still returns `passed: true` / `AuthRequired` with no
+    /// network call, unaffected by Task 1's non-OAuth connect-failure
+    /// change.
+    #[tokio::test]
+    async fn probe_oauth_early_return_arm_is_unchanged_by_detail_carrying_connect_failure_arm() {
+        let cfg = ironhermes_mcp::McpServerConfig {
+            url: Some("https://mcp.cloudflare.com/mcp".to_string()),
+            oauth_provider: Some("cloudflare_api".to_string()),
+            ..Default::default()
+        };
+        let result = run_probe("oauth-test", &cfg).await;
+        assert!(result.passed);
+        assert_eq!(result.status, McpServerStatus::AuthRequired);
+        assert!(result.message.is_none());
         assert!(result.tools.is_empty());
     }
 
@@ -2210,6 +2644,7 @@ mod tests {
             security: ironhermes_core::config::SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             ..Default::default()
         };
@@ -2418,6 +2853,7 @@ mod tests {
             security: ironhermes_core::config::SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             ..Default::default()
         };
@@ -2521,6 +2957,7 @@ mod tests {
             security: ironhermes_core::config::SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             ..Default::default()
         };
@@ -2572,6 +3009,7 @@ mod tests {
             security: ironhermes_core::config::SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             ..Default::default()
         };

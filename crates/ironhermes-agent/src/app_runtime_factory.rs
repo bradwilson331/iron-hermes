@@ -65,7 +65,25 @@ pub struct AppRuntimeBundle {
     pub registry: Arc<RwLock<ToolRegistry>>,
     pub hook_registry: Arc<HookRegistry>,
     pub mcp_manager: Option<Arc<McpManager>>,
-    pub skill_registry: Arc<SkillRegistry>,
+    /// Phase 49.4: the skill catalog is HOT-SWAPPABLE, not a boot-time constant.
+    ///
+    /// Installing, creating, forking, or deleting a skill writes to disk; without
+    /// a swappable handle the running process kept serving the catalog it loaded
+    /// at startup, so a freshly installed skill stayed invisible (and unusable)
+    /// until restart. `AgentRuntime::reload_skill_registry` replaces the inner
+    /// `Arc` under this lock; every surface that reads through
+    /// `AgentRuntime::skill_registry()` sees the new catalog on its next read.
+    ///
+    /// `std::sync::RwLock` (not tokio's) so the accessor stays callable from sync
+    /// contexts; the guard is never held across an `.await`.
+    pub skill_registry: Arc<std::sync::RwLock<Arc<SkillRegistry>>>,
+    /// The cwd the boot-time skill scan used. Kept so a reload rebuilds the SAME
+    /// search paths — deriving it again at reload time would silently change the
+    /// catalog whenever the process cwd differs from the one it booted with.
+    pub skills_cwd: PathBuf,
+    /// The credential dir the boot-time `skills` tool registration used, kept for
+    /// the same reason.
+    pub skills_credential_dir: PathBuf,
     pub active_skills: Arc<std::sync::Mutex<Vec<SkillRecord>>>,
     pub browser_session: Arc<tokio::sync::Mutex<Option<BrowserSession>>>,
     pub job_store: Arc<Mutex<JobStore>>,
@@ -279,10 +297,16 @@ pub async fn build_app_runtime_bundle(
         &input.cwd,
         &input.config.skills,
     ));
+    // The shared, swappable handle stored on the bundle. The plain `Arc` above is
+    // what the boot-time tool registrations capture; `reload_skill_registry`
+    // re-registers those with the replacement.
+    let skill_registry_handle = Arc::new(std::sync::RwLock::new(skill_registry.clone()));
     let active_skills: Arc<std::sync::Mutex<Vec<SkillRecord>>> =
         Arc::new(std::sync::Mutex::new(Vec::new()));
     let credential_dir =
         ironhermes_tools::skills_tool::default_credential_dir(&input.config.skills);
+    let skills_cwd = input.cwd.clone();
+    let skills_credential_dir = credential_dir.clone();
     registry.register_skills_tool(
         skill_registry.clone(),
         active_skills.clone(),
@@ -353,7 +377,9 @@ pub async fn build_app_runtime_bundle(
         registry,
         hook_registry,
         mcp_manager,
-        skill_registry,
+        skill_registry: skill_registry_handle,
+        skills_cwd,
+        skills_credential_dir,
         active_skills,
         browser_session,
         job_store,

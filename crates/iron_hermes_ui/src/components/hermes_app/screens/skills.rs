@@ -18,6 +18,10 @@
 use dioxus::prelude::*;
 use std::collections::HashMap;
 
+use crate::components::hermes_app::screens::skills_import::{
+    EditorTarget, NewSkillWizard, SkillImportWizard, SkillMdEditor,
+};
+
 #[allow(dead_code)] // called from use_memo closure in ScreenSkills; dead_code fires on lib target
 fn tab_predicate(category: &str, enabled: bool, tab: &str) -> bool {
     match tab {
@@ -39,7 +43,15 @@ fn search_matches(name: &str, description: &str, query: &str) -> bool {
 
 #[component]
 pub fn ScreenSkills(is_active: bool) -> Element {
-    let skills_resource = use_server_future(crate::server::api::list_skills)?;
+    // Phase 49.4 Plan 07 (D-05..D-09): bumped after a successful import,
+    // create, or fork so the list re-fetches — read in the SYNC prefix of
+    // this resource (the resource + refresh-tick idiom; the hook-order-crash
+    // trap this screen documents above is never invoked by this plan).
+    let mut refresh_tick: Signal<u32> = use_signal(|| 0);
+    let skills_resource = use_server_future(move || {
+        let _tick = refresh_tick();
+        async move { crate::server::api::list_skills().await }
+    })?;
 
     // Extract data and error flag BEFORE rsx! — signal borrow discipline
     // per iron_hermes_ui/clippy.toml (no GenerationalRef held across RSX).
@@ -52,6 +64,20 @@ pub fn ScreenSkills(is_active: bool) -> Element {
     // Tab and search signals — let mut so event handlers can .set()
     let mut active_tab = use_signal(|| "all");
     let mut search_query = use_signal(String::new);
+
+    // Phase 49.4 Plan 07 (D-05/D-06): IMPORT wizard open/closed, owned here
+    // (mirrors kanban/drawer.rs's ReadSignal-prop / EventHandler-callback
+    // ownership split — the wizard reads `open`, this screen owns the set).
+    let mut import_open: Signal<bool> = use_signal(|| false);
+    let import_open_ro: ReadSignal<bool> = import_open.into();
+    // Phase 49.4 Plan 07 (D-08): NEW SKILL wizard open/closed — same
+    // ownership split as import_open above.
+    let mut new_skill_open: Signal<bool> = use_signal(|| false);
+    let new_skill_open_ro: ReadSignal<bool> = new_skill_open.into();
+    // Phase 49.4 Plan 07 (D-09): the SKILL.md editor's target — None when
+    // closed, Some(name, is_bundled) when opened from a row action.
+    let mut editing_skill: Signal<Option<EditorTarget>> = use_signal(|| None);
+    let editing_skill_ro: ReadSignal<Option<EditorTarget>> = editing_skill.into();
 
     // Optimistic toggle state — HashMap<name, enabled> owned by this screen
     let mut toggle_states: Signal<HashMap<String, bool>> = use_signal(HashMap::new);
@@ -193,15 +219,22 @@ pub fn ScreenSkills(is_active: bool) -> Element {
                 div { class: "screen-header-left",
                     div { class: "screen-tag", "// MODULE 04" }
                     h1 { class: "screen-title", "Skills" }
-                    p { class: "screen-sub",
-                        "{count_all} loaded · {enabled_count_live} enabled for "
+                    span { class: "screen-status",
+                        "· {count_all} loaded · {enabled_count_live} enabled for "
                         code { style: "color:var(--teal)", "default" }
-                        "."
                     }
                 }
                 div { class: "screen-actions",
-                    button { class: "btn btn--ghost btn--sm", "⇣ IMPORT" }
-                    button { class: "btn btn--sm", "+ NEW SKILL" }
+                    button {
+                        class: "btn btn--ghost btn--sm",
+                        onclick: move |_| import_open.set(true),
+                        "⇣ IMPORT"
+                    }
+                    button {
+                        class: "btn btn--sm",
+                        onclick: move |_| new_skill_open.set(true),
+                        "+ NEW SKILL"
+                    }
                 }
             }
 
@@ -255,15 +288,46 @@ pub fn ScreenSkills(is_active: bool) -> Element {
                     }
                 } else {
                     for (skill, is_enabled, err_msg) in card_data.iter().cloned() {
-                        SkillCard {
-                            key: "{skill.name}",
-                            skill: skill.clone(),
-                            enabled: is_enabled,
-                            error_msg: err_msg,
-                            on_toggle: move |_| on_toggle(skill.name.clone()),
+                        {
+                            // Separate owned locals per closure — two `move`
+                            // closures cannot both move-capture the same
+                            // `skill.name` field out of one shared `skill`.
+                            let toggle_name = skill.name.clone();
+                            let edit_target = EditorTarget {
+                                name: skill.name.clone(),
+                                is_bundled: skill.category == "bundled",
+                            };
+                            rsx! {
+                                SkillCard {
+                                    key: "{skill.name}",
+                                    skill: skill.clone(),
+                                    enabled: is_enabled,
+                                    error_msg: err_msg,
+                                    on_toggle: move |_| on_toggle(toggle_name.clone()),
+                                    on_edit: move |_| editing_skill.set(Some(edit_target.clone())),
+                                }
+                            }
                         }
                     }
                 }
+            }
+
+            SkillImportWizard {
+                open: import_open_ro,
+                on_close: move |_| import_open.set(false),
+                on_installed: move |_| refresh_tick.set(refresh_tick() + 1),
+            }
+
+            NewSkillWizard {
+                open: new_skill_open_ro,
+                on_close: move |_| new_skill_open.set(false),
+                on_created: move |_| refresh_tick.set(refresh_tick() + 1),
+            }
+
+            SkillMdEditor {
+                target: editing_skill_ro,
+                on_close: move |_| editing_skill.set(None),
+                on_saved: move |_| refresh_tick.set(refresh_tick() + 1),
             }
         }
     }
@@ -275,6 +339,9 @@ fn SkillCard(
     enabled: bool, // plain bool — NOT Signal<bool>; parent owns toggle_states
     error_msg: Option<String>, // None = no error; Some = revert error text
     on_toggle: EventHandler<()>, // fires on .tgl click; parent owns the spawn
+    // Phase 49.4 Plan 07 (D-09): opens the SKILL.md editor for this skill;
+    // parent owns the editing_skill signal (same ownership split as on_toggle).
+    on_edit: EventHandler<()>,
 ) -> Element {
     // Phase 41.1 Plan 06 (D-07): the Run affordance consumes the SAME chat send
     // handler + active-screen signal provided at the HermesApp root, so one
@@ -323,6 +390,14 @@ fn SkillCard(
                         }
                     },
                     "▶ Run"
+                }
+                // Phase 49.4 Plan 07 (D-09): opens the SKILL.md editor.
+                button {
+                    class: "btn btn--ghost btn--sm",
+                    r#type: "button",
+                    "aria-label": "Edit skill {skill.name}",
+                    onclick: move |_| on_edit.call(()),
+                    "✎ Edit"
                 }
                 div {
                     class: if enabled { "tgl on" } else { "tgl" },

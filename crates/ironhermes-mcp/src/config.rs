@@ -4,34 +4,86 @@ use std::collections::HashMap;
 /// Configuration for a single MCP server (D-17: matches hermes-agent YAML schema).
 ///
 /// Supports both stdio transport (`command`/`args`/`env`) and HTTP transport (`url`/`headers`).
-/// Common options: `timeout`, `connect_timeout`, `enabled`, `enabled_tools`, `auth`, `sampling`.
+/// Common options: `timeout`, `connect_timeout`, `enabled`, `enabled_tools`, `auth`.
+/// `sampling` also parses here but is DOCUMENTED-INERT — see its own field doc
+/// comment and `48.3-DEAD-CONFIG-AUDIT.md`.
+///
+/// **D-04 field liveness audit (48.3):** every field below carries a marker
+/// recording whether it is ALIVE (read by a production call site), FIXED in
+/// this phase or 48.3-01 (was dead, now wired), or DOCUMENTED-INERT (parses,
+/// has no production reader, and now says so at runtime rather than being
+/// silently accepted). See
+/// `.planning/phases/48.3-tools-wizard-and-mcp-didn-t-work-for-atomic-mail/48.3-DEAD-CONFIG-AUDIT.md`
+/// for the full re-verified table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct McpServerConfig {
     // --- stdio transport ---
     /// Command to run for stdio-based MCP servers (e.g., "npx").
+    ///
+    /// Liveness (48.3 D-04 audit): ALIVE — read at
+    /// `server_task.rs::connect_and_serve` (transport dispatch),
+    /// `mcp_config.rs` (CLI connect path), `mcp_admin_api.rs` (import/probe paths).
     pub command: Option<String>,
     /// Arguments for the stdio command (e.g., ["-y", "@modelcontextprotocol/server-filesystem"]).
+    ///
+    /// Liveness (48.3 D-04 audit): ALIVE — read at `transport.rs::connect_stdio`.
     pub args: Vec<String>,
     /// Environment variables passed to the stdio subprocess (filtered by build_safe_env).
+    ///
+    /// Liveness (48.3 D-04 audit): ALIVE — read at
+    /// `transport.rs::connect_stdio` via `security::build_safe_env`.
     pub env: HashMap<String, String>,
 
     // --- HTTP transport ---
     /// URL for HTTP/StreamableHTTP-based MCP servers.
+    ///
+    /// Liveness (48.3 D-04 audit): ALIVE — read at
+    /// `server_task.rs::connect_and_serve` (transport dispatch), `mcp_config.rs`
+    /// (CLI connect path), `mcp_admin_api.rs` (import/probe paths).
     pub url: Option<String>,
     /// HTTP headers to include in requests.
+    ///
+    /// Liveness (48.3 D-04 audit): FIXED in 48.3-01 — read at
+    /// `transport.rs::connect_http`. Previously dead on every runtime path
+    /// (the triggering Atomic Mail incident): deserialized, env-interpolated,
+    /// and asserted on in unit tests, but never applied to the transport.
     pub headers: HashMap<String, String>,
 
     // --- common options ---
     /// Tool call timeout in seconds. Default: 120.
+    ///
+    /// Liveness (48.3 D-04 audit): ALIVE — read at
+    /// `server_task.rs::connect_and_serve` (wraps every `client.call_tool()` in
+    /// `tokio::time::timeout`).
     pub timeout: u64,
     /// Connection timeout in seconds. Default: 60.
+    ///
+    /// Liveness (48.3 D-04 audit): FIXED in 48.3-02 Task 1 — read at
+    /// `server_task.rs::connect_and_serve`, which now bounds each individual
+    /// gateway connect attempt (stdio/OAuth-HTTP/plain-HTTP) by this value with
+    /// a 1-second floor. Previously enforced only on the CLI
+    /// (`mcp_config.rs::attempt_connect_and_list_with_timeout`) and web-probe
+    /// (`mcp_admin_api.rs::run_probe`) paths — never on the gateway's own
+    /// auto-start/reconnect path, the exact path the triggering incident hit.
     pub connect_timeout: u64,
     /// Whether this server is enabled. Default: true.
+    ///
+    /// Liveness (48.3 D-04 audit): ALIVE — read at `manager.rs`, `boot_gate.rs`,
+    /// `mcp_admin_api.rs`.
     pub enabled: bool,
     /// D-08: if set, only these tool names are registered from this server.
+    ///
+    /// Liveness (48.3 D-04 audit): ALIVE — read at
+    /// `server_task.rs::connect_and_serve` (filters registered tool names).
     pub enabled_tools: Option<Vec<String>>,
     /// Optional auth token or bearer credential.
+    ///
+    /// Liveness (48.3 D-04 audit): FIXED in 48.3-01 Task 2 — read at
+    /// `transport.rs::connect_http`, applied as `Authorization: Bearer <token>`
+    /// when no explicit `headers.Authorization` entry is set (explicit header
+    /// wins). Previously dead everywhere outside this file's own
+    /// env-interpolation and round-trip tests.
     pub auth: Option<String>,
     /// OAuth provider namespace for the rmcp DCR/discovery OAuth path (D-03, Phase 44).
     ///
@@ -39,6 +91,10 @@ pub struct McpServerConfig {
     /// the `auth.json` token namespace (`tokens.<ns>`). DCR is persisted under
     /// `clients.<server-url>`. Does NOT cross-reference `auth.providers.<name>` (D-03).
     /// Never log this value alongside token data (A-1).
+    ///
+    /// Liveness (48.3 D-04 audit): ALIVE — read at `server_task.rs` (multiple
+    /// sites), `transport.rs::build_oauth_manager`, `mcp_admin_api.rs`,
+    /// `main.rs`, `tui_rata/event_loop.rs`.
     pub oauth_provider: Option<String>,
     /// Phase 46.1 D-01: per-server issuer pin for MCP-OAuth PRM validation (B-4).
     ///
@@ -48,8 +104,19 @@ pub struct McpServerConfig {
     /// talk to its own declared issuer). An empty/whitespace-only value is treated
     /// as absent (falls back to baseline ∪ global) rather than an empty allowlist
     /// (V5 input validation, fail-safe). See `security::resolve_allowed_issuers`.
+    ///
+    /// Liveness (48.3 D-04 audit): ALIVE (OAuth path only) — read at
+    /// `transport.rs::build_oauth_manager`, `mcp_admin_api.rs`.
     pub allowed_issuer: Option<String>,
     /// Sampling/createMessage configuration.
+    ///
+    /// Liveness (48.3 D-04 audit): DOCUMENTED-INERT — no production reader;
+    /// see `48.3-DEAD-CONFIG-AUDIT.md`. `SamplingHandler::new` (`sampling.rs`)
+    /// is constructed only from that module's own unit tests; no call site
+    /// builds one from a real `McpServerConfig.sampling` value or attaches one
+    /// as an MCP client's `createMessage` handler. `server_task.rs`'s
+    /// `sampling_inert_warning` emits a startup `tracing::warn!` when this
+    /// field is set, so the inertness is audible rather than silent (D-04).
     pub sampling: Option<SamplingConfig>,
 }
 
@@ -74,14 +141,30 @@ impl Default for McpServerConfig {
 }
 
 /// Sampling (server-initiated LLM completion) configuration (D-03).
+///
+/// **D-04 note:** this whole struct is reachable only through
+/// `McpServerConfig.sampling`, which is DOCUMENTED-INERT — see that field's doc
+/// comment and `48.3-DEAD-CONFIG-AUDIT.md`. Its own fields below inherit that
+/// same disposition: they parse, but since no production code ever constructs a
+/// `SamplingHandler` from a real config value, none of these three fields is
+/// read by anything at runtime either.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SamplingConfig {
     /// Whether sampling is enabled for this server. Default: false.
+    ///
+    /// Liveness (48.3 D-04 audit): DOCUMENTED-INERT — no production reader;
+    /// inherits `sampling`'s disposition (see `48.3-DEAD-CONFIG-AUDIT.md`).
     pub enabled: bool,
     /// Maximum requests per minute for sampling. Default: 10.
+    ///
+    /// Liveness (48.3 D-04 audit): DOCUMENTED-INERT — no production reader;
+    /// inherits `sampling`'s disposition (see `48.3-DEAD-CONFIG-AUDIT.md`).
     pub max_rpm: u32,
     /// Maximum tool rounds per sampling request. Default: 5.
+    ///
+    /// Liveness (48.3 D-04 audit): DOCUMENTED-INERT — no production reader;
+    /// inherits `sampling`'s disposition (see `48.3-DEAD-CONFIG-AUDIT.md`).
     pub max_tool_rounds: u32,
 }
 

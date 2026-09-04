@@ -114,7 +114,7 @@ pub fn ScreenArtifacts(is_active: bool) -> Element {
                             div { class: "screen-header-left",
                                 div { class: "screen-tag", "// MODULE 15" }
                                 h1 { class: "screen-title", "Artifacts" }
-                                p { class: "screen-sub", "Loading…" }
+                                span { class: "screen-status", "· Loading…" }
                             }
                         }
                     },
@@ -123,9 +123,6 @@ pub fn ScreenArtifacts(is_active: bool) -> Element {
                             div { class: "screen-header-left",
                                 div { class: "screen-tag", "// MODULE 15" }
                                 h1 { class: "screen-title", "Artifacts" }
-                                p { class: "screen-sub",
-                                    "Captures from chat, kanban, and delegate work."
-                                }
                             }
                         }
                         div { class: "panel",
@@ -142,10 +139,9 @@ pub fn ScreenArtifacts(is_active: bool) -> Element {
                                 div { class: "screen-header-left",
                                     div { class: "screen-tag", "// MODULE 15" }
                                     h1 { class: "screen-title", "Artifacts" }
-                                    p { class: "screen-sub",
-                                        "Captures from chat, kanban, and delegate work. {count} artifact",
+                                    span { class: "screen-status",
+                                        "· {count} artifact",
                                         if count == 1 { "" } else { "s" },
-                                        " from this profile."
                                     }
                                 }
                                 div { class: "screen-actions",

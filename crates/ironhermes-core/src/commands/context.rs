@@ -221,6 +221,71 @@ pub trait CronJobReader: Send + Sync {
 }
 
 // =============================================================================
+// CronJobWriter trait — Phase 49.5 Plan 05 (write-side sibling of CronJobReader)
+// =============================================================================
+
+/// The wire shape a [`CronJobWriter`] receives: a blueprint key plus the
+/// slot values to fill it with, exactly as parsed from `/blueprint run`'s
+/// tail.
+#[derive(Debug, Clone)]
+pub struct CronJobSpec {
+    pub blueprint_key: String,
+    pub values: Vec<(String, String)>,
+}
+
+/// Write-side sibling of [`CronJobReader`]. Defined in ironhermes-core to
+/// avoid a circular dep with ironhermes-cron (ironhermes-cron depends on
+/// ironhermes-core, so a trait referencing `JobStore` cannot live there).
+/// The concrete implementation `CronJobWriterImpl` lives in ironhermes-cron.
+///
+/// Deliberately narrow: creation from a compiled-in blueprint is the only
+/// operation exposed. A general `create_job(arbitrary fields)` method would
+/// hand every present and future slash command the ability to set `script`
+/// and `workdir`, which is exactly the capability this phase keeps off the
+/// chat surface (T-49.5-05-02).
+pub trait CronJobWriter: Send + Sync {
+    /// Fill `spec.blueprint_key` with `spec.values` and persist the result
+    /// as a new cron job. Returns the new job's id on success.
+    fn create_job_from_blueprint(&self, spec: CronJobSpec) -> Result<String, String>;
+}
+
+// =============================================================================
+// BlueprintSaver trait — Phase 49.6 Plan 03 (D-08/D-14 authoring-side sibling)
+// =============================================================================
+
+/// The wire shape a [`BlueprintSaver`] receives: which cron job to export,
+/// an optional explicit blueprint name (falls back to the job's own name),
+/// and the description body `compose_blueprint_skill_md` needs (its first
+/// line becomes the emitted `SKILL.md`'s `description`, per D-12).
+#[derive(Debug, Clone)]
+pub struct BlueprintSaveRequest {
+    pub job_id_or_name: String,
+    pub blueprint_name: Option<String>,
+    pub body: String,
+}
+
+/// Authoring-side sibling of [`CronJobWriter`]. Defined in ironhermes-core
+/// for the same cycle-break reason: `ironhermes-core` cannot depend on
+/// `ironhermes-cron` (which reads the job) or `ironhermes-hub` (which writes
+/// the installed `SKILL.md`) without a dependency cycle, so the trait is
+/// declared here and implemented downstream (`BlueprintSaverImpl` in
+/// `ironhermes-cli`).
+///
+/// Deliberately narrow: exporting an existing job's D-12 portable fields
+/// into a blueprint `SKILL.md` is the only operation exposed. A general
+/// "write an arbitrary skill" method would hand every present and future
+/// slash command the ability to author prompt-loaded content — the exact
+/// capability D-14's Local-only refusal keeps off the chat surface. Wiring
+/// this handle does not by itself authorize a remote save; the gate lives
+/// in `cmd_blueprint_save` against `ctx.platform`, unconditionally, before
+/// this trait is ever consulted.
+pub trait BlueprintSaver: Send + Sync {
+    /// Export the requested job as an installed blueprint skill. Returns the
+    /// installed blueprint's name on success.
+    fn save_job_as_blueprint(&self, req: BlueprintSaveRequest) -> Result<String, String>;
+}
+
+// =============================================================================
 // KanbanStoreReader trait — Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02)
 // =============================================================================
 
@@ -685,6 +750,21 @@ pub struct CommandContext {
     /// Option<Arc<dyn>> to avoid circular dep with ironhermes-cron.
     pub cron_store: Option<Arc<dyn CronJobReader>>,
 
+    /// Phase 49.5 Plan 05: write-capable cron handle for `/blueprint run`.
+    /// Option<Arc<dyn>> to avoid circular dep with ironhermes-cron. Wiring
+    /// this handle does not by itself authorize remote job creation — the
+    /// gate lives in `cmd_blueprint`'s run arm against `ctx.platform` and
+    /// `security.remote_blueprint_run_enabled`.
+    pub cron_job_writer: Option<Arc<dyn CronJobWriter>>,
+
+    /// Phase 49.6 Plan 03 (D-08/D-14): authoring-side handle for
+    /// `/blueprint save`. Option<Arc<dyn>> to avoid circular dep with
+    /// ironhermes-cron and ironhermes-hub. Wired ONLY on the CLI/TUI context
+    /// builder, never on the gateway's — `cmd_blueprint_save`'s unconditional
+    /// `ctx.platform != Platform::Local` gate is the control, the absent
+    /// handle on every other surface is the backstop.
+    pub blueprint_saver: Option<Arc<dyn BlueprintSaver>>,
+
     /// Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02): KanbanStoreReader handle for `/kanban` slash UI.
     /// Option<Arc<dyn>> to avoid circular dep with ironhermes-kanban.
     pub kanban_store: Option<Arc<dyn KanbanStoreReader>>,
@@ -775,6 +855,10 @@ impl CommandContext {
             agent_loop: None,
             // Phase 22.4.2.1 Plan 01: CronJobReader for /cron slash UI.
             cron_store: None,
+            // Phase 49.5 Plan 05: CronJobWriter for /blueprint run.
+            cron_job_writer: None,
+            // Phase 49.6 Plan 03: BlueprintSaver for /blueprint save.
+            blueprint_saver: None,
             // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02): KanbanStoreReader for /kanban slash UI.
             kanban_store: None,
             // Phase 36.3.7.5 BUG-36.3.7.5-06.
@@ -897,6 +981,20 @@ impl CommandContext {
     /// Builder: attach a CronJobReader handle for `/cron` slash UI (Phase 22.4.2.1 Plan 01).
     pub fn with_cron_store(mut self, store: Arc<dyn CronJobReader>) -> Self {
         self.cron_store = Some(store);
+        self
+    }
+
+    /// Builder: attach a CronJobWriter handle for `/blueprint run` (Phase 49.5 Plan 05).
+    pub fn with_cron_job_writer(mut self, writer: Arc<dyn CronJobWriter>) -> Self {
+        self.cron_job_writer = Some(writer);
+        self
+    }
+
+    /// Builder: attach a BlueprintSaver handle for `/blueprint save`
+    /// (Phase 49.6 Plan 03). Mirrors `with_cron_job_writer`'s cycle-break
+    /// pattern. Callers wire this ONLY on the CLI/TUI context builder.
+    pub fn with_blueprint_saver(mut self, saver: Arc<dyn BlueprintSaver>) -> Self {
+        self.blueprint_saver = Some(saver);
         self
     }
 

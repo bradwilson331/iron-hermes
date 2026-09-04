@@ -1,4 +1,4 @@
-//! Phase 24 — `hermes doctor` gateway.pid liveness integration test (24-05-03).
+//! Phase 24 — `ironhermes doctor` gateway.pid liveness integration test (24-05-03).
 
 use std::process::Command;
 use tempfile::TempDir;
@@ -13,7 +13,7 @@ fn seed_gateway_pid(home: &std::path::Path, pid: u32) {
     std::fs::write(home.join("gateway.pid"), body).unwrap();
 }
 
-/// 24-05-03: `hermes doctor` includes a gateway.pid liveness check on the
+/// 24-05-03: `ironhermes doctor` includes a gateway.pid liveness check on the
 /// active profile (D-16). With a live PID (current test process id), the
 /// check reports OK.
 #[test]

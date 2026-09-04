@@ -866,6 +866,7 @@ mod tests {
             security: SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             ..Config::default()
         };
@@ -950,6 +951,7 @@ mod tests {
             security: SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             ..Config::default()
         };
@@ -1004,6 +1006,7 @@ mod tests {
             security: SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             vault,
             ..Config::default()
@@ -1050,6 +1053,7 @@ mod tests {
             security: SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             vault,
             ..Config::default()
@@ -1087,6 +1091,7 @@ mod tests {
             security: SecurityConfig {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             ..Config::default()
         };

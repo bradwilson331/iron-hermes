@@ -30,9 +30,17 @@ use super::advanced::AdvancedProfilePane;
 use crate::components::hermes_app::widgets::avatar_picker::AvatarPicker;
 use crate::protocol::{
     BotAvatarDescriptor, CloneFromChoice, CreateProfileRequest, DuplicateProfileRequest, KeyMode,
-    KeyStatus, VerifyOutcome, VerifyReport,
+    KeyStatus, ProfileHealth, VerifyOutcome, VerifyReport,
 };
 use dioxus::prelude::*;
+
+/// Phase 49.4: the `kn-modal-*` / `kn-wizard` styles this dialog uses live in
+/// `kanban.css`, which is linked per-screen (Kanban, Tools, Agents) but NOT
+/// globally — so when the wizard mounts on the Soul screen (its `+ ADD PROFILE`
+/// entry) it rendered completely unstyled. Linking the stylesheet from the
+/// component itself makes it styled wherever it mounts. `document::Link`
+/// dedupes by href, so this is a no-op on a screen that already links it.
+const WIZARD_CSS: Asset = asset!("/assets/kanban.css");
 
 /// DOM id shared by the CLONE FROM `<input>`'s `list` attribute and its
 /// paired `<datalist>` — mirrors `kanban/modals.rs`'s
@@ -73,13 +81,48 @@ const PROFILE_NAME_MAX_LEN: usize = 64;
 
 /// Step spine. Display-only in this phase — no click-to-jump (matches the
 /// canvas, which drives `next`/`back` only from the footer).
+///
+/// Phase 49.4 Plan 10 (D-15): `Entry` and `ClonePicker` are new, reachable
+/// only when the caller opts in via `CreateProfileWizard`'s
+/// `show_entry_step` prop (default `false` — the two pre-existing mounts,
+/// Kanban board and Agents roster, omit it and land on `Identity` exactly
+/// as before this plan).
 #[allow(dead_code)] // used in CreateProfileWizard; dead_code fires under --all-features
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum WizardStep {
+    Entry,
+    ClonePicker,
     Identity,
     ConfigKeys,
     Verify,
 }
+
+/// Phase 49.4 Plan 10 (D-15): the add-new-profile dialog's entry-point
+/// choice — the UI-SPEC Copywriting Contract's two labels ("Start from a
+/// template" / "Clone an existing profile"). `Template` proceeds into the
+/// wizard's pre-existing steps unchanged (this plan's own `create_profile`
+/// path); `Clone` routes through `ClonePicker` and submits via
+/// `duplicate_profile` instead, reusing the wizard's pre-existing
+/// `clone_from_choice`/`clone_source` signals (the same ones the bot-context
+/// Advanced disclosure's "Clone existing bot" control already writes to) —
+/// one submit branch, never two.
+#[allow(dead_code)] // used in CreateProfileWizard; dead_code fires under --all-features
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CreateEntry {
+    Template,
+    Clone,
+}
+
+/// Phase 49.4 Plan 10 (D-15, Claude's Discretion): the starter persona
+/// written for a freshly template-created profile so the Soul editor never
+/// opens on an empty textarea for a brand-new profile. Genuinely useful,
+/// not a placeholder — the operator edits this in place immediately.
+/// `create_profile`'s request DTO has no persona field (protocol.rs
+/// `CreateProfileRequest`), so this is written via a follow-up
+/// `save_profile_persona` call after `create_profile` succeeds — see
+/// `submit_create`'s `Ok` arm.
+#[allow(dead_code)] // used in CreateProfileWizard's submit_create; dead_code fires under --all-features
+pub(crate) const STARTER_SOUL_MD: &str = "# Identity\n\nYou are a helpful assistant. Introduce yourself briefly on first contact and stay focused on the operator's actual request.\n\n# Voice\n\nSpeak plainly and concisely. Prefer short paragraphs and concrete next steps over hedging or filler.\n\n# Behaviour\n\nAsk a clarifying question when the request is ambiguous. Say what you did and why after completing a task, and flag anything you were unsure about.\n";
 
 /// Client-side name-rule outcome. Four variants — UI-SPEC's own four
 /// locked strings, ported from the bash script's `die()` messages, not
@@ -291,6 +334,11 @@ pub fn CreateProfileWizard(
     on_dismiss: EventHandler<()>,
     on_created: EventHandler<String>,
     #[props(default)] context: ProfileDialogContext,
+    // Phase 49.4 Plan 10 (D-15): opt-in entry-point selection step ahead of
+    // Identity. Defaults to `false` so the two pre-existing mounts (Kanban
+    // board, Agents roster) keep landing on `Identity` first exactly as
+    // before this plan — only the Soul page's new mount passes `true`.
+    #[props(default)] show_entry_step: bool,
 ) -> Element {
     // ALL hooks register unconditionally on every render (Pattern E from
     // PATTERNS.md — agents.rs UAT-2 hotfix discipline).
@@ -331,7 +379,21 @@ pub fn CreateProfileWizard(
     });
 
     // ---- Step spine ----
-    let mut step: Signal<WizardStep> = use_signal(|| WizardStep::Identity);
+    // Phase 49.4 Plan 10 (D-15): starts on `Entry` only when the caller
+    // opts in — the closure runs once at mount, so this never re-evaluates
+    // `show_entry_step` mid-session (a `#[props]` value is immutable for
+    // this component instance's lifetime anyway).
+    let mut step: Signal<WizardStep> = use_signal(move || {
+        if show_entry_step {
+            WizardStep::Entry
+        } else {
+            WizardStep::Identity
+        }
+    });
+    // Phase 49.4 Plan 10 (D-15): which entry-point the operator picked —
+    // `None` until the Entry step's buttons are clicked (or always `None`
+    // for the two pre-existing mounts, which never visit that step).
+    let mut entry_choice: Signal<Option<CreateEntry>> = use_signal(|| None);
 
     // ---- Step 1: IDENTITY ----
     let mut name: Signal<String> = use_signal(String::new);
@@ -445,7 +507,15 @@ pub fn CreateProfileWizard(
     let mut go_back = move || {
         let current = *step.read();
         step.set(match current {
-            WizardStep::Identity => WizardStep::Identity,
+            WizardStep::Entry => WizardStep::Entry,
+            WizardStep::ClonePicker => WizardStep::Entry,
+            WizardStep::Identity => {
+                if show_entry_step {
+                    WizardStep::Entry
+                } else {
+                    WizardStep::Identity
+                }
+            }
             WizardStep::ConfigKeys => WizardStep::Identity,
             WizardStep::Verify => WizardStep::ConfigKeys,
         });
@@ -475,6 +545,9 @@ pub fn CreateProfileWizard(
         // payload.
         let clone_choice_owned = *clone_from_choice.read();
         let clone_source_owned = clone_source.read().clone();
+        // Phase 49.4 Plan 10 (D-15): read BEFORE spawn (Pattern B) — decides
+        // whether the success arm below writes the starter persona.
+        let entry_choice_owned = *entry_choice.read();
         creating.set(true);
         create_error.set(None);
         let mut creating_sig = creating;
@@ -512,6 +585,27 @@ pub fn CreateProfileWizard(
                     // redisplayed, mirroring providers.rs:541-542.
                     manual_key_value_sig.set(String::new());
                     step_sig.set(WizardStep::Verify);
+                    // Phase 49.4 Plan 10 (D-15): the template path writes
+                    // the starter persona NOW that the profile exists —
+                    // never before, same "only after the write it depends
+                    // on has actually succeeded" discipline the avatar save
+                    // below already follows. The clone path never reaches
+                    // here (clone_choice_owned routed through
+                    // duplicate_profile above, which copies the source's
+                    // own real persona) — writing a starter over a cloned
+                    // persona would silently discard what was just copied.
+                    // A failure here is intentionally swallowed: the
+                    // profile itself was already created successfully, and
+                    // an empty-but-real SOUL.md is not a failure state (the
+                    // editor's own empty-state is a valid, documented case)
+                    // — see this plan's SUMMARY for the sequencing note.
+                    if entry_choice_owned == Some(CreateEntry::Template) {
+                        let _ = crate::server::profile_api::save_profile_persona(
+                            name_for_created.clone(),
+                            STARTER_SOUL_MD.to_string(),
+                        )
+                        .await;
+                    }
                     // Phase 50.1 Plan 04 (D-12): persist the avatar choice
                     // NOW that the profile exists — never before, since a
                     // save keyed to a not-yet-created profile name would
@@ -546,6 +640,10 @@ pub fn CreateProfileWizard(
     };
 
     rsx! {
+        // Phase 49.4: pull in the kn-modal / kn-wizard styles so this dialog is
+        // styled on every screen it can open from (Soul included), not just the
+        // screens that happen to link kanban.css themselves.
+        document::Link { rel: "stylesheet", href: WIZARD_CSS }
         div {
             class: "kn-modal-overlay",
             role: "presentation",
@@ -579,28 +677,108 @@ pub fn CreateProfileWizard(
                         "✕"
                     }
                 }
-                div { class: "kn-wizard-steps",
-                    span {
-                        class: if current_step == WizardStep::Identity { "kn-modal-seg kn-modal-seg--active" } else { "kn-modal-seg kn-modal-seg--done" },
-                        "1 · IDENTITY"
-                    }
-                    span {
-                        class: if current_step == WizardStep::ConfigKeys {
-                            "kn-modal-seg kn-modal-seg--active"
-                        } else if current_step == WizardStep::Verify {
-                            "kn-modal-seg kn-modal-seg--done"
-                        } else {
-                            "kn-modal-seg"
-                        },
-                        "2 · CONFIG & KEYS"
-                    }
-                    span {
-                        class: if current_step == WizardStep::Verify { "kn-modal-seg kn-modal-seg--active" } else { "kn-modal-seg" },
-                        "3 · VERIFY"
+                // Phase 49.4 Plan 10 (D-15): the 1/2/3 step spine only
+                // covers the wizard's pre-existing three steps — hidden
+                // while on the new Entry/ClonePicker steps rather than
+                // rendering with none of its three segments marked active.
+                if !matches!(current_step, WizardStep::Entry | WizardStep::ClonePicker) {
+                    div { class: "kn-wizard-steps",
+                        span {
+                            class: if current_step == WizardStep::Identity { "kn-modal-seg kn-modal-seg--active" } else { "kn-modal-seg kn-modal-seg--done" },
+                            "1 · IDENTITY"
+                        }
+                        span {
+                            class: if current_step == WizardStep::ConfigKeys {
+                                "kn-modal-seg kn-modal-seg--active"
+                            } else if current_step == WizardStep::Verify {
+                                "kn-modal-seg kn-modal-seg--done"
+                            } else {
+                                "kn-modal-seg"
+                            },
+                            "2 · CONFIG & KEYS"
+                        }
+                        span {
+                            class: if current_step == WizardStep::Verify { "kn-modal-seg kn-modal-seg--active" } else { "kn-modal-seg" },
+                            "3 · VERIFY"
+                        }
                     }
                 }
                 div { class: "kn-modal-body",
-                    if current_step == WizardStep::Identity {
+                    if current_step == WizardStep::Entry {
+                        p {
+                            style: "font-size: var(--fs-12); color: var(--fg-dim); margin: 0 0 var(--sp-3) 0;",
+                            "How do you want to create this profile?"
+                        }
+                        button {
+                            class: "kn-modal-btn kn-modal-btn--submit",
+                            style: "width: 100%; justify-content: flex-start; margin-bottom: var(--sp-2);",
+                            onclick: move |_| {
+                                entry_choice.set(Some(CreateEntry::Template));
+                                clone_from_choice.set(CloneFromChoice::Empty);
+                                step.set(WizardStep::Identity);
+                            },
+                            "Start from a template"
+                        }
+                        button {
+                            class: "kn-modal-btn",
+                            style: "width: 100%; justify-content: flex-start;",
+                            onclick: move |_| {
+                                entry_choice.set(Some(CreateEntry::Clone));
+                                clone_from_choice.set(CloneFromChoice::CloneExisting);
+                                step.set(WizardStep::ClonePicker);
+                            },
+                            "Clone an existing profile"
+                        }
+                    } else if current_step == WizardStep::ClonePicker {
+                        div {
+                            style: "font-size: var(--fs-11); color: var(--fg-dim); padding-bottom: var(--sp-2); overflow-wrap: anywhere;",
+                            "SOUL.md and config only — API keys and secrets are never copied."
+                        }
+                        match known_profiles_resource() {
+                            None => rsx! {
+                                div { class: "kn-drawer-loading", "Loading profiles…" }
+                            },
+                            Some(Err(_)) => rsx! {
+                                div { class: "kn-modal-error", "Could not read profiles. Check permissions and retry." }
+                            },
+                            Some(Ok(ref rows)) if rows.is_empty() => rsx! {
+                                div { class: "kn-drawer-empty", "No existing profiles to clone from yet." }
+                            },
+                            Some(Ok(rows)) => rsx! {
+                                div { class: "clone-picker",
+                                    for row in rows.iter().cloned() {
+                                        {
+                                            let row_name = row.name.clone();
+                                            let dot_color = if row.health == ProfileHealth::Incomplete {
+                                                "var(--amber)"
+                                            } else {
+                                                "var(--accent-primary)"
+                                            };
+                                            rsx! {
+                                                div {
+                                                    key: "{row.name}",
+                                                    class: "clone-picker-row",
+                                                    title: "{row.name}",
+                                                    onclick: move |_| {
+                                                        clone_source.set(row_name.clone());
+                                                        step.set(WizardStep::Identity);
+                                                    },
+                                                    span {
+                                                        style: "overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto;",
+                                                        "{row.name}"
+                                                    }
+                                                    span {
+                                                        style: "display:inline-block;width:6px;height:6px;border-radius:50%;background:{dot_color};margin-left:6px;flex-shrink:0;",
+                                                        "aria-hidden": "true",
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                        }
+                    } else if current_step == WizardStep::Identity {
                         label { class: "kn-modal-label", "PROFILE NAME" }
                         input {
                             class: "kn-modal-input",
@@ -669,42 +847,55 @@ pub fn CreateProfileWizard(
                                         // even runs). Never in the drawer —
                                         // a one-time creation operation, not
                                         // a live field.
-                                        div { class: "kn-drawer-section-label", "CLONE FROM" }
-                                        div { class: "kn-modal-segmented",
-                                            button {
-                                                class: if clone_choice_val == CloneFromChoice::Empty { "kn-modal-seg kn-modal-seg--active" } else { "kn-modal-seg" },
-                                                onclick: move |_| clone_from_choice.set(CloneFromChoice::Empty),
-                                                "Empty"
-                                            }
-                                            button {
-                                                class: if clone_choice_val == CloneFromChoice::CloneExisting { "kn-modal-seg kn-modal-seg--active" } else { "kn-modal-seg" },
-                                                onclick: move |_| clone_from_choice.set(CloneFromChoice::CloneExisting),
-                                                "Clone existing bot ▾"
-                                            }
-                                            button {
-                                                class: "kn-modal-seg",
-                                                disabled: true,
-                                                "aria-label": "Import (not available yet)",
-                                                "Import"
-                                            }
-                                        }
-                                        if clone_choice_val == CloneFromChoice::CloneExisting {
-                                            input {
-                                                class: "kn-modal-input",
-                                                placeholder: "bot to clone",
-                                                list: KN_CLONE_FROM_DATALIST_ID,
-                                                value: "{clone_source_val}",
-                                                oninput: move |evt| clone_source.set(evt.value()),
-                                            }
-                                            datalist { id: KN_CLONE_FROM_DATALIST_ID,
-                                                for known_name in known_profile_names.iter().cloned() {
-                                                    option { key: "{known_name}", value: "{known_name}" }
+                                        // Phase 49.4 Plan 10 (D-15): hidden
+                                        // when `show_entry_step` is true —
+                                        // the new Entry step already owns
+                                        // this decision for that caller (the
+                                        // Soul page), so this control would
+                                        // otherwise let the operator set a
+                                        // second, conflicting clone source.
+                                        // The two pre-existing mounts never
+                                        // set `show_entry_step`, so this
+                                        // stays visible for them exactly as
+                                        // before this plan.
+                                        if !show_entry_step {
+                                            div { class: "kn-drawer-section-label", "CLONE FROM" }
+                                            div { class: "kn-modal-segmented",
+                                                button {
+                                                    class: if clone_choice_val == CloneFromChoice::Empty { "kn-modal-seg kn-modal-seg--active" } else { "kn-modal-seg" },
+                                                    onclick: move |_| clone_from_choice.set(CloneFromChoice::Empty),
+                                                    "Empty"
+                                                }
+                                                button {
+                                                    class: if clone_choice_val == CloneFromChoice::CloneExisting { "kn-modal-seg kn-modal-seg--active" } else { "kn-modal-seg" },
+                                                    onclick: move |_| clone_from_choice.set(CloneFromChoice::CloneExisting),
+                                                    "Clone existing bot ▾"
+                                                }
+                                                button {
+                                                    class: "kn-modal-seg",
+                                                    disabled: true,
+                                                    "aria-label": "Import (not available yet)",
+                                                    "Import"
                                                 }
                                             }
-                                        }
-                                        div {
-                                            style: "font-size: var(--fs-11); color: var(--fg-dim); padding-bottom: var(--sp-2);",
-                                            "Importing isn't available in this phase."
+                                            if clone_choice_val == CloneFromChoice::CloneExisting {
+                                                input {
+                                                    class: "kn-modal-input",
+                                                    placeholder: "bot to clone",
+                                                    list: KN_CLONE_FROM_DATALIST_ID,
+                                                    value: "{clone_source_val}",
+                                                    oninput: move |evt| clone_source.set(evt.value()),
+                                                }
+                                                datalist { id: KN_CLONE_FROM_DATALIST_ID,
+                                                    for known_name in known_profile_names.iter().cloned() {
+                                                        option { key: "{known_name}", value: "{known_name}" }
+                                                    }
+                                                }
+                                            }
+                                            div {
+                                                style: "font-size: var(--fs-11); color: var(--fg-dim); padding-bottom: var(--sp-2);",
+                                                "Importing isn't available in this phase."
+                                            }
                                         }
                                         div { class: "kn-drawer-section-label", "AVATAR" }
                                         AvatarPicker {
@@ -910,13 +1101,26 @@ pub fn CreateProfileWizard(
                             class: "kn-modal-btn",
                             onclick: move |_| {
                                 match current_step {
-                                    WizardStep::Identity => on_dismiss.call(()),
+                                    WizardStep::Entry => on_dismiss.call(()),
+                                    WizardStep::Identity if !show_entry_step => on_dismiss.call(()),
                                     _ => go_back(),
                                 }
                             },
-                            if current_step == WizardStep::Identity { "CANCEL" } else { "← BACK" }
+                            if current_step == WizardStep::Entry
+                                || (current_step == WizardStep::Identity && !show_entry_step)
+                            {
+                                "CANCEL"
+                            } else {
+                                "← BACK"
+                            }
                         }
-                        if current_step == WizardStep::Identity {
+                        if current_step == WizardStep::Entry || current_step == WizardStep::ClonePicker {
+                            // Phase 49.4 Plan 10 (D-15): no footer action
+                            // button on these two steps — progression
+                            // happens via the body's own controls (the
+                            // entry-choice buttons, or clicking a
+                            // clone-picker row).
+                        } else if current_step == WizardStep::Identity {
                             button {
                                 class: "kn-modal-btn kn-modal-btn--submit",
                                 disabled: !name_is_valid,

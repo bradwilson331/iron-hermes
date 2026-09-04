@@ -16,6 +16,16 @@ RUNNER="$IRONHERMES_HOME_DIR/scripts/gateway-run.sh"
 
 mkdir -p "$LOG_DIR"
 
+# 48.3 D-06/T-48.3-21: create the log 0600 before this watchdog's first
+# append — a supervisor (or this script) opening a missing append target
+# otherwise creates it with default (typically 0644) permissions, and
+# gateway startup errors can quote provider keys. Guarded so a chmod
+# failure cannot abort the watchdog's real job of restarting a dead gateway.
+if [ ! -e "$LOG_FILE" ]; then
+    : >"$LOG_FILE" 2>/dev/null || true
+fi
+chmod 600 "$LOG_FILE" 2>/dev/null || true
+
 is_alive() {
     local pid="$1"
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null

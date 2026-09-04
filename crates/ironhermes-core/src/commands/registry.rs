@@ -244,6 +244,15 @@ pub fn build_registry() -> Vec<CommandDef> {
         CommandDef::new("cron", "Manage cron jobs", ToolsAndSkills)
             .args_hint("[subcommand]")
             .platform(CliOnly),
+        // Phase 49.5 Plan 05 (D-07/D-08): /blueprint deliberately diverges from
+        // /cron's CliOnly platform — Universal, matching the adjacent /kanban
+        // precedent. Safe because `list`/`show` are pure reads of compiled-in
+        // data, and `run` (the one verb that writes) carries its own
+        // remote-origin authorization gate in cmd_blueprint against
+        // `security.remote_blueprint_run_enabled` — see that function's doc.
+        CommandDef::new("blueprint", "Browse and schedule automation blueprints", ToolsAndSkills)
+            .args_hint("[subcommand]")
+            .platform(Universal),
         // Phase 36.3.7 (D-35/D-36): /kanban slash command registered with Universal
         // platform so it propagates to TG/Discord/Slack/UI via CommandRouter. NOT
         // CliOnly (unlike cron) — D-36 requires mid-run bypass to work on gateway+UI.

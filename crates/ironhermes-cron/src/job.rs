@@ -139,6 +139,11 @@ pub struct CronJob {
     pub workdir: Option<String>,
     #[serde(default)]
     pub last_delivery_error: Option<String>,
+    /// Each run sees the previous run's output, for deduping and picking up
+    /// where the last run left off. Inert until plan 04 wires the read — this
+    /// field only adds storage.
+    #[serde(default)]
+    pub continuity: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -366,5 +371,46 @@ mod cronjob_serde_tests {
         assert_eq!(origin.chat_id, "12345");
         assert_eq!(origin.chat_name, None);
         assert_eq!(origin.thread_id, None);
+    }
+
+    /// Test 7 (D-16): a jobs.json record that predates `continuity` deserializes
+    /// with no error and `continuity == false`.
+    #[test]
+    fn continuity_defaults_to_false_when_absent_from_json() {
+        let job: CronJob = serde_json::from_str(minimal_job_json()).expect("deserialize");
+        assert!(!job.continuity);
+    }
+
+    /// Test 8 (D-16): `continuity: true` round-trips through serialize/deserialize.
+    #[test]
+    fn continuity_round_trips_true() {
+        let json = r#"{
+            "id": "continuity-id",
+            "name": "Continuity Job",
+            "prompt": "do something",
+            "skills": [],
+            "schedule": { "kind": "interval", "minutes": 60, "display": "every 60m" },
+            "schedule_display": "every 60m",
+            "repeat": { "times": null, "completed": 0 },
+            "enabled": true,
+            "state": "scheduled",
+            "paused_at": null,
+            "paused_reason": null,
+            "deliver": "local",
+            "origin": null,
+            "created_at": "2026-01-01T00:00:00Z",
+            "next_run_at": null,
+            "last_run_at": null,
+            "last_status": null,
+            "last_error": null,
+            "continuity": true
+        }"#;
+
+        let job: CronJob = serde_json::from_str(json).expect("deserialize");
+        assert!(job.continuity);
+
+        let serialized = serde_json::to_string(&job).expect("serialize");
+        let job2: CronJob = serde_json::from_str(&serialized).expect("re-deserialize");
+        assert!(job2.continuity);
     }
 }

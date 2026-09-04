@@ -16,6 +16,12 @@ use tempfile::NamedTempFile;
 
 const PID_FILENAME: &str = "gateway.pid";
 
+/// Phase 49.3 Plan 06 (D-08): the versioned per-adapter status heartbeat
+/// file, written next to `gateway.pid` by the gateway process's periodic
+/// heartbeat task (`runner.rs`'s "9c" task) and read by the web server's
+/// `read_platform_status` (heartbeat-first, pidfile-fallback).
+const STATUS_FILENAME: &str = "gateway-status.json";
+
 /// 3-line YAML record stored at `$IRONHERMES_HOME/gateway.pid`.
 /// D-10: pid (u32), started_at (ISO8601 UTC string), profile (slug or "default").
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -81,6 +87,58 @@ pub fn write_gateway_pid(home: &Path, record: &GatewayPidRecord) -> Result<()> {
         )
     })?;
     Ok(())
+}
+
+/// Phase 49.3 Plan 06 (D-08, T-49.3-06-02): atomic write via tempfile in
+/// the same dir + persist — the EXACT same shape as [`write_gateway_pid`]
+/// above, so the status heartbeat gets the same no-partial-reads guarantee
+/// with no second atomic-write mechanism invented. Called from exactly ONE
+/// shared periodic task (`runner.rs`'s "9c" heartbeat) — never from
+/// multiple racing writers to the same file.
+pub fn write_gateway_status(
+    home: &Path,
+    status: &ironhermes_core::gateway_status::GatewayPlatformStatus,
+) -> Result<()> {
+    std::fs::create_dir_all(home)
+        .with_context(|| format!("failed to create {}", home.display()))?;
+    let status_path = home.join(STATUS_FILENAME);
+    let json = serde_json::to_string_pretty(status).context("failed to serialize gateway status")?;
+    let mut tmp = NamedTempFile::new_in(home)
+        .with_context(|| format!("failed to create temp file in {}", home.display()))?;
+    tmp.write_all(json.as_bytes())
+        .context("failed to write gateway-status.json contents")?;
+    tmp.flush().context("failed to flush gateway-status.json")?;
+    tmp.persist(&status_path).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to atomic-rename gateway-status.json to {}: {}",
+            status_path.display(),
+            e.error
+        )
+    })?;
+    Ok(())
+}
+
+/// Phase 49.3 Plan 06 (D-08): reads the status heartbeat file written by
+/// [`write_gateway_status`]. Returns `Ok(None)` when absent (no heartbeat
+/// has ever been written, or the gateway process predates this feature).
+/// Returns `Err` on I/O failure or unparseable JSON — the caller
+/// (`iron_hermes_ui::server::gateway_platform_status_api::read_platform_status`)
+/// treats any `Err` uniformly as "no live heartbeat" and falls back to
+/// pidfile liveness (T-49.3-06-01); this fn itself does not perform that
+/// fallback so it stays a pure, directly-testable read.
+pub fn read_gateway_status(
+    home: &Path,
+) -> Result<Option<ironhermes_core::gateway_status::GatewayPlatformStatus>> {
+    let status_path = home.join(STATUS_FILENAME);
+    if !status_path.exists() {
+        return Ok(None);
+    }
+    let contents = std::fs::read_to_string(&status_path)
+        .with_context(|| format!("failed to read {}", status_path.display()))?;
+    let status: ironhermes_core::gateway_status::GatewayPlatformStatus =
+        serde_json::from_str(&contents)
+            .with_context(|| format!("failed to parse {}", status_path.display()))?;
+    Ok(Some(status))
 }
 
 /// Returns Ok(None) when the file is absent (the common case at startup).
@@ -612,5 +670,78 @@ mod tests {
         // `STOP_CONFIRM_DEADLINE` constant. The probe never goes stale.
         let outcome = await_stopped(42, Duration::from_millis(50), |_| PidLiveness::Live);
         assert_eq!(outcome, DeathConfirmation::NotConfirmed);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Phase 49.3 Plan 06 (D-08): status-file atomic writer/reader.
+    // ─────────────────────────────────────────────────────────────────────
+
+    use ironhermes_core::gateway_status::{GatewayPlatformStatus, PlatformStatusEntry};
+    use std::collections::BTreeMap;
+
+    fn sample_status() -> GatewayPlatformStatus {
+        let mut platforms = BTreeMap::new();
+        platforms.insert(
+            "telegram".to_string(),
+            PlatformStatusEntry {
+                connected: true,
+                session_count: 2,
+            },
+        );
+        platforms.insert(
+            "discord".to_string(),
+            PlatformStatusEntry {
+                connected: false,
+                session_count: 0,
+            },
+        );
+        GatewayPlatformStatus::new(platforms)
+    }
+
+    #[test]
+    fn write_then_read_gateway_status_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let status = sample_status();
+        write_gateway_status(dir.path(), &status).unwrap();
+        let read = read_gateway_status(dir.path()).unwrap().unwrap();
+        assert_eq!(read, status);
+    }
+
+    #[test]
+    fn read_gateway_status_absent_returns_none() {
+        let dir = TempDir::new().unwrap();
+        assert!(read_gateway_status(dir.path()).unwrap().is_none());
+    }
+
+    #[test]
+    fn gateway_status_write_is_atomic_across_repeated_writes() {
+        // Mirrors `pid_write_is_atomic` above — writing twice must always
+        // leave a fully-parseable file (no half-written intermediate state
+        // ever observable), proving the same NamedTempFile-then-persist
+        // shape is in use.
+        let dir = TempDir::new().unwrap();
+        let s1 = sample_status();
+        write_gateway_status(dir.path(), &s1).unwrap();
+        assert_eq!(read_gateway_status(dir.path()).unwrap().unwrap(), s1);
+
+        let mut platforms2 = BTreeMap::new();
+        platforms2.insert(
+            "buzz".to_string(),
+            PlatformStatusEntry {
+                connected: true,
+                session_count: 7,
+            },
+        );
+        let s2 = GatewayPlatformStatus::new(platforms2);
+        write_gateway_status(dir.path(), &s2).unwrap();
+        let after = read_gateway_status(dir.path()).unwrap().unwrap();
+        assert_eq!(after.platforms.get("buzz").unwrap().session_count, 7);
+    }
+
+    #[test]
+    fn read_gateway_status_rejects_garbage() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("gateway-status.json"), "not json").unwrap();
+        assert!(read_gateway_status(dir.path()).is_err());
     }
 }

@@ -367,6 +367,7 @@ fn cmd_edit(
         schedule: parsed_schedule,
         schedule_display,
         skills: skills_opt,
+        ..Default::default()
     };
 
     let updated = store.update_job(&id, updates)?;
@@ -1068,6 +1069,7 @@ mod tests {
                     schedule: None,
                     schedule_display: None,
                     skills: Some(Vec::new()),
+                    ..Default::default()
                 },
             )
             .unwrap();

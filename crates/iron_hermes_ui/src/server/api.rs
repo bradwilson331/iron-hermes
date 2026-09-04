@@ -550,6 +550,36 @@ fn resolve_provider_or_fallback(
 pub async fn list_provider_models(
     provider: String,
 ) -> Result<ProviderModelsSnapshot, ServerFnError> {
+    // ---- Phase 49.4 hotfix: short-TTL single-flight cache ----
+    //
+    // The Models screen mounts up to 8 provider→model cascades (default + one
+    // per role), and EACH called this fn on mount — every call a live HTTP GET
+    // to the provider's `/models` endpoint (300+ models for OpenRouter, 4-5s
+    // under load). Landing on Models therefore fired ~8 concurrent slow
+    // upstream requests and repeated them on every revisit, saturating the
+    // single UI-server runtime so the model list, avatars, and even other
+    // screens stopped loading.
+    //
+    // Fix: cache each provider's snapshot for 60s. Holding the async mutex
+    // across the whole miss path also single-flights concurrent callers — the
+    // first does the one upstream fetch; the rest wait here, then read the
+    // freshly-cached entry instead of issuing their own request. A cache hit is
+    // just a lock + map lookup, so it never touches config, state, or network.
+    use std::time::{Duration, Instant};
+    const MODEL_LIST_TTL: Duration = Duration::from_secs(60);
+    static MODEL_LIST_CACHE: std::sync::OnceLock<
+        tokio::sync::Mutex<std::collections::HashMap<String, (Instant, ProviderModelsSnapshot)>>,
+    > = std::sync::OnceLock::new();
+    let cache =
+        MODEL_LIST_CACHE.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut cache_guard = cache.lock().await;
+    if let Some((cached_at, snapshot)) = cache_guard.get(&provider) {
+        if cached_at.elapsed() < MODEL_LIST_TTL {
+            return Ok(snapshot.clone());
+        }
+    }
+    let cache_key = provider.clone();
+
     let config = ironhermes_core::config::Config::load()
         .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
 
@@ -562,53 +592,59 @@ pub async fn list_provider_models(
         .map(|(id, _meta)| id.to_string())
         .collect();
 
-    let (base_url, api_key) =
-        match resolve_provider_or_fallback(&config, &provider, catalog_ids.clone()) {
-            Ok(pair) => pair,
-            Err(fallback) => return Ok(fallback),
+    let snapshot: ProviderModelsSnapshot = async move {
+        let (base_url, api_key) =
+            match resolve_provider_or_fallback(&config, &provider, catalog_ids.clone()) {
+                Ok(pair) => pair,
+                Err(fallback) => return fallback,
+            };
+
+        let url = format!("{base_url}/models");
+        let client = reqwest::Client::new();
+        let mut req = client.get(&url);
+        if let Some(key) = api_key {
+            req = req.bearer_auth(key);
+        }
+
+        // Any transport failure degrades to the catalog fallback rather than a
+        // hard error (T-46.9-32) — the outbound provider endpoint is not
+        // trustworthy enough to gate the dropdown on.
+        let Ok(resp) = req.send().await else {
+            return ProviderModelsSnapshot {
+                models: catalog_ids,
+                fell_back: true,
+            };
+        };
+        if !resp.status().is_success() {
+            return ProviderModelsSnapshot {
+                models: catalog_ids,
+                fell_back: true,
+            };
+        }
+        let Ok(body) = resp.json::<serde_json::Value>().await else {
+            return ProviderModelsSnapshot {
+                models: catalog_ids,
+                fell_back: true,
+            };
         };
 
-    let url = format!("{base_url}/models");
-    let client = reqwest::Client::new();
-    let mut req = client.get(&url);
-    if let Some(key) = api_key {
-        req = req.bearer_auth(key);
-    }
+        let models = parse_openai_models_response(&body);
+        if models.is_empty() {
+            return ProviderModelsSnapshot {
+                models: catalog_ids,
+                fell_back: true,
+            };
+        }
 
-    // Any transport failure degrades to the catalog fallback rather than a
-    // hard error (T-46.9-32) — the outbound provider endpoint is not
-    // trustworthy enough to gate the dropdown on.
-    let Ok(resp) = req.send().await else {
-        return Ok(ProviderModelsSnapshot {
-            models: catalog_ids,
-            fell_back: true,
-        });
-    };
-    if !resp.status().is_success() {
-        return Ok(ProviderModelsSnapshot {
-            models: catalog_ids,
-            fell_back: true,
-        });
+        ProviderModelsSnapshot {
+            models,
+            fell_back: false,
+        }
     }
-    let Ok(body) = resp.json::<serde_json::Value>().await else {
-        return Ok(ProviderModelsSnapshot {
-            models: catalog_ids,
-            fell_back: true,
-        });
-    };
+    .await;
 
-    let models = parse_openai_models_response(&body);
-    if models.is_empty() {
-        return Ok(ProviderModelsSnapshot {
-            models: catalog_ids,
-            fell_back: true,
-        });
-    }
-
-    Ok(ProviderModelsSnapshot {
-        models,
-        fell_back: false,
-    })
+    cache_guard.insert(cache_key, (Instant::now(), snapshot.clone()));
+    Ok(snapshot)
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

@@ -207,7 +207,7 @@ async fn cmd_set_password(vault: bool) -> Result<()> {
 /// visually ambiguous characters `0`/`O` and `1`/`l`/`I` — chosen so a
 /// password read off `podman logs` is never misdictated. Digits `2`-`9` (8)
 /// + uppercase `A`-`Z` minus `I`,`O` (24) + lowercase `a`-`z` minus `l` (25)
-/// = 57 symbols.
+///   = 57 symbols.
 ///
 /// Entropy: [`PASSWORD_GROUP_COUNT`] * [`PASSWORD_GROUP_LEN`] = 16 symbols
 /// drawn from this alphabet gives `16 * log2(57) = 93.3` bits, against the

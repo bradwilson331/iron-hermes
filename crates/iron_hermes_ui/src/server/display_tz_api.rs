@@ -38,16 +38,32 @@ pub struct DisplayTimezones {
     pub hour12: bool,
 }
 
-/// Resolve `primary = display.timezone.or(agent.timezone)` and truncate
-/// `extra_timezones` to [`MAX_EXTRA_TIMEZONES`]. Pure/native-only so it is
-/// directly unit testable without a filesystem-backed `Config::load()`.
+/// Phase 49.4 Plan 04 (D-13): resolve `primary = display.timezone.or(agent.timezone)`
+/// and `hour12 = display.hour12.unwrap_or(false)` — the single source of
+/// truth for the display-timezone + hour-format resolution rule. Extracted
+/// out of [`resolve_display_timezones`] so `schedules_api.rs` can share the
+/// exact same rule instead of re-reading `config.agent.timezone` directly
+/// (the D-13 bug this plan fixes). Pure/native-only so it is directly unit
+/// testable without a filesystem-backed `Config::load()`.
 #[cfg(not(target_arch = "wasm32"))]
-fn resolve_display_timezones(config: &ironhermes_core::config::Config) -> DisplayTimezones {
+pub(crate) fn resolve_display_tz_parts(
+    config: &ironhermes_core::config::Config,
+) -> (Option<String>, bool) {
     let primary = config
         .display
         .timezone
         .clone()
         .or_else(|| config.agent.timezone.clone());
+    let hour12 = config.display.hour12.unwrap_or(false);
+    (primary, hour12)
+}
+
+/// Resolve `primary = display.timezone.or(agent.timezone)` and truncate
+/// `extra_timezones` to [`MAX_EXTRA_TIMEZONES`]. Pure/native-only so it is
+/// directly unit testable without a filesystem-backed `Config::load()`.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_display_timezones(config: &ironhermes_core::config::Config) -> DisplayTimezones {
+    let (primary, hour12) = resolve_display_tz_parts(config);
     let extras = config
         .display
         .extra_timezones
@@ -55,7 +71,6 @@ fn resolve_display_timezones(config: &ironhermes_core::config::Config) -> Displa
         .take(MAX_EXTRA_TIMEZONES)
         .cloned()
         .collect();
-    let hour12 = config.display.hour12.unwrap_or(false);
 
     DisplayTimezones {
         primary,
@@ -77,7 +92,7 @@ pub async fn get_display_timezones() -> Result<DisplayTimezones, ServerFnError> 
 
 #[cfg(all(test, feature = "server"))]
 mod tests {
-    use super::resolve_display_timezones;
+    use super::{resolve_display_timezones, resolve_display_tz_parts};
     use ironhermes_core::config::{Config, DisplayConfig};
 
     fn config_with(display: DisplayConfig, agent_timezone: Option<&str>) -> Config {
@@ -199,5 +214,55 @@ mod tests {
         let config = config_with(DisplayConfig::default(), None);
         let resolved = resolve_display_timezones(&config);
         assert!(!resolved.hour12);
+    }
+
+    // =========================================================================
+    // Phase 49.4 Plan 04 (D-13): resolve_display_tz_parts — the shared
+    // primary/hour12 resolver `schedules_api.rs` reads instead of
+    // `config.agent.timezone` directly.
+    // =========================================================================
+
+    #[test]
+    fn parts_prefers_display_timezone_over_agent_timezone() {
+        let config = config_with(
+            DisplayConfig {
+                timezone: Some("America/New_York".to_string()),
+                extra_timezones: vec![],
+                ..Default::default()
+            },
+            Some("Europe/London"),
+        );
+        let (primary, _hour12) = resolve_display_tz_parts(&config);
+        assert_eq!(primary.as_deref(), Some("America/New_York"));
+    }
+
+    #[test]
+    fn parts_falls_back_to_agent_timezone_when_display_unset() {
+        let config = config_with(DisplayConfig::default(), Some("Europe/London"));
+        let (primary, _hour12) = resolve_display_tz_parts(&config);
+        assert_eq!(primary.as_deref(), Some("Europe/London"));
+    }
+
+    #[test]
+    fn parts_primary_is_none_when_neither_set() {
+        let config = config_with(DisplayConfig::default(), None);
+        let (primary, _hour12) = resolve_display_tz_parts(&config);
+        assert_eq!(primary, None);
+    }
+
+    #[test]
+    fn parts_hour12_matches_resolve_display_timezones() {
+        let config = config_with(
+            DisplayConfig {
+                hour12: Some(true),
+                ..Default::default()
+            },
+            None,
+        );
+        let (_primary, hour12) = resolve_display_tz_parts(&config);
+        assert!(hour12);
+        // Cross-check: the full DisplayTimezones resolver must agree —
+        // there is exactly one implementation of the rule.
+        assert_eq!(resolve_display_timezones(&config).hour12, hour12);
     }
 }

@@ -63,7 +63,13 @@ use dioxus::prelude::*;
 #[cfg(feature = "server")]
 use std::collections::BTreeMap;
 #[cfg(feature = "server")]
-use std::path::{Path, PathBuf};
+use std::path::Path;
+// 49.4-02 fix (folded todo 2026-08-28): `PathBuf` widened to `not(target_arch
+// = "wasm32")` because `BotHandoffError::WorkspaceNotFound` (below, also
+// widened) needs it — `Path` stays `feature = "server"`-only since nothing
+// in the widened cluster needs it.
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::PathBuf;
 #[cfg(feature = "server")]
 use std::process::Stdio;
 
@@ -73,7 +79,13 @@ use std::process::Stdio;
 /// worker-binary override variable (`IRONHERMES_WORKER_BIN`) rides this
 /// allowlist so a recursive spawn (bot handoff -> further subprocess) would
 /// carry the override forward, mirroring kanban's own forward-compat note.
-#[cfg(feature = "server")]
+// 49.4-02 fix (folded todo 2026-08-28): widened from `feature = "server"` to
+// `not(target_arch = "wasm32")` — this is a pure `&str` const with no `tokio`
+// dependency, and `gateway_control_api.rs`'s own native-only helper (which
+// is NOT `feature = "server"`-gated) references it, which broke `cargo test
+// --workspace` (no `server` feature requested for this non-default-member
+// crate in that invocation).
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) const BOT_HANDOFF_SAFE_SYSTEM_VARS: &[&str] = &[
     "PATH",
     "HOME",
@@ -98,7 +110,12 @@ const BOT_HANDOFF_TIMEOUT_SECONDS: u64 = 180;
 /// unhandled task death. No variant's `Display` embeds the child's raw
 /// environment, a key value, or a raw line from any `.env` file — the exact
 /// mechanism behind this project's CR-05/CR-06 disclosures.
-#[cfg(feature = "server")]
+// 49.4-02 fix: widened from `feature = "server"` — the type itself and its
+// `Display`/`Error` impls below are pure data/formatting (no `tokio`
+// dependency); `resolve_bot_worker_bin` (also widened) returns
+// `Result<String, BotHandoffError>`, so the error type must be available
+// wherever that fn is.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum BotHandoffError {
     /// `bot_name` failed `ironhermes_core::profile::validate_profile_name`.
@@ -146,7 +163,8 @@ pub(crate) enum BotHandoffError {
     Cancelled,
 }
 
-#[cfg(feature = "server")]
+// 49.4-02 fix: widened alongside `BotHandoffError`'s own definition above.
+#[cfg(not(target_arch = "wasm32"))]
 impl std::fmt::Display for BotHandoffError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -193,7 +211,8 @@ impl std::fmt::Display for BotHandoffError {
     }
 }
 
-#[cfg(feature = "server")]
+// 49.4-02 fix: widened alongside `BotHandoffError`'s own definition above.
+#[cfg(not(target_arch = "wasm32"))]
 impl std::error::Error for BotHandoffError {}
 
 /// Phase 50.1 Plan 03 (D-02): resolve the ironhermes worker binary. Mirrors
@@ -202,7 +221,10 @@ impl std::error::Error for BotHandoffError {}
 /// `"ironhermes"` (PATH lookup). Unlike the kanban original this returns a
 /// `Result`: an explicitly-set-but-empty override is a real misconfiguration
 /// this path names rather than silently spawning an empty-string command.
-#[cfg(feature = "server")]
+// 49.4-02 fix: widened from `feature = "server"` — pure `std::env::var`
+// lookup, no tokio dependency; `gateway_control_api.rs`'s native-only
+// `perform_start` helper (not `feature = "server"`-gated) calls this.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn resolve_bot_worker_bin() -> Result<String, BotHandoffError> {
     let bin = std::env::var("IRONHERMES_WORKER_BIN").unwrap_or_else(|_| "ironhermes".to_string());
     if bin.trim().is_empty() {

@@ -1,8 +1,14 @@
 # IronHermes Gateway — systemd --user unit.
 # Install location: ~/.config/systemd/user/ironhermes-gateway.service
 # Enable: systemctl --user daemon-reload && systemctl --user enable --now ironhermes-gateway
-# Logs:   journalctl --user -u ironhermes-gateway -f
+# Logs:   ~/.ironhermes/logs/gateway.log (application output); journalctl --user -u ironhermes-gateway -f (unit lifecycle only)
 # Headless servers (no graphical login): loginctl enable-linger $USER
+#
+# NOTE: append: requires systemd 240 or newer. With StandardOutput=/StandardError=
+# set below, systemd cannot duplicate a stream to both destinations, so the
+# journal now carries only systemd's own lifecycle messages for this unit
+# (start/stop/restart) while the gateway's own stdout/stderr go to the file —
+# 48.3 D-06 chose the file as the one canonical gateway log.
 
 [Unit]
 Description=IronHermes Telegram Gateway
@@ -13,6 +19,9 @@ Wants=network-online.target
 Type=simple
 ExecStart=%h/.ironhermes/scripts/gateway-run.sh
 WorkingDirectory=%h
+# %h is the same specifier ExecStart already relies on above.
+StandardOutput=append:%h/.ironhermes/logs/gateway.log
+StandardError=append:%h/.ironhermes/logs/gateway.log
 EnvironmentFile=-%h/.ironhermes/.env
 Restart=always
 RestartSec=5

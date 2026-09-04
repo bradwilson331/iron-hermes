@@ -63,9 +63,6 @@ pub fn ScreenMemory(is_active: bool) -> Element {
                 div { class: "screen-header-left",
                     div { class: "screen-tag", "// MODULE 06" }
                     h1 { class: "screen-title", "Memory" }
-                    p { class: "screen-sub",
-                        "Persistent context the active agent recalls across sessions — entries, user profile, and embedding-store provider."
-                    }
                 }
                 div { class: "screen-actions",
                     // EXPORT and + ENTRY: static affordance per D-07 / UI-SPEC §"Read-only phase"

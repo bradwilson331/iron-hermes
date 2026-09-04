@@ -17,7 +17,7 @@
 
 use dioxus::prelude::*;
 #[cfg(feature = "server")]
-use dioxus_fullstack::{body::Bytes, CloseCode, Message, TypedWebsocket};
+use dioxus_fullstack::{CloseCode, Message, TypedWebsocket, body::Bytes};
 use dioxus_fullstack::{WebSocketOptions, Websocket};
 #[cfg(feature = "server")]
 use std::time::Duration;
@@ -68,34 +68,218 @@ pub(crate) const WS_ORIGIN_CHECKED_PATHS: &[&str] = &["/api/ws/kanban", "/api/ws
 
 /// Derive this deployment's expected `Origin` from the incoming request's
 /// own `Host` header — never a hardcoded scheme+host (a request-derived
-/// value works identically on 127.0.0.1 local probing, a LAN bind, and the
-/// production `iron-hermes.sliplane.app` deployment behind Caddy, with zero
-/// per-environment configuration). `secure` selects the scheme; callers
-/// pass `AuthState`'s own `cookie_secure` flag, matching the same signal
-/// that already decides whether the session cookie itself carries `Secure`.
+/// value works identically on 127.0.0.1 local probing and a LAN bind, with
+/// zero per-environment configuration). `secure` selects the scheme;
+/// callers pass `AuthState`'s own `cookie_secure` flag, matching the same
+/// signal that already decides whether the session cookie itself carries
+/// `Secure`. This does NOT derive correctly on a TLS-terminating reverse
+/// proxy (e.g. the production `iron-hermes.sliplane.app` deployment behind
+/// Caddy) when `cookie_secure` is left at its `false` default — see
+/// [`expected_ws_origin_behind_proxy`], the proxy-aware entry point,
+/// D-02 (49.1.1).
 pub(crate) fn expected_ws_origin(host: &str, secure: bool) -> String {
     let scheme = if secure { "https" } else { "http" };
     format!("{scheme}://{host}")
 }
 
-/// The no-`Origin` rule (documented here, pinned by Test 3 in
-/// `origin_check_tests` below): a MISSING `Origin` header is ACCEPTED, not
-/// rejected. Browsers always send `Origin` on a WebSocket upgrade — same-
-/// origin or cross-origin — so only non-browser clients (CLI tools, curl,
-/// another backend service) legitimately omit it; rejecting a missing
-/// header would break those without closing any browser-driven CSWSH
-/// vector (which always presents an `Origin`).
+/// D-02 (49.1.1): the single shared `X-Forwarded-Proto` parser. Takes the
+/// already-string-extracted header value, never a raw axum header-map type
+/// (this keeps the function wasm-safe), and returns the first
+/// comma-separated value, trimmed, when it names `http` or `https`; anything
+/// else (absent, empty, unparseable, or a scheme other than http/https)
+/// yields `None`. Shared by two call sites, each applying its OWN fallback policy
+/// — `auth::require_auth`'s WS-origin block (falls back to `cookie_secure`
+/// via [`expected_ws_origin_behind_proxy`]) and
+/// `mcp_oauth_callback_route::reconstruct_callback_url` (falls back to
+/// `"http"`) — so no default is baked in here.
+/// 49.1.1 WR-02: the scheme match is ASCII-case-INSENSITIVE (RFC 3986 §3.1
+/// makes URI schemes case-insensitive, and not every proxy emits lowercase),
+/// but the returned value is always the canonical lowercase form. Both call
+/// sites interpolate this straight into a URL — returning the caller's
+/// `"HTTPS"` verbatim would build `HTTPS://host`, which then fails the
+/// byte-exact `allowed_origins` comparison against the browser's lowercase
+/// `Origin`. Accepting without canonicalizing would trade the 403 this phase
+/// fixes for a different one.
+pub(crate) fn parse_x_forwarded_proto(value: Option<&str>) -> Option<&'static str> {
+    let first = value.and_then(|v| v.split(',').next()).map(str::trim)?;
+    if first.eq_ignore_ascii_case("https") {
+        Some("https")
+    } else if first.eq_ignore_ascii_case("http") {
+        Some("http")
+    } else {
+        None
+    }
+}
+
+/// D-02 (49.1.1): the proxy-aware entry point for [`expected_ws_origin`] —
+/// the sliplane outage fix. When `x_forwarded_proto` yields a valid scheme
+/// via [`parse_x_forwarded_proto`], that forwarded scheme wins over
+/// `cookie_secure`: a Caddy-fronted deployment terminates TLS at the edge
+/// and forwards `X-Forwarded-Proto: https` even though `cookie_secure` may
+/// still be left at its `false` default. When the header is absent or
+/// invalid, this delegates to [`expected_ws_origin`] unchanged, so loopback
+/// and LAN behavior stays byte-identical to pre-phase.
+pub(crate) fn expected_ws_origin_behind_proxy(
+    host: &str,
+    x_forwarded_proto: Option<&str>,
+    cookie_secure: bool,
+) -> String {
+    match parse_x_forwarded_proto(x_forwarded_proto) {
+        Some(scheme) => format!("{scheme}://{host}"),
+        None => expected_ws_origin(host, cookie_secure),
+    }
+}
+
+/// D-04 (49.1.1): typed, wasm-safe classification of the
+/// `web_ui.allowed_origins` config value. Follows the exact
+/// `NotifierToml::resolve()` → `SubscribeBoardsConfig` precedent
+/// (`crates/ironhermes-kanban/src/notifier_config.rs:51-82`): a `"*"`
+/// anywhere in the raw list wins over any other entries.
 ///
-/// Returns `true` (reject) only when `path` is one of
-/// [`WS_ORIGIN_CHECKED_PATHS`] AND a present `origin` does not equal
-/// `expected`.
+/// `Unconfigured` is its own variant, distinct from `Any` — unlike the
+/// two-variant precedent, this enum needs the third state because D-02
+/// gives the unconfigured case a genuinely different behavior (a
+/// `Host`-derived fallback) from `Any`'s accept-any-present-origin rule.
+/// Collapsing `Unconfigured` into `Any` would silently turn every
+/// zero-config loopback deployment into one that accepts any origin.
+///
+/// `Any` is NOT an off switch: with D-03 in force, a MISSING `Origin` is
+/// still rejected under `Any` — only a PRESENT origin always matches.
+/// RESEARCH.md Pitfall 4 records this as the misreading most likely to
+/// reintroduce the original no-op.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AllowedOriginsConfig {
+    /// No `web_ui.allowed_origins` and no `IRONHERMES_WEB_ALLOWED_ORIGINS`
+    /// configured. The expected origin still falls back to a `Host`-derived
+    /// value (see [`expected_ws_origin_behind_proxy`]).
+    Unconfigured,
+    /// The raw list contained `"*"` anywhere. Any *present* `Origin`
+    /// matches; a *missing* one is still rejected once D-03 lands.
+    Any,
+    /// The raw list, with no wildcard entry, in configured order.
+    Explicit(Vec<String>),
+}
+
+impl AllowedOriginsConfig {
+    /// Classify a raw `web_ui.allowed_origins` list into a typed variant.
+    ///
+    /// - Empty slice → [`AllowedOriginsConfig::Unconfigured`].
+    /// - `"*"` anywhere in the slice → [`AllowedOriginsConfig::Any`].
+    /// - Otherwise → [`AllowedOriginsConfig::Explicit`] with the entries
+    ///   cloned in order.
+    ///
+    /// `Explicit(vec![])` is unreachable through this resolver — an empty
+    /// list always yields `Unconfigured`, so "configured but matches
+    /// nothing" cannot be constructed here.
+    pub(crate) fn resolve(entries: &[String]) -> AllowedOriginsConfig {
+        if entries.is_empty() {
+            AllowedOriginsConfig::Unconfigured
+        } else if entries.iter().any(|s| s == "*") {
+            AllowedOriginsConfig::Any
+        } else {
+            AllowedOriginsConfig::Explicit(entries.to_vec())
+        }
+    }
+
+    /// `true` for [`AllowedOriginsConfig::Any`] and
+    /// [`AllowedOriginsConfig::Explicit`]; `false` for
+    /// [`AllowedOriginsConfig::Unconfigured`]. Read by `main.rs`'s D-04
+    /// fail-closed boot guard via `auth_config.allowed_origins.is_configured()`,
+    /// captured before `auth_config` is moved into `AuthState::new`.
+    pub(crate) fn is_configured(&self) -> bool {
+        !matches!(self, AllowedOriginsConfig::Unconfigured)
+    }
+}
+
+// clippy::derivable_impls would rather this be `#[derive(Default)]` with a
+// `#[default]` variant attribute; kept as a manual impl instead so the
+// "unconfigured fallback" doc comment stays attached to a named `impl`
+// block matching the plan's own spec, rather than scattered onto one
+// variant.
+#[allow(clippy::derivable_impls)]
+impl Default for AllowedOriginsConfig {
+    fn default() -> Self {
+        AllowedOriginsConfig::Unconfigured
+    }
+}
+
+/// D-03 (49.1.1): the no-`Origin` rule, REVERSED. A MISSING `Origin` header
+/// is now REJECTED, not accepted — this reverses Phase 49.1's documented
+/// rule. The old rule's justification was that only non-browser clients
+/// (CLI tools, curl, another backend service) legitimately omit `Origin`,
+/// and rejecting a missing header would break those without closing any
+/// browser-driven CSWSH vector. That justification does not hold: an
+/// exhaustive grep of every consumer of [`WS_ORIGIN_CHECKED_PATHS`] in this
+/// repo (CONTEXT.md D-03) found only the Dioxus wasm client —
+/// `components/hermes_app/screens/kanban.rs` and `server/ws.rs` — plus
+/// tests and UAT docs. No CLI, script, or documented workflow opens either
+/// socket, and browsers always send `Origin` on a WebSocket upgrade, same-
+/// origin or cross-origin. There is no legitimate omission left to protect.
+///
+/// Returns `true` (reject) when `path` is one of
+/// [`WS_ORIGIN_CHECKED_PATHS`] AND EITHER `origin` is absent OR a present
+/// `origin` does not equal `expected`.
 pub(crate) fn is_cross_origin_ws_upgrade(path: &str, origin: Option<&str>, expected: &str) -> bool {
     if !WS_ORIGIN_CHECKED_PATHS.contains(&path) {
         return false;
     }
     match origin {
-        None => false,
+        None => true,
         Some(o) => o != expected,
+    }
+}
+
+/// D-02 / D-03 / D-04 (49.1.1): the single verdict function `require_auth`
+/// calls into for both checked WS paths. Structured so D-03's missing-
+/// `Origin` rejection applies uniformly ahead of the [`AllowedOriginsConfig`]
+/// match — no variant, not even [`AllowedOriginsConfig::Any`], can
+/// reintroduce the old bypass.
+///
+/// - Not a checked path → `false` (accept), regardless of every other
+///   argument.
+/// - `origin` is `None` on a checked path → `true` (reject), unconditionally.
+/// - [`AllowedOriginsConfig::Any`] with a present `origin` → `false`
+///   (accept any origin, but never a missing one).
+/// - [`AllowedOriginsConfig::Explicit`] → the incoming `origin` is compared
+///   byte-exact against every entry; `host` is never consulted. Comparison
+///   is byte-exact because Plan 03 already canonicalizes every configured
+///   entry once at boot through `validate_web_redirect_base`, which returns
+///   the ASCII origin serialization with the default port elided and no
+///   trailing slash — exactly the form a browser sends in `Origin`.
+///   Lowercasing, trimming, or otherwise re-normalizing here would let the
+///   two normalizations drift apart; do not add either. Pinned by
+///   `allowlist_comparison_is_byte_exact`.
+/// - [`AllowedOriginsConfig::Unconfigured`] → derives the expected origin
+///   from `host` (via [`expected_ws_origin_behind_proxy`]) and delegates to
+///   [`is_cross_origin_ws_upgrade`]. A missing `host` here means there is
+///   nothing to derive an expected origin from, so this returns `true`
+///   (reject) rather than silently passing — the bypass `require_auth`'s
+///   former `if let Some(host) = ...` wrapper allowed.
+pub(crate) fn ws_upgrade_origin_rejected(
+    path: &str,
+    origin: Option<&str>,
+    allowed: &AllowedOriginsConfig,
+    host: Option<&str>,
+    x_forwarded_proto: Option<&str>,
+    cookie_secure: bool,
+) -> bool {
+    if !WS_ORIGIN_CHECKED_PATHS.contains(&path) {
+        return false;
+    }
+    let Some(origin) = origin else {
+        return true;
+    };
+    match allowed {
+        AllowedOriginsConfig::Any => false,
+        AllowedOriginsConfig::Explicit(list) => !list.iter().any(|entry| entry == origin),
+        AllowedOriginsConfig::Unconfigured => match host {
+            Some(host) => {
+                let expected =
+                    expected_ws_origin_behind_proxy(host, x_forwarded_proto, cookie_secure);
+                is_cross_origin_ws_upgrade(path, Some(origin), &expected)
+            }
+            None => true,
+        },
     }
 }
 
@@ -401,10 +585,88 @@ mod origin_check_unit_tests {
 
     #[test]
     fn expected_origin_derives_scheme_from_secure_flag() {
-        assert_eq!(expected_ws_origin("127.0.0.1:8109", false), "http://127.0.0.1:8109");
+        assert_eq!(
+            expected_ws_origin("127.0.0.1:8109", false),
+            "http://127.0.0.1:8109"
+        );
         assert_eq!(
             expected_ws_origin("iron-hermes.sliplane.app", true),
             "https://iron-hermes.sliplane.app"
+        );
+    }
+
+    #[test]
+    fn x_forwarded_proto_takes_the_first_value() {
+        assert_eq!(parse_x_forwarded_proto(Some("https, http")), Some("https"));
+        assert_eq!(parse_x_forwarded_proto(Some("  https  ")), Some("https"));
+    }
+
+    #[test]
+    fn x_forwarded_proto_rejects_a_non_http_scheme() {
+        assert_eq!(parse_x_forwarded_proto(Some("gopher")), None);
+        assert_eq!(parse_x_forwarded_proto(Some("")), None);
+    }
+
+    /// 49.1.1 WR-02: URI schemes are case-insensitive (RFC 3986 §3.1) and not
+    /// every proxy emits lowercase. Pre-fix, an uppercase value fell through to
+    /// the `cookie_secure` default and reproduced the exact WS 403 this phase
+    /// exists to fix, just for a non-Caddy proxy. Fails against the pre-fix
+    /// exact-match `filter`.
+    #[test]
+    fn x_forwarded_proto_matches_case_insensitively() {
+        assert_eq!(parse_x_forwarded_proto(Some("HTTPS")), Some("https"));
+        assert_eq!(parse_x_forwarded_proto(Some("Https")), Some("https"));
+        assert_eq!(parse_x_forwarded_proto(Some("HTTP")), Some("http"));
+        assert_eq!(
+            parse_x_forwarded_proto(Some("  HTTPS , http")),
+            Some("https")
+        );
+    }
+
+    /// 49.1.1 WR-02: accepting case-insensitively is only half the fix. Both
+    /// call sites interpolate the result into a URL, so the returned scheme
+    /// MUST be canonical lowercase — otherwise `HTTPS://host` is built and then
+    /// fails the byte-exact `allowed_origins` comparison against the browser's
+    /// lowercase `Origin`, trading one 403 for another.
+    #[test]
+    fn x_forwarded_proto_canonicalizes_to_lowercase() {
+        assert_eq!(
+            expected_ws_origin_behind_proxy("iron-hermes.sliplane.app", Some("HTTPS"), false),
+            "https://iron-hermes.sliplane.app"
+        );
+    }
+
+    #[test]
+    fn x_forwarded_proto_absent_is_none() {
+        assert_eq!(parse_x_forwarded_proto(None), None);
+    }
+
+    #[test]
+    fn expected_origin_behind_proxy_prefers_forwarded_proto() {
+        // D-02: the forwarded scheme wins over a false cookie_secure — the
+        // exact sliplane case that broke.
+        assert_eq!(
+            expected_ws_origin_behind_proxy("iron-hermes.sliplane.app", Some("https"), false),
+            "https://iron-hermes.sliplane.app"
+        );
+        // An invalid forwarded value is treated as absent, not as `http`.
+        assert_eq!(
+            expected_ws_origin_behind_proxy("host", Some("bogus"), true),
+            "https://host"
+        );
+    }
+
+    #[test]
+    fn expected_origin_behind_proxy_falls_back_to_secure_flag() {
+        // Absent header — loopback/LAN behavior is byte-identical to
+        // pre-phase `expected_ws_origin`.
+        assert_eq!(
+            expected_ws_origin_behind_proxy("127.0.0.1:8109", None, false),
+            "http://127.0.0.1:8109"
+        );
+        assert_eq!(
+            expected_ws_origin_behind_proxy("host", None, true),
+            "https://host"
         );
     }
 
@@ -425,23 +687,240 @@ mod origin_check_unit_tests {
     #[test]
     fn same_origin_is_not_flagged() {
         for path in WS_ORIGIN_CHECKED_PATHS {
-            assert!(!is_cross_origin_ws_upgrade(path, Some("http://127.0.0.1:8109"), "http://127.0.0.1:8109"));
+            assert!(!is_cross_origin_ws_upgrade(
+                path,
+                Some("http://127.0.0.1:8109"),
+                "http://127.0.0.1:8109"
+            ));
         }
     }
 
     #[test]
     fn foreign_origin_is_flagged() {
         for path in WS_ORIGIN_CHECKED_PATHS {
-            assert!(is_cross_origin_ws_upgrade(path, Some("https://evil.example"), "http://127.0.0.1:8109"));
+            assert!(is_cross_origin_ws_upgrade(
+                path,
+                Some("https://evil.example"),
+                "http://127.0.0.1:8109"
+            ));
         }
     }
 
-    /// The pinned no-Origin rule: a MISSING Origin is never flagged, on
-    /// either checked path.
+    /// D-03 (49.1.1): inverted and renamed from the old pinned test that
+    /// asserted a missing `Origin` was accepted — the new rule rejects it
+    /// on every checked path.
     #[test]
-    fn missing_origin_is_not_flagged() {
+    fn missing_origin_is_flagged() {
         for path in WS_ORIGIN_CHECKED_PATHS {
-            assert!(!is_cross_origin_ws_upgrade(path, None, "http://127.0.0.1:8109"));
+            assert!(is_cross_origin_ws_upgrade(
+                path,
+                None,
+                "http://127.0.0.1:8109"
+            ));
+        }
+    }
+
+    #[test]
+    fn allowed_origins_empty_list_is_unconfigured() {
+        assert_eq!(
+            AllowedOriginsConfig::resolve(&[]),
+            AllowedOriginsConfig::Unconfigured
+        );
+    }
+
+    #[test]
+    fn allowed_origins_wildcard_anywhere_is_any() {
+        assert_eq!(
+            AllowedOriginsConfig::resolve(&["*".to_string()]),
+            AllowedOriginsConfig::Any
+        );
+        // The wildcard wins from anywhere in the list, not just index 0.
+        assert_eq!(
+            AllowedOriginsConfig::resolve(&["https://a.example".to_string(), "*".to_string(),]),
+            AllowedOriginsConfig::Any
+        );
+    }
+
+    #[test]
+    fn allowed_origins_list_is_explicit() {
+        assert_eq!(
+            AllowedOriginsConfig::resolve(&[
+                "https://a.example".to_string(),
+                "https://b.example".to_string(),
+            ]),
+            AllowedOriginsConfig::Explicit(vec![
+                "https://a.example".to_string(),
+                "https://b.example".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn allowed_origins_default_is_unconfigured() {
+        assert_eq!(
+            AllowedOriginsConfig::default(),
+            AllowedOriginsConfig::Unconfigured
+        );
+        assert!(!AllowedOriginsConfig::Unconfigured.is_configured());
+        assert!(AllowedOriginsConfig::Any.is_configured());
+        assert!(
+            AllowedOriginsConfig::Explicit(vec!["https://a.example".to_string()]).is_configured()
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // D-02 / D-03 / D-04 (49.1.1) — `ws_upgrade_origin_rejected` verdict
+    // table.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn configured_allowlist_matches_any_listed_entry() {
+        let allowed = AllowedOriginsConfig::Explicit(vec![
+            "https://a.example".to_string(),
+            "https://b.example".to_string(),
+        ]);
+        assert!(!ws_upgrade_origin_rejected(
+            "/api/ws/kanban",
+            Some("https://b.example"),
+            &allowed,
+            None,
+            None,
+            false,
+        ));
+    }
+
+    #[test]
+    fn configured_allowlist_rejects_an_unlisted_origin() {
+        let allowed = AllowedOriginsConfig::Explicit(vec![
+            "https://a.example".to_string(),
+            "https://b.example".to_string(),
+        ]);
+        assert!(ws_upgrade_origin_rejected(
+            "/api/ws/kanban",
+            Some("https://c.example"),
+            &allowed,
+            None,
+            None,
+            false,
+        ));
+    }
+
+    #[test]
+    fn configured_allowlist_verdict_is_invariant_under_host() {
+        // D-02: with an allowlist configured, `Host` is ignored entirely —
+        // not even a `Host` that agrees with the origin, or one absent
+        // altogether, changes the verdict.
+        let allowed = AllowedOriginsConfig::Explicit(vec!["https://a.example".to_string()]);
+        for host in [
+            Some("https://a.example"),
+            Some("evil.example"),
+            Some(""),
+            None,
+        ] {
+            assert!(
+                !ws_upgrade_origin_rejected(
+                    "/api/ws/kanban",
+                    Some("https://a.example"),
+                    &allowed,
+                    host,
+                    None,
+                    false,
+                ),
+                "verdict must not depend on host={host:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wildcard_accepts_any_present_origin() {
+        assert!(!ws_upgrade_origin_rejected(
+            "/api/ws/kanban",
+            Some("https://evil.example"),
+            &AllowedOriginsConfig::Any,
+            None,
+            None,
+            false,
+        ));
+    }
+
+    #[test]
+    fn wildcard_still_rejects_a_missing_origin() {
+        // D-04: the wildcard is not an off switch.
+        assert!(ws_upgrade_origin_rejected(
+            "/api/ws/kanban",
+            None,
+            &AllowedOriginsConfig::Any,
+            None,
+            None,
+            false,
+        ));
+    }
+
+    #[test]
+    fn unconfigured_falls_back_to_derived_origin() {
+        let allowed = AllowedOriginsConfig::Unconfigured;
+        // Pre-phase derived behavior preserved.
+        assert!(!ws_upgrade_origin_rejected(
+            "/api/ws/kanban",
+            Some("http://127.0.0.1:8109"),
+            &allowed,
+            Some("127.0.0.1:8109"),
+            None,
+            false,
+        ));
+        assert!(ws_upgrade_origin_rejected(
+            "/api/ws/kanban",
+            Some("https://evil.example"),
+            &allowed,
+            Some("127.0.0.1:8109"),
+            None,
+            false,
+        ));
+        // Plan 01's outage fix still holds through the new entry point.
+        assert!(!ws_upgrade_origin_rejected(
+            "/api/ws/kanban",
+            Some("https://iron-hermes.sliplane.app"),
+            &allowed,
+            Some("iron-hermes.sliplane.app"),
+            Some("https"),
+            false,
+        ));
+    }
+
+    #[test]
+    fn absent_host_on_a_checked_path_is_rejected() {
+        // A request with no Host header no longer bypasses the origin
+        // check on a checked path (Unconfigured leg — there is nothing to
+        // derive an expected origin from).
+        assert!(ws_upgrade_origin_rejected(
+            "/api/ws/kanban",
+            Some("http://127.0.0.1:8109"),
+            &AllowedOriginsConfig::Unconfigured,
+            None,
+            None,
+            false,
+        ));
+    }
+
+    #[test]
+    fn allowlist_comparison_is_byte_exact() {
+        let allowed = AllowedOriginsConfig::Explicit(vec!["https://a.example".to_string()]);
+        for origin in [
+            "https://a.example/",
+            "https://A.Example",
+            "https://a.example:443",
+        ] {
+            assert!(
+                ws_upgrade_origin_rejected(
+                    "/api/ws/kanban",
+                    Some(origin),
+                    &allowed,
+                    None,
+                    None,
+                    false,
+                ),
+                "expected {origin} to be rejected against the byte-exact allowlist"
+            );
         }
     }
 }
@@ -459,11 +938,12 @@ mod origin_check_unit_tests {
 mod origin_check_tests {
     use axum::body::Body;
     use axum::extract::ConnectInfo;
-    use axum::http::{header, Request, StatusCode};
+    use axum::http::{Request, StatusCode, header};
     use std::net::SocketAddr;
     use std::sync::{Arc, OnceLock};
     use tower::ServiceExt as _;
 
+    use super::AllowedOriginsConfig;
     use crate::server::auth::{AuthConfig, AuthState};
 
     /// Isolated `IRONHERMES_HOME` for every `AuthState` this test module
@@ -483,10 +963,13 @@ mod origin_check_tests {
     }
 
     fn hash_password(pw: &str) -> String {
-        use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
         use argon2::Argon2;
+        use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
         let salt = SaltString::generate(&mut OsRng);
-        Argon2::default().hash_password(pw.as_bytes(), &salt).unwrap().to_string()
+        Argon2::default()
+            .hash_password(pw.as_bytes(), &salt)
+            .unwrap()
+            .to_string()
     }
 
     async fn dummy_ws_handler() -> StatusCode {
@@ -500,7 +983,10 @@ mod origin_check_tests {
     /// the exact wrapping order main.rs uses.
     fn test_router(auth_state: Arc<AuthState>) -> axum::Router {
         let auth_routes = axum::Router::new()
-            .route("/auth/login", axum::routing::post(crate::server::auth::login))
+            .route(
+                "/auth/login",
+                axum::routing::post(crate::server::auth::login),
+            )
             .with_state(auth_state.clone());
 
         axum::Router::new()
@@ -525,7 +1011,11 @@ mod origin_check_tests {
         req.extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 47100))));
         let resp = router.clone().oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT, "login must succeed with the correct password");
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "login must succeed with the correct password"
+        );
         let set_cookie = resp
             .headers()
             .get(header::SET_COOKIE)
@@ -536,11 +1026,16 @@ mod origin_check_tests {
         set_cookie.split(';').next().unwrap().to_string()
     }
 
-    fn ws_upgrade_request(cookie: Option<&str>, origin: Option<&str>) -> Request<Body> {
+    fn ws_upgrade_request(
+        cookie: Option<&str>,
+        origin: Option<&str>,
+        host: &str,
+        x_forwarded_proto: Option<&str>,
+    ) -> Request<Body> {
         let mut builder = Request::builder()
             .method("GET")
             .uri("/api/ws/kanban")
-            .header(header::HOST, "127.0.0.1:8109")
+            .header(header::HOST, host)
             .header(header::CONNECTION, "Upgrade")
             .header(header::UPGRADE, "websocket")
             .header("sec-websocket-version", "13")
@@ -550,6 +1045,9 @@ mod origin_check_tests {
         }
         if let Some(o) = origin {
             builder = builder.header(header::ORIGIN, o);
+        }
+        if let Some(p) = x_forwarded_proto {
+            builder = builder.header("x-forwarded-proto", p);
         }
         builder.body(Body::empty()).unwrap()
     }
@@ -563,6 +1061,19 @@ mod origin_check_tests {
         .unwrap()
     }
 
+    /// D-02 (49.1.1): identical to [`fresh_auth`] but with a caller-supplied
+    /// `AllowedOriginsConfig` — every other field stays `..Default::default()`
+    /// so the four pre-existing tests and `fresh_auth` itself are untouched.
+    fn fresh_auth_with_allowed_origins(allowed_origins: AllowedOriginsConfig) -> Arc<AuthState> {
+        ensure_home_env();
+        AuthState::new(AuthConfig {
+            password_hash: Some(hash_password("hunter2")),
+            allowed_origins,
+            ..Default::default()
+        })
+        .unwrap()
+    }
+
     /// Test 1: a WebSocket upgrade carrying a valid session cookie and a
     /// same-origin `Origin` header succeeds (reaches the handler).
     #[tokio::test]
@@ -571,7 +1082,12 @@ mod origin_check_tests {
         let router = test_router(auth.clone());
         let cookie = login_and_get_cookie(&router, "hunter2").await;
 
-        let req = ws_upgrade_request(Some(&cookie), Some("http://127.0.0.1:8109"));
+        let req = ws_upgrade_request(
+            Some(&cookie),
+            Some("http://127.0.0.1:8109"),
+            "127.0.0.1:8109",
+            None,
+        );
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(
             resp.status(),
@@ -589,7 +1105,12 @@ mod origin_check_tests {
         let router = test_router(auth.clone());
         let cookie = login_and_get_cookie(&router, "hunter2").await;
 
-        let req = ws_upgrade_request(Some(&cookie), Some("https://evil.example"));
+        let req = ws_upgrade_request(
+            Some(&cookie),
+            Some("https://evil.example"),
+            "127.0.0.1:8109",
+            None,
+        );
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(
             resp.status(),
@@ -598,21 +1119,24 @@ mod origin_check_tests {
         );
     }
 
-    /// Test 3: a WebSocket upgrade carrying a valid session cookie and NO
-    /// `Origin` header is handled by the pinned rule — accepted (non-
-    /// browser clients).
+    /// Test 3 (D-03, 49.1.1, inverted and renamed): a WebSocket upgrade
+    /// carrying a valid session cookie and NO `Origin` header is now
+    /// REJECTED. This used to be "the pinned rule" — accepted, on the
+    /// theory that only non-browser clients omit `Origin` — but CONTEXT.md
+    /// D-03's exhaustive consumer grep found no such client for either
+    /// checked path, and browsers always send `Origin` on an upgrade.
     #[tokio::test]
-    async fn test3_no_origin_with_valid_session_pinned_rule_accepts() {
+    async fn test3_no_origin_with_valid_session_rejected() {
         let auth = fresh_auth();
         let router = test_router(auth.clone());
         let cookie = login_and_get_cookie(&router, "hunter2").await;
 
-        let req = ws_upgrade_request(Some(&cookie), None);
+        let req = ws_upgrade_request(Some(&cookie), None, "127.0.0.1:8109", None);
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(
             resp.status(),
-            StatusCode::OK,
-            "a missing Origin must be accepted per the pinned no-Origin rule"
+            StatusCode::FORBIDDEN,
+            "a missing Origin must now be rejected (D-03 reversal)"
         );
     }
 
@@ -624,12 +1148,89 @@ mod origin_check_tests {
         let auth = fresh_auth();
         let router = test_router(auth);
 
-        let req = ws_upgrade_request(None, Some("http://127.0.0.1:8109"));
+        let req = ws_upgrade_request(None, Some("http://127.0.0.1:8109"), "127.0.0.1:8109", None);
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(
             resp.status(),
             StatusCode::UNAUTHORIZED,
             "no session cookie must be rejected regardless of Origin"
+        );
+    }
+
+    /// Test 5 (D-02, 49.1.1): a WebSocket upgrade behind a TLS-terminating
+    /// reverse proxy — `X-Forwarded-Proto: https` plus a `Host`/`Origin`
+    /// pair matching the production sliplane deployment — succeeds even
+    /// though `AuthState`'s `cookie_secure` is left at its `false` default.
+    /// On pre-phase code this exact request is rejected with 403; this test
+    /// is the sliplane-outage regression pin.
+    #[tokio::test]
+    async fn test5_forwarded_proto_https_with_insecure_cookie_flag_accepts() {
+        let auth = fresh_auth();
+        let router = test_router(auth.clone());
+        let cookie = login_and_get_cookie(&router, "hunter2").await;
+
+        let req = ws_upgrade_request(
+            Some(&cookie),
+            Some("https://iron-hermes.sliplane.app"),
+            "iron-hermes.sliplane.app",
+            Some("https"),
+        );
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "X-Forwarded-Proto: https must be honored even when cookie_secure is false"
+        );
+    }
+
+    /// Test 6 (D-02, 49.1.1): with an allowlist configured, an upgrade
+    /// carrying a listed `Origin` succeeds even though `Host` names an
+    /// attacker-controlled value — the allowlist is the sole authority and
+    /// `Host` is ignored entirely.
+    #[tokio::test]
+    async fn test6_configured_allowlist_accepts_listed_origin_regardless_of_host() {
+        let auth = fresh_auth_with_allowed_origins(AllowedOriginsConfig::Explicit(vec![
+            "https://iron-hermes.sliplane.app".to_string(),
+        ]));
+        let router = test_router(auth.clone());
+        let cookie = login_and_get_cookie(&router, "hunter2").await;
+
+        let req = ws_upgrade_request(
+            Some(&cookie),
+            Some("https://iron-hermes.sliplane.app"),
+            "attacker.example",
+            None,
+        );
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a listed Origin must be accepted regardless of Host"
+        );
+    }
+
+    /// Test 7 (D-02, 49.1.1): with the same allowlist configured, a
+    /// `Host` that AGREES with a foreign `Origin` no longer buys the
+    /// attacker a pass — precisely the no-op this phase closes.
+    #[tokio::test]
+    async fn test7_configured_allowlist_rejects_unlisted_origin() {
+        let auth = fresh_auth_with_allowed_origins(AllowedOriginsConfig::Explicit(vec![
+            "https://iron-hermes.sliplane.app".to_string(),
+        ]));
+        let router = test_router(auth.clone());
+        let cookie = login_and_get_cookie(&router, "hunter2").await;
+
+        let req = ws_upgrade_request(
+            Some(&cookie),
+            Some("https://evil.example"),
+            "https://evil.example",
+            None,
+        );
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "an unlisted Origin must be rejected even when Host agrees with it"
         );
     }
 }

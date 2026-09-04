@@ -4,6 +4,7 @@ pub mod approvals;
 pub mod async_bridge; // Phase 41.3 UAT gap: LocalSet-safe async→sync bridge
 pub mod audit;
 pub mod auth;
+pub mod blueprint; // Phase 49.5 Plan 05: relocated from ironhermes-cron (Rule 4 escalation) — see module doc
 pub mod browser_profile;
 pub mod commands;
 pub mod concurrency;
@@ -18,6 +19,7 @@ pub mod dispatch_gate; // Phase 47.4 GAP-1: shared pre-spawn dispatch predicate
 pub mod dotenv_write; // Phase 47.6 Plan 04 (D-06): single shared .env writer
 pub mod env_sanitize;
 pub mod error;
+pub mod gateway_status; // Phase 49.3 Plan 06 (D-08): versioned gateway heartbeat status schema
 pub mod memory_provider;
 pub mod memory_store;
 pub mod model_metadata;

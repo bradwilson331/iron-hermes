@@ -262,7 +262,16 @@ else
         for c in "${FAILED_COMPONENTS[@]}"; do
             case "$(uname -s)" in
                 Linux)  log "  check logs: journalctl --user -u ironhermes-$c -n 50" ;;
-                Darwin) log "  check logs: tail -n 50 $IRONHERMES_HOME_DIR/logs/$c.err.log" ;;
+                Darwin)
+                    # 48.3 D-06: the gateway plist now writes both streams to
+                    # the single canonical gateway.log (Task 1); web keeps
+                    # its separate .err.log.
+                    if [ "$c" = "gateway" ]; then
+                        log "  check logs: tail -n 50 $IRONHERMES_HOME_DIR/logs/gateway.log"
+                    else
+                        log "  check logs: tail -n 50 $IRONHERMES_HOME_DIR/logs/$c.err.log"
+                    fi
+                    ;;
             esac
         done
         die "one or more services failed to come up: ${FAILED_COMPONENTS[*]}"

@@ -408,9 +408,6 @@ pub fn ScreenAgents(is_active: bool) -> Element {
                 div { class: "screen-header-left",
                     div { class: "screen-tag", "// MODULE 03" }
                     h1 { class: "screen-title", "Agents" }
-                    p { class: "screen-sub",
-                        "Each profile is an isolated Hermes workspace with its own config, memory, skill set, and persona."
-                    }
                 }
                 div { class: "screen-actions",
                     // Phase 50.1 Plan 01 (D-08): opens the create-profile
@@ -510,9 +507,6 @@ pub fn ScreenAgents(is_active: bool) -> Element {
                     h2 {
                         style: "font-size:var(--fs-14);margin:0;",
                         "In-Flight Turns"
-                    }
-                    p { class: "screen-sub",
-                        "Active agent turns across all surfaces. CANCEL signals cooperative teardown."
                     }
                 }
                 div { class: "screen-actions",

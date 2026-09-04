@@ -300,8 +300,40 @@ pub fn ProfileDetailDrawer(
         crate::server::provider_config_api::get_provider_config().await
     });
     let model_options_resource = use_resource(move || {
+        // Phase 49.4 hotfix: skip the model fetch while the drawer is closed.
+        // This drawer is mounted UNCONDITIONALLY on the Agents (BotRoster) and
+        // Kanban screens — it renders nothing until `profile_id` is `Some`, but
+        // the resource hook still fires on every mount. With an empty provider,
+        // `list_provider_models("")` returns the entire ~300-model fallback
+        // catalog, so a closed drawer was eagerly fetching (and holding) the
+        // full catalog on every visit to those screens. Reading `profile_id`
+        // here subscribes, so the real fetch runs the moment the drawer opens.
+        let is_open = profile_id.read().is_some();
         let provider = provider_wc();
-        async move { crate::server::api::list_provider_models(provider).await }
+        async move {
+            if !is_open {
+                return Ok(crate::server::api::ProviderModelsSnapshot {
+                    models: Vec::new(),
+                    fell_back: false,
+                });
+            }
+            crate::server::api::list_provider_models(provider).await
+        }
+    });
+
+    // Phase 49.4 hotfix: stable unique `<datalist>` id per drawer instance
+    // (same idiom as `models.rs`'s `ProviderModelCascade`) so the MODEL picker
+    // below is a filterable input + capped datalist rather than a native
+    // `<select>` holding every option — a provider like OpenRouter exposes
+    // 300+ models, and building that many `<option>` nodes on the
+    // single-threaded WASM client froze the screen when the drawer opened.
+    let model_list_id = use_hook(|| {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static DRAWER_MODEL_SEQ: AtomicU64 = AtomicU64::new(0);
+        format!(
+            "drawer-models-{}",
+            DRAWER_MODEL_SEQ.fetch_add(1, Ordering::Relaxed)
+        )
     });
 
     // Fetch-on-change: resolves the E5/loading backstop. Resets to
@@ -622,6 +654,24 @@ pub fn ProfileDetailDrawer(
                         model_snapshot.as_ref(),
                         assigned_model_ref,
                     );
+                    // Phase 49.4 hotfix: cap the datalist to at most
+                    // MODEL_DATALIST_CAP matches for the currently-typed text so
+                    // a 300+-model provider never materializes hundreds of DOM
+                    // `<option>` nodes at once. The assigned model is always kept
+                    // in `model_options` (compute_model_options prepends it), so
+                    // an empty filter still surfaces the current value.
+                    const MODEL_DATALIST_CAP: usize = 50;
+                    let model_filter = model_val.trim().to_ascii_lowercase();
+                    let datalist_options: Vec<String> = model_options
+                        .iter()
+                        .filter(|id| {
+                            model_filter.is_empty()
+                                || id.to_ascii_lowercase().contains(&model_filter)
+                        })
+                        .take(MODEL_DATALIST_CAP)
+                        .cloned()
+                        .collect();
+                    let model_total = model_options.len();
 
                     // ---- Section 3: Keys ----
                     let keys = detail.keys.clone();
@@ -687,24 +737,26 @@ pub fn ProfileDetailDrawer(
                                 }
                             }
                             label { class: "kn-modal-label", "MODEL" }
-                            select {
+                            input {
                                 class: "voice-settings-select",
                                 style: "overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
+                                list: "{model_list_id}",
+                                value: "{model_val}",
+                                placeholder: "— select a model —",
                                 disabled: !write_enabled || models_loading,
-                                onchange: move |evt| {
+                                oninput: move |evt| {
                                     model_wc.set(evt.value());
                                     save_hint.set(None);
                                 },
-                                if model_val.trim().is_empty() {
-                                    option { value: "", selected: true, "— select a model —" }
+                            }
+                            datalist { id: "{model_list_id}",
+                                for id in datalist_options.iter() {
+                                    option { key: "{id}", value: "{id}" }
                                 }
-                                for id in model_options.iter() {
-                                    option {
-                                        key: "{id}",
-                                        value: "{id}",
-                                        selected: id == &model_val,
-                                        "{id}"
-                                    }
+                            }
+                            if model_total > datalist_options.len() {
+                                div { class: "kn-modal-hint--info",
+                                    "{datalist_options.len()}/{model_total} — type to filter"
                                 }
                             }
                             if fell_back && !models_loading {

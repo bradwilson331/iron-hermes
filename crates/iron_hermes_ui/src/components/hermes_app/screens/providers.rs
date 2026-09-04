@@ -240,12 +240,12 @@ pub fn ScreenProviders(is_active: bool) -> Element {
                 div { class: "screen-header-left",
                     div { class: "screen-tag", "// MODULE 13" }
                     h1 { class: "screen-title", "Providers" }
-                    p { class: "screen-sub",
-                        "API providers and credential pools. "
+                    span { class: "screen-status",
+                        "· "
                         code { style: "color:var(--teal)", "{active_count}" }
                         " active of "
                         code { style: "color:var(--teal)", "{provider_count}" }
-                        " configured."
+                        " configured"
                     }
                 }
                 div { class: "screen-actions",

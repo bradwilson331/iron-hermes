@@ -767,6 +767,63 @@ pub struct ProfilePersona {
     pub body: String,
 }
 
+/// Phase 49.4 Plan 08 (D-14): the two-level scope an activation record
+/// covers — "chat only" (the web UI chat/voice surface alone) or
+/// "everywhere" (chat plus editor defaults plus the gateway/worker
+/// default). Plain-tag enum serde, matching `ProfileHealth`/`KeyStatus`
+/// above.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActivationScope {
+    ChatOnly,
+    Everywhere,
+}
+
+/// Phase 49.4 Plan 08 (D-14): the persisted activation-with-scope record on
+/// the wire — which profile is "active" and how far that activation
+/// reaches. The absence of a record (`get_active_profile` returning `None`)
+/// means every surface keeps resolving to the pre-existing
+/// environment-derived active profile; this DTO exists only once an
+/// operator has explicitly activated something.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ActiveProfileRecord {
+    pub name: String,
+    pub scope: ActivationScope,
+    pub updated_at_ms: i64,
+}
+
+/// Phase 49.4 Plan 12 (D-16): a bot's identity for the profile-to-bot
+/// binding. Checkpoint decision (resolved by the human operator,
+/// `gate="blocking-human"`, before this plan's Task 2 ran — full text
+/// recorded in `49.4-12-SUMMARY.md`'s Decisions section): a "bot" for this
+/// binding is a gateway PLATFORM ADAPTER instance (Telegram, Discord,
+/// Slack, Buzz, the webhook listener, or the REST API server listener) —
+/// the fixed, closed key set already enumerated as `GatewayConfig.platforms`'s
+/// map keys (`gateway_platform_status_api.rs::PLATFORM_KEYS`: `"telegram"`,
+/// `"discord"`, `"slack"`, `"buzz"`, `"webhook"`, `"api_server"`). NOT a
+/// profile (the roster's existing rows already ARE profiles — binding
+/// "which profile" onto a profile row is circular) and NOT a kanban worker
+/// (already bound via its `--profile <assignee>` spawn argument per the
+/// operator's own second decision — no second store is built for that
+/// case; see `server::bot_binding_api`'s module doc for the full record). A
+/// plain string newtype: a platform adapter has a single natural key, never
+/// a composite one.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BotKey(pub String);
+
+/// Phase 49.4 Plan 12 (D-16): one persisted profile-to-bot binding record.
+/// `profile_name` is always an explicit, real profile name — including the
+/// literal `"default"` (the always-present profile), which both the roster
+/// and Soul-page UIs use to represent "no meaningful override" rather than
+/// an unlabelled/blank state (UI-SPEC E14 partial). `updated_at_ms` mirrors
+/// `ActiveProfileRecord`'s own field for the same reason (an audit/debug
+/// timestamp, never displayed to the operator).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct BotBinding {
+    pub bot_key: BotKey,
+    pub profile_name: String,
+    pub updated_at_ms: i64,
+}
+
 /// Phase 50.1 Plan 01 (D-11): UI-owned bot display metadata. Persisted under
 /// a UI-owned store keyed by profile name — never the profile `config.yaml`
 /// (a malformed one silently degrades to defaults, D-11), never the agent

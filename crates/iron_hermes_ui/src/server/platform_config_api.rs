@@ -643,6 +643,708 @@ pub async fn set_buzz_edit(
     }
 }
 
+// =============================================================================
+// Phase 49.3 Plan 01 (tracer slice, D-06): the Telegram platform's read
+// surface over `gateway.platforms["telegram"]` — modeled verbatim on the
+// Buzz surface above (module doc's "DTO is an explicit allowlist"
+// discipline applies identically here). Discord/Slack extend this same
+// shape in later plans of this phase; this module owns the shared
+// `resolve_scope_target`/`save_scoped`/`check_buzz_write_gate` pipeline
+// every one of them reuses — see those plans' own module docs when they
+// land.
+// =============================================================================
+
+/// The `gateway.platforms` map key this Telegram surface reads and writes.
+/// Never hardcoded a second time below — every lookup goes through this
+/// constant (mirrors [`BUZZ_PLATFORM_KEY`]).
+const TELEGRAM_PLATFORM_KEY: &str = "telegram";
+
+/// Explicit field allowlist over `gateway.platforms["telegram"]`
+/// (`PlatformGatewayConfig`) — see module doc's "DTO is an explicit
+/// allowlist" section. `configured` distinguishes "no `telegram:` block
+/// exists yet" from "the block exists and is disabled", the same Task 1
+/// distinction [`BuzzPlatformView::configured`] makes. `token_present` is a
+/// presence flag derived from `PlatformGatewayConfig::token.is_some()` —
+/// the token VALUE never reaches this DTO, and no field in this struct is
+/// named `token`/`app_token`/`api_key` (enforced below by
+/// [`tests::telegram_view_dto_carries_no_secret_bearing_field`]).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct TelegramPlatformView {
+    pub configured: bool,
+    pub enabled: bool,
+    /// Canonical cross-platform sender allowlist — same field/contract as
+    /// [`BuzzPlatformView::whitelist`]. Empty = deny all.
+    pub whitelist: Vec<String>,
+    /// D-06 advanced tier: explicit Telegram home channel
+    /// (`PlatformGatewayConfig::home_channel_id`'s own doc comment,
+    /// `ironhermes-core/src/config.rs`).
+    pub home_channel_id: Option<String>,
+    /// D-06 advanced tier: session inactivity timeout in hours.
+    pub session_timeout_hours: u64,
+    /// D-06 advanced tier: maximum concurrent agent runs.
+    pub max_concurrent_runs: usize,
+    /// Presence-only flag for the bot token — never the token value itself.
+    pub token_present: bool,
+}
+
+/// Pure builder — mirrors [`build_buzz_view`]'s "'not configured' is its
+/// own answer" discipline: `entry` is `None` only when no `telegram:`
+/// block exists in `gateway.platforms` at all, never derived from
+/// `enabled` or any other field. The absent-block defaults for
+/// `session_timeout_hours`/`max_concurrent_runs` come from
+/// `PlatformGatewayConfig::default()` so an unconfigured card still shows
+/// the values the gateway would actually use if the block were created.
+/// No disk I/O; directly unit-testable.
+#[cfg(not(target_arch = "wasm32"))]
+fn build_telegram_view(
+    entry: Option<&ironhermes_core::config::PlatformGatewayConfig>,
+) -> TelegramPlatformView {
+    match entry {
+        Some(cfg) => TelegramPlatformView {
+            configured: true,
+            enabled: cfg.enabled,
+            whitelist: cfg.whitelist.clone(),
+            home_channel_id: cfg.home_channel_id.clone(),
+            session_timeout_hours: cfg.session_timeout_hours,
+            max_concurrent_runs: cfg.max_concurrent_runs,
+            token_present: cfg.token.is_some(),
+        },
+        None => {
+            let default_cfg = ironhermes_core::config::PlatformGatewayConfig::default();
+            TelegramPlatformView {
+                configured: false,
+                enabled: false,
+                whitelist: Vec::new(),
+                home_channel_id: None,
+                session_timeout_hours: default_cfg.session_timeout_hours,
+                max_concurrent_runs: default_cfg.max_concurrent_runs,
+                token_present: false,
+            }
+        }
+    }
+}
+
+/// Read the Telegram platform state for `scope` — never errors on an
+/// absent `telegram:` block; that is the `configured: false` answer, not a
+/// failure. Mirrors [`get_buzz_platform_view`] exactly, including the
+/// shared [`crate::server::tools_config_api::resolve_scope_target`] scope
+/// resolution (root vs. a named profile's own `config.yaml`, never
+/// conflated).
+#[server]
+pub async fn get_telegram_platform_view(
+    scope: ConfigScope,
+) -> Result<TelegramPlatformView, ServerFnError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let (config, _target) = crate::server::tools_config_api::resolve_scope_target(&scope)
+            .map_err(ServerFnError::new)?;
+        Ok(build_telegram_view(
+            config.gateway.platforms.get(TELEGRAM_PLATFORM_KEY),
+        ))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = scope;
+        unreachable!("server fn body never runs on the wasm client")
+    }
+}
+
+// =============================================================================
+// Phase 49.3 Plan 02: Telegram instant-write `enabled` toggle — mirrors
+// [`set_buzz_enabled_impl`]/[`set_buzz_enabled`] exactly, including reuse of
+// [`check_buzz_write_gate`] (the gate is generic over every
+// `gateway.platforms.*` write, not Buzz-specific despite its name — see
+// that fn's own doc comment; module doc's "D-10 sibling" note explains why
+// this plan does not promote/rename it a second time).
+// =============================================================================
+
+/// Pure(-ish) core of [`set_telegram_enabled`]. Staged-write order: resolve
+/// scope (fresh disk read) -> gate check -> read-modify-write the EXISTING
+/// map entry (creating it from `Default` only when genuinely absent, so
+/// every sibling platform entry and `#[serde(flatten)] extra` survive) ->
+/// atomic save -> re-read fresh from disk so the returned DTO reflects what
+/// is actually on disk.
+#[cfg(not(target_arch = "wasm32"))]
+async fn set_telegram_enabled_impl(
+    scope: ConfigScope,
+    enabled: bool,
+) -> Result<TelegramPlatformView, String> {
+    let (mut config, target) = crate::server::tools_config_api::resolve_scope_target(&scope)?;
+    check_buzz_write_gate()?;
+
+    let mut platform = config
+        .gateway
+        .platforms
+        .get(TELEGRAM_PLATFORM_KEY)
+        .cloned()
+        .unwrap_or_default();
+    platform.enabled = enabled;
+    config
+        .gateway
+        .platforms
+        .insert(TELEGRAM_PLATFORM_KEY.to_string(), platform);
+    crate::server::tools_config_api::save_scoped(&config, &target)?;
+
+    let (reread, _reread_target) = crate::server::tools_config_api::resolve_scope_target(&scope)?;
+    Ok(build_telegram_view(
+        reread.gateway.platforms.get(TELEGRAM_PLATFORM_KEY),
+    ))
+}
+
+/// Write the Telegram `enabled` flag for `scope` — the tracer's one
+/// working end-to-end write field (D-11 instant write; D-09 no
+/// auto-restart — the caller renders the staged-apply pill, this fn never
+/// touches the gateway process). Refuses before touching config when the
+/// write gate is closed; every other field of the map entry (and every
+/// sibling platform entry) survives untouched. Mirrors [`set_buzz_enabled`].
+#[server]
+pub async fn set_telegram_enabled(
+    scope: ConfigScope,
+    enabled: bool,
+) -> Result<TelegramPlatformView, ServerFnError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        set_telegram_enabled_impl(scope, enabled)
+            .await
+            .map_err(ServerFnError::new)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (scope, enabled);
+        unreachable!("server fn body never runs on the wasm client")
+    }
+}
+
+// =============================================================================
+// Phase 49.3 Plan 03 (D-06): Discord/Slack DTOs + get/set_enabled/set_edit,
+// plus Telegram's own staged `set_telegram_edit` (advanced tier). Every fn
+// below is copied verbatim from the Buzz/Telegram template above, substituting
+// only the map key and the field set — see module doc's "DTO is an explicit
+// allowlist" discipline, which applies identically here.
+// =============================================================================
+
+/// The `gateway.platforms` map key the Discord surface reads and writes.
+const DISCORD_PLATFORM_KEY: &str = "discord";
+
+/// The `gateway.platforms` map key the Slack surface reads and writes.
+const SLACK_PLATFORM_KEY: &str = "slack";
+
+/// Explicit field allowlist over `gateway.platforms["discord"]`
+/// (`PlatformGatewayConfig`) — mirrors [`TelegramPlatformView`] exactly.
+/// `token_present` is a presence flag derived from `token.is_some()` — the
+/// token VALUE never reaches this DTO (enforced by
+/// [`tests::discord_view_dto_carries_no_secret_bearing_field`]).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct DiscordPlatformView {
+    pub configured: bool,
+    pub enabled: bool,
+    /// Canonical cross-platform sender allowlist — same field/contract as
+    /// [`BuzzPlatformView::whitelist`]. Discord's own adapter parses each
+    /// entry as a u64 snowflake ID at the runner boundary
+    /// (`ironhermes-gateway/src/runner.rs` ~:1285); this DTO carries the
+    /// same untyped `Vec<String>` every platform shares — no numeric
+    /// coercion happens here.
+    pub whitelist: Vec<String>,
+    /// D-06 advanced tier: explicit Discord home channel.
+    pub home_channel_id: Option<String>,
+    /// D-06 advanced tier: session inactivity timeout in hours.
+    pub session_timeout_hours: u64,
+    /// D-06 advanced tier: maximum concurrent agent runs.
+    pub max_concurrent_runs: usize,
+    /// Presence-only flag for the bot token — never the token value itself.
+    pub token_present: bool,
+}
+
+/// Explicit field allowlist over `gateway.platforms["slack"]`
+/// (`PlatformGatewayConfig`) — mirrors [`TelegramPlatformView`], plus
+/// `app_token_present` for Slack's Socket Mode app-level token (`xapp-`).
+/// Neither `token` nor `app_token` VALUES ever reach this DTO (enforced by
+/// [`tests::slack_view_dto_carries_no_secret_bearing_field`] and
+/// [`tests::slack_view_dto_never_carries_the_app_token_value`]).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SlackPlatformView {
+    pub configured: bool,
+    pub enabled: bool,
+    /// Canonical cross-platform sender allowlist — same field/contract as
+    /// [`BuzzPlatformView::whitelist`].
+    pub whitelist: Vec<String>,
+    /// D-06 advanced tier: explicit Slack home channel.
+    pub home_channel_id: Option<String>,
+    /// D-06 advanced tier: session inactivity timeout in hours.
+    pub session_timeout_hours: u64,
+    /// D-06 advanced tier: maximum concurrent agent runs.
+    pub max_concurrent_runs: usize,
+    /// Presence-only flag for the bot token — never the token value itself.
+    pub token_present: bool,
+    /// Presence-only flag for the Socket Mode app-level token (`xapp-`) —
+    /// never the value itself.
+    pub app_token_present: bool,
+}
+
+/// Pure builder — mirrors [`build_telegram_view`]'s "'not configured' is
+/// its own answer" discipline. No disk I/O; directly unit-testable.
+#[cfg(not(target_arch = "wasm32"))]
+fn build_discord_view(
+    entry: Option<&ironhermes_core::config::PlatformGatewayConfig>,
+) -> DiscordPlatformView {
+    match entry {
+        Some(cfg) => DiscordPlatformView {
+            configured: true,
+            enabled: cfg.enabled,
+            whitelist: cfg.whitelist.clone(),
+            home_channel_id: cfg.home_channel_id.clone(),
+            session_timeout_hours: cfg.session_timeout_hours,
+            max_concurrent_runs: cfg.max_concurrent_runs,
+            token_present: cfg.token.is_some(),
+        },
+        None => {
+            let default_cfg = ironhermes_core::config::PlatformGatewayConfig::default();
+            DiscordPlatformView {
+                configured: false,
+                enabled: false,
+                whitelist: Vec::new(),
+                home_channel_id: None,
+                session_timeout_hours: default_cfg.session_timeout_hours,
+                max_concurrent_runs: default_cfg.max_concurrent_runs,
+                token_present: false,
+            }
+        }
+    }
+}
+
+/// Pure builder — mirrors [`build_telegram_view`], plus
+/// `app_token_present` derived from `app_token.is_some()`. No disk I/O;
+/// directly unit-testable.
+#[cfg(not(target_arch = "wasm32"))]
+fn build_slack_view(
+    entry: Option<&ironhermes_core::config::PlatformGatewayConfig>,
+) -> SlackPlatformView {
+    match entry {
+        Some(cfg) => SlackPlatformView {
+            configured: true,
+            enabled: cfg.enabled,
+            whitelist: cfg.whitelist.clone(),
+            home_channel_id: cfg.home_channel_id.clone(),
+            session_timeout_hours: cfg.session_timeout_hours,
+            max_concurrent_runs: cfg.max_concurrent_runs,
+            token_present: cfg.token.is_some(),
+            app_token_present: cfg.app_token.is_some(),
+        },
+        None => {
+            let default_cfg = ironhermes_core::config::PlatformGatewayConfig::default();
+            SlackPlatformView {
+                configured: false,
+                enabled: false,
+                whitelist: Vec::new(),
+                home_channel_id: None,
+                session_timeout_hours: default_cfg.session_timeout_hours,
+                max_concurrent_runs: default_cfg.max_concurrent_runs,
+                token_present: false,
+                app_token_present: false,
+            }
+        }
+    }
+}
+
+/// Read the Discord platform state for `scope` — never errors on an absent
+/// `discord:` block. Mirrors [`get_telegram_platform_view`] exactly.
+#[server]
+pub async fn get_discord_platform_view(
+    scope: ConfigScope,
+) -> Result<DiscordPlatformView, ServerFnError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let (config, _target) = crate::server::tools_config_api::resolve_scope_target(&scope)
+            .map_err(ServerFnError::new)?;
+        Ok(build_discord_view(
+            config.gateway.platforms.get(DISCORD_PLATFORM_KEY),
+        ))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = scope;
+        unreachable!("server fn body never runs on the wasm client")
+    }
+}
+
+/// Read the Slack platform state for `scope` — never errors on an absent
+/// `slack:` block. Mirrors [`get_telegram_platform_view`] exactly.
+#[server]
+pub async fn get_slack_platform_view(scope: ConfigScope) -> Result<SlackPlatformView, ServerFnError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let (config, _target) = crate::server::tools_config_api::resolve_scope_target(&scope)
+            .map_err(ServerFnError::new)?;
+        Ok(build_slack_view(
+            config.gateway.platforms.get(SLACK_PLATFORM_KEY),
+        ))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = scope;
+        unreachable!("server fn body never runs on the wasm client")
+    }
+}
+
+/// Pure(-ish) core of [`set_discord_enabled`]. Mirrors
+/// [`set_telegram_enabled_impl`] exactly.
+#[cfg(not(target_arch = "wasm32"))]
+async fn set_discord_enabled_impl(
+    scope: ConfigScope,
+    enabled: bool,
+) -> Result<DiscordPlatformView, String> {
+    let (mut config, target) = crate::server::tools_config_api::resolve_scope_target(&scope)?;
+    check_buzz_write_gate()?;
+
+    let mut platform = config
+        .gateway
+        .platforms
+        .get(DISCORD_PLATFORM_KEY)
+        .cloned()
+        .unwrap_or_default();
+    platform.enabled = enabled;
+    config
+        .gateway
+        .platforms
+        .insert(DISCORD_PLATFORM_KEY.to_string(), platform);
+    crate::server::tools_config_api::save_scoped(&config, &target)?;
+
+    let (reread, _reread_target) = crate::server::tools_config_api::resolve_scope_target(&scope)?;
+    Ok(build_discord_view(
+        reread.gateway.platforms.get(DISCORD_PLATFORM_KEY),
+    ))
+}
+
+/// Write the Discord `enabled` flag for `scope`. Mirrors
+/// [`set_telegram_enabled`] exactly.
+#[server]
+pub async fn set_discord_enabled(
+    scope: ConfigScope,
+    enabled: bool,
+) -> Result<DiscordPlatformView, ServerFnError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        set_discord_enabled_impl(scope, enabled)
+            .await
+            .map_err(ServerFnError::new)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (scope, enabled);
+        unreachable!("server fn body never runs on the wasm client")
+    }
+}
+
+/// Pure(-ish) core of [`set_slack_enabled`]. Mirrors
+/// [`set_telegram_enabled_impl`] exactly.
+#[cfg(not(target_arch = "wasm32"))]
+async fn set_slack_enabled_impl(
+    scope: ConfigScope,
+    enabled: bool,
+) -> Result<SlackPlatformView, String> {
+    let (mut config, target) = crate::server::tools_config_api::resolve_scope_target(&scope)?;
+    check_buzz_write_gate()?;
+
+    let mut platform = config
+        .gateway
+        .platforms
+        .get(SLACK_PLATFORM_KEY)
+        .cloned()
+        .unwrap_or_default();
+    platform.enabled = enabled;
+    config
+        .gateway
+        .platforms
+        .insert(SLACK_PLATFORM_KEY.to_string(), platform);
+    crate::server::tools_config_api::save_scoped(&config, &target)?;
+
+    let (reread, _reread_target) = crate::server::tools_config_api::resolve_scope_target(&scope)?;
+    Ok(build_slack_view(
+        reread.gateway.platforms.get(SLACK_PLATFORM_KEY),
+    ))
+}
+
+/// Write the Slack `enabled` flag for `scope`. Mirrors
+/// [`set_telegram_enabled`] exactly.
+#[server]
+pub async fn set_slack_enabled(
+    scope: ConfigScope,
+    enabled: bool,
+) -> Result<SlackPlatformView, ServerFnError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        set_slack_enabled_impl(scope, enabled)
+            .await
+            .map_err(ServerFnError::new)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (scope, enabled);
+        unreachable!("server fn body never runs on the wasm client")
+    }
+}
+
+// =============================================================================
+// Shared staged-edit payload for whitelist/home_channel_id/
+// session_timeout_hours/max_concurrent_runs (D-06 primary + advanced
+// tiers) — the SAME field set across Telegram/Discord/Slack, so one payload
+// type and one validator serve all three `set_*_edit` fns below. NEVER
+// touches `enabled` (its own fn, Task 1 shape) or `token`/`app_token` (no
+// write fn anywhere in this module accepts either — the secret path is
+// `set_gateway_secret`, plan 02).
+// =============================================================================
+
+/// The staged-write payload shared by [`set_telegram_edit`],
+/// [`set_discord_edit`], and [`set_slack_edit`] — deliberately touches
+/// nothing but whitelist/home_channel_id/session_timeout_hours/
+/// max_concurrent_runs.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct ChatEditPayload {
+    pub whitelist: Vec<String>,
+    /// Empty string means "no home channel set" and normalizes to `None` —
+    /// the staged form's text input has no separate representation for
+    /// "unset" vs. "empty string typed" (mirrors [`BuzzEditPayload::relay_url`]).
+    pub home_channel_id: Option<String>,
+    pub session_timeout_hours: u64,
+    pub max_concurrent_runs: usize,
+}
+
+/// Validated + normalized (trimmed) form of a staged chat-platform edit —
+/// never constructed except by [`validate_and_normalize_chat_edit`].
+#[derive(Debug)]
+#[cfg(not(target_arch = "wasm32"))]
+struct NormalizedChatEdit {
+    whitelist: Vec<String>,
+    home_channel_id: Option<String>,
+    session_timeout_hours: u64,
+    max_concurrent_runs: usize,
+}
+
+/// Pure core: validate every field, normalize the whitelist, and turn an
+/// empty-after-trim `home_channel_id` into `None`. No disk I/O — every
+/// branch below is directly unit-testable without a `Config`. Reuses
+/// [`validate_and_normalize_entries`] verbatim for whitelist validation
+/// (concatenates all problems in one round trip, names field+index, never
+/// echoes the raw entry text — T-48.2-12-10).
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_and_normalize_chat_edit(
+    payload: &ChatEditPayload,
+) -> Result<NormalizedChatEdit, Vec<String>> {
+    let mut errors = Vec::new();
+
+    let whitelist = match validate_and_normalize_entries("whitelist", &payload.whitelist) {
+        Ok(v) => v,
+        Err(e) => {
+            errors.extend(e);
+            Vec::new()
+        }
+    };
+
+    let home_channel_id = match payload.home_channel_id.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(trimmed) => {
+            if trimmed.len() > MAX_ENTRY_LEN {
+                errors.push(format!(
+                    "home_channel_id exceeds {MAX_ENTRY_LEN} characters"
+                ));
+                None
+            } else if trimmed.contains('\n') || trimmed.contains('\r') {
+                errors.push("home_channel_id must not contain a newline".to_string());
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+    };
+
+    if errors.is_empty() {
+        Ok(NormalizedChatEdit {
+            whitelist,
+            home_channel_id,
+            session_timeout_hours: payload.session_timeout_hours,
+            max_concurrent_runs: payload.max_concurrent_runs,
+        })
+    } else {
+        Err(errors)
+    }
+}
+
+/// Pure(-ish) core of [`set_telegram_edit`]. Staged-write order mirrors
+/// [`set_buzz_edit_impl`]: validate (no disk I/O) -> resolve scope (fresh
+/// disk read) -> gate check -> read-modify-write the EXISTING map entry
+/// (`token` and every other field survives — this fn never touches it) ->
+/// atomic save -> re-read fresh from disk.
+#[cfg(not(target_arch = "wasm32"))]
+async fn set_telegram_edit_impl(
+    scope: ConfigScope,
+    payload: ChatEditPayload,
+) -> Result<TelegramPlatformView, Vec<String>> {
+    let normalized = validate_and_normalize_chat_edit(&payload)?;
+
+    let (mut config, target) =
+        crate::server::tools_config_api::resolve_scope_target(&scope).map_err(|e| vec![e])?;
+    check_buzz_write_gate().map_err(|e| vec![e])?;
+
+    let mut platform = config
+        .gateway
+        .platforms
+        .get(TELEGRAM_PLATFORM_KEY)
+        .cloned()
+        .unwrap_or_default();
+    platform.whitelist = normalized.whitelist;
+    platform.home_channel_id = normalized.home_channel_id;
+    platform.session_timeout_hours = normalized.session_timeout_hours;
+    platform.max_concurrent_runs = normalized.max_concurrent_runs;
+    config
+        .gateway
+        .platforms
+        .insert(TELEGRAM_PLATFORM_KEY.to_string(), platform);
+    crate::server::tools_config_api::save_scoped(&config, &target).map_err(|e| vec![e])?;
+
+    let (reread, _reread_target) =
+        crate::server::tools_config_api::resolve_scope_target(&scope).map_err(|e| vec![e])?;
+    Ok(build_telegram_view(
+        reread.gateway.platforms.get(TELEGRAM_PLATFORM_KEY),
+    ))
+}
+
+/// Staged-write commit for Telegram's whitelist/home_channel_id/
+/// session_timeout_hours/max_concurrent_runs (D-06 primary + advanced
+/// tiers). Never accepts `token` — that field has no write fn anywhere in
+/// this module (the secret path is `set_gateway_secret`, plan 02).
+#[server]
+pub async fn set_telegram_edit(
+    scope: ConfigScope,
+    payload: ChatEditPayload,
+) -> Result<TelegramPlatformView, ServerFnError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        set_telegram_edit_impl(scope, payload)
+            .await
+            .map_err(|errors| ServerFnError::new(errors.join("; ")))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (scope, payload);
+        unreachable!("server fn body never runs on the wasm client")
+    }
+}
+
+/// Pure(-ish) core of [`set_discord_edit`]. Mirrors
+/// [`set_telegram_edit_impl`] exactly, substituting the map key.
+#[cfg(not(target_arch = "wasm32"))]
+async fn set_discord_edit_impl(
+    scope: ConfigScope,
+    payload: ChatEditPayload,
+) -> Result<DiscordPlatformView, Vec<String>> {
+    let normalized = validate_and_normalize_chat_edit(&payload)?;
+
+    let (mut config, target) =
+        crate::server::tools_config_api::resolve_scope_target(&scope).map_err(|e| vec![e])?;
+    check_buzz_write_gate().map_err(|e| vec![e])?;
+
+    let mut platform = config
+        .gateway
+        .platforms
+        .get(DISCORD_PLATFORM_KEY)
+        .cloned()
+        .unwrap_or_default();
+    platform.whitelist = normalized.whitelist;
+    platform.home_channel_id = normalized.home_channel_id;
+    platform.session_timeout_hours = normalized.session_timeout_hours;
+    platform.max_concurrent_runs = normalized.max_concurrent_runs;
+    config
+        .gateway
+        .platforms
+        .insert(DISCORD_PLATFORM_KEY.to_string(), platform);
+    crate::server::tools_config_api::save_scoped(&config, &target).map_err(|e| vec![e])?;
+
+    let (reread, _reread_target) =
+        crate::server::tools_config_api::resolve_scope_target(&scope).map_err(|e| vec![e])?;
+    Ok(build_discord_view(
+        reread.gateway.platforms.get(DISCORD_PLATFORM_KEY),
+    ))
+}
+
+/// Staged-write commit for Discord's whitelist/home_channel_id/
+/// session_timeout_hours/max_concurrent_runs. Never accepts `token`.
+#[server]
+pub async fn set_discord_edit(
+    scope: ConfigScope,
+    payload: ChatEditPayload,
+) -> Result<DiscordPlatformView, ServerFnError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        set_discord_edit_impl(scope, payload)
+            .await
+            .map_err(|errors| ServerFnError::new(errors.join("; ")))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (scope, payload);
+        unreachable!("server fn body never runs on the wasm client")
+    }
+}
+
+/// Pure(-ish) core of [`set_slack_edit`]. Mirrors [`set_telegram_edit_impl`]
+/// exactly, substituting the map key. Never touches `app_token` — Slack's
+/// Socket Mode app-level token has no write fn anywhere in this module
+/// (the secret path is `set_gateway_secret`, plan 02).
+#[cfg(not(target_arch = "wasm32"))]
+async fn set_slack_edit_impl(
+    scope: ConfigScope,
+    payload: ChatEditPayload,
+) -> Result<SlackPlatformView, Vec<String>> {
+    let normalized = validate_and_normalize_chat_edit(&payload)?;
+
+    let (mut config, target) =
+        crate::server::tools_config_api::resolve_scope_target(&scope).map_err(|e| vec![e])?;
+    check_buzz_write_gate().map_err(|e| vec![e])?;
+
+    let mut platform = config
+        .gateway
+        .platforms
+        .get(SLACK_PLATFORM_KEY)
+        .cloned()
+        .unwrap_or_default();
+    platform.whitelist = normalized.whitelist;
+    platform.home_channel_id = normalized.home_channel_id;
+    platform.session_timeout_hours = normalized.session_timeout_hours;
+    platform.max_concurrent_runs = normalized.max_concurrent_runs;
+    config
+        .gateway
+        .platforms
+        .insert(SLACK_PLATFORM_KEY.to_string(), platform);
+    crate::server::tools_config_api::save_scoped(&config, &target).map_err(|e| vec![e])?;
+
+    let (reread, _reread_target) =
+        crate::server::tools_config_api::resolve_scope_target(&scope).map_err(|e| vec![e])?;
+    Ok(build_slack_view(
+        reread.gateway.platforms.get(SLACK_PLATFORM_KEY),
+    ))
+}
+
+/// Staged-write commit for Slack's whitelist/home_channel_id/
+/// session_timeout_hours/max_concurrent_runs. Never accepts `token` or
+/// `app_token`.
+#[server]
+pub async fn set_slack_edit(
+    scope: ConfigScope,
+    payload: ChatEditPayload,
+) -> Result<SlackPlatformView, ServerFnError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        set_slack_edit_impl(scope, payload)
+            .await
+            .map_err(|errors| ServerFnError::new(errors.join("; ")))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = (scope, payload);
+        unreachable!("server fn body never runs on the wasm client")
+    }
+}
+
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
@@ -1042,6 +1744,7 @@ mod tests {
             security: SecurityConfig {
                 web_config_write_enabled: write_enabled,
                 web_process_control_enabled: false,
+                remote_blueprint_run_enabled: false,
             },
             ..Config::default()
         }
@@ -1352,6 +2055,613 @@ mod tests {
         assert_eq!(
             before, after,
             "a rejected field must abort the ENTIRE save — nothing written, not even the valid field"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 49.3 Plan 01/02 — Telegram tracer slice
+    // -------------------------------------------------------------------
+
+    /// The absent-key answer (`configured: false`) is structurally distinct
+    /// from the present-but-disabled answer — mirrors
+    /// `absent_key_answer_differs_from_disabled_but_present_answer` for
+    /// Buzz above.
+    #[test]
+    fn telegram_absent_key_answer_differs_from_disabled_but_present_answer() {
+        let absent = build_telegram_view(None);
+        assert!(
+            !absent.configured,
+            "no telegram: block must report configured: false"
+        );
+        assert!(!absent.enabled);
+        assert!(!absent.token_present);
+
+        let present_disabled = PlatformGatewayConfig::default();
+        let present = build_telegram_view(Some(&present_disabled));
+        assert!(
+            present.configured,
+            "an explicit telegram: block must report configured: true"
+        );
+        assert!(!present.enabled);
+
+        assert_ne!(
+            absent, present,
+            "absent and present-but-disabled must never collapse into the same DTO"
+        );
+    }
+
+    /// Task 1's behavior contract: a configured, enabled entry round-trips
+    /// its real fields into the DTO, and `token_present` reflects presence
+    /// only — never the token value.
+    #[test]
+    fn telegram_present_entry_carries_its_real_fields_into_the_dto() {
+        let cfg = PlatformGatewayConfig {
+            enabled: true,
+            token: Some("secret-telegram-bot-token".to_string()),
+            whitelist: vec!["123".to_string()],
+            home_channel_id: Some("c".to_string()),
+            ..Default::default()
+        };
+        let view = build_telegram_view(Some(&cfg));
+        assert!(view.configured);
+        assert!(view.enabled);
+        assert_eq!(view.whitelist, vec!["123".to_string()]);
+        assert_eq!(view.home_channel_id, Some("c".to_string()));
+        assert!(
+            view.token_present,
+            "token_present must be true when a token is set"
+        );
+    }
+
+    /// Recursively walk the serialized Telegram DTO and assert none of the
+    /// secret-bearing key names appears at ANY nesting depth — the same
+    /// walker `buzz_platform_view_dto_carries_no_secret_bearing_field`
+    /// uses.
+    #[test]
+    fn telegram_view_dto_carries_no_secret_bearing_field() {
+        let view = TelegramPlatformView {
+            configured: true,
+            enabled: true,
+            whitelist: vec!["123".to_string()],
+            home_channel_id: Some("c".to_string()),
+            session_timeout_hours: 24,
+            max_concurrent_runs: 8,
+            token_present: true,
+        };
+        let json = serde_json::to_value(&view).expect("DTO must serialize");
+        assert_no_secret_key_at_any_depth(&json);
+    }
+
+    /// Task 1's third behavior line: a profile-scope call reads the
+    /// profile's own `config.yaml`, never root's.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn telegram_profile_scope_read_never_reads_root_config() {
+        let _g = crate::server::test_support::env_lock();
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("IRONHERMES_HOME", home_dir.path()) };
+
+        // Seed ROOT with telegram DISABLED.
+        let mut root_cfg = Config::default();
+        root_cfg.gateway.platforms.insert(
+            TELEGRAM_PLATFORM_KEY.to_string(),
+            PlatformGatewayConfig {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        root_cfg.save().expect("seed root config.yaml");
+
+        // Seed a PROFILE with telegram ENABLED and a distinct whitelist.
+        let profile_dir = crate::server::profile_api::profile_dir_for("tg-profile");
+        std::fs::create_dir_all(&profile_dir).expect("create profile dir");
+        let mut profile_cfg = Config::default();
+        profile_cfg.gateway.platforms.insert(
+            TELEGRAM_PLATFORM_KEY.to_string(),
+            PlatformGatewayConfig {
+                enabled: true,
+                whitelist: vec!["profile-only-id".to_string()],
+                ..Default::default()
+            },
+        );
+        profile_cfg
+            .save_to(&profile_dir.join("config.yaml"))
+            .expect("seed profile config.yaml");
+
+        let (resolved, _target) = crate::server::tools_config_api::resolve_scope_target(
+            &ConfigScope::Profile("tg-profile".to_string()),
+        )
+        .expect("resolve profile scope");
+        let view = build_telegram_view(resolved.gateway.platforms.get(TELEGRAM_PLATFORM_KEY));
+
+        unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+        assert!(
+            view.enabled,
+            "profile scope must read the PROFILE's telegram entry (enabled), not root's (disabled)"
+        );
+        assert_eq!(
+            view.whitelist,
+            vec!["profile-only-id".to_string()],
+            "profile scope must read the profile's own whitelist, not root's"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // set_telegram_enabled_impl — gate / round-trip (disk-backed), mirrors
+    // the Buzz enabled tests above.
+    // -------------------------------------------------------------------
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn telegram_write_refuses_when_gate_closed_before_touching_config() {
+        let _g = crate::server::test_support::env_lock();
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("IRONHERMES_HOME", home_dir.path()) };
+
+        let cfg = seeded_config(false);
+        cfg.save().expect("seed root config.yaml");
+        let config_path = ironhermes_core::config::Config::config_path();
+        let before = std::fs::read(&config_path).expect("read seeded config");
+
+        let result = set_telegram_enabled_impl(ConfigScope::Root, true).await;
+
+        let after = std::fs::read(&config_path).expect("read config after refused write");
+        unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+        assert!(
+            result.is_err(),
+            "write must be refused when the gate is closed"
+        );
+        assert_eq!(
+            before, after,
+            "a refused write must leave disk bytes unchanged"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn telegram_write_round_trip_preserves_sibling_platform_and_unknown_extra_key() {
+        let _g = crate::server::test_support::env_lock();
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("IRONHERMES_HOME", home_dir.path()) };
+
+        let mut cfg = seeded_config(true);
+        let mut buzz = PlatformGatewayConfig {
+            enabled: true,
+            whitelist: vec!["buzz-pubkey-should-never-move".to_string()],
+            ..Default::default()
+        };
+        buzz.extra.insert(
+            "buzz_only_field".to_string(),
+            serde_json::json!("keep-me"),
+        );
+        cfg.gateway
+            .platforms
+            .insert(BUZZ_PLATFORM_KEY.to_string(), buzz);
+
+        let mut telegram = PlatformGatewayConfig {
+            enabled: false,
+            whitelist: vec!["existing-chat-id".to_string()],
+            ..Default::default()
+        };
+        telegram.extra.insert(
+            "an_unknown_telegram_key".to_string(),
+            serde_json::json!("keep-me-too"),
+        );
+        cfg.gateway
+            .platforms
+            .insert(TELEGRAM_PLATFORM_KEY.to_string(), telegram);
+        cfg.save().expect("seed root config.yaml");
+
+        let result = set_telegram_enabled_impl(ConfigScope::Root, true).await;
+        let reloaded = ironhermes_core::config::Config::load();
+        unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+        let view = result.expect("write must succeed when the gate is open");
+        assert!(view.enabled, "the enabled flag must reflect the write");
+        assert_eq!(
+            view.whitelist,
+            vec!["existing-chat-id".to_string()],
+            "an unrelated field on the SAME entry must survive the write"
+        );
+
+        let reloaded = reloaded.expect("reload saved config");
+        let reloaded_buzz = reloaded
+            .gateway
+            .platforms
+            .get(BUZZ_PLATFORM_KEY)
+            .expect("sibling platform entry must survive the telegram write");
+        assert_eq!(
+            reloaded_buzz.whitelist,
+            vec!["buzz-pubkey-should-never-move".to_string()],
+            "a sibling platform's field must never be touched by a telegram write"
+        );
+        assert_eq!(
+            reloaded_buzz.extra.get("buzz_only_field"),
+            Some(&serde_json::json!("keep-me")),
+            "a sibling platform's unknown extra key must survive"
+        );
+
+        let reloaded_telegram = reloaded
+            .gateway
+            .platforms
+            .get(TELEGRAM_PLATFORM_KEY)
+            .expect("telegram entry must survive its own write");
+        assert_eq!(
+            reloaded_telegram.extra.get("an_unknown_telegram_key"),
+            Some(&serde_json::json!("keep-me-too")),
+            "an unknown key inside the telegram entry must survive a read-modify-write"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 49.3 Plan 03 — Discord/Slack DTOs + no-secret tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn discord_absent_key_answer_differs_from_disabled_but_present_answer() {
+        let absent = build_discord_view(None);
+        assert!(!absent.configured);
+        assert!(!absent.enabled);
+        assert!(!absent.token_present);
+
+        let present_disabled = PlatformGatewayConfig::default();
+        let present = build_discord_view(Some(&present_disabled));
+        assert!(present.configured);
+        assert!(!present.enabled);
+
+        assert_ne!(absent, present);
+    }
+
+    #[test]
+    fn discord_present_entry_carries_its_real_fields_into_the_dto() {
+        let cfg = PlatformGatewayConfig {
+            enabled: true,
+            token: Some("secret-discord-bot-token".to_string()),
+            whitelist: vec!["111222333".to_string()],
+            home_channel_id: Some("c-discord".to_string()),
+            ..Default::default()
+        };
+        let view = build_discord_view(Some(&cfg));
+        assert!(view.configured);
+        assert!(view.enabled);
+        assert_eq!(view.whitelist, vec!["111222333".to_string()]);
+        assert_eq!(view.home_channel_id, Some("c-discord".to_string()));
+        assert!(view.token_present);
+    }
+
+    /// Recursively walk the serialized Discord DTO and assert none of the
+    /// secret-bearing key names appears at ANY nesting depth.
+    #[test]
+    fn discord_view_dto_carries_no_secret_bearing_field() {
+        let view = DiscordPlatformView {
+            configured: true,
+            enabled: true,
+            whitelist: vec!["111222333".to_string()],
+            home_channel_id: Some("c".to_string()),
+            session_timeout_hours: 24,
+            max_concurrent_runs: 8,
+            token_present: true,
+        };
+        let json = serde_json::to_value(&view).expect("DTO must serialize");
+        assert_no_secret_key_at_any_depth(&json);
+    }
+
+    #[test]
+    fn slack_absent_key_answer_differs_from_disabled_but_present_answer() {
+        let absent = build_slack_view(None);
+        assert!(!absent.configured);
+        assert!(!absent.enabled);
+        assert!(!absent.token_present);
+        assert!(!absent.app_token_present);
+
+        let present_disabled = PlatformGatewayConfig::default();
+        let present = build_slack_view(Some(&present_disabled));
+        assert!(present.configured);
+        assert!(!present.enabled);
+
+        assert_ne!(absent, present);
+    }
+
+    #[test]
+    fn slack_present_entry_carries_its_real_fields_into_the_dto() {
+        let cfg = PlatformGatewayConfig {
+            enabled: true,
+            token: Some("xoxb-secret-slack-bot-token".to_string()),
+            app_token: Some("xapp-secret-slack-app-token".to_string()),
+            whitelist: vec!["U12345".to_string()],
+            home_channel_id: Some("c-slack".to_string()),
+            ..Default::default()
+        };
+        let view = build_slack_view(Some(&cfg));
+        assert!(view.configured);
+        assert!(view.enabled);
+        assert_eq!(view.whitelist, vec!["U12345".to_string()]);
+        assert_eq!(view.home_channel_id, Some("c-slack".to_string()));
+        assert!(view.token_present);
+        assert!(view.app_token_present);
+    }
+
+    /// Recursively walk the serialized Slack DTO and assert none of the
+    /// secret-bearing key names appears at ANY nesting depth — the DTO
+    /// carries `app_token_present: bool` only, never `app_token`.
+    #[test]
+    fn slack_view_dto_carries_no_secret_bearing_field() {
+        let view = SlackPlatformView {
+            configured: true,
+            enabled: true,
+            whitelist: vec!["U12345".to_string()],
+            home_channel_id: Some("c".to_string()),
+            session_timeout_hours: 24,
+            max_concurrent_runs: 8,
+            token_present: true,
+            app_token_present: true,
+        };
+        let json = serde_json::to_value(&view).expect("DTO must serialize");
+        assert_no_secret_key_at_any_depth(&json);
+    }
+
+    /// Dedicated assertion (beyond the generic recursive walk above) that
+    /// the actual `xapp-` app-token VALUE never reaches the serialized
+    /// Slack DTO — the DTO carries `app_token_present: true` only.
+    #[test]
+    fn slack_view_dto_never_carries_the_app_token_value() {
+        const APP_TOKEN_MARKER: &str = "xapp-CANARY-should-never-leak-9f2c";
+        let cfg = PlatformGatewayConfig {
+            enabled: true,
+            app_token: Some(APP_TOKEN_MARKER.to_string()),
+            ..Default::default()
+        };
+        let view = build_slack_view(Some(&cfg));
+        assert!(view.app_token_present);
+        let rendered = serde_json::to_string(&view).expect("DTO must serialize to a string");
+        assert!(
+            !rendered.contains(APP_TOKEN_MARKER),
+            "the app_token VALUE must never reach the serialized Slack DTO"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 49.3 Plan 03 — set_discord_enabled_impl / set_slack_enabled_impl
+    // gate / round-trip (disk-backed), mirror the Telegram tests above.
+    // -------------------------------------------------------------------
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn discord_write_refuses_when_gate_closed_before_touching_config() {
+        let _g = crate::server::test_support::env_lock();
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("IRONHERMES_HOME", home_dir.path()) };
+
+        let cfg = seeded_config(false);
+        cfg.save().expect("seed root config.yaml");
+        let config_path = ironhermes_core::config::Config::config_path();
+        let before = std::fs::read(&config_path).expect("read seeded config");
+
+        let result = set_discord_enabled_impl(ConfigScope::Root, true).await;
+
+        let after = std::fs::read(&config_path).expect("read config after refused write");
+        unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+        assert!(result.is_err());
+        assert_eq!(before, after);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn slack_write_refuses_when_gate_closed_before_touching_config() {
+        let _g = crate::server::test_support::env_lock();
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("IRONHERMES_HOME", home_dir.path()) };
+
+        let cfg = seeded_config(false);
+        cfg.save().expect("seed root config.yaml");
+        let config_path = ironhermes_core::config::Config::config_path();
+        let before = std::fs::read(&config_path).expect("read seeded config");
+
+        let result = set_slack_enabled_impl(ConfigScope::Root, true).await;
+
+        let after = std::fs::read(&config_path).expect("read config after refused write");
+        unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+        assert!(result.is_err());
+        assert_eq!(before, after);
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 49.3 Plan 03 — validate_and_normalize_chat_edit
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn chat_edit_with_empty_home_channel_id_string_normalizes_to_none() {
+        let payload = ChatEditPayload {
+            whitelist: vec![],
+            home_channel_id: Some("   ".to_string()),
+            session_timeout_hours: 24,
+            max_concurrent_runs: 8,
+        };
+        let normalized = validate_and_normalize_chat_edit(&payload).expect("must validate");
+        assert_eq!(normalized.home_channel_id, None);
+    }
+
+    #[test]
+    fn chat_edit_rejects_newline_in_home_channel_id() {
+        let payload = ChatEditPayload {
+            whitelist: vec![],
+            home_channel_id: Some("chan\n1".to_string()),
+            session_timeout_hours: 24,
+            max_concurrent_runs: 8,
+        };
+        let result = validate_and_normalize_chat_edit(&payload);
+        assert!(result.is_err());
+        assert!(result.unwrap_err()[0].contains("newline"));
+    }
+
+    #[test]
+    fn chat_edit_rejects_when_whitelist_invalid_and_names_the_problem() {
+        let payload = ChatEditPayload {
+            whitelist: vec!["   ".to_string()],
+            home_channel_id: None,
+            session_timeout_hours: 24,
+            max_concurrent_runs: 8,
+        };
+        let result = validate_and_normalize_chat_edit(&payload);
+        assert!(result.is_err());
+        assert!(result.unwrap_err()[0].contains("empty or whitespace-only"));
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 49.3 Plan 03 — set_discord_edit_impl tempdir round trip
+    // (acceptance criterion: proves whitelist+home_channel write and
+    // re-read, and does NOT alter the token field).
+    // -------------------------------------------------------------------
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn discord_edit_writes_whitelist_and_home_channel_and_never_alters_the_token_field() {
+        let _g = crate::server::test_support::env_lock();
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("IRONHERMES_HOME", home_dir.path()) };
+
+        let mut cfg = seeded_config(true);
+        let discord = PlatformGatewayConfig {
+            enabled: true,
+            token: Some("discord-token-should-never-move".to_string()),
+            whitelist: vec!["existing-id".to_string()],
+            ..Default::default()
+        };
+        cfg.gateway
+            .platforms
+            .insert(DISCORD_PLATFORM_KEY.to_string(), discord);
+        cfg.save().expect("seed root config.yaml");
+
+        let payload = ChatEditPayload {
+            whitelist: vec!["111222333".to_string(), "444555666".to_string()],
+            home_channel_id: Some("c-home".to_string()),
+            session_timeout_hours: 48,
+            max_concurrent_runs: 4,
+        };
+        let result = set_discord_edit_impl(ConfigScope::Root, payload).await;
+        let reloaded = ironhermes_core::config::Config::load();
+        unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+        let view = result.expect("edit write must succeed when the gate is open");
+        assert_eq!(
+            view.whitelist,
+            vec!["111222333".to_string(), "444555666".to_string()]
+        );
+        assert_eq!(view.home_channel_id, Some("c-home".to_string()));
+        assert_eq!(view.session_timeout_hours, 48);
+        assert_eq!(view.max_concurrent_runs, 4);
+
+        let reloaded = reloaded.expect("reload saved config");
+        let reloaded_discord = reloaded
+            .gateway
+            .platforms
+            .get(DISCORD_PLATFORM_KEY)
+            .expect("discord entry must survive its own write");
+        assert_eq!(
+            reloaded_discord.token,
+            Some("discord-token-should-never-move".to_string()),
+            "set_discord_edit must NEVER alter the token field"
+        );
+        assert_eq!(
+            reloaded_discord.whitelist,
+            vec!["111222333".to_string(), "444555666".to_string()],
+            "the write must be visible in a fresh re-read from disk"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn slack_edit_never_alters_the_app_token_field() {
+        let _g = crate::server::test_support::env_lock();
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("IRONHERMES_HOME", home_dir.path()) };
+
+        let mut cfg = seeded_config(true);
+        let slack = PlatformGatewayConfig {
+            enabled: true,
+            token: Some("xoxb-should-never-move".to_string()),
+            app_token: Some("xapp-should-never-move".to_string()),
+            ..Default::default()
+        };
+        cfg.gateway
+            .platforms
+            .insert(SLACK_PLATFORM_KEY.to_string(), slack);
+        cfg.save().expect("seed root config.yaml");
+
+        let payload = ChatEditPayload {
+            whitelist: vec!["U9999".to_string()],
+            home_channel_id: None,
+            session_timeout_hours: 24,
+            max_concurrent_runs: 8,
+        };
+        let result = set_slack_edit_impl(ConfigScope::Root, payload).await;
+        let reloaded = ironhermes_core::config::Config::load();
+        unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+        result.expect("edit write must succeed when the gate is open");
+        let reloaded = reloaded.expect("reload saved config");
+        let reloaded_slack = reloaded
+            .gateway
+            .platforms
+            .get(SLACK_PLATFORM_KEY)
+            .expect("slack entry must survive its own write");
+        assert_eq!(
+            reloaded_slack.token,
+            Some("xoxb-should-never-move".to_string())
+        );
+        assert_eq!(
+            reloaded_slack.app_token,
+            Some("xapp-should-never-move".to_string()),
+            "set_slack_edit must NEVER alter the app_token field"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn telegram_edit_writes_whitelist_and_home_channel_and_never_alters_the_token_field() {
+        let _g = crate::server::test_support::env_lock();
+        let home_dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("IRONHERMES_HOME", home_dir.path()) };
+
+        let mut cfg = seeded_config(true);
+        let telegram = PlatformGatewayConfig {
+            enabled: true,
+            token: Some("telegram-token-should-never-move".to_string()),
+            ..Default::default()
+        };
+        cfg.gateway
+            .platforms
+            .insert(TELEGRAM_PLATFORM_KEY.to_string(), telegram);
+        cfg.save().expect("seed root config.yaml");
+
+        let payload = ChatEditPayload {
+            whitelist: vec!["12345".to_string()],
+            home_channel_id: Some("home-chat".to_string()),
+            session_timeout_hours: 12,
+            max_concurrent_runs: 2,
+        };
+        let result = set_telegram_edit_impl(ConfigScope::Root, payload).await;
+        let reloaded = ironhermes_core::config::Config::load();
+        unsafe { std::env::remove_var("IRONHERMES_HOME") };
+
+        let view = result.expect("edit write must succeed when the gate is open");
+        assert_eq!(view.whitelist, vec!["12345".to_string()]);
+        assert_eq!(view.home_channel_id, Some("home-chat".to_string()));
+
+        let reloaded = reloaded.expect("reload saved config");
+        let reloaded_telegram = reloaded
+            .gateway
+            .platforms
+            .get(TELEGRAM_PLATFORM_KEY)
+            .expect("telegram entry must survive its own write");
+        assert_eq!(
+            reloaded_telegram.token,
+            Some("telegram-token-should-never-move".to_string()),
+            "set_telegram_edit must NEVER alter the token field"
         );
     }
 }

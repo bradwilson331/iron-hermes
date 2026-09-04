@@ -58,7 +58,7 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.3.5"
+version = "0.3.8"
 edition = "2024"
 authors = ["Nous Research"]
 license = "MIT"
@@ -123,6 +123,11 @@ base64 = "0.22"
 fs2 = "0.4"
 # URL parsing
 url = "2"
+# HTTP types (HeaderName/HeaderValue) — Phase 48.3 D-01: promoted from transitive
+# (via rmcp's client-side-sse feature) to a direct dep so ironhermes-mcp can build
+# StreamableHttpClientTransportConfig::custom_headers()'s HashMap<HeaderName, HeaderValue>.
+# Resolves to the same http 1.4.0 already in Cargo.lock as rmcp's own dependency.
+http = "1"
 # Phase 43 — OAuth 2.1 PKCE + device-code flows
 oauth2 = { version = "5", features = ["reqwest"] }
 open = "5"

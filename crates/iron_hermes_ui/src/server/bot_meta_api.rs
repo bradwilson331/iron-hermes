@@ -377,9 +377,10 @@ pub(crate) fn write_preview_for(name: &str, reply_text: &str, at_ms: i64) -> Res
 }
 
 /// Phase 50.1 Plan 01 Task 3 / Plan 06: the `delete_bot_meta` impl layer —
-/// the synchronous delete-sync hook `profile_api::delete_profile_impl`
-/// (plan 50.1-06) calls directly, inside the same blocking call as the
-/// profile directory removal. `pub(crate)` (widened from Plan 01's private
+/// the synchronous delete-sync hook `profile_api::archive_profile_impl`
+/// (plan 50.1-06, renamed from `delete_profile_impl` and rewritten to
+/// archive by plan 49.4-08) calls directly, inside the same blocking call
+/// as the profile directory move. `pub(crate)` (widened from Plan 01's private
 /// visibility) so `profile_api.rs` can call it synchronously — the
 /// `#[server]` `delete_bot_meta` fn below is async and cannot be invoked
 /// from inside another `spawn_blocking` closure. Validates the name before

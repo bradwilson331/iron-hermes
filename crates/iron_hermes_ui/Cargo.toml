@@ -19,6 +19,21 @@ uuid = { version = "1", features = ["v4", "serde", "js"] }
 # Minimal tokio for platform/timer.rs (native sleep); `server` feature adds `full`.
 tokio = { version = "1", features = ["time"], default-features = false }
 
+# Phase 49.4 Plan 04 (D-11/D-13): schedules_api.rs's build_schedule_string and
+# humanize_schedule are pure, wasm-compilable functions living OUTSIDE any
+# server/wasm32 cfg gate — the client calls them directly to build/preview
+# schedule strings before submitting. build_schedule_string's one-time mode
+# resolves an operator-picked date+time into an RFC3339 instant in the
+# resolved display timezone, which needs chrono/chrono-tz on BOTH targets.
+# Previously these were native-only (`[target.'cfg(not(target_arch =
+# "wasm32"))'.dependencies]`, added in Phase 46.9 Plan 09 for the
+# server-only last_run_at/next_run_at formatting); the ungated pure
+# functions this plan adds require them unconditionally. Neither function
+# calls `Utc::now()`/`Local::now()` internally (the current instant is
+# always passed in), so no wasm clock-source feature is needed.
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+
 # Client-only deps (WASM)
 gloo-timers = { version = "0.3", features = ["futures"] }
 # Phase 26.7.1 Plan 01 (UAT-4 hotfix): std::time::Instant panics on wasm32
@@ -127,6 +142,14 @@ wasm-bindgen-futures = "0.4"
 # below). Pre-pinned workspace dep (root Cargo.toml:111), already used by
 # three other crates.
 base64 = { workspace = true }
+# Phase 49.4 Plan 05 (D-05): skills_import_api.rs's classify_import_source /
+# normalize_github_identifier are pure and ungated so the client can reuse
+# them — both parse operator-typed strings with `url::Url::parse`. Shared
+# dep (both targets need it): the `url` crate is pure Rust with no I/O and
+# already compiles to wasm32 elsewhere in this workspace. Pre-pinned
+# workspace dep (root Cargo.toml, `url = "2"`), already used by
+# ironhermes-cli/ironhermes-core.
+url = { workspace = true }
 
 # Server-only deps — optional, activated by `server` feature
 axum = { version = "=0.8.4", optional = true }
@@ -222,12 +245,8 @@ ironhermes-cron = { path = "../ironhermes-cron" }
 # Phase 46.9 Plan 09 (GAP-4): schedules_api.rs renders last_run_at in the
 # operator's configured display timezone (config.agent.timezone), mirroring
 # ironhermes-agent/src/prompt_builder.rs's chrono_tz::Tz resolution.
-# Native-only (cfg-gated) — the render runs server-side only, same grouping
-# as ironhermes-cron above. `chrono` itself is named directly (chrono::Local,
-# chrono::DateTime) rather than only relied on transitively through
-# ironhermes-cron's re-exported types, so it must be a direct dep too.
-chrono = { workspace = true }
-chrono-tz = { workspace = true }
+# `chrono`/`chrono-tz` themselves moved to the unconditional [dependencies]
+# section above in Phase 49.4 Plan 04 — see that comment for why.
 # Phase 46.9 Plan 06 (D-03): provider_secrets_api.rs wraps the raw API key
 # in secrecy::SecretString before it ever touches a Debug/Display path.
 # Same version pin as ironhermes-vault's own Cargo.toml (already resolved
@@ -255,6 +274,23 @@ parking_lot = "0.12"
 # every caller is `#[cfg(feature = "server")]`, so the wasm client build
 # never pulls this in.
 regex = { workspace = true }
+# Phase 49.4 Plan 05 (D-05..D-09): skills_import_api.rs wires the existing,
+# already-shipping (via ironhermes-cli) skills-hub install pipeline into
+# this crate rather than growing a second, unreviewed importer. Placed in
+# THIS non-wasm target table (matching ironhermes-core/ironhermes-cli above)
+# — the crate depends on tokio, reqwest and std::fs, none of which the wasm
+# client bundle should ever pull in. Every caller is `#[cfg(feature =
+# "server")]`-gated internally (module doc has the full reasoning), same
+# convention as ironhermes-mcp above.
+ironhermes-hub = { path = "../ironhermes-hub" }
+# Phase 49.4 Plan 05 (D-05, T-49.4-05-SC): raw-deflate decoding for the
+# hand-rolled minimal zip reader in skills_import_api.rs (no zip-parsing
+# crate exists anywhere in this workspace, and the plan's threat model
+# explicitly disposes T-49.4-05-SC on the premise that no external registry
+# package is introduced this phase — so the container format is parsed
+# by hand against the already-vendored `flate2`, not a new dependency).
+# Already resolved in the lockfile via ironhermes-hub's own tarball.rs.
+flate2 = { workspace = true }
 
 [dev-dependencies]
 # Test-only features for `#[tokio::test]` (macros + rt).
@@ -297,10 +333,6 @@ demo = []
 # the read-only npub row, and the wasm client bundle never pulls
 # `nostr-sdk` in (it lives under the non-wasm target dependency table).
 buzz = ["ironhermes-gateway/buzz", "dep:nostr-sdk"]
-# Phase 26.2.1: Gate the legacy Warp-style shell behind an opt-in feature.
-# Default builds mount the new wheel-driven `HermesApp`; enable `legacy-shell`
-# to mount `WarpHermes` instead (kept compiling as a UAT fallback).
-legacy-shell = []
 # Phase 01 (Three.js Viseme Avatar Core) Plan 04 (D-10): throwaway dev flag.
 # When ON, orb_canvas.rs mounts the talking-head avatar (window.ironHermesAvatar)
 # instead of the orb; default builds leave the orb path byte-for-byte unchanged.

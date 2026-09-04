@@ -158,7 +158,7 @@ default:
 
 | Entrypoint | Execs | When |
 |---|---|---|
-| `docker/web-entrypoint.sh` | `iron_hermes_ui` (fullstack web server, `0.0.0.0:8080`, foreground/PID 1) + `ironhermes gateway --non-interactive` (background, best-effort) | **Default** — the image's `ENTRYPOINT` |
+| `docker/web-entrypoint.sh` | `iron_hermes_ui` (fullstack web server, `0.0.0.0:8080`; sole determinant of container health/lifecycle) + `ironhermes gateway --non-interactive` (background, best-effort), both supervised under `tini` as PID 1 so `stop` shuts them down gracefully | **Default** — the image's `ENTRYPOINT` |
 | `docker/entrypoint.sh` | `ironhermes` CLI with your args | Override with `--entrypoint` for management/one-shot use |
 
 Both seed config templates on first run (**only if absent**, so your edits
@@ -255,7 +255,9 @@ for a `--cron` gateway), retrying for up to 10 seconds to absorb normal
 startup latency. If any component is not running afterward, the script
 prints the matching log-inspection command
 (`journalctl --user -u <unit> -n 50` on Linux, `tail -n 50
-~/.ironhermes/logs/<name>.err.log` on macOS) and exits non-zero — a deploy
+~/.ironhermes/logs/<name>.err.log` on macOS — except for `gateway`, which
+prints `~/.ironhermes/logs/gateway.log`; see
+["The gateway log"](#the-gateway-log) above) and exits non-zero — a deploy
 that leaves a service down is never reported as a success.
 
 ### No debug web build
@@ -270,6 +272,14 @@ debug bundle would be silently ignored in favor of a stale release bundle.
 
 The Telegram gateway runs as a persistent background process (`ironhermes gateway`). Use the platform-appropriate service manager.
 
+### The gateway log
+
+There is exactly **one** canonical gateway log file: `~/.ironhermes/logs/gateway.log`. `~/.ironhermes/gateway.log` (no `logs/` segment) is a compatibility symlink to it, installed by `scripts/deploy/install.sh`. All three supervision mechanisms — the launchd plist, the systemd `--user` unit, and the cron watchdog — append to the same file. It is created mode `0600` before any supervisor first opens it, because gateway startup errors can quote provider keys. `ironhermes doctor` prints the resolved path and whether it is current or stale.
+
+Every other log-path mention on this page for the gateway refers back to this file; the systemd and launchd subsections below say what they still write elsewhere for the case where that matters.
+
+> **Pitfall: a log that "found nothing" may mean the wrong supervisor.** 48.3 was opened because an operator grepped `~/.ironhermes/gateway.log`, found nothing, and concluded a code path had never fired — when in fact the live gateway was supervised by systemd with no `StandardOutput=` directive, so its output went to `journalctl` instead. Before concluding a code path is silent, confirm which supervisor is actually running the process (`systemctl --user status <unit>` on Linux, `launchctl print gui/$UID/<label>` on macOS) and that its output destination matches the file you're grepping.
+
 ### macOS — LaunchAgent
 
 The installer copies the plist template to `~/Library/LaunchAgents/com.ironhermes.gateway.plist` with `__HOME__` substituted. To manage manually:
@@ -281,9 +291,8 @@ launchctl load ~/Library/LaunchAgents/com.ironhermes.gateway.plist
 # Stop and unload
 launchctl bootout gui/$UID/com.ironhermes.gateway
 
-# View logs
-tail -f ~/.ironhermes/logs/gateway.out.log
-tail -f ~/.ironhermes/logs/gateway.err.log
+# View logs — see "The gateway log" above
+tail -f ~/.ironhermes/logs/gateway.log
 ```
 
 The LaunchAgent restarts the gateway on crash (`KeepAlive.Crashed=true`) but not on a clean exit. Restart storms are throttled: one restart per 30 seconds (`ThrottleInterval=30`).
@@ -299,7 +308,12 @@ cp scripts/deploy/ironhermes-gateway.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now ironhermes-gateway
 
-# View logs
+# View application output — see "The gateway log" above
+tail -f ~/.ironhermes/logs/gateway.log
+
+# View unit lifecycle only (start/stop/restart/crash) — the unit's
+# StandardOutput=/StandardError= directives route application output to
+# the file above, so the journal no longer carries it for this unit.
 journalctl --user -u ironhermes-gateway -f
 ```
 
@@ -320,7 +334,7 @@ For systems without launchd or systemd, a cron-driven watchdog checks the gatewa
 (crontab -l 2>/dev/null; echo "* * * * * $HOME/.ironhermes/scripts/gateway-watchdog.sh >/dev/null 2>&1 # ironhermes-gateway-watchdog") | crontab -
 ```
 
-The watchdog reads `~/.ironhermes/gateway.pid`, probes with `kill -0`, and re-launches via `gateway-run.sh` if the process is gone. Logs are appended to `~/.ironhermes/logs/gateway.log`.
+The watchdog reads `~/.ironhermes/gateway.pid`, probes with `kill -0`, and re-launches via `gateway-run.sh` if the process is gone. Its own log lines, and everything the relaunched gateway prints, are appended to the same canonical file described in "The gateway log" above — created mode `0600` before the watchdog's first append.
 
 ---
 
@@ -333,6 +347,8 @@ Authentication is **opt-in by configuration**. With no `web_ui.auth.password_has
 **A non-loopback bind with no configured hash now refuses to start.** This is a hard startup check in the binary itself (`bind_guard_allows` in `main.rs`, called before `TcpListener::bind`), not only a shell-script warning — so launching via systemd, a LaunchAgent, or the binary directly is covered too, not just `scripts/deploy/web-run.sh`. The refusal message:
 
 > refusing to bind `<address>`: this is a non-loopback address and no `web_ui.auth.password_hash` is configured. Set one via `ironhermes web set-password` (paste the printed hash into `web_ui.auth.password_hash` in config.yaml), or bind to a loopback address (127.0.0.1 / ::1) instead.
+
+A second, independent startup guard covers origin protection rather than credentials — see [Cross-site origin allowlist (`web_ui.allowed_origins`)](#cross-site-origin-allowlist-web_uiallowed_origins) below.
 
 **Generating the credential:**
 
@@ -349,7 +365,7 @@ The command never writes `config.yaml` itself — paste the printed PHC string i
 |---|---|---|
 | `password_hash` | unset | argon2id PHC string; auth is disabled while this is unset. Also resolvable via `IRONHERMES_WEB_PASSWORD_HASH` env or the vault key `web_ui/auth/password_hash` |
 | `login_theme` | `basic` | Which of the five login treatments the server renders; an unrecognized slug falls back to `basic` |
-| `cookie_secure` | `false` | Adds the `Secure` cookie attribute — **cannot be set `true` without a TLS story** (see below) |
+| `cookie_secure` | `false` | Adds the `Secure` cookie attribute — **set `true` whenever TLS terminates in front of this server**, including at a reverse proxy or load balancer (see below) |
 | `session_ttl_hours` | `168` (7 days) | Absolute session lifetime from creation |
 | `idle_timeout_hours` | `24` | Sliding idle timeout, refreshed on authenticated requests |
 
@@ -360,9 +376,60 @@ The command never writes `config.yaml` itself — paste the printed PHC string i
 - Lost password: run `ironhermes web set-password` again and restart with the new hash; there is no recovery flow.
 - Single operator only — no roles, no multi-user, no OIDC.
 
-**What is still true and must not be softened:** there is no built-in TLS. On plain-LAN HTTP the login password and the session cookie are sniffable by anything on the same network segment, and `cookie_secure` cannot be set `true` without a reverse proxy or load balancer terminating TLS in front of this server. Tailscale (or an equivalent WireGuard overlay) is the assumed transport-confidentiality layer for LAN/tailnet use — it encrypts the link itself, which is why plain `cookie_secure: false` HTTP is acceptable there but not on an open LAN. A reverse proxy is still the recommendation for any public-internet posture; it is no longer a hard requirement for LAN/tailnet use now that the server enforces its own fail-closed bind guard.
+**What is still true and must not be softened:** there is no built-in TLS. On plain-LAN HTTP the login password and the session cookie are sniffable by anything on the same network segment, and `cookie_secure` should stay `false` until a reverse proxy or load balancer is terminating TLS in front of this server — once one is, `cookie_secure` should be set `true` to protect the session cookie. Tailscale (or an equivalent WireGuard overlay) is the assumed transport-confidentiality layer for LAN/tailnet use — it encrypts the link itself, which is why plain `cookie_secure: false` HTTP is acceptable there but not on an open LAN. A reverse proxy is still the recommendation for any public-internet posture; it is no longer a hard requirement for LAN/tailnet use now that the server enforces its own fail-closed bind guard. Leaving `cookie_secure` at `false` behind a TLS-terminating proxy is what produced Phase 49.1.1's WebSocket outage — the flag was never the blocker the earlier guidance implied.
 
 Because of the bind guard above, every script below still defaults to a loopback (`127.0.0.1`) bind and refuses any other address unless you explicitly set `IRONHERMES_WEB_ALLOW_PUBLIC_BIND=1` — that shell-script gate is now an earlier, friendlier warning layered in front of the binary's own real guarantee, not the only line of defense.
+
+### Cross-site origin allowlist (`web_ui.allowed_origins`)
+
+`web_ui.allowed_origins` (config.yaml, a **sibling** of `web_ui.auth` on the `web_ui` block — deliberately not nested under `web_ui.auth`) is the deployment's public identity, which authentication merely consumes. It is also the intended future anchor for the OAuth callback's own origin resolution. It controls which browser `Origin` values are accepted on the chat and kanban WebSocket upgrades.
+
+```yaml
+web_ui:
+  allowed_origins: ["https://iron-hermes.sliplane.app"]
+```
+
+**Env override:** `IRONHERMES_WEB_ALLOWED_ORIGINS`, comma-separated for multiple origins. Set it in `~/.ironhermes/.env` (loaded at startup) or via a container/dashboard environment variable — the same two mechanisms already used for `IRONHERMES_WEB_PASSWORD_HASH`, for platforms that expose only env vars.
+
+**Precedence:** `config.yaml` wins whenever `web_ui.allowed_origins` is present and non-empty; the env var applies only when it is absent or empty. This is the same layering `web_ui.auth.password_hash` already uses (`config.yaml` → env → vault), so the two keys behave alike. **A consequence worth knowing during an incident:** if a deployment has a non-empty `allowed_origins` in `config.yaml`, setting `IRONHERMES_WEB_ALLOWED_ORIGINS` will *not* override it — edit or clear the `config.yaml` value instead.
+
+```bash
+IRONHERMES_WEB_ALLOWED_ORIGINS='https://iron-hermes.sliplane.app'
+```
+
+**When configured:** the incoming `Origin` header on a WebSocket upgrade to `/api/ws/chat` or `/api/ws/kanban` is compared against the list, and the request's own `Host` header is ignored entirely.
+
+**When unset (the default):** the expected origin is still derived from `Host`, with the scheme taken from the first comma-separated `X-Forwarded-Proto` value when the proxy supplies one, falling back to `web_ui.auth.cookie_secure` otherwise. This keeps loopback and LAN deployments zero-config.
+
+**A WebSocket upgrade with no `Origin` header is rejected on both of those paths, in every configuration.** This reverses the previous rule, but browsers always send `Origin` on an upgrade request, so no real client is affected.
+
+**The `["*"]` wildcard** is the typed escape hatch for a trusted LAN:
+
+```yaml
+web_ui:
+  allowed_origins: ["*"]
+```
+
+This is **not** "disable the check": any *present* origin is accepted, but a *missing* one is still rejected. That makes it weaker than an explicit allowlist and strictly stronger than turning origin checking off.
+
+**A non-loopback bind with no configured origins refuses to start**, the same way a non-loopback bind with no `web_ui.auth.password_hash` already does (see above). The refusal message:
+
+> FATAL: Refusing to bind non-loopback address 0.0.0.0 without origin protection.
+> To secure this deployment, configure `web_ui.allowed_origins` with your public URL(s).
+> Example (config.yaml):
+>   web_ui:
+>     allowed_origins: ["https://iron-hermes.sliplane.app"]
+>
+> Or set IRONHERMES_WEB_ALLOWED_ORIGINS='https://iron-hermes.sliplane.app'
+> (comma-separated for multiple) — use this on platforms that only expose env vars.
+>
+> Alternatively, to accept any browser origin on a trusted LAN, use:
+>   web_ui:
+>     allowed_origins: ["*"]
+
+This is a second, independent startup guard from the credential bind guard above — the two exist for two distinct causes with two distinct messages and are not merged.
+
+**Validation:** each configured entry must be a bare `scheme://host[:port]` origin with no path, query, fragment, or userinfo. A malformed entry is a hard startup error. Entries are checked by `ironhermes_mcp::security::validate_web_redirect_base` — the same validator the MCP redirect-origin key below already uses, so there is one rule for both keys.
 
 ### MCP OAuth redirect origin (`mcp_oauth.web_redirect_base_url`)
 
@@ -553,8 +620,8 @@ Logs in `~/.ironhermes/logs/` are preserved by the uninstaller.
 No third-party monitoring library (Sentry, Datadog, New Relic, OpenTelemetry) was detected in the project dependencies. Runtime observability is available through:
 
 - **Structured logs** — set `RUST_LOG=ironhermes=info` (or `debug`) in `~/.ironhermes/.env` to control log verbosity
-- **Gateway logs** — `~/.ironhermes/logs/gateway.log`, `gateway.out.log`, `gateway.err.log`
-- **systemd journal** — `journalctl --user -u ironhermes-gateway -f` (Linux)
+- **Gateway log** — `~/.ironhermes/logs/gateway.log` (see ["The gateway log"](#the-gateway-log) above); `gateway.out.log` and `gateway.err.log` are pre-48.3 files that no longer receive writes — if you still have them on disk, that's why they stopped growing
+- **systemd journal** — `journalctl --user -u ironhermes-gateway -f` (Linux; unit lifecycle only as of 48.3, not application output)
 - **PID file** — `~/.ironhermes/gateway.pid` (3-line YAML; readable by the watchdog and external health checks)
 
 <!-- VERIFY: any external monitoring or alerting integration beyond file-based logs -->

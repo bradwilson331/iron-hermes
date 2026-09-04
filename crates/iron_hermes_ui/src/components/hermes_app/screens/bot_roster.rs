@@ -27,7 +27,8 @@ use crate::components::hermes_app::screens::bot_roster::group_settings::GroupSet
 use crate::components::hermes_app::screens::profile_shared::edit_dialog::ProfileDetailDrawer;
 use crate::components::hermes_app::screens::profile_shared::ProfileDialogContext;
 use crate::components::hermes_app::widgets::active_now_strip::ActiveNowStrip;
-use crate::protocol::{BotMeta, BotRosterEntry, ProfileRow};
+use crate::protocol::{BotBinding, BotMeta, BotRosterEntry, ProfileRow};
+use crate::server::bot_binding_api::{list_bot_bindings, set_bot_binding};
 use crate::server::bot_meta_api::{list_bot_meta, live_profile_name};
 use crate::server::group_chat_api::list_group_rooms;
 use crate::server::profile_api::list_profiles;
@@ -369,6 +370,11 @@ pub fn BotRoster(
         _ => None,
     };
 
+    // Phase 49.4 Plan 12: `PlatformBindings`' own PROFILE: selector needs
+    // the full profile-name list too — cloned here, BEFORE `profiles` is
+    // moved into `build_roster_entries` below.
+    let profiles_for_bindings = profiles.clone();
+
     let entries: Vec<BotRosterEntry> =
         build_roster_entries(profiles, &meta_map, &kanban_worker_names, live_name.as_deref());
     let is_empty = entries.is_empty();
@@ -485,6 +491,17 @@ pub fn BotRoster(
                         "+ NEW ROOM"
                     }
                 }
+                // Phase 49.4 Plan 12 (D-16): the roster-side half of the
+                // profile-to-bot binding editor — an ADDITIVE panel for the
+                // fixed ≤6 platform-adapter keys, each with its own PROFILE:
+                // selector. Deliberately NOT retrofitted onto every existing
+                // roster row: those rows already ARE profiles (per the
+                // checkpoint decision's own framing), so a "which profile"
+                // selector on a profile row would be circular. Independent
+                // of the roster grid's own loading/empty/error state below —
+                // it fetches and renders regardless of how many (or how
+                // few) profile rows exist.
+                PlatformBindings { profiles: profiles_for_bindings }
                 if is_loading {
                     div { class: "kn-drawer-loading", "Loading bots…" }
                 } else if load_error {
@@ -607,6 +624,204 @@ pub fn BotRoster(
                 // mount-unconditionally idiom, same as `GroupSettingsDrawer`'s
                 // other mount site in `group_chat_workspace.rs`).
                 GroupSettingsDrawer { open: roster_settings_open }
+            }
+        }
+    }
+}
+
+/// Phase 49.4 Plan 12 (D-16): the fixed, closed platform-adapter key set —
+/// duplicated from `bot_binding_api::PLATFORM_KEYS` (that `const` lives in
+/// a `#[cfg(feature = "server")]`-agnostic but native-only-CALLER module;
+/// this component runs on the wasm client too, so it carries its own
+/// literal copy per this crate's own established small-constant-
+/// duplication precedent).
+const PLATFORM_KEYS: [&str; 6] = ["telegram", "discord", "slack", "buzz", "webhook", "api_server"];
+
+/// Phase 49.4 Plan 12 (UI-SPEC E14 partial): the literal profile name an
+/// unbound bot displays — duplicated from `bot_binding_api::DEFAULT_BOUND_PROFILE`
+/// for the same wasm-client-reachability reason `PLATFORM_KEYS` above is.
+const DEFAULT_PROFILE_LABEL: &str = "default";
+
+/// Phase 49.4 Plan 12 (D-16, UI-SPEC E14): the roster-side profile-to-bot
+/// binding editor — one labelled `PROFILE:` select per fixed platform-
+/// adapter key. Follows the crate's resource-plus-refresh-tick idiom with
+/// its OWN locally-owned tick (mirrors `rooms_refresh_tick`'s placement
+/// exactly — a change originating entirely within this component's own
+/// subtree that needs to force a re-fetch without a caller round-trip).
+/// Never calls the resource restart method on a `use_resource`, and mounts
+/// no context provider (both crate-wide hard constraints).
+#[component]
+fn PlatformBindings(profiles: Vec<ProfileRow>) -> Element {
+    let bindings_tick: Signal<u32> = use_signal(|| 0);
+    // `Signal<Option<BTreeMap<...>>>` (not the resource's own `Option`
+    // directly) so the diff effect below can tell "never fetched yet" apart
+    // from "fetched, and it happens to be empty" — the latter must never be
+    // misread as a mass-revert of every binding.
+    let mut prior_bindings: Signal<Option<std::collections::BTreeMap<String, String>>> =
+        use_signal(|| None);
+    let mut saving_key: Signal<Option<String>> = use_signal(|| None);
+    let mut inline_error: Signal<Option<(String, String)>> = use_signal(|| None);
+    let mut notice: Signal<Option<(String, String)>> = use_signal(|| None);
+
+    let bindings_resource = use_resource(move || {
+        let _tick = bindings_tick();
+        async move { list_bot_bindings().await }
+    });
+
+    let fetched: Vec<BotBinding> = match bindings_resource() {
+        Some(Ok(v)) => v,
+        _ => Vec::new(),
+    };
+    let current_map: std::collections::BTreeMap<String, String> = fetched
+        .iter()
+        .map(|b| (b.bot_key.0.clone(), b.profile_name.clone()))
+        .collect();
+
+    // Diff against the previous fetch to detect an externally-caused
+    // revert (UI-SPEC E14 error: a bound profile was archived elsewhere —
+    // Soul page, or another browser tab — and this store entry silently
+    // flipped to the default profile). This is the ONLY place that
+    // transient notice can originate from for that case; a same-tab
+    // set-binding success shows its own notice inline at the point of
+    // change instead (see `onchange` below).
+    // Phase 49.4 hotfix: this effect writes `prior_bindings` every run, so it
+    // MUST NOT subscribe to `prior_bindings` — Dioxus 0.7 does not dedupe
+    // identical signal writes (see the same warning in `screens/agents.rs`'s
+    // UAT-3 fix), so reading it with `.read()` here made the effect re-trigger
+    // itself forever, pegging the single-threaded WASM client and freezing the
+    // Agents screen (BotRoster mounts this component) with no console error.
+    // The crate's rule is `.read()` in render, `.peek()` in effects. We
+    // subscribe to `bindings_resource` instead so a genuinely new fetch still
+    // re-runs the revert diff, and `.peek()` the prior value.
+    use_effect(move || {
+        let current_map: std::collections::BTreeMap<String, String> = match bindings_resource() {
+            Some(Ok(v)) => v
+                .iter()
+                .map(|b| (b.bot_key.0.clone(), b.profile_name.clone()))
+                .collect(),
+            _ => std::collections::BTreeMap::new(),
+        };
+        if let Some(old_map) = prior_bindings.peek().clone() {
+            for (key, new_profile) in current_map.iter() {
+                let reverted_here = old_map
+                    .get(key)
+                    .is_some_and(|old_profile| old_profile != new_profile)
+                    && new_profile == DEFAULT_PROFILE_LABEL;
+                if reverted_here {
+                    let old_profile = old_map.get(key).cloned().unwrap_or_default();
+                    notice.set(Some((
+                        key.clone(),
+                        format!("{key} reverted to default — {old_profile} was archived"),
+                    )));
+                }
+            }
+        }
+        prior_bindings.set(Some(current_map));
+    });
+
+    let saving_key_val = saving_key.read().clone();
+    let inline_error_val = inline_error.read().clone();
+    let notice_val = notice.read().clone();
+
+    rsx! {
+        div { class: "panel", style: "margin-bottom: var(--sp-2);",
+            div { class: "panel-title", "Platform bindings" }
+            // Phase 49.4: the six bindings were one full-width row each, so the
+            // panel ate most of the Agents viewport. Lay them out in a
+            // responsive grid instead — as many columns as fit at a 260px
+            // minimum, collapsing to a single column on narrow viewports.
+            div {
+                style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:4px 20px;",
+                for key in PLATFORM_KEYS {
+                    {
+                        let key_s = key.to_string();
+                        let bound = current_map
+                            .get(key)
+                            .cloned()
+                            .unwrap_or_else(|| DEFAULT_PROFILE_LABEL.to_string());
+                        let is_saving = saving_key_val.as_deref() == Some(key);
+                        let row_error = inline_error_val
+                            .as_ref()
+                            .filter(|(k, _)| k == key)
+                            .map(|(_, m)| m.clone());
+                        let row_notice = notice_val
+                            .as_ref()
+                            .filter(|(k, _)| k == key)
+                            .map(|(_, m)| m.clone());
+                        let onchange_key = key_s.clone();
+                        rsx! {
+                            div {
+                                key: "{key}",
+                                style: "display:flex;align-items:center;gap:8px;",
+                                span {
+                                    style: "min-width:76px;text-transform:uppercase;font-size:10px;letter-spacing:0.1em;color:var(--gray);",
+                                    "{key}"
+                                }
+                                // The platform name + the profile value are
+                                // self-describing; the separate "PROFILE:" label
+                                // on every row was pure width. The select keeps
+                                // its accessible name via aria-label instead.
+                                select {
+                                    class: "voice-settings-select",
+                                    "aria-label": "Profile bound to {key}",
+                                    style: "flex:1;min-width:0;max-width:180px;padding-block:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                                    disabled: is_saving,
+                                    onchange: move |evt| {
+                                        let new_profile = evt.value();
+                                        let key_local = onchange_key.clone();
+                                        notice.set(None);
+                                        inline_error.set(None);
+                                        saving_key.set(Some(key_local.clone()));
+                                        spawn(async move {
+                                            match set_bot_binding(key_local.clone(), new_profile.clone()).await {
+                                                Ok(()) => {
+                                                    saving_key.set(None);
+                                                    notice.set(Some((
+                                                        key_local.clone(),
+                                                        format!("{key_local} now uses {new_profile}"),
+                                                    )));
+                                                    let cur = *bindings_tick.read();
+                                                    let mut tick = bindings_tick;
+                                                    tick.set(cur + 1);
+                                                }
+                                                Err(e) => {
+                                                    saving_key.set(None);
+                                                    inline_error.set(Some((key_local, e.to_string())));
+                                                }
+                                            }
+                                        });
+                                    },
+                                    // Phase 49.4: the default/root agent as an
+                                    // explicit choice. An unbound platform
+                                    // already REPORTS "default" (it is the
+                                    // read-side fallback), but without this
+                                    // option the value had no matching entry and
+                                    // could never be chosen again once a real
+                                    // profile was picked.
+                                    option {
+                                        key: "{DEFAULT_PROFILE_LABEL}",
+                                        value: "{DEFAULT_PROFILE_LABEL}",
+                                        selected: bound == DEFAULT_PROFILE_LABEL,
+                                        "default (root agent)"
+                                    }
+                                    for p in profiles.iter() {
+                                        option {
+                                            key: "{p.name}",
+                                            value: "{p.name}",
+                                            selected: p.name == bound,
+                                            "{p.name}"
+                                        }
+                                    }
+                                }
+                                if let Some(msg) = row_notice {
+                                    span { style: "color:var(--teal);font-size:11px;", "{msg}" }
+                                } else if let Some(msg) = row_error {
+                                    span { style: "color:var(--red);font-size:11px;", "{msg}" }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

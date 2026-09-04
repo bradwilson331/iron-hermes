@@ -2,7 +2,7 @@
 
 **Phase:** 26.2.1 — new-web-ui-with-wheel-menu
 **Audience:** developer running through end-to-end verification before sign-off
-**Prerequisite:** `cargo check -p iron_hermes_ui` exits 0 AND `cargo test -p iron_hermes_ui --bin iron_hermes_ui` exits 0 AND `cargo test -p iron_hermes_ui --test wave0_smoke` exits 0 AND `cargo clippy -p iron_hermes_ui --all-features -- -D warnings` exits 0 AND `cargo check -p iron_hermes_ui --features legacy-shell` exits 0
+**Prerequisite:** `cargo check -p iron_hermes_ui` exits 0 AND `cargo test -p iron_hermes_ui --bin iron_hermes_ui` exits 0 AND `cargo test -p iron_hermes_ui --test wave0_smoke` exits 0 AND `cargo clippy -p iron_hermes_ui --all-features -- -D warnings` exits 0
 
 **How to run:**
 1. Start the dev server with `dx serve --package iron_hermes_ui`. (This is Dioxus 0.7's unified fullstack launcher — it builds the WASM client and runs the server in one process. The standalone `cargo run … --features server` path is NOT supported in this phase: it panics on a missing `target/debug/public` directory that only `dx serve` populates.)
@@ -119,10 +119,9 @@
 ## 12. Build & Clippy
 
 - [ ] 12.1 Run `cargo check -p iron_hermes_ui`. Confirm exit 0.
-- [ ] 12.2 Run `cargo check -p iron_hermes_ui --features legacy-shell`. Confirm exit 0.
-- [ ] 12.3 Run `cargo clippy -p iron_hermes_ui --all-features -- -D warnings`. Confirm exit 0.
-- [ ] 12.4 Run `cargo test -p iron_hermes_ui --bin iron_hermes_ui`. Confirm exit 0.
-- [ ] 12.5 Run `cargo test -p iron_hermes_ui --test wave0_smoke`. Confirm exit 0.
+- [ ] 12.2 Run `cargo clippy -p iron_hermes_ui --all-features -- -D warnings`. Confirm exit 0.
+- [ ] 12.3 Run `cargo test -p iron_hermes_ui --bin iron_hermes_ui`. Confirm exit 0.
+- [ ] 12.4 Run `cargo test -p iron_hermes_ui --test wave0_smoke`. Confirm exit 0.
 
 ## Sign-Off
 

@@ -766,6 +766,25 @@ fn build_command_context(app: &App) -> CommandContext {
         let handle: Arc<dyn CronJobReader> = Arc::new(CronJobReaderImpl(cron.clone()));
         ctx = ctx.with_cron_store(handle);
     }
+    // Phase 49.5 Plan 05: wire CronJobWriter for `/blueprint run`. Unlike the
+    // reader above, the writer is stateless and opens its own JobStore per
+    // call, so it does not need `app.cron_store` to be present — wired
+    // unconditionally. Covers both the CLI and the TUI, which share this
+    // context builder. CLI/TUI are local trusted surfaces (Platform::Local),
+    // so cmd_blueprint's run arm leaves this handle ungated; wiring it here
+    // is not itself authorization for the gateway's remote-origin gate.
+    ctx = ctx.with_cron_job_writer(std::sync::Arc::new(
+        ironhermes_cron::CronJobWriterImpl::new(),
+    ));
+    // Phase 49.6 Plan 03: wire BlueprintSaver for `/blueprint save`. Wired
+    // ONLY here (the CLI/TUI context builder) — never on the gateway's —
+    // because `cmd_blueprint_save`'s unconditional Platform::Local gate is
+    // the control and this handle's absence everywhere else is the
+    // backstop. Like the writer above, it is stateless and opens its own
+    // JobStore per call, so it is wired unconditionally.
+    ctx = ctx.with_blueprint_saver(std::sync::Arc::new(
+        crate::blueprint_save::BlueprintSaverImpl::new(),
+    ));
     ctx
 }
 

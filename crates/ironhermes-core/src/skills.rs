@@ -115,9 +115,89 @@ pub struct HermesMetadata {
     pub required_environment_variables: Vec<EnvVarEntry>,
     pub required_credential_files: Vec<CredentialFileEntry>,
     pub config: Vec<SkillConfigField>,
+    /// D-11 (Phase 49.6 Plan 01): typed extraction of `metadata.hermes.blueprint`
+    /// — the block a blueprint-carrying SKILL.md's frontmatter carries once a
+    /// cron job is saved as a blueprint (D-08 "a blueprint is an ordinary
+    /// skill"). Deliberately uses a scoped-tolerant `deserialize_with` rather
+    /// than relying on the struct-level `#[serde(default)]` alone: that only
+    /// covers a *missing* key. A *present-but-malformed* `blueprint:` block
+    /// (e.g. a scalar/list instead of a mapping) would otherwise bubble a
+    /// deserialize error up through the whole `HermesMetadata` parse, which
+    /// `extract_hermes_metadata`'s outer WARN-BUT-LOAD catch would then reset
+    /// to `HermesMetadata::default()` — silently dropping `requires_toolsets`
+    /// and every other sibling field over one bad sub-key. See
+    /// `deserialize_blueprint_tolerant`, which degrades ONLY `blueprint` to
+    /// `None` and leaves the rest of the block intact (RESEARCH.md Pitfall 4).
+    #[serde(default, deserialize_with = "deserialize_blueprint_tolerant")]
+    pub blueprint: Option<BlueprintMetadata>,
     /// Preserve unknown hermes fields for forward compat (D-18).
     #[serde(flatten)]
     pub extras: HashMap<String, serde_yaml::Value>,
+}
+
+/// D-12 (Phase 49.6 Plan 01): the seven portable fields captured when a cron
+/// job is saved as a blueprint `SKILL.md`. Mirrors upstream
+/// `tools/blueprints.py:246` `export_blueprint`'s field set exactly.
+/// Deliberately excludes everything else on `CronJob` — `script`, `workdir`,
+/// `base_url`, `skills`, `context_from`, `continuity` — because a shareable
+/// artifact carrying a shell command, a filesystem path, or an inference
+/// endpoint is a strictly worse risk than 49.5's accepted AR-06 (which only
+/// applied to a single-tenant web form editing its own `jobs.json`). The
+/// exclusion is structural: this struct has no field capable of holding any
+/// of those values, so `compose_blueprint_skill_md` cannot leak them by
+/// omitting a strip step — there is no strip step to omit.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct BlueprintMetadata {
+    pub schedule: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deliver: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub no_agent: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled_toolsets: Option<Vec<String>>,
+}
+
+/// `skip_serializing_if` helper for a plain `bool` field — `Option::is_none`
+/// isn't usable on a non-`Option` type, and the crate has no existing
+/// "skip when false" helper to reuse.
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+/// `deserialize_with` for `HermesMetadata::blueprint`. Deserializes the raw
+/// `blueprint:` value into a `serde_yaml::Value` first (this step is
+/// effectively infallible — it's converting one `Value` representation into
+/// another), then attempts `BlueprintMetadata` from that value. A type
+/// mismatch (scalar/list instead of a mapping, or a wrong-typed sub-field)
+/// degrades to `Ok(None)` with a named warning, rather than propagating the
+/// error up and failing the ENTIRE `HermesMetadata` parse the way an
+/// un-wrapped `Option<BlueprintMetadata>` field would (RESEARCH.md Pitfall 4;
+/// see `HermesMetadata::blueprint`'s own doc comment for the full rationale).
+fn deserialize_blueprint_tolerant<'de, D>(
+    deserializer: D,
+) -> Result<Option<BlueprintMetadata>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_yaml::Value::deserialize(deserializer)?;
+    match serde_yaml::from_value::<BlueprintMetadata>(value) {
+        Ok(bp) => Ok(Some(bp)),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "HermesMetadata.blueprint parse error (WARN-BUT-LOAD, scoped) — \
+                 blueprint sub-key ignored, rest of metadata.hermes.* intact"
+            );
+            Ok(None)
+        }
+    }
 }
 
 /// Provenance label used by D-15 scan enforcement (Plan 05).
@@ -162,7 +242,16 @@ pub struct SkillFrontmatter {
     #[serde(default)]
     pub compatibility: Option<String>,
     /// Pre-approved tool list from the agentskills.io spec. Parsed but NOT enforced (07.2 D-10).
-    #[serde(default, rename = "allowed-tools")]
+    ///
+    /// Accepts BOTH YAML forms (see [`deserialize_allowed_tools`]): a real
+    /// sequence (`[a, b]`) and the comma-separated scalar (`a, b`) that
+    /// Claude-Code-style skills commonly write. Always lands as a `Vec`, so
+    /// every consumer (e.g. `agent_loop`'s enforcement union) is unaffected.
+    #[serde(
+        default,
+        rename = "allowed-tools",
+        deserialize_with = "deserialize_allowed_tools"
+    )]
     pub allowed_tools: Option<Vec<String>>,
     /// Opaque metadata blob storing arbitrary hermes-agent extensions (e.g. `metadata.hermes.tags`).
     /// Stored as `serde_yaml::Value` per 07.2 D-09 for forward-compat without typed schema changes.
@@ -198,33 +287,122 @@ pub struct SkillRecord {
 // parse_skill_md
 // =============================================================================
 
+/// Accept `allowed-tools` in either YAML shape: the spec's sequence form
+/// (`allowed-tools: [terminal, read_file]`) and the plain comma-separated
+/// scalar (`allowed-tools: terminal, read_file`) that skills written in the
+/// Claude Code convention very often use.
+///
+/// Before this, the scalar form failed `Vec<String>` deserialization, which
+/// failed the WHOLE frontmatter parse, which made `parse_skill_md` return
+/// `None` — surfacing to the operator as an unexplained "couldn't read a
+/// SKILL.md" on an otherwise perfectly valid skill. Both forms now normalize to
+/// the same `Vec<String>`; a scalar is split on commas with surrounding
+/// whitespace trimmed and empty entries dropped.
+fn deserialize_allowed_tools<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ListOrScalar {
+        List(Vec<String>),
+        Scalar(String),
+    }
+
+    Ok(
+        Option::<ListOrScalar>::deserialize(deserializer)?.map(|v| match v {
+            ListOrScalar::List(list) => list,
+            ListOrScalar::Scalar(s) => s
+                .split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect(),
+        }),
+    )
+}
+
+/// Reason a `SKILL.md` could not be parsed, for surfacing to an operator.
+/// [`parse_skill_md`] keeps its `Option` API (every existing caller is
+/// unchanged); [`parse_skill_md_verbose`] is the same logic with the failure
+/// reason preserved instead of collapsed to `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillParseError {
+    /// No leading `---` frontmatter delimiter.
+    MissingFrontmatter,
+    /// Opening `---` present but never closed by a `\n---` line.
+    UnterminatedFrontmatter,
+    /// The YAML block did not deserialize into the frontmatter schema.
+    /// Carries serde's own message, which names the offending field.
+    InvalidYaml(String),
+    /// `name` failed `validate_skill_name`.
+    InvalidName { name: String, reason: String },
+}
+
+impl std::fmt::Display for SkillParseError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingFrontmatter => write!(
+                f,
+                "no YAML frontmatter found — a SKILL.md must start with a `---` line"
+            ),
+            Self::UnterminatedFrontmatter => write!(
+                f,
+                "the YAML frontmatter is never closed — add a `---` line after the metadata"
+            ),
+            Self::InvalidYaml(e) => write!(f, "the YAML frontmatter could not be read: {e}"),
+            Self::InvalidName { name, reason } => {
+                write!(f, "the skill name {name:?} is not usable: {reason}")
+            }
+        }
+    }
+}
+
 /// Parse a SKILL.md file content into (SkillFrontmatter, body).
 ///
 /// Returns None if:
 /// - Content does not start with `---`
 /// - YAML frontmatter is invalid
 /// - Closing `---` delimiter is missing
+///
+/// See [`parse_skill_md_verbose`] for the same logic with the failure reason
+/// preserved instead of collapsed to `None`.
 pub fn parse_skill_md(content: &str) -> Option<(SkillFrontmatter, String)> {
+    parse_skill_md_verbose(content).ok()
+}
+
+/// [`parse_skill_md`] with the failure reason preserved — see
+/// [`SkillParseError`]. Behaviour is otherwise identical.
+pub fn parse_skill_md_verbose(
+    content: &str,
+) -> Result<(SkillFrontmatter, String), SkillParseError> {
     let trimmed = content.trim_start();
     if !trimmed.starts_with("---") {
-        return None;
+        return Err(SkillParseError::MissingFrontmatter);
     }
 
     // Skip past the opening `---\n`
-    let after_open = trimmed.strip_prefix("---")?;
+    let after_open = trimmed
+        .strip_prefix("---")
+        .ok_or(SkillParseError::MissingFrontmatter)?;
     // Allow `---` followed by `\n` or `\r\n`
-    let after_open = after_open.strip_prefix('\n').or_else(|| {
-        after_open
-            .strip_prefix('\r')
-            .and_then(|s| s.strip_prefix('\n'))
-    })?;
+    let after_open = after_open
+        .strip_prefix('\n')
+        .or_else(|| {
+            after_open
+                .strip_prefix('\r')
+                .and_then(|s| s.strip_prefix('\n'))
+        })
+        .ok_or(SkillParseError::MissingFrontmatter)?;
 
     // Find the FIRST `\n---` to locate the closing delimiter
-    let close_pos = after_open.find("\n---")?;
+    let close_pos = after_open
+        .find("\n---")
+        .ok_or(SkillParseError::UnterminatedFrontmatter)?;
     let yaml_block = &after_open[..close_pos];
 
     // Parse the YAML
-    let frontmatter: SkillFrontmatter = serde_yaml::from_str(yaml_block).ok()?;
+    let frontmatter: SkillFrontmatter = serde_yaml::from_str(yaml_block)
+        .map_err(|e| SkillParseError::InvalidYaml(e.to_string()))?;
 
     // Phase 21.8.2 D-10/D-11/Pitfall 4: normalize Title Case / spaces to kebab-case
     // BEFORE validation. In-memory only — the on-disk directory is never renamed.
@@ -250,7 +428,10 @@ pub fn parse_skill_md(content: &str) -> Option<(SkillFrontmatter, String)> {
             "SkillRegistry: rejecting skill with invalid name {:?}: {}",
             frontmatter.name, reason
         );
-        return None;
+        return Err(SkillParseError::InvalidName {
+            name: frontmatter.name.clone(),
+            reason: reason.to_string(),
+        });
     }
 
     // SKILL-07 description length check (D-14): WARN-BUT-LOAD — do not return None.
@@ -276,7 +457,7 @@ pub fn parse_skill_md(content: &str) -> Option<(SkillFrontmatter, String)> {
         .trim()
         .to_string();
 
-    Some((frontmatter, body))
+    Ok((frontmatter, body))
 }
 
 /// Extract the raw YAML frontmatter text (between the two `---` fences) from a
@@ -338,7 +519,13 @@ fn skill_matches_current_platform(platforms: Option<&Vec<String>>) -> bool {
 ///
 /// Unknown fields inside `metadata.hermes.*` are captured by `#[serde(flatten)] extras`
 /// and do NOT cause an error.
-fn extract_hermes_metadata(raw: &Option<serde_yaml::Value>) -> Option<HermesMetadata> {
+///
+/// Widened to `pub` in Phase 49.6 Plan 01 (D-08 round-trip proof): the
+/// blueprint save/parse round trip is verified from `iron_hermes_ui`, which
+/// needs to recover `HermesMetadata` (and specifically `.blueprint`) from an
+/// installed `SKILL.md`'s parsed frontmatter without duplicating this
+/// extraction logic.
+pub fn extract_hermes_metadata(raw: &Option<serde_yaml::Value>) -> Option<HermesMetadata> {
     let root = raw.as_ref()?;
     let hermes_val = root.get("hermes")?.clone();
     match serde_yaml::from_value::<HermesMetadata>(hermes_val) {
@@ -348,6 +535,114 @@ fn extract_hermes_metadata(raw: &Option<serde_yaml::Value>) -> Option<HermesMeta
             Some(HermesMetadata::default())
         }
     }
+}
+
+// =============================================================================
+// Blueprint composition (D-08/D-11/D-12, Phase 49.6 Plan 01)
+// =============================================================================
+
+/// Mirrors upstream `tools/blueprints.py:246` `export_blueprint`'s name
+/// sanitizer: lowercase, replace every character that is not ASCII
+/// alphanumeric and not `-`/`_` with `-`, trim leading/trailing `-`/`_`, and
+/// fall back to `shared-blueprint` when the result is empty.
+pub fn sanitize_blueprint_name(raw: &str) -> String {
+    let mapped: String = raw
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = mapped.trim_matches(|c| c == '-' || c == '_');
+    if trimmed.is_empty() {
+        "shared-blueprint".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Mirrors upstream `export_blueprint`'s description derivation: the first
+/// non-empty line of `body`, truncated to at most 200 CHARACTERS (not
+/// bytes — `.chars().take(200)` always lands on a char boundary), falling
+/// back to `Shared automation blueprint.` when the body has no non-empty
+/// line.
+pub fn blueprint_description_from_body(body: &str) -> String {
+    let first_non_empty = body
+        .trim()
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty());
+    match first_non_empty {
+        Some(line) => line.chars().take(200).collect(),
+        None => "Shared automation blueprint.".to_string(),
+    }
+}
+
+/// Private serialization-only shape for a composed blueprint `SKILL.md`'s
+/// frontmatter. Mirrors upstream `export_blueprint`'s dict field order
+/// exactly (`name`, `description`, `version`, `license`,
+/// `metadata.hermes.{tags,blueprint}`). Being a typed struct — rather than
+/// hand-assembled YAML strings — is what makes D-12's field exclusion
+/// structural: this type has no member able to hold `script`/`workdir`/
+/// `base_url`, so there is no generic "serialize the whole job, strip six
+/// fields after the fact" step for a future edit to accidentally skip.
+#[derive(Serialize)]
+struct BlueprintSkillFrontmatter {
+    name: String,
+    description: String,
+    version: String,
+    license: String,
+    metadata: BlueprintSkillMetadataBlock,
+}
+
+#[derive(Serialize)]
+struct BlueprintSkillMetadataBlock {
+    hermes: BlueprintSkillHermesBlock,
+}
+
+#[derive(Serialize)]
+struct BlueprintSkillHermesBlock {
+    tags: Vec<String>,
+    blueprint: BlueprintMetadata,
+}
+
+/// Compose a blueprint `SKILL.md` document from a name, a body, and the D-12
+/// portable fields — the D-08/D-09 write path's input to the SAME installer
+/// pipeline every other skill source uses (this function only builds text;
+/// see `install_composed_blueprint` in `iron_hermes_ui` for the actual write).
+pub fn compose_blueprint_skill_md(name: &str, body: &str, bp: &BlueprintMetadata) -> String {
+    let sanitized_name = sanitize_blueprint_name(name);
+    let description = blueprint_description_from_body(body);
+    let frontmatter = BlueprintSkillFrontmatter {
+        name: sanitized_name.clone(),
+        description,
+        version: "1.0.0".to_string(),
+        license: "MIT".to_string(),
+        metadata: BlueprintSkillMetadataBlock {
+            hermes: BlueprintSkillHermesBlock {
+                tags: vec!["blueprint".to_string(), "automation".to_string()],
+                blueprint: bp.clone(),
+            },
+        },
+    };
+    let yaml = serde_yaml::to_string(&frontmatter)
+        .expect("BlueprintSkillFrontmatter has no non-serializable content");
+    // serde_yaml's exact leading-document-marker behavior is not part of its
+    // stable public contract across versions — defensively strip a leading
+    // "---\n" if present rather than assume either way, then always emit
+    // exactly one ourselves.
+    let yaml_body = yaml.strip_prefix("---\n").unwrap_or(&yaml).trim_end();
+    let trimmed_body = body.trim();
+    let body_text = if trimmed_body.is_empty() {
+        format!("# {sanitized_name}\n\nShared automation blueprint.")
+    } else {
+        trimmed_body.to_string()
+    };
+    format!("---\n{yaml_body}\n---\n\n{body_text}\n")
 }
 
 // =============================================================================
@@ -984,6 +1279,23 @@ impl SkillRegistry {
         &self.skills
     }
 
+    /// D-13 (Phase 49.6 Plan 03): the single discovery predicate answering
+    /// "is this skill a usable blueprint" — filters [`Self::list`] down to
+    /// records whose `metadata.hermes.blueprint` parsed into a
+    /// [`BlueprintMetadata`] with a non-empty schedule, via
+    /// [`blueprint_metadata_of`]. Preserves `list()`'s ordering for the
+    /// entries it keeps.
+    ///
+    /// Curated `AutomationBlueprint` catalog entries (`blueprint.rs`) are a
+    /// deliberately separate species (D-10) and never appear here — this
+    /// accessor only ever inspects `SkillRecord.hermes_metadata`.
+    pub fn list_blueprint_skills(&self) -> Vec<&SkillRecord> {
+        self.skills
+            .iter()
+            .filter(|record| blueprint_metadata_of(record).is_some())
+            .collect()
+    }
+
     /// Return the typed config schema declared in a skill's
     /// `metadata.hermes.config` frontmatter (Phase 19 D-07).
     ///
@@ -1048,6 +1360,34 @@ impl SkillRegistry {
         }
         reg
     }
+}
+
+// =============================================================================
+// Blueprint-skill discovery predicate (D-08, D-13, Phase 49.6 Plan 03)
+// =============================================================================
+
+/// The single predicate answering "is this skill a usable blueprint" for one
+/// record. [`SkillRegistry::list_blueprint_skills`] is implemented in terms
+/// of this function rather than re-deriving the rule per call site.
+///
+/// A skill is a usable blueprint only when its `hermes_metadata.blueprint`
+/// parsed into a `Some(BlueprintMetadata)` (Plan 01's scoped-tolerant
+/// `deserialize_blueprint_tolerant` already collapses a type-wrong block to
+/// `None`, leaving the rest of `metadata.hermes.*` intact) AND that
+/// metadata's `schedule` is non-empty.
+///
+/// The non-empty-schedule condition is load-bearing, not defensive tidiness:
+/// `BlueprintMetadata` derives `Default` for serde tolerance, so a partially
+/// written or hand-edited frontmatter block can deserialize into a value
+/// with no schedule, and a card offering to schedule nothing is worse than
+/// no card (UI-SPEC.md E8's `partial` row: skipped from the grid, not
+/// rendered as a broken card).
+pub fn blueprint_metadata_of(record: &SkillRecord) -> Option<&BlueprintMetadata> {
+    record
+        .hermes_metadata
+        .as_ref()
+        .and_then(|m| m.blueprint.as_ref())
+        .filter(|bp| !bp.schedule.is_empty())
 }
 
 // =============================================================================
@@ -3446,6 +3786,167 @@ Body.
         // Just confirm the already-valid name loads — no normalization expected.
         assert!(registry.find("ascii-art").is_some());
     }
+
+    // -------------------------------------------------------------------------
+    // blueprint_skill_discovery tests (D-08, D-13, Phase 49.6 Plan 03)
+    // -------------------------------------------------------------------------
+
+    fn make_blueprint_skill_md(name: &str, schedule_block: &str) -> String {
+        format!(
+            "---\nname: {name}\ndescription: A blueprint skill\nmetadata:\n  hermes:\n    tags:\n      - blueprint\n      - automation\n    blueprint:\n{schedule_block}\n---\nBody content here.\n"
+        )
+    }
+
+    #[test]
+    fn test_blueprint_skill_discovery_returns_only_blueprint_carrying_skills() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+
+        let bp_dir = skills_dir.join("my-blueprint");
+        fs::create_dir_all(&bp_dir).unwrap();
+        fs::write(
+            bp_dir.join("SKILL.md"),
+            make_blueprint_skill_md(
+                "my-blueprint",
+                "      schedule: \"every 30m\"\n      prompt: \"Do the thing\"\n",
+            ),
+        )
+        .unwrap();
+
+        let ord_a_dir = skills_dir.join("ordinary-a");
+        fs::create_dir_all(&ord_a_dir).unwrap();
+        fs::write(
+            ord_a_dir.join("SKILL.md"),
+            make_skill_md("ordinary-a", "just a skill", ""),
+        )
+        .unwrap();
+
+        let ord_b_dir = skills_dir.join("ordinary-b");
+        fs::create_dir_all(&ord_b_dir).unwrap();
+        fs::write(
+            ord_b_dir.join("SKILL.md"),
+            make_skill_md("ordinary-b", "another skill", ""),
+        )
+        .unwrap();
+
+        let registry =
+            SkillRegistry::load_with_paths_for_test(&[skills_dir], SkillSource::Builtin);
+        assert_eq!(registry.list().len(), 3, "list() must still return all three");
+
+        let blueprints = registry.list_blueprint_skills();
+        assert_eq!(blueprints.len(), 1, "only the blueprint-carrying skill");
+        assert_eq!(blueprints[0].name, "my-blueprint");
+    }
+
+    #[test]
+    fn test_blueprint_skill_discovery_excludes_empty_schedule() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let bp_dir = skills_dir.join("half-written");
+        fs::create_dir_all(&bp_dir).unwrap();
+        // `blueprint:` block present and parses, but `schedule` is empty —
+        // a partially written frontmatter block.
+        fs::write(
+            bp_dir.join("SKILL.md"),
+            make_blueprint_skill_md("half-written", "      schedule: \"\"\n"),
+        )
+        .unwrap();
+
+        let registry =
+            SkillRegistry::load_with_paths_for_test(&[skills_dir], SkillSource::Builtin);
+        assert_eq!(registry.list().len(), 1);
+        assert_eq!(
+            registry.list_blueprint_skills().len(),
+            0,
+            "empty schedule must be excluded even though blueprint field parsed"
+        );
+        // Confirm the field DID parse (not a tolerant-degrade case) — this
+        // proves the exclusion is the schedule check, not a parse failure.
+        let record = &registry.list()[0];
+        let bp = record
+            .hermes_metadata
+            .as_ref()
+            .and_then(|m| m.blueprint.as_ref())
+            .expect("blueprint block must have parsed");
+        assert!(bp.schedule.is_empty());
+    }
+
+    #[test]
+    fn test_blueprint_skill_discovery_excludes_type_wrong_block_preserves_other_fields() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+        let bp_dir = skills_dir.join("malformed");
+        fs::create_dir_all(&bp_dir).unwrap();
+        // `blueprint:` is a scalar, not a mapping — the tolerant deserializer
+        // degrades ONLY `blueprint` to None; `requires_toolsets` must survive.
+        let content = "---\nname: malformed\ndescription: A malformed blueprint skill\nmetadata:\n  hermes:\n    requires_toolsets:\n      - terminal\n    blueprint: \"not-a-mapping\"\n---\nBody\n";
+        fs::write(bp_dir.join("SKILL.md"), content).unwrap();
+
+        let registry =
+            SkillRegistry::load_with_paths_for_test(&[skills_dir], SkillSource::Builtin);
+        assert_eq!(registry.list().len(), 1, "the skill still loads via list()");
+        assert_eq!(
+            registry.list_blueprint_skills().len(),
+            0,
+            "type-wrong blueprint block must be excluded"
+        );
+        let record = &registry.list()[0];
+        let meta = record
+            .hermes_metadata
+            .as_ref()
+            .expect("hermes metadata must still be present");
+        assert!(
+            meta.blueprint.is_none(),
+            "blueprint sub-key degrades to None"
+        );
+        assert_eq!(
+            meta.requires_toolsets,
+            vec!["terminal".to_string()],
+            "sibling fields must survive the scoped degrade"
+        );
+    }
+
+    #[test]
+    fn test_blueprint_skill_discovery_preserves_list_ordering() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join("skills");
+
+        for (name, is_blueprint) in [("a-first", true), ("b-second", false), ("c-third", true)] {
+            let skill_dir = skills_dir.join(name);
+            fs::create_dir_all(&skill_dir).unwrap();
+            let content = if is_blueprint {
+                make_blueprint_skill_md(name, "      schedule: \"every 1h\"\n")
+            } else {
+                make_skill_md(name, "ordinary", "")
+            };
+            fs::write(skill_dir.join("SKILL.md"), content).unwrap();
+        }
+
+        let registry =
+            SkillRegistry::load_with_paths_for_test(&[skills_dir], SkillSource::Builtin);
+        let list_order: Vec<&str> = registry
+            .list()
+            .iter()
+            .filter(|r| blueprint_metadata_of(r).is_some())
+            .map(|r| r.name.as_str())
+            .collect();
+        let accessor_order: Vec<&str> = registry
+            .list_blueprint_skills()
+            .iter()
+            .map(|r| r.name.as_str())
+            .collect();
+        assert_eq!(
+            accessor_order, list_order,
+            "accessor must preserve list()'s ordering for kept entries"
+        );
+        // Filesystem `read_dir` order is not guaranteed alphabetical, so
+        // assert the KEPT SET (order-independent) rather than a literal
+        // sequence — the ordering invariant itself is already proven above
+        // by comparing directly against list()'s own (whatever) order.
+        let mut kept: Vec<&str> = accessor_order.clone();
+        kept.sort_unstable();
+        assert_eq!(kept, vec!["a-first", "c-third"]);
+    }
 }
 
 // =============================================================================
@@ -3691,5 +4192,72 @@ Body.
         use crate::config::SkillsConfig;
         let cfg = SkillsConfig::default();
         assert_eq!(cfg.defcon_level.level(), 5);
+    }
+
+    /// Regression: a real skill (`qis-communication-jta`) failed to import
+    /// because it wrote `allowed-tools` as a comma-separated scalar — the
+    /// Claude Code convention — which failed `Vec<String>` deserialization and
+    /// so failed the WHOLE frontmatter parse. Both YAML shapes must work and
+    /// must normalize to the same list.
+    #[test]
+    fn allowed_tools_accepts_scalar_and_sequence_forms_identically() {
+        let scalar = "---\nname: t\ndescription: d\nallowed-tools: terminal, read_file,  write_file \n---\nbody\n";
+        let sequence = "---\nname: t\ndescription: d\nallowed-tools: [terminal, read_file, write_file]\n---\nbody\n";
+
+        let (from_scalar, _) = parse_skill_md(scalar).expect("scalar form must parse");
+        let (from_sequence, _) = parse_skill_md(sequence).expect("sequence form must parse");
+
+        let expected = vec![
+            "terminal".to_string(),
+            "read_file".to_string(),
+            "write_file".to_string(),
+        ];
+        assert_eq!(from_scalar.allowed_tools.as_ref(), Some(&expected));
+        assert_eq!(
+            from_scalar.allowed_tools, from_sequence.allowed_tools,
+            "both YAML shapes must normalize to the same list"
+        );
+    }
+
+    #[test]
+    fn allowed_tools_absent_stays_none() {
+        let (fm, _) = parse_skill_md("---\nname: t\ndescription: d\n---\nbody\n")
+            .expect("must parse without allowed-tools");
+        assert_eq!(fm.allowed_tools, None);
+    }
+
+    /// The verbose parser must NAME the offending field rather than collapsing
+    /// to a generic failure — the whole point of the import error surfacing.
+    #[test]
+    fn parse_error_reasons_are_specific() {
+        // `SkillFrontmatter` is deliberately not `PartialEq`, so match on the
+        // error rather than comparing the whole `Result`.
+        assert!(matches!(
+            parse_skill_md_verbose("no frontmatter here"),
+            Err(SkillParseError::MissingFrontmatter)
+        ));
+        assert!(matches!(
+            parse_skill_md_verbose("---\nname: t\ndescription: d\n"),
+            Err(SkillParseError::UnterminatedFrontmatter)
+        ));
+
+        // `description` typed as a mapping fails the schema; the message must
+        // mention the field so an operator can act on it.
+        let bad_type = "---\nname: t\ndescription:\n  nested: value\n---\nbody\n";
+        match parse_skill_md_verbose(bad_type) {
+            Err(SkillParseError::InvalidYaml(msg)) => {
+                assert!(
+                    msg.contains("description"),
+                    "serde message must name the offending field, got: {msg}"
+                );
+            }
+            other => panic!("expected InvalidYaml, got {other:?}"),
+        }
+
+        // A name that cannot be normalized into a valid skill name.
+        match parse_skill_md_verbose("---\nname: \"..\"\ndescription: d\n---\nbody\n") {
+            Err(SkillParseError::InvalidName { .. }) => {}
+            other => panic!("expected InvalidName, got {other:?}"),
+        }
     }
 }

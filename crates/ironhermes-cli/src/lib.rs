@@ -27,6 +27,12 @@ pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
 }
 
 pub mod approval_gate;
+// Phase 49.6 Plan 03: `/blueprint save`'s CLI-only BlueprintSaverImpl.
+// Compiled into BOTH this lib target and the `ironhermes` bin target
+// (`main.rs` declares it too, mirroring `setup.rs`'s dual-declaration
+// pattern above) — `tui_rata::commands::build_command_context` wires it via
+// `crate::blueprint_save`, and `tui_rata` itself lives in this lib crate.
+pub mod blueprint_save;
 pub mod kanban;
 pub mod memory_cmd;
 /// Phase 42 EXEC-01: Quick Command dispatch (guard → approval → TerminalTool, LLM-free).

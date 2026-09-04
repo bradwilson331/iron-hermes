@@ -254,6 +254,18 @@ pub struct AgentRuntime {
     patch_tool_arc: Option<Arc<dyn ironhermes_tools::registry::Tool>>,
 }
 
+/// What `AgentRuntime::reload_skill_registry` changed, so callers can report it
+/// instead of guessing.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillRegistryReload {
+    /// Skill names present after the reload but not before, sorted.
+    pub added: Vec<String>,
+    /// Skill names present before the reload but not after, sorted.
+    pub removed: Vec<String>,
+    /// Total skills in the reloaded catalog.
+    pub total: usize,
+}
+
 impl AgentRuntime {
     /// Build the runtime: create the shared budget from
     /// `config.agent.max_iterations`, construct the subagent runner with a clone
@@ -964,8 +976,82 @@ impl AgentRuntime {
     pub fn hook_registry(&self) -> &Arc<HookRegistry> {
         &self.bundle.hook_registry
     }
-    pub fn skill_registry(&self) -> &Arc<SkillRegistry> {
+    /// The current skill catalog. Returns an owned `Arc` rather than a borrow
+    /// because the catalog is hot-swappable (see
+    /// `AppRuntimeBundle::skill_registry`) — callers that cache the returned
+    /// `Arc` across a reload keep observing the OLD catalog, so read it fresh at
+    /// each use site instead of holding it in long-lived state.
+    pub fn skill_registry(&self) -> Arc<SkillRegistry> {
+        match self.bundle.skill_registry.read() {
+            Ok(guard) => guard.clone(),
+            // A panic in another reader/writer must not take the catalog down
+            // with it — the value behind the lock is a plain `Arc` and is always
+            // consistent, so recovering the poisoned inner value is safe.
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// The shared swappable handle itself, for surfaces that must observe
+    /// reloads without going back through `AgentRuntime`.
+    pub fn skill_registry_handle(&self) -> &Arc<std::sync::RwLock<Arc<SkillRegistry>>> {
         &self.bundle.skill_registry
+    }
+
+    /// Re-scan the configured skill search paths and swap the result in.
+    ///
+    /// Call after any write that changes what is on disk (install, create, fork,
+    /// SKILL.md edit, delete). Returns what changed so callers can report it.
+    /// The `skills` tool is re-registered against the new catalog so the agent
+    /// can actually invoke a newly installed skill in the same process.
+    pub async fn reload_skill_registry(
+        &self,
+        skills_config: &ironhermes_core::config::SkillsConfig,
+    ) -> SkillRegistryReload {
+        let fresh = Arc::new(SkillRegistry::load_with_config(
+            &self.bundle.skills_cwd,
+            skills_config,
+        ));
+
+        let before: std::collections::HashSet<String> = self
+            .skill_registry()
+            .list()
+            .iter()
+            .map(|r| r.name.clone())
+            .collect();
+        let after: std::collections::HashSet<String> =
+            fresh.list().iter().map(|r| r.name.clone()).collect();
+        let mut added: Vec<String> = after.difference(&before).cloned().collect();
+        let mut removed: Vec<String> = before.difference(&after).cloned().collect();
+        added.sort();
+        removed.sort();
+        let total = fresh.list().len();
+
+        // Swap first, so any concurrent reader that beats the tool re-registration
+        // still sees the new catalog rather than the old one.
+        match self.bundle.skill_registry.write() {
+            Ok(mut guard) => *guard = fresh.clone(),
+            Err(poisoned) => *poisoned.into_inner() = fresh.clone(),
+        }
+
+        // Re-register the `skills` tool against the replacement. It captured an
+        // `Arc<SkillRegistry>` by value at boot, so without this the agent would
+        // keep listing and reading the pre-reload catalog even though every
+        // display surface had moved on.
+        {
+            let mut tools = self.bundle.registry.write().await;
+            tools.register_skills_tool(
+                fresh,
+                self.bundle.active_skills.clone(),
+                self.bundle.skills_credential_dir.clone(),
+                std::collections::HashMap::new(),
+            );
+        }
+
+        SkillRegistryReload {
+            added,
+            removed,
+            total,
+        }
     }
     pub fn active_skills(&self) -> &Arc<std::sync::Mutex<Vec<SkillRecord>>> {
         &self.bundle.active_skills
@@ -1075,7 +1161,9 @@ impl AgentRuntime {
         let registry = Arc::new(RwLock::new(ToolRegistry::new()));
         let hook_registry = Arc::new(HookRegistry::new(ironhermes_hooks::HooksConfig::default()));
         // load_with_paths(&[]) produces an empty SkillRegistry without touching disk.
-        let skill_registry = Arc::new(SkillRegistry::load_with_paths(&[]));
+        let skill_registry = Arc::new(std::sync::RwLock::new(Arc::new(
+            SkillRegistry::load_with_paths(&[]),
+        )));
         let active_skills = Arc::new(std::sync::Mutex::new(Vec::new()));
         let cron_dir =
             std::env::temp_dir().join(format!("ironhermes_test_cron_{}", std::process::id()));
@@ -1089,6 +1177,8 @@ impl AgentRuntime {
             registry,
             hook_registry,
             skill_registry,
+            skills_cwd: std::env::temp_dir(),
+            skills_credential_dir: std::env::temp_dir(),
             active_skills,
             job_store,
             browser_session,
@@ -1621,8 +1711,9 @@ mod tests {
         let hook_registry = std::sync::Arc::new(ironhermes_hooks::HookRegistry::new(
             ironhermes_hooks::HooksConfig::default(),
         ));
-        let skill_registry =
-            std::sync::Arc::new(ironhermes_core::SkillRegistry::load_with_paths(&[]));
+        let skill_registry = std::sync::Arc::new(std::sync::RwLock::new(std::sync::Arc::new(
+            ironhermes_core::SkillRegistry::load_with_paths(&[]),
+        )));
         let active_skills = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let cron_dir = std::env::temp_dir().join(format!(
             "ironhermes_test_cron_extras_{}",
@@ -1636,6 +1727,8 @@ mod tests {
             registry,
             hook_registry,
             skill_registry,
+            skills_cwd: std::env::temp_dir(),
+            skills_credential_dir: std::env::temp_dir(),
             active_skills,
             job_store,
             browser_session,

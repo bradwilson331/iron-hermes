@@ -61,22 +61,6 @@ pub enum Block {
     },
 }
 
-impl Block {
-    /// Returns the CSS class fragment used by `warp-ih.css` to color the
-    /// 2px left accent stripe on each block.
-    pub fn kind_class(&self) -> &'static str {
-        match self {
-            Block::Cmd { .. } => "is-cmd",
-            Block::Out { .. } => "is-out",
-            Block::Ai { .. } => "is-ai",
-            Block::Ok { .. } => "is-ok",
-            Block::Err { .. } => "is-err",
-            Block::Tool { .. } => "is-tool",
-            Block::Audio { .. } => "is-ai", // audio blocks use the AI accent stripe
-        }
-    }
-}
-
 /// A parsed shell command line — list of tokens plus prompt/cwd metadata.
 /// Defaults for `cwd` and `glyph` per `shell.jsx` line 115.
 #[derive(Clone, PartialEq, Debug)]
@@ -101,23 +85,6 @@ pub enum Token {
     Str(String),
 }
 
-impl Token {
-    pub fn kind_class(&self) -> &'static str {
-        match self {
-            Token::Bin(_) => "bin",
-            Token::Arg(_) => "arg",
-            Token::Flag(_) => "flag",
-            Token::Str(_) => "str",
-        }
-    }
-
-    pub fn text(&self) -> &str {
-        match self {
-            Token::Bin(s) | Token::Arg(s) | Token::Flag(s) | Token::Str(s) => s.as_str(),
-        }
-    }
-}
-
 /// A tool-call block (`is-tool`) — emitted by the agent side panel and
 /// occasionally surfaces in the main stream as a `Block::Tool` variant.
 #[derive(Clone, PartialEq, Debug)]
@@ -137,17 +104,6 @@ pub enum ToolStatus {
     Failed,
 }
 
-/// Input mode toggle (`⌥+M` cycles).
-///
-/// Phase 3 hardcodes `Mode::Shell` at the WarpHermes call site (UI-SPEC line 461);
-/// `Mode::Agent` is exercised by Phase 4's `⌥+M` keybind plumbing.
-#[derive(Clone, PartialEq, Debug)]
-pub enum Mode {
-    Shell,
-    #[allow(dead_code)]
-    Agent,
-}
-
 /// One row in the command palette overlay — slash command or workflow.
 #[derive(Clone, PartialEq, Debug)]
 pub struct PaletteItem {
@@ -155,16 +111,6 @@ pub struct PaletteItem {
     pub cmd: String,
     pub label: String,
     pub kbd: Vec<String>,
-}
-
-/// Title-bar tab.
-#[derive(Clone, PartialEq, Debug)]
-pub struct Tab {
-    pub label: String,
-    pub live: bool,
-    /// Session key used by `WarpHermes::on_tab_click` to switch the active session.
-    /// Populated from the server-returned session ID (Phase 26.2 D-09).
-    pub session_id: String,
 }
 
 /// One side-panel message (`who: "user" | "hermes"`). When `tool` is `Some`,
@@ -175,31 +121,6 @@ pub struct Message {
     pub time: String,
     pub body: String,
     pub tool: Option<ToolCall>,
-}
-
-/// Status-bar token-budget pill content.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct TokenBudget {
-    pub used: u32,
-    pub max: u32,
-}
-
-/// Compact per-session summary rendered as a memory card in the side panel.
-#[derive(Clone, PartialEq, Debug, Default)]
-pub struct SessionMemory {
-    pub session_id: String,
-    pub label: String,
-    pub is_live: bool,
-    pub first_time: String,
-    pub last_time: String,
-    /// Number of user turns in this session.
-    pub exchange_count: u32,
-    /// Last known token usage.
-    pub token_count: u32,
-    /// Personality slug active in this session.
-    pub personality: String,
-    /// Last user message, truncated to ≤160 chars.
-    pub last_input: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -262,36 +183,23 @@ pub struct BlockEntry {
 /// Two-state palette substate per CONTEXT D-20.
 ///
 /// `Browse` is the default — full PALETTE_ITEMS list visible.
-/// `PersonalityPick` shows the six personalities as palette rows.
-/// Selecting `/personality` while in `Browse` transitions to
-/// `PersonalityPick`; selecting a personality writes
-/// `ShellSettings.personality` and transitions back to `Browse` (then
-/// closes palette). Esc from `PersonalityPick` returns to `Browse`
-/// without closing.
+/// `PersonalityPick` shows the six personalities as palette rows
+/// (`command_palette.rs` renders both substates). Selecting `/personality`
+/// while in `Browse` was meant to transition to `PersonalityPick`, and
+/// selecting a personality was meant to transition back to `Browse` (then
+/// close the palette) — but the only code that ever constructed this
+/// variant was the legacy `warp_hermes.rs` shell, removed in 49.4-02
+/// (folded todo 2026-05-29). `command_palette.rs`'s `PersonalityPick`
+/// render branch is therefore currently unreachable in `HermesApp`: no
+/// `/personality` trigger exists to set the palette into this substate.
+/// Flagged as a real capability gap (not faked with a dead-code deletion
+/// of the working render branch) — see this plan's SUMMARY.
 #[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub enum PaletteState {
     #[default]
     Browse,
+    #[allow(dead_code)]
     PersonalityPick,
-}
-
-/// Cross-cutting settings bundle provided via `use_context_provider` per
-/// CONTEXT D-02 + RESEARCH Pattern 5.
-///
-/// Forward-compatible: Phase 5 will add `theme: Signal<Theme>`,
-/// `density: Signal<Density>`, `block: Signal<BlockStyle>`,
-/// `agent: Signal<AgentLayout>` fields without refactoring existing
-/// consumers. Putting individual signals in the struct (rather than
-/// `Signal<ShellSettings>`) means writes to one field don't invalidate
-/// consumers of the others — canonical Dioxus 0.7 "bag of related
-/// signals" pattern.
-///
-/// `Signal<T>` is `Copy`, so `ShellSettings` derives `Copy` — required
-/// for cheap `use_context::<ShellSettings>()` clones in consumers.
-#[derive(Clone, Copy)]
-pub struct ShellSettings {
-    pub personality: Signal<Personality>,
-    // Phase 5: theme, density, block, agent — additive only (D-02).
 }
 
 /// Cross-platform timestamp helper per CONTEXT D-34.
@@ -555,31 +463,6 @@ pub fn demo_palette_items() -> Vec<PaletteItem> {
     ]
 }
 
-/// 3 title-bar tabs (UI-SPEC lines 200-204).
-///
-/// Gated behind `cfg(test)` or `feature = "demo"` — production code fetches
-/// real sessions from the server via `list_sessions()` (Plan 03).
-#[cfg(any(test, feature = "demo"))]
-#[allow(dead_code)] // demo seed data; no test currently calls this directly
-pub fn demo_tabs() -> Vec<Tab> {
-    vec![
-        Tab {
-            label: "ironhermes chat".into(),
-            live: true,
-            session_id: "demo-0".to_string(),
-        },
-        Tab {
-            label: "cargo watch".into(),
-            live: true,
-            session_id: "demo-1".to_string(),
-        },
-        Tab {
-            label: "agent · scratch".into(),
-            live: false,
-            session_id: "demo-2".to_string(),
-        },
-    ]
-}
 
 // ===========================================================================
 // Phase 26.2.1 — Wheel-menu UI primitives (Plan 02)
@@ -613,7 +496,7 @@ use serde::{Deserialize, Serialize};
 /// wheel wedges either — they are reached from the Sessions page's
 /// `▤ ARTIFACTS` affordance (gallery → row click → viewer), like a
 /// sub-screen pair rather than a top-level wheel destination.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default, Serialize, Deserialize)]
 pub enum Screen {
     #[default]
     Chat,

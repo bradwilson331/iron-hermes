@@ -293,7 +293,7 @@ fn test_filter_secrets_detects_api_key() {
 fn test_filter_secrets_detects_bearer_jwt() {
     let msgs = vec![ChatMessage::tool_result(
         "tc1",
-        "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.abc.signature",
+        "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.abc.signature", // secret-scan:allow — synthetic JWT fixture for this test's own bearer-secret detection assertion (D-11 pre-existing match, 48.3-04)
     )];
     let result = mock_agent_result(msgs, None);
     assert_eq!(

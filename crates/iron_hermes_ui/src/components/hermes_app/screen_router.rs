@@ -24,30 +24,45 @@ pub fn ScreenRouter() -> Element {
     // Drop the borrow immediately (clippy signal-borrow-safety rule).
     let cur = *active.read();
 
-    rsx! {
-        screens::chat::ScreenChat { is_active: cur == Screen::Chat }
-        screens::sessions::ScreenSessions { is_active: cur == Screen::Sessions }
-        screens::agents::ScreenAgents { is_active: cur == Screen::Agents }
-        screens::skills::ScreenSkills { is_active: cur == Screen::Skills }
-        screens::models::ScreenModels { is_active: cur == Screen::Models }
-        screens::memory::ScreenMemory { is_active: cur == Screen::Memory }
-        screens::soul::ScreenSoul { is_active: cur == Screen::Soul }
-        screens::tools::ScreenTools { is_active: cur == Screen::Tools }
-        screens::schedules::ScreenSchedules { is_active: cur == Screen::Schedules }
-        screens::gateway::ScreenGateway { is_active: cur == Screen::Gateway }
-        screens::office::ScreenOffice { is_active: cur == Screen::Office }
-        screens::settings::ScreenSettings { is_active: cur == Screen::Settings }
-        screens::providers::ScreenProviders { is_active: cur == Screen::Providers }
-        // Phase 36.3.7.11 D-02: always-mounted Kanban screen — Plan 04 wires
-        // the wheel-nav wedge + Agents-page `KANBAN BOARD →` button to drive
-        // active_screen; Plan 01 supplies the live KanbanBoard body.
-        screens::kanban::ScreenKanban { is_active: cur == Screen::Kanban }
-        // Phase 46.6 Plan 05 (D-07): lean artifacts gallery + sandboxed
-        // viewer, reached from the Sessions screen's `▤ ARTIFACTS` button
-        // (not a wheel wedge — see the Screen enum doc comment). Mirrors
-        // the same always-mounted / `is-active`-class pattern as every
-        // other screen above (RESEARCH Pattern 7).
-        screens::artifacts::ScreenArtifacts { is_active: cur == Screen::Artifacts }
-        screens::artifact_viewer::ArtifactViewer { is_active: cur == Screen::ArtifactViewer }
+    // Phase 49.4 hotfix — render ONLY the active screen.
+    //
+    // Originally all 16 screens mounted at once (RESEARCH Pattern 7). The
+    // first hotfix made them mount lazily but STAY mounted, which meant a full
+    // tour of the wheel re-accumulated every screen's fetches, polls, and
+    // continuous Three.js/WebGL render loops (the voice orb in ScreenChat, the
+    // bot avatars in ScreenAgents) — the same saturation, just deferred until
+    // you had visited everything. On a single-threaded WASM client the only
+    // reliable bound is to keep exactly ONE screen mounted: the active one.
+    //
+    // Pattern 7's reason for keeping screens mounted was WebSocket-teardown
+    // avoidance, but `use_websocket` lives at the `HermesApp` root (mod.rs),
+    // NOT in a screen, and the chat transcript is a root-level signal — so
+    // unmounting an inactive screen never touches the socket or loses the
+    // conversation. The cost is that a screen re-fetches when you return to it
+    // and loses purely-local transient state (e.g. an unsent composer draft);
+    // that is the correct trade for a client that otherwise freezes. Each
+    // rendered screen is, by construction, the active one, so `is_active` is
+    // always true here.
+    match cur {
+        Screen::Chat => rsx! { screens::chat::ScreenChat { is_active: true } },
+        Screen::Sessions => rsx! { screens::sessions::ScreenSessions { is_active: true } },
+        Screen::Agents => rsx! { screens::agents::ScreenAgents { is_active: true } },
+        Screen::Skills => rsx! { screens::skills::ScreenSkills { is_active: true } },
+        Screen::Models => rsx! { screens::models::ScreenModels { is_active: true } },
+        Screen::Memory => rsx! { screens::memory::ScreenMemory { is_active: true } },
+        Screen::Soul => rsx! { screens::soul::ScreenSoul { is_active: true } },
+        Screen::Tools => rsx! { screens::tools::ScreenTools { is_active: true } },
+        Screen::Schedules => rsx! { screens::schedules::ScreenSchedules { is_active: true } },
+        Screen::Gateway => rsx! { screens::gateway::ScreenGateway { is_active: true } },
+        Screen::Office => rsx! { screens::office::ScreenOffice { is_active: true } },
+        Screen::Settings => rsx! { screens::settings::ScreenSettings { is_active: true } },
+        Screen::Providers => rsx! { screens::providers::ScreenProviders { is_active: true } },
+        // Phase 36.3.7.11 D-02: Kanban screen (wheel wedge + Agents-page
+        // `KANBAN BOARD →` button drive active_screen).
+        Screen::Kanban => rsx! { screens::kanban::ScreenKanban { is_active: true } },
+        // Phase 46.6 Plan 05 (D-07): artifacts gallery + sandboxed viewer,
+        // reached from the Sessions screen's `▤ ARTIFACTS` button.
+        Screen::Artifacts => rsx! { screens::artifacts::ScreenArtifacts { is_active: true } },
+        Screen::ArtifactViewer => rsx! { screens::artifact_viewer::ArtifactViewer { is_active: true } },
     }
 }

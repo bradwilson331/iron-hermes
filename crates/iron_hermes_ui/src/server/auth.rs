@@ -104,6 +104,12 @@ pub struct AuthConfig {
     pub session_ttl: Duration,
     /// Sliding idle timeout. Default 24 h.
     pub idle_timeout: Duration,
+    /// D-01 / D-06 (49.1.1): the resolved `web_ui.allowed_origins` /
+    /// `IRONHERMES_WEB_ALLOWED_ORIGINS` allowlist, typed via
+    /// [`crate::server::kanban_ws::AllowedOriginsConfig`]. Read by
+    /// `require_auth`'s WS-origin block via
+    /// `kanban_ws::ws_upgrade_origin_rejected`.
+    pub allowed_origins: crate::server::kanban_ws::AllowedOriginsConfig,
 }
 
 impl Default for AuthConfig {
@@ -114,6 +120,7 @@ impl Default for AuthConfig {
             cookie_secure: false,
             session_ttl: Duration::from_secs(7 * 24 * 3600),
             idle_timeout: Duration::from_secs(24 * 3600),
+            allowed_origins: crate::server::kanban_ws::AllowedOriginsConfig::default(),
         }
     }
 }
@@ -126,7 +133,9 @@ impl Default for AuthConfig {
 /// exactly: a sealed/corrupt vault propagates a hard error via `?`; only a
 /// healthy vault returning `Ok(None)` counts as "not configured" (Pitfall 4).
 /// Never wrap the vault call in `.ok()` or `.unwrap_or_default()`.
-pub async fn auth_config_from(config: &ironhermes_core::config::Config) -> anyhow::Result<AuthConfig> {
+pub async fn auth_config_from(
+    config: &ironhermes_core::config::Config,
+) -> anyhow::Result<AuthConfig> {
     use secrecy::ExposeSecret as _;
 
     let web_ui_auth = &config.web_ui.auth;
@@ -146,12 +155,61 @@ pub async fn auth_config_from(config: &ironhermes_core::config::Config) -> anyho
         None
     };
 
+    // D-01 / D-06 (49.1.1): `web_ui.allowed_origins` layering — config.yaml
+    // wins when non-empty; otherwise the comma-separated
+    // `IRONHERMES_WEB_ALLOWED_ORIGINS` env var, trimmed per-segment with
+    // empty segments dropped; otherwise unconfigured. Read from
+    // `config.web_ui` directly, NOT through `web_ui_auth` — D-06 places
+    // this key one level up from `auth`. No vault leg (D-01 names none for
+    // this key).
+    let raw_allowed_origins: Vec<String> = if !config.web_ui.allowed_origins.is_empty() {
+        config.web_ui.allowed_origins.clone()
+    } else if let Ok(v) = std::env::var("IRONHERMES_WEB_ALLOWED_ORIGINS") {
+        v.split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // Canonicalize and validate every non-wildcard entry. The `"*"`
+    // sentinel skips validation entirely and resolves straight to the
+    // wildcard variant — the same sentinel guard `NotifierToml::resolve()`
+    // applies to its own wildcard. A malformed entry is a hard startup
+    // error (never silently dropped, which would leave a running server
+    // whose allowlist matches nothing — T-49.1.1-07); the error names the
+    // offending entry's zero-based index and reuses the validator's own
+    // fixed message, never the entry value itself (T-49.1.1-08).
+    let canonicalized_allowed_origins: Vec<String> = if raw_allowed_origins.iter().any(|s| s == "*")
+    {
+        vec!["*".to_string()]
+    } else {
+        let mut canonicalized = Vec::with_capacity(raw_allowed_origins.len());
+        for (index, entry) in raw_allowed_origins.iter().enumerate() {
+            match ironhermes_mcp::security::validate_web_redirect_base(entry) {
+                Ok(normalized) => canonicalized.push(normalized),
+                Err(reason) => {
+                    anyhow::bail!(
+                        "web_ui.allowed_origins / IRONHERMES_WEB_ALLOWED_ORIGINS: \
+                             entry {index} rejected: {reason}"
+                    );
+                }
+            }
+        }
+        canonicalized
+    };
+    let allowed_origins =
+        crate::server::kanban_ws::AllowedOriginsConfig::resolve(&canonicalized_allowed_origins);
+
     Ok(AuthConfig {
         password_hash,
         login_theme: web_ui_auth.login_theme.clone(),
         cookie_secure: web_ui_auth.cookie_secure,
         session_ttl: Duration::from_secs(web_ui_auth.session_ttl_hours.saturating_mul(3600)),
         idle_timeout: Duration::from_secs(web_ui_auth.idle_timeout_hours.saturating_mul(3600)),
+        allowed_origins,
     })
 }
 
@@ -210,7 +268,10 @@ fn login_attempts_path() -> PathBuf {
 fn load_persisted_login_attempts(path: &Path) -> LoginAttemptEntry {
     let now = Instant::now();
     match std::fs::read_to_string(path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => LoginAttemptEntry { count: 0, last_failure: now },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => LoginAttemptEntry {
+            count: 0,
+            last_failure: now,
+        },
         Err(e) => {
             tracing::warn!(
                 target: "iron_hermes_ui::auth",
@@ -501,7 +562,10 @@ impl AuthState {
         // vs 429 — no operational signal is lost by moving the verdict to
         // a global counter.
         let mut sources = self.login_attempt_sources.write();
-        let source = sources.entry(ip).or_insert(LoginAttemptEntry { count: 0, last_failure: now });
+        let source = sources.entry(ip).or_insert(LoginAttemptEntry {
+            count: 0,
+            last_failure: now,
+        });
         source.count += 1;
         source.last_failure = now;
 
@@ -634,24 +698,50 @@ pub async fn require_auth(
             // never reaches ws_kanban/ws_chat and never completes the WS
             // handshake. Scoped to the two known WS paths only — every
             // other route is unaffected.
-            if let Some(host) = req.headers().get(header::HOST).and_then(|v| v.to_str().ok()) {
-                let expected =
-                    crate::server::kanban_ws::expected_ws_origin(host, auth.config.cookie_secure);
-                let origin = req.headers().get(header::ORIGIN).and_then(|v| v.to_str().ok());
-                if crate::server::kanban_ws::is_cross_origin_ws_upgrade(
-                    req.uri().path(),
-                    origin,
-                    &expected,
-                ) {
-                    tracing::warn!(
-                        target: "iron_hermes_ui::auth",
-                        path = %req.uri().path(),
-                        origin = origin.unwrap_or("<none>"),
-                        expected = %expected,
-                        "rejected cross-origin WebSocket upgrade (CSWSH defense-in-depth)"
-                    );
-                    return StatusCode::FORBIDDEN.into_response();
-                }
+            //
+            // D-02 / D-03 (49.1.1): `Host` is extracted as an `Option`, not
+            // gated behind `if let Some(host) = ...` — a request with no
+            // `Host` header must not skip the check. With an allowlist
+            // configured, `Host` is irrelevant anyway (D-02); `x_fwd_proto`
+            // only feeds the unconfigured/derived fallback leg.
+            let host = req
+                .headers()
+                .get(header::HOST)
+                .and_then(|v| v.to_str().ok());
+            let x_fwd_proto = req
+                .headers()
+                .get("x-forwarded-proto")
+                .and_then(|v| v.to_str().ok());
+            let origin = req
+                .headers()
+                .get(header::ORIGIN)
+                .and_then(|v| v.to_str().ok());
+            if crate::server::kanban_ws::ws_upgrade_origin_rejected(
+                req.uri().path(),
+                origin,
+                &auth.config.allowed_origins,
+                host,
+                x_fwd_proto,
+                auth.config.cookie_secure,
+            ) {
+                // Names which AllowedOriginsConfig variant was in force —
+                // never the allowlist contents (T-49.1.1-12) — so an
+                // operator can distinguish an allowlist miss from a
+                // derived-path miss from a missing header without the
+                // deployment's full origin set landing in the access log.
+                let allowed_origins_variant = match &auth.config.allowed_origins {
+                    crate::server::kanban_ws::AllowedOriginsConfig::Unconfigured => "unconfigured",
+                    crate::server::kanban_ws::AllowedOriginsConfig::Any => "any",
+                    crate::server::kanban_ws::AllowedOriginsConfig::Explicit(_) => "explicit",
+                };
+                tracing::warn!(
+                    target: "iron_hermes_ui::auth",
+                    path = %req.uri().path(),
+                    origin = origin.unwrap_or("<none>"),
+                    allowed_origins_variant,
+                    "rejected cross-origin WebSocket upgrade (CSWSH defense-in-depth)"
+                );
+                return StatusCode::FORBIDDEN.into_response();
             }
             next.run(req).await
         }
@@ -669,7 +759,11 @@ pub struct LoginRequest {
 }
 
 fn session_cookie(auth: &AuthState, token: &str, max_age: i64) -> HeaderValue {
-    let secure = if auth.config.cookie_secure { "; Secure" } else { "" };
+    let secure = if auth.config.cookie_secure {
+        "; Secure"
+    } else {
+        ""
+    };
     HeaderValue::from_str(&format!(
         "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}{secure}"
     ))
@@ -817,7 +911,10 @@ mod tests {
             .hash_password(pw.as_bytes(), &salt)
             .unwrap()
             .to_string();
-        let _env_guard = ScopedEnv::set("IRONHERMES_HOME", home.to_str().expect("tempdir path is valid UTF-8"));
+        let _env_guard = ScopedEnv::set(
+            "IRONHERMES_HOME",
+            home.to_str().expect("tempdir path is valid UTF-8"),
+        );
         AuthState::new(AuthConfig {
             password_hash: Some(hash),
             ..Default::default()
@@ -844,7 +941,10 @@ mod tests {
         // (read-only) rehydration, so this still gets the same isolated
         // home as every other test in this module.
         let home = tempfile::tempdir().expect("tempdir").keep();
-        let _env_guard = ScopedEnv::set("IRONHERMES_HOME", home.to_str().expect("tempdir path is valid UTF-8"));
+        let _env_guard = ScopedEnv::set(
+            "IRONHERMES_HOME",
+            home.to_str().expect("tempdir path is valid UTF-8"),
+        );
         let s = AuthState::new(AuthConfig::default()).unwrap();
         assert!(!s.enabled());
     }
@@ -858,6 +958,142 @@ mod tests {
         assert!(AuthState::new(cfg).is_err());
     }
 
+    // -------------------------------------------------------------------
+    // D-01 / D-06 (49.1.1): auth_config_from's allowed_origins layering.
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn auth_config_from_reads_config_yaml_allowed_origins() {
+        let config = ironhermes_core::config::Config {
+            web_ui: ironhermes_core::config::WebUiConfig {
+                allowed_origins: vec!["https://iron-hermes.sliplane.app".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolved = auth_config_from(&config).await.expect("must resolve");
+        assert_eq!(
+            resolved.allowed_origins,
+            crate::server::kanban_ws::AllowedOriginsConfig::Explicit(vec![
+                "https://iron-hermes.sliplane.app".to_string()
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_config_from_falls_back_to_allowed_origins_env_var() {
+        let _env_guard = ScopedEnv::set(
+            "IRONHERMES_WEB_ALLOWED_ORIGINS",
+            "https://a.example, https://b.example",
+        );
+        let config = ironhermes_core::config::Config::default();
+        let resolved = auth_config_from(&config).await.expect("must resolve");
+        assert_eq!(
+            resolved.allowed_origins,
+            crate::server::kanban_ws::AllowedOriginsConfig::Explicit(vec![
+                "https://a.example".to_string(),
+                "https://b.example".to_string(),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_config_from_prefers_config_yaml_over_allowed_origins_env_var() {
+        let _env_guard =
+            ScopedEnv::set("IRONHERMES_WEB_ALLOWED_ORIGINS", "https://from-env.example");
+        let config = ironhermes_core::config::Config {
+            web_ui: ironhermes_core::config::WebUiConfig {
+                allowed_origins: vec!["https://from-yaml.example".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolved = auth_config_from(&config).await.expect("must resolve");
+        assert_eq!(
+            resolved.allowed_origins,
+            crate::server::kanban_ws::AllowedOriginsConfig::Explicit(vec![
+                "https://from-yaml.example".to_string()
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_config_from_canonicalizes_allowed_origins() {
+        let config = ironhermes_core::config::Config {
+            web_ui: ironhermes_core::config::WebUiConfig {
+                allowed_origins: vec!["HTTPS://Iron-Hermes.Sliplane.App:443/".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolved = auth_config_from(&config).await.expect("must resolve");
+        assert_eq!(
+            resolved.allowed_origins,
+            crate::server::kanban_ws::AllowedOriginsConfig::Explicit(vec![
+                "https://iron-hermes.sliplane.app".to_string()
+            ])
+        );
+
+        // D-04: the "*" sentinel skips validation entirely and resolves
+        // straight to the wildcard variant.
+        let wildcard_config = ironhermes_core::config::Config {
+            web_ui: ironhermes_core::config::WebUiConfig {
+                allowed_origins: vec!["*".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolved_wildcard = auth_config_from(&wildcard_config)
+            .await
+            .expect("wildcard must resolve without validation");
+        assert_eq!(
+            resolved_wildcard.allowed_origins,
+            crate::server::kanban_ws::AllowedOriginsConfig::Any
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_config_from_rejects_a_malformed_allowed_origin() {
+        let config = ironhermes_core::config::Config {
+            web_ui: ironhermes_core::config::WebUiConfig {
+                allowed_origins: vec!["https://a.example/callback".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let err = auth_config_from(&config)
+            .await
+            .err()
+            .expect("a path-bearing origin must be a hard startup error");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("a.example") && !msg.contains("/callback"),
+            "error message must not echo the rejected entry: {msg}"
+        );
+
+        let config = ironhermes_core::config::Config {
+            web_ui: ironhermes_core::config::WebUiConfig {
+                allowed_origins: vec!["not-a-url".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(
+            auth_config_from(&config).await.is_err(),
+            "an unparseable origin must be a hard startup error"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_config_from_unset_allowed_origins_is_unconfigured() {
+        let config = ironhermes_core::config::Config::default();
+        let resolved = auth_config_from(&config).await.expect("must resolve");
+        assert_eq!(
+            resolved.allowed_origins,
+            crate::server::kanban_ws::AllowedOriginsConfig::Unconfigured
+        );
+    }
+
     #[test]
     fn verify_and_session_round_trip() {
         let s = state_with_password("hunter2");
@@ -866,7 +1102,10 @@ mod tests {
         let tok = s.mint_session();
         assert!(s.validate_session(&tok));
         s.remove_session(&tok);
-        assert!(!s.validate_session(&tok), "logout must be a true revocation");
+        assert!(
+            !s.validate_session(&tok),
+            "logout must be a true revocation"
+        );
     }
 
     /// The load-bearing D-07 property: data surfaces are NOT public, and the
@@ -876,10 +1115,9 @@ mod tests {
     /// widened `is_public` back to a prefix rule.
     #[test]
     fn deny_by_default_allowlist() {
-        let assets: HashSet<String> =
-            crate::server::login_page::public_asset_paths("basic")
-                .into_iter()
-                .collect();
+        let assets: HashSet<String> = crate::server::login_page::public_asset_paths("basic")
+            .into_iter()
+            .collect();
         for (m, p) in [
             (Method::POST, "/api/anything"),
             (Method::GET, "/ws"),
@@ -891,7 +1129,10 @@ mod tests {
             // POST on the callback path must still require a session, or a
             // later edit could silently widen it into a write-capable public
             // endpoint.
-            (Method::POST, crate::server::mcp_admin_api::MCP_OAUTH_CALLBACK_PATH),
+            (
+                Method::POST,
+                crate::server::mcp_admin_api::MCP_OAUTH_CALLBACK_PATH,
+            ),
         ] {
             assert!(!is_public(&m, p, &assets), "{m} {p} must require a session");
         }
@@ -899,7 +1140,10 @@ mod tests {
             (Method::GET, "/"),
             (Method::POST, "/auth/login"),
             (Method::GET, "/auth/session"),
-            (Method::GET, crate::server::mcp_admin_api::MCP_OAUTH_CALLBACK_PATH),
+            (
+                Method::GET,
+                crate::server::mcp_admin_api::MCP_OAUTH_CALLBACK_PATH,
+            ),
         ] {
             assert!(is_public(&m, p, &assets), "{m} {p} must stay public");
         }
@@ -921,7 +1165,10 @@ mod tests {
         for _ in 0..LOGIN_MAX_ATTEMPTS {
             assert!(matches!(s.check_rate_limit(ip), RateLimitVerdict::Allowed));
         }
-        assert!(matches!(s.check_rate_limit(ip), RateLimitVerdict::Limited(_)));
+        assert!(matches!(
+            s.check_rate_limit(ip),
+            RateLimitVerdict::Limited(_)
+        ));
     }
 
     // -------------------------------------------------------------------
@@ -939,10 +1186,9 @@ mod tests {
     /// cannot accidentally satisfy the allowlist.
     #[test]
     fn asset_allowlist_excludes_bundle_and_heavy_assets() {
-        let assets: HashSet<String> =
-            crate::server::login_page::public_asset_paths("basic")
-                .into_iter()
-                .collect();
+        let assets: HashSet<String> = crate::server::login_page::public_asset_paths("basic")
+            .into_iter()
+            .collect();
         for (m, p) in [
             (Method::GET, "/wasm/iron_hermes_ui_bg.wasm"),
             (Method::GET, "/wasm/iron_hermes_ui.js"),
@@ -973,8 +1219,9 @@ mod tests {
     /// script or the globe image, and each theme that needs one must have it.
     #[test]
     fn public_asset_paths_are_theme_scoped() {
-        let basic: HashSet<String> =
-            crate::server::login_page::public_asset_paths("basic").into_iter().collect();
+        let basic: HashSet<String> = crate::server::login_page::public_asset_paths("basic")
+            .into_iter()
+            .collect();
         let matrix_rain: HashSet<String> =
             crate::server::login_page::public_asset_paths("matrix-rain")
                 .into_iter()
@@ -1008,7 +1255,10 @@ mod tests {
     fn unknown_theme_falls_back_to_basic() {
         let basic = crate::server::login_page::public_asset_paths("basic");
         let unknown = crate::server::login_page::public_asset_paths("not-a-real-theme");
-        assert_eq!(basic, unknown, "unknown theme must yield the same allowlist as basic");
+        assert_eq!(
+            basic, unknown,
+            "unknown theme must yield the same allowlist as basic"
+        );
 
         let basic_html = crate::server::login_page::login_html("basic");
         let unknown_html = crate::server::login_page::login_html("not-a-real-theme");
@@ -1054,7 +1304,10 @@ mod tests {
         ));
         // /api/* with NO Sec-Fetch-Dest header at all (empty HeaderMap) ->
         // allowed. Absence is not treated as an iframe.
-        assert!(!is_iframe_originated_api_request("/api/anything", &headers_with(None)));
+        assert!(!is_iframe_originated_api_request(
+            "/api/anything",
+            &headers_with(None)
+        ));
         assert!(
             !is_iframe_originated_api_request("/api/anything", &HeaderMap::new()),
             "an explicit empty HeaderMap must never be treated as iframe-originated"
@@ -1086,7 +1339,10 @@ mod tests {
         let router = axum::Router::new()
             .route("/api/anything", axum::routing::get(dummy_handler))
             .route("/artifacts/{id}", axum::routing::get(dummy_handler))
-            .layer(axum::middleware::from_fn_with_state(auth.clone(), require_auth));
+            .layer(axum::middleware::from_fn_with_state(
+                auth.clone(),
+                require_auth,
+            ));
 
         let cookie = format!("{SESSION_COOKIE}={token}");
 
@@ -1199,7 +1455,11 @@ mod tests {
             )
             .await;
             if i < 5 {
-                assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "attempt {i} must be 401");
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "attempt {i} must be 401"
+                );
                 last_401_body = Some(to_bytes(resp.into_body(), usize::MAX).await.unwrap());
             } else {
                 assert_eq!(
@@ -1367,7 +1627,11 @@ mod tests {
                 }),
             )
             .await;
-            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "attempt {i} must be 401");
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "attempt {i} must be 401"
+            );
         }
 
         let resp = login(
@@ -1378,7 +1642,11 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT, "correct password must succeed");
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "correct password must succeed"
+        );
 
         let resp = login(
             State(auth.clone()),
@@ -1609,7 +1877,8 @@ mod tests {
         );
 
         let contents = std::fs::read_to_string(&path).expect("read state file");
-        let value: serde_json::Value = serde_json::from_str(&contents).expect("state file must be valid JSON");
+        let value: serde_json::Value =
+            serde_json::from_str(&contents).expect("state file must be valid JSON");
         let obj = value.as_object().expect("state file must be a JSON object");
         let keys: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
         assert_eq!(
@@ -1655,7 +1924,10 @@ mod tests {
     async fn logout_revokes_session() {
         let auth = state_with_password("hunter2");
         let token = auth.mint_session();
-        assert!(auth.validate_session(&token), "session must be valid before logout");
+        assert!(
+            auth.validate_session(&token),
+            "session must be valid before logout"
+        );
 
         let req = Request::builder()
             .method("POST")

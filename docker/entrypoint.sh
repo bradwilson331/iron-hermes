@@ -42,6 +42,27 @@ fi
 # D-13: Create essential directories
 mkdir -p "$IRONHERMES_HOME"/{cron,sessions,logs,hooks,memories,skills,workspace}
 
+# ─── Skill seeding (image → volume, skip-if-exists) ───
+# /opt/ironhermes/{skills,optional-skills} are the read-only copies baked into
+# the image; the agent only ever scans the volume. `cp -rn` merges new
+# categories and new skills in on an image upgrade while never overwriting an
+# operator edit or a Hub install already on the volume.
+#
+# skills/ lands in $IRONHERMES_HOME/skills, a default search root, so those
+# skills are live immediately. optional-skills/ lands in
+# $IRONHERMES_HOME/optional-skills, which is NOT a default search root — opt in
+# by adding it to skills.extra_paths in config.yaml, or import individual
+# skills from it in the web UI (its Local Path quick-pick already offers this
+# directory). Non-fatal: a seeding failure must never take the container down.
+for _src in skills optional-skills; do
+    if [ -d "$INSTALL_DIR/$_src" ]; then
+        mkdir -p "$IRONHERMES_HOME/$_src"
+        cp -rn "$INSTALL_DIR/$_src/." "$IRONHERMES_HOME/$_src/" 2>/dev/null || \
+            echo "Warning: seeding $_src into $IRONHERMES_HOME failed — continuing" >&2
+    fi
+done
+
+
 # D-14: Copy templates only if they don't already exist (preserve user edits)
 [ ! -f "$IRONHERMES_HOME/.env" ]        && cp "$INSTALL_DIR/.env.example" "$IRONHERMES_HOME/.env"
 [ ! -f "$IRONHERMES_HOME/config.yaml" ] && cp "$INSTALL_DIR/cli-config.yaml.example" "$IRONHERMES_HOME/config.yaml"

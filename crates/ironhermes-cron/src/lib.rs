@@ -10,6 +10,7 @@ use tracing::debug;
 // ---------------------------------------------------------------------------
 
 pub mod adapter;
+pub mod blueprint;
 pub mod delivery;
 pub mod display;
 pub mod heartbeat;
@@ -18,8 +19,10 @@ pub mod parser;
 pub mod scanner;
 pub mod store;
 pub mod tick;
+pub mod writer_impl;
 
 pub use adapter::{DeliveryRegistry, DeliverySend, TgSendApi};
+pub use blueprint::*;
 pub use delivery::*;
 pub use heartbeat::*;
 pub use job::*;
@@ -27,6 +30,7 @@ pub use parser::*;
 pub use scanner::scan_cron_prompt;
 pub use store::*;
 pub use tick::*;
+pub use writer_impl::*;
 
 /// Process-global serialization lock for tests that mutate shared env vars
 /// (`IRONHERMES_HOME`, `*_HOME_CHANNEL`, ...). Every env-mutating test across all

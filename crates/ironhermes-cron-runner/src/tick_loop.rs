@@ -324,6 +324,7 @@ mod tests {
             enabled_toolsets: None,
             workdir,
             last_delivery_error: None,
+            continuity: false,
         };
 
         let jobs = vec![

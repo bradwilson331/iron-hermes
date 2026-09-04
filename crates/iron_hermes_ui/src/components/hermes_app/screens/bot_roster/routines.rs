@@ -137,9 +137,14 @@ pub fn BotRoutinesSection(bot_name: String) -> Element {
         let _screen = active_screen();
         let name = name_for_fetch.clone();
         async move {
-            let rows = get_schedules().await?;
+            // Phase 49.6 Plan 02 (D-04): aggregate scope (`None`) — a
+            // routine can live in any profile's store, not just root, so
+            // this must scan every store the same way the Schedules
+            // screen's own default view does.
+            let view = get_schedules(None).await?;
             Ok::<Vec<ScheduleRow>, ServerFnError>(
-                rows.into_iter()
+                view.rows
+                    .into_iter()
                     .filter(|row| is_routine_of(&name, &row.name))
                     .collect(),
             )
@@ -225,6 +230,11 @@ fn RoutineRow(bot_name: String, row: ScheduleRow, on_changed: EventHandler<()>) 
     let next_run_display = row.next_run_at.clone().unwrap_or_else(|| "—".to_string());
     let id_for_run = row.id.clone();
     let id_for_delete = row.id.clone();
+    // Phase 49.6 Plan 02 (D-01/D-04): target the SAME store the row was
+    // read out of, never root by assumption — `ScheduleRow.profile` is
+    // exactly which store produced this row.
+    let profile_for_run = row.profile.clone();
+    let profile_for_delete = row.profile.clone();
 
     rsx! {
         div { class: "kn-routine-row",
@@ -242,9 +252,10 @@ fn RoutineRow(bot_name: String, row: ScheduleRow, on_changed: EventHandler<()>) 
                             return;
                         }
                         let id = id_for_run.clone();
+                        let profile = profile_for_run.clone();
                         running.set(true);
                         spawn(async move {
-                            let _ = run_schedule_now(id).await;
+                            let _ = run_schedule_now(id, Some(profile)).await;
                             running.set(false);
                             on_changed.call(());
                         });
@@ -259,9 +270,10 @@ fn RoutineRow(bot_name: String, row: ScheduleRow, on_changed: EventHandler<()>) 
                             return;
                         }
                         let id = id_for_delete.clone();
+                        let profile = profile_for_delete.clone();
                         deleting.set(true);
                         spawn(async move {
-                            let _ = delete_schedule(id).await;
+                            let _ = delete_schedule(id, Some(profile)).await;
                             deleting.set(false);
                             on_changed.call(());
                         });

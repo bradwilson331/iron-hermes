@@ -18,6 +18,15 @@ pub const MAX_RETRIES: u32 = 5;
 /// Maximum backoff interval between reconnection attempts (D-05).
 pub const MAX_BACKOFF: Duration = Duration::from_secs(60);
 
+/// Floor for `config.connect_timeout` when bounding an individual gateway connect
+/// attempt inside `connect_and_serve` (D-04). Mirrors `mcp_admin_api.rs:709`'s
+/// inline `cfg.connect_timeout.max(1)` floor already used on the CLI and
+/// web-probe paths — named here so the gateway's own auto-start/reconnect path
+/// (this file) enforces the identical floor. A configured `connect_timeout: 0`
+/// must resolve to this 1-second bound, never to `Duration::ZERO`, which would
+/// abort every connect attempt instantly.
+pub const CONNECT_TIMEOUT_FLOOR_SECS: u64 = 1;
+
 /// OAuth-specific permanent errors that bypass the exponential-backoff reconnect loop.
 ///
 /// When `connect_and_serve` returns one of these variants (wrapped as `anyhow::Error`),
@@ -59,10 +68,24 @@ impl std::error::Error for McpOAuthError {}
 
 /// Returns `true` when an error string indicates an HTTP 401 / Unauthorized response.
 ///
-/// Used by `connect_and_serve` to trigger the B-2 WWW-Authenticate parse path.
-/// rmcp 1.8 surfaces 401s as transport errors whose string representations contain
-/// the HTTP status code or reason phrase; exact format is version-specific.
-/// Called only on OAuth servers (`config.oauth_provider.is_some()`).
+/// Used by `connect_and_serve` to trigger the B-2 WWW-Authenticate parse path
+/// (called only on OAuth servers there), and by [`connect_failure_hint`] to
+/// detect a 401-shaped failure on the plain-HTTP path. rmcp 1.8 surfaces 401s as
+/// transport errors whose string representations contain the HTTP status code or
+/// reason phrase; exact format is version-specific.
+///
+/// **Folded from the Phase 46.1 code-review LOW list** (todo:
+/// `2026-07-02-phase-46.1-review-followups-refresh-hardening.md`): the original
+/// final alternative, a bare `lower.contains("unauthorized")`, matched any prose
+/// occurrence of the word with no adjacent HTTP-status evidence — e.g. "the caller
+/// is unauthorized to perform this action" would false-positive as a 401. It now
+/// requires "unauthorized" to sit next to actual status evidence (a `401` digit
+/// token or a `status:` label) via the explicit phrases below; every
+/// previously-matching numeric-`401`-token form (` 401 `, ` 401\n`, `"401"`,
+/// trailing ` 401`) is unchanged. The three M-01/M-02/M-03 items in that same
+/// todo are NOT folded here — they live in `auth_store_adapter.rs` and
+/// `ironhermes-core/src/auth/store.rs`, files this phase does not touch, and M-02
+/// additionally needs an operator call against a locked 46.1 D-03 decision.
 fn is_oauth_401(err_str: &str) -> bool {
     let lower = err_str.to_ascii_lowercase();
     // Match "401" as a distinct token (avoid matching e.g. port "4011")
@@ -70,7 +93,75 @@ fn is_oauth_401(err_str: &str) -> bool {
         || lower.contains(" 401\n")
         || lower.contains("\"401\"")
         || lower.ends_with(" 401")
-        || lower.contains("unauthorized")
+        // 46.1 LOW fold: "unauthorized" only counts when adjacent to HTTP-status
+        // evidence, not as a bare prose occurrence of the word.
+        || lower.contains("401 unauthorized")
+        || lower.contains("unauthorized (401)")
+        || lower.contains("unauthorized(401)")
+        || lower.contains("status: unauthorized")
+        || lower.contains("status:unauthorized")
+        || lower.contains("http 401")
+}
+
+/// Returns a fixed diagnostic hint distinguishing "no credential configured" from
+/// "credential rejected" for a plain-HTTP MCP connect failure that looks like a 401
+/// (D-04 — closes the third instance of "the wizard's failure mode was silence"
+/// named in CONTEXT.md's `<specifics>`: the gateway previously said nothing
+/// specific about a 401).
+///
+/// Returns `None` when `config.oauth_provider.is_some()` — the OAuth path already
+/// has its own `McpOAuthError`/WWW-Authenticate diagnostics (B-2) and must not be
+/// double-reported — or when `err_str` does not look like a 401 per
+/// [`is_oauth_401`].
+///
+/// Both returned strings are fixed `&'static str` constants. Never interpolate a
+/// header key, a header value, a token, or the raw error into them — the raw error
+/// is already carried separately through `sanitize_error` at the call site
+/// (`security.rs:152`), and this hint must be safe to sit alongside it.
+fn connect_failure_hint(config: &McpServerConfig, err_str: &str) -> Option<&'static str> {
+    if config.oauth_provider.is_some() {
+        return None;
+    }
+    if !is_oauth_401(err_str) {
+        return None;
+    }
+    let has_credential = config.auth.is_some()
+        || config
+            .headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("authorization"));
+    if has_credential {
+        Some(
+            "a credential was sent and the server rejected it — check the token \
+             value and that it has not expired/rotated",
+        )
+    } else {
+        Some(
+            "no credential is configured for this server — set `headers.Authorization` \
+             or `auth:` in its `mcp_servers` entry",
+        )
+    }
+}
+
+/// Returns a fixed warning when `config.sampling` is set — the `sampling` field
+/// is DOCUMENTED-INERT (D-04, see `48.3-DEAD-CONFIG-AUDIT.md`): it is parsed but
+/// not connected to any live `createMessage` handler in this build.
+/// `SamplingHandler::new` (`sampling.rs:47`) is constructed only from that
+/// module's own `#[cfg(test)]` tests — no production call site builds one from a
+/// real `McpServerConfig.sampling` value, and none is ever attached to an MCP
+/// client as its `createMessage` handler. This is the D-04 generalization
+/// applied to the one field this phase cannot fix within budget: it stops being
+/// silent without pretending to be implemented.
+fn sampling_inert_warning(config: &McpServerConfig) -> Option<&'static str> {
+    if config.sampling.is_some() {
+        Some(
+            "MCP server config sets `sampling`, but this build has no live \
+             createMessage handler wired to any MCP client — the setting is \
+             parsed and has no effect (see 48.3-DEAD-CONFIG-AUDIT.md)",
+        )
+    } else {
+        None
+    }
 }
 
 /// Result of a single server task's lifecycle.
@@ -116,6 +207,15 @@ pub async fn run_server_task(
 ) -> ServerTaskResult {
     // D-18: interpolate ${ENV_VAR} placeholders in config fields
     crate::config::interpolate_config(&mut config);
+
+    // D-04: `sampling` is DOCUMENTED-INERT (see 48.3-DEAD-CONFIG-AUDIT.md) — it
+    // parses but is not connected to any live createMessage handler in this
+    // build. Warn once per server per task, right after interpolation and
+    // before the retry loop, so a configured-but-unimplemented capability
+    // announces its own inertness instead of being silently accepted.
+    if let Some(hint) = sampling_inert_warning(&config) {
+        tracing::warn!(server = %name, "{}", hint);
+    }
 
     let mut registered_names: Vec<String> = Vec::new();
     let mut failure_reason: Option<String> = None;
@@ -190,6 +290,7 @@ pub async fn run_server_task(
                     tracing::warn!(
                         server = %name,
                         error = %sanitized,
+                        hint = ?connect_failure_hint(&config, &e.to_string()),
                         "MCP server exhausted {} retries",
                         MAX_RETRIES
                     );
@@ -211,6 +312,7 @@ pub async fn run_server_task(
                     max = MAX_RETRIES,
                     backoff_secs = backoff.as_secs(),
                     error = %sanitized,
+                    hint = ?connect_failure_hint(&config, &e.to_string()),
                     "MCP server disconnected, retrying"
                 );
                 // Warm-but-revoked follow-up fix: record the reason live, mid-
@@ -256,11 +358,31 @@ async fn connect_and_serve(
     oauth_refreshed: &mut bool,
     global_issuer_allowlist: &[String],
 ) -> anyhow::Result<Vec<String>> {
+    // D-04: bound each individual connect attempt by the operator's connect_timeout,
+    // with a 1-second floor so `connect_timeout: 0` never resolves to Duration::ZERO
+    // (which would abort every attempt instantly). This wraps only the transport
+    // call below — the outer reconnect loop in `run_server_task` (its MAX_RETRIES
+    // accounting and exponential backoff) is untouched; a timeout here is a real
+    // connect failure that the outer loop retries with backoff like any other Err,
+    // deliberately DIFFERENT from the `tracing::warn! + return Ok(Vec::new())`
+    // non-error-skip shape used by the two OAuth-token-absent branches below (those
+    // mean "not startable yet, that is normal"; a connect timeout is not normal).
+    let connect_timeout_bound =
+        Duration::from_secs(config.connect_timeout.max(CONNECT_TIMEOUT_FLOOR_SECS));
+
     // Connect via appropriate transport.
     // MCPA-02: OAuth branch precedes the plain-HTTP branch — dispatched when both
     // `url` AND `oauth_provider` are set on the config.
     let (client, child_opt) = if config.command.is_some() {
-        transport::connect_stdio(config).await?
+        tokio::time::timeout(connect_timeout_bound, transport::connect_stdio(config))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Server '{}': stdio connect attempt exceeded connect_timeout ({}s)",
+                    name,
+                    connect_timeout_bound.as_secs()
+                )
+            })??
     } else if config.url.is_some() && config.oauth_provider.is_some() {
         // D-04: headless / auto-start posture — OAuth servers are skipped with a
         // non-error tracing::warn when no AuthStore is available or no cached token
@@ -288,12 +410,30 @@ async fn connect_and_serve(
                     );
                     return Ok(Vec::new()); // D-04: non-error skip; zero tools registered
                 }
-                transport::connect_http_oauth(config, store.clone(), global_issuer_allowlist)
-                    .await?
+                tokio::time::timeout(
+                    connect_timeout_bound,
+                    transport::connect_http_oauth(config, store.clone(), global_issuer_allowlist),
+                )
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!(
+                        "Server '{}': OAuth HTTP connect attempt exceeded connect_timeout ({}s)",
+                        name,
+                        connect_timeout_bound.as_secs()
+                    )
+                })??
             }
         }
     } else if config.url.is_some() {
-        transport::connect_http(config).await?
+        tokio::time::timeout(connect_timeout_bound, transport::connect_http(config))
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Server '{}': HTTP connect attempt exceeded connect_timeout ({}s)",
+                    name,
+                    connect_timeout_bound.as_secs()
+                )
+            })??
     } else {
         return Err(anyhow::anyhow!(
             "Server '{}' has neither 'command' nor 'url'",
@@ -624,6 +764,84 @@ mod tests {
         assert_eq!(MAX_BACKOFF, Duration::from_secs(60));
     }
 
+    /// D-04: `connect_timeout: 0` must resolve to a 1-second bound, never to
+    /// `Duration::ZERO` (which would abort every connect attempt instantly).
+    /// Asserts on the computed `Duration`, not on timing.
+    #[test]
+    fn connect_timeout_floor_is_at_least_one_second() {
+        let config = McpServerConfig {
+            connect_timeout: 0,
+            ..Default::default()
+        };
+        let bound = Duration::from_secs(config.connect_timeout.max(CONNECT_TIMEOUT_FLOOR_SECS));
+        assert_eq!(bound, Duration::from_secs(1));
+        assert_ne!(bound, Duration::ZERO);
+    }
+
+    /// D-04: a config pointing at a URL that accepts the TCP connection but never
+    /// responds, with `connect_timeout: 1`, causes `connect_and_serve` to return
+    /// `Err` within a wall-clock bound well under the default 60s — proving the
+    /// bound is applied to the individual attempt inside `connect_and_serve`, not
+    /// merely stored on the config. This assertion fails without the connect_timeout
+    /// wrap and passes with it.
+    #[tokio::test]
+    async fn connect_timeout_bounds_each_attempt_not_the_whole_loop() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local_addr");
+        // Accept connections and hold them open forever — never write a response.
+        tokio::spawn(async move {
+            loop {
+                if let Ok((stream, _)) = listener.accept().await {
+                    // Keep the accepted socket alive so the client's request
+                    // never sees a connection-reset; just never respond.
+                    std::mem::forget(stream);
+                }
+            }
+        });
+
+        let config = McpServerConfig {
+            url: Some(format!("http://{addr}/mcp")),
+            connect_timeout: 1,
+            ..Default::default()
+        };
+
+        let registry = Arc::new(RwLock::new(ToolRegistry::new()));
+        let cancel_token = CancellationToken::new();
+        let connected = Arc::new(AtomicBool::new(false));
+        let child_slot: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>> =
+            Arc::new(tokio::sync::Mutex::new(None));
+        let auth_store: Option<Arc<AuthStore>> = None;
+        let mut oauth_refreshed = false;
+        let global_issuer_allowlist: Vec<String> = Vec::new();
+
+        let start = std::time::Instant::now();
+        let result = connect_and_serve(
+            "hang_test_server",
+            &config,
+            &registry,
+            &cancel_token,
+            &connected,
+            &child_slot,
+            &auth_store,
+            &mut oauth_refreshed,
+            &global_issuer_allowlist,
+        )
+        .await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "connect_and_serve must return Err on a connect timeout, not hang forever"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "connect_timeout=1 must bound the connect attempt well under the default \
+             60s ceiling; took {elapsed:?}"
+        );
+    }
+
     /// B-2 / T-44-02: static-grep regression — connect_and_serve MUST reference
     /// `WWW-Authenticate` header parsing on every OAuth 401, and MUST NOT fold
     /// `insufficient_scope` into the reconnect retry loop (Pitfall 6 avoidance).
@@ -646,5 +864,149 @@ mod tests {
             "B-2: McpOAuthError::InsufficientScope must be returned on insufficient_scope \
              challenges so the reconnect loop is bypassed immediately (Pitfall 6 avoidance)."
         );
+    }
+
+    // -------------------------------------------------------------------
+    // is_oauth_401 (Task 2c — folded 46.1 LOW: bare "unauthorized" prose
+    // must not classify as a 401)
+    // -------------------------------------------------------------------
+
+    /// A bare prose occurrence of "unauthorized" with no adjacent HTTP-status
+    /// evidence must NOT classify as a 401 (the 46.1 LOW this task folds).
+    #[test]
+    fn is_oauth_401_does_not_match_bare_unauthorized_prose() {
+        assert!(!is_oauth_401(
+            "the caller is unauthorized to perform this action"
+        ));
+        assert!(!is_oauth_401("you are not authorized"));
+        assert!(!is_oauth_401("Unauthorized access attempt logged"));
+    }
+
+    /// Every alternative `is_oauth_401` accepted before the 46.1 fold must still
+    /// match, so the tightening cannot silently narrow real 401 detection.
+    #[test]
+    fn is_oauth_401_matches_every_preexisting_alternative() {
+        assert!(is_oauth_401("received 401 from server"), " 401 ");
+        assert!(is_oauth_401("received 401\nretrying"), " 401\\n");
+        assert!(is_oauth_401(r#"status="401""#), "\"401\"");
+        assert!(is_oauth_401("server returned 401"), "ends_with ' 401'");
+    }
+
+    /// The four new HTTP-status-adjacent "unauthorized" phrases the 46.1 fold
+    /// still accepts.
+    #[test]
+    fn is_oauth_401_matches_status_adjacent_unauthorized_phrases() {
+        assert!(is_oauth_401("401 unauthorized"));
+        assert!(is_oauth_401("request failed: unauthorized (401)"));
+        assert!(is_oauth_401("status: unauthorized"));
+        assert!(is_oauth_401("http 401"));
+    }
+
+    // -------------------------------------------------------------------
+    // connect_failure_hint (Task 2a/2b — plain-HTTP 401 diagnostics)
+    // -------------------------------------------------------------------
+
+    /// A plain-HTTP config with no credential configured and a 401-shaped error
+    /// yields a hint whose text names both `headers` and `auth`.
+    #[test]
+    fn connect_failure_hint_names_missing_credential_for_plain_http_401() {
+        let config = McpServerConfig {
+            oauth_provider: None,
+            url: Some("https://mcp.example.com/mcp".to_string()),
+            headers: std::collections::HashMap::new(),
+            auth: None,
+            ..Default::default()
+        };
+        let hint = connect_failure_hint(&config, "server returned 401");
+        let hint = hint.expect("expected Some(hint) for a 401-shaped error with no credential");
+        assert!(hint.contains("headers"), "hint must mention 'headers': {hint}");
+        assert!(hint.contains("auth"), "hint must mention 'auth': {hint}");
+    }
+
+    /// A plain-HTTP config WITH a credential (Authorization header) and a
+    /// 401-shaped error yields a DIFFERENT hint than the no-credential case —
+    /// "no credential configured" and "credential rejected" are different
+    /// problems and collapsing them is what cost the operator hours.
+    #[test]
+    fn connect_failure_hint_differs_for_credential_present_vs_absent() {
+        let no_cred = McpServerConfig {
+            oauth_provider: None,
+            url: Some("https://mcp.example.com/mcp".to_string()),
+            headers: std::collections::HashMap::new(),
+            auth: None,
+            ..Default::default()
+        };
+        let mut with_cred_headers = std::collections::HashMap::new();
+        with_cred_headers.insert("Authorization".to_string(), "Bearer test-token".to_string());
+        let with_cred = McpServerConfig {
+            oauth_provider: None,
+            url: Some("https://mcp.example.com/mcp".to_string()),
+            headers: with_cred_headers,
+            auth: None,
+            ..Default::default()
+        };
+
+        let hint_no_cred = connect_failure_hint(&no_cred, "server returned 401").unwrap();
+        let hint_with_cred = connect_failure_hint(&with_cred, "server returned 401").unwrap();
+        assert_ne!(
+            hint_no_cred, hint_with_cred,
+            "no-credential and credential-rejected hints must be different messages"
+        );
+
+        // Also cover the `auth:` shorthand credential shape.
+        let with_auth_shorthand = McpServerConfig {
+            oauth_provider: None,
+            url: Some("https://mcp.example.com/mcp".to_string()),
+            headers: std::collections::HashMap::new(),
+            auth: Some("test-token".to_string()),
+            ..Default::default()
+        };
+        let hint_with_auth_shorthand =
+            connect_failure_hint(&with_auth_shorthand, "server returned 401").unwrap();
+        assert_eq!(hint_with_auth_shorthand, hint_with_cred);
+    }
+
+    /// Any config with `oauth_provider: Some(_)` yields `None` — the OAuth path
+    /// owns its own diagnostics and must not be double-reported.
+    #[test]
+    fn connect_failure_hint_is_none_for_oauth_servers() {
+        let config = McpServerConfig {
+            oauth_provider: Some("cloudflare_api".to_string()),
+            url: Some("https://mcp.cloudflare.com/mcp".to_string()),
+            headers: std::collections::HashMap::new(),
+            auth: None,
+            ..Default::default()
+        };
+        assert!(connect_failure_hint(&config, "server returned 401").is_none());
+    }
+
+    /// A non-401-shaped error yields `None` — the hint is 401-specific.
+    #[test]
+    fn connect_failure_hint_is_none_for_non_401_errors() {
+        let config = McpServerConfig {
+            oauth_provider: None,
+            url: Some("https://mcp.example.com/mcp".to_string()),
+            headers: std::collections::HashMap::new(),
+            auth: None,
+            ..Default::default()
+        };
+        assert!(connect_failure_hint(&config, "connection refused").is_none());
+    }
+
+    // -------------------------------------------------------------------
+    // sampling_inert_warning (Task 3a — D-04 sampling declared inert)
+    // -------------------------------------------------------------------
+
+    /// `sampling_inert_warning` returns `Some` iff `config.sampling.is_some()`.
+    #[test]
+    fn sampling_inert_warning_fires_only_when_sampling_is_set() {
+        let without_sampling = McpServerConfig::default();
+        assert!(sampling_inert_warning(&without_sampling).is_none());
+
+        let with_sampling = McpServerConfig {
+            sampling: Some(crate::config::SamplingConfig::default()),
+            ..Default::default()
+        };
+        assert!(sampling_inert_warning(&with_sampling).is_some());
     }
 }

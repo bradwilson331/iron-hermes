@@ -26,9 +26,6 @@ pub fn ScreenOffice(is_active: bool) -> Element {
                 div { class: "screen-header-left",
                     div { class: "screen-tag", "// MODULE 11" }
                     h1 { class: "screen-title", "Office" }
-                    p { class: "screen-sub",
-                        "Claw3d spatial interface — physical desk overlay. Calibrate cameras, manage device meshes, mirror Hermes panels onto the surface."
-                    }
                 }
                 div { class: "screen-actions",
                     button { class: "btn btn--ghost btn--sm", "⌖ CALIBRATE" }

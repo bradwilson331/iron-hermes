@@ -631,6 +631,7 @@ mod tests {
             enabled_toolsets: None,
             workdir: None,
             last_delivery_error: None,
+            continuity: false,
         }
     }
 

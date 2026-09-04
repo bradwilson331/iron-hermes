@@ -1,4 +1,6 @@
-use crate::commands::context::CommandContext;
+use std::collections::BTreeMap;
+
+use crate::commands::context::{BlueprintSaveRequest, CommandContext, CronJobSpec};
 use crate::commands::typo::suggest_typo;
 use crate::commands::{CommandDef, CommandResult, CommandRouter};
 
@@ -67,6 +69,7 @@ pub fn dispatch(
         "commands" => cmd_commands(args, ctx, router),
         "skills" => cmd_skills(args, ctx),
         "cron" => cmd_cron(args, ctx),
+        "blueprint" => cmd_blueprint(args, ctx), // Phase 49.5 Plan 05 — /blueprint slash command dispatch.
         "kanban" => cmd_kanban(args, ctx), // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02) — /kanban slash command dispatch.
 
         // -------------------------------------------------------------------
@@ -1180,6 +1183,352 @@ fn cmd_cron(args: &[&str], ctx: &CommandContext) -> CommandResult {
             CommandResult::Error(format!("Unknown /cron subcommand: {}{}", other, suffix))
         }
     }
+}
+
+// =============================================================================
+// /blueprint slash command — Phase 49.5 Plan 05
+// =============================================================================
+//
+// Mirrors `cmd_cron`'s sub-dispatch shape. Unlike `/cron`, `list`/`show`
+// need NO `CommandContext` handle at all — `crate::blueprint` (relocated
+// into ironhermes-core this same plan; see that module's doc for why) is
+// compiled in, so both verbs work on every platform immediately, including
+// surfaces that never wire a cron handle (e.g. the web UI). Only `run`
+// needs `ctx.cron_job_writer` and an authorization gate, because it is the
+// one verb that writes.
+fn cmd_blueprint(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    match args.first().copied() {
+        None | Some("list") => cmd_blueprint_list(),
+        Some("show") => cmd_blueprint_show(args),
+        Some("run") => cmd_blueprint_run(args, ctx),
+        Some("save") => cmd_blueprint_save(args, ctx),
+        Some(other) => {
+            let suffix = suggest_typo(other, &["list", "show", "run", "save"])
+                .map(|s| format!(" {}", s))
+                .unwrap_or_default();
+            CommandResult::Error(format!("Unknown /blueprint subcommand: {}{}", other, suffix))
+        }
+    }
+}
+
+/// `list` renders every catalog entry in declaration order — key, title,
+/// and a one-line description. No `CommandContext` handle needed.
+fn cmd_blueprint_list() -> CommandResult {
+    let mut out = String::new();
+    for bp in crate::blueprint::catalog() {
+        out.push_str(&format!("{:<20} {} — {}\n", bp.key, bp.title, bp.description));
+    }
+    CommandResult::Output(out.trim_end().to_string())
+}
+
+/// `show <key>` resolves `key` with [`resolve_blueprint`] and renders the
+/// entry's description plus one line per slot: name, label, type, default,
+/// options where present, and whether it is optional. No `CommandContext`
+/// handle needed.
+fn cmd_blueprint_show(args: &[&str]) -> CommandResult {
+    let key = match args.get(1) {
+        Some(s) => *s,
+        None => return CommandResult::Error("/blueprint show <key>: missing key".to_string()),
+    };
+    let bp = match resolve_blueprint(key) {
+        Ok(bp) => bp,
+        Err(e) => return CommandResult::Error(e),
+    };
+
+    let mut out = format!("{} — {}\n{}\n\nSlots:\n", bp.key, bp.title, bp.description);
+    for slot in bp.slots {
+        out.push_str(&format!("  {:<16} {} [{:?}]", slot.name, slot.label, slot.slot_type));
+        if let Some(default) = slot.default {
+            out.push_str(&format!(" default={default:?}"));
+        }
+        if !slot.options.is_empty() {
+            out.push_str(&format!(" options=[{}]", slot.options.join(", ")));
+        }
+        out.push_str(if slot.optional { " optional" } else { " required" });
+        out.push('\n');
+    }
+    CommandResult::Output(out.trim_end().to_string())
+}
+
+/// `run <key> slot=value …` does four things in order: resolve the key,
+/// reconstruct slot pairs the upstream tokenizer broke apart, apply the
+/// remote-origin authorization gate, then create the job.
+///
+/// SECURITY (T-49.5-05-01): the gate below is the single point that admits
+/// or refuses a gateway-originated job-creation request. `Platform::Local`
+/// (CLI/TUI) proceeds ungated — local trusted surfaces, operator already at
+/// the machine. Every other platform requires
+/// `security.remote_blueprint_run_enabled` (default `false`). This
+/// deliberately never consults `security.web_config_write_enabled` — that
+/// flag authorizes browser-initiated writes to `config.yaml`, a different
+/// capability entirely. A `Config::load()` failure on the remote path is
+/// treated as refusal, never as permission.
+fn cmd_blueprint_run(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    // First: resolve the key with the same matcher `show` uses; a missing
+    // key is a usage error and touches nothing.
+    let key = match args.get(1) {
+        Some(s) => *s,
+        None => {
+            return CommandResult::Error(
+                "/blueprint run <key> [slot=value ...]: missing key".to_string(),
+            );
+        }
+    };
+    let bp = match resolve_blueprint(key) {
+        Ok(bp) => bp,
+        Err(e) => return CommandResult::Error(e),
+    };
+
+    // Second: reconstruct multi-word slot values the upstream whitespace
+    // tokenizer broke apart.
+    let values = parse_slot_pairs(&args[2..]);
+
+    // Third: the remote-origin authorization gate. See SECURITY note above.
+    if ctx.platform != crate::types::Platform::Local {
+        let allowed = crate::Config::load()
+            .map(|c| c.security.remote_blueprint_run_enabled)
+            .unwrap_or(false);
+        if !allowed {
+            return CommandResult::Error(format!(
+                "/blueprint run is disabled on the {:?} platform — an operator \
+                 must set security.remote_blueprint_run_enabled: true in \
+                 config.yaml to allow remote chat to schedule cron jobs \
+                 (CLI/TUI are unaffected by this flag).",
+                ctx.platform
+            ));
+        }
+    }
+
+    // Fourth: take the writer handle and create the job.
+    let writer = match &ctx.cron_job_writer {
+        Some(w) => w.clone(),
+        None => {
+            return CommandResult::Output(
+                "/blueprint run: cron job writer not configured.".to_string(),
+            );
+        }
+    };
+
+    let values_map: BTreeMap<String, String> = values.iter().cloned().collect();
+    let spec = CronJobSpec {
+        blueprint_key: bp.key.to_string(),
+        values,
+    };
+
+    match writer.create_job_from_blueprint(spec) {
+        Ok(job_id) => {
+            // Best-effort re-derivation of the resolved schedule for display
+            // only — the writer already validated and persisted the job
+            // using the identical `fill_blueprint` call, so this should
+            // always agree; fall back to the unresolved template rather
+            // than panicking if it somehow doesn't.
+            let schedule = crate::blueprint::fill_blueprint(bp, &values_map)
+                .map(|filled| filled.schedule_expr)
+                .unwrap_or_else(|_| bp.schedule_template.to_string());
+            CommandResult::Output(format!(
+                "Scheduled '{}' as job {} ({}).",
+                bp.title, job_id, schedule
+            ))
+        }
+        Err(e) => CommandResult::Error(e),
+    }
+}
+
+/// `save <job-id-or-name> [--name <blueprint-name>] <description...>` exports
+/// an existing cron job as an installed blueprint `SKILL.md` (D-08, D-12).
+///
+/// SECURITY (D-14): unlike `cmd_blueprint_run`'s gate directly above, there
+/// is no `Config::load()` here and no flag consulted — this is an
+/// unconditional refusal, not a fail-closed default. A save writes a
+/// `SKILL.md` that is loaded into the agent's PROMPT on later runs, so a
+/// remote-originated save is persistent prompt injection, a strictly worse
+/// risk class than a one-off scheduled job from `run`. Reusing
+/// `security.remote_blueprint_run_enabled` here would silently extend a
+/// control to a capability it was never reviewed for — the exact pattern
+/// 49.5's review flagged. There is deliberately no config flag that can
+/// enable this on a remote platform.
+fn cmd_blueprint_save(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    if ctx.platform != crate::types::Platform::Local {
+        return CommandResult::Error(format!(
+            "/blueprint save is only available on the Local (CLI/TUI) platform — \
+             the current platform is {:?}. There is no configuration flag that \
+             enables this on a remote surface.",
+            ctx.platform
+        ));
+    }
+
+    let job_id_or_name = match args.get(1) {
+        Some(s) => s.to_string(),
+        None => {
+            return CommandResult::Error(
+                "/blueprint save <job-id-or-name> [--name <blueprint-name>] <description>: \
+                 missing job id or name"
+                    .to_string(),
+            );
+        }
+    };
+
+    // Parse the remaining tail: an optional `--name <value>` / `--name=<value>`
+    // flag (in either order relative to the description) plus the description
+    // body, everything else joined back together with single spaces.
+    let mut blueprint_name: Option<String> = None;
+    let mut body_tokens: Vec<String> = Vec::new();
+    let mut rest = &args[2.min(args.len())..];
+    while let Some((&tok, tail)) = rest.split_first() {
+        if tok == "--name" {
+            if let Some((&name_tok, after)) = tail.split_first() {
+                blueprint_name = Some(name_tok.to_string());
+                rest = after;
+            } else {
+                rest = tail;
+            }
+            continue;
+        }
+        if let Some(name) = tok.strip_prefix("--name=") {
+            blueprint_name = Some(name.to_string());
+            rest = tail;
+            continue;
+        }
+        body_tokens.push(tok.to_string());
+        rest = tail;
+    }
+    let body = body_tokens.join(" ");
+
+    let saver = match &ctx.blueprint_saver {
+        Some(s) => s.clone(),
+        None => {
+            return CommandResult::Output(
+                "/blueprint save: blueprint saver not configured.".to_string(),
+            );
+        }
+    };
+
+    let req = BlueprintSaveRequest {
+        job_id_or_name,
+        blueprint_name,
+        body,
+    };
+
+    match saver.save_job_as_blueprint(req) {
+        Ok(name) => CommandResult::Output(format!("Saved job as blueprint '{}'.", name)),
+        Err(e) => CommandResult::Error(e),
+    }
+}
+
+/// Ported, simplified forgiving-name resolver for `/blueprint show`/`run`:
+/// exact key match, then unique prefix on key or title word-start, then
+/// unique substring on key/title/description. An ambiguous match at any
+/// stage names its candidates rather than guessing. Based on
+/// `hermes_cli/blueprint_cmd.py`'s `match_blueprint`; this port omits its
+/// upstream fuzzy/difflib pass — 49.5-CONTEXT.md's D-09 scope is read+run
+/// only, not a UX nicety beyond the three explicit stages.
+fn resolve_blueprint(query: &str) -> Result<&'static crate::blueprint::AutomationBlueprint, String> {
+    let q = query.trim().to_lowercase();
+    if q.is_empty() {
+        return Err("blueprint key must not be empty".to_string());
+    }
+
+    if let Some(bp) = crate::blueprint::find_blueprint(&q) {
+        return Ok(bp);
+    }
+
+    let catalog = crate::blueprint::catalog();
+
+    let prefix: Vec<&crate::blueprint::AutomationBlueprint> = catalog
+        .iter()
+        .filter(|bp| {
+            bp.key.to_lowercase().starts_with(&q)
+                || bp.title.split_whitespace().any(|w| w.to_lowercase().starts_with(&q))
+        })
+        .collect();
+    if prefix.len() == 1 {
+        return Ok(prefix[0]);
+    }
+    if prefix.len() > 1 {
+        return Err(ambiguous_blueprint_error(query, &prefix));
+    }
+
+    let substr: Vec<&crate::blueprint::AutomationBlueprint> = catalog
+        .iter()
+        .filter(|bp| {
+            bp.key.to_lowercase().contains(&q)
+                || bp.title.to_lowercase().contains(&q)
+                || bp.description.to_lowercase().contains(&q)
+        })
+        .collect();
+    if substr.len() == 1 {
+        return Ok(substr[0]);
+    }
+    if substr.len() > 1 {
+        return Err(ambiguous_blueprint_error(query, &substr));
+    }
+
+    Err(format!(
+        "no blueprint matches {:?} — known keys: {}",
+        query,
+        catalog.iter().map(|bp| bp.key).collect::<Vec<_>>().join(", ")
+    ))
+}
+
+fn ambiguous_blueprint_error(
+    query: &str,
+    candidates: &[&crate::blueprint::AutomationBlueprint],
+) -> String {
+    format!(
+        "{:?} is ambiguous — candidates: {}",
+        query,
+        candidates.iter().map(|bp| bp.key).collect::<Vec<_>>().join(", ")
+    )
+}
+
+/// Reconstructs `name=value` slot pairs from `/blueprint run`'s trailing
+/// args, honouring double quotes around a multi-word value. Every surface
+/// reaching `dispatch` splits the raw input on whitespace before the
+/// handler sees it (`handler.rs:938`, `tui_rata/commands.rs:338`), so a
+/// quoted value like `topic="AI and robotics"` arrives as several separate
+/// tokens (`topic="AI`, `and`, `robotics"`). Re-joining with single spaces
+/// and re-scanning recovers the pair. Whitespace runs inside a quoted value
+/// collapse to a single space, because the tokenizer upstream has already
+/// discarded the original spacing — a known, accepted limitation, not an
+/// oversight. A token carrying no `=` is ignored rather than becoming a
+/// positional argument.
+fn parse_slot_pairs(tail: &[&str]) -> Vec<(String, String)> {
+    let joined = tail.join(" ");
+    let mut pairs = Vec::new();
+    let mut words = joined.split(' ').filter(|w| !w.is_empty());
+
+    while let Some(word) = words.next() {
+        let Some((name, rest)) = word.split_once('=') else {
+            continue;
+        };
+        if name.is_empty() {
+            continue;
+        }
+
+        if let Some(quoted) = rest.strip_prefix('"') {
+            if let Some(end) = quoted.find('"') {
+                pairs.push((name.to_string(), quoted[..end].to_string()));
+            } else {
+                let mut value = quoted.to_string();
+                for next_word in words.by_ref() {
+                    if let Some(end) = next_word.find('"') {
+                        if end > 0 {
+                            value.push(' ');
+                            value.push_str(&next_word[..end]);
+                        }
+                        break;
+                    }
+                    value.push(' ');
+                    value.push_str(next_word);
+                }
+                pairs.push((name.to_string(), value));
+            }
+        } else {
+            pairs.push((name.to_string(), rest.to_string()));
+        }
+    }
+
+    pairs
 }
 
 // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02) — /kanban slash command sub-dispatch.
@@ -3360,5 +3709,338 @@ mod cmd_agents_tree_tests {
             "leaf line should have indentation; got: {:?}",
             leaf_line
         );
+    }
+}
+
+// =============================================================================
+// Phase 49.5 Plan 05: /blueprint slash command tests
+// =============================================================================
+
+#[cfg(test)]
+mod cmd_blueprint_tests {
+    use super::*;
+    use crate::commands::context::{BlueprintSaver, CronJobWriter};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Process-wide lock for the one test in this module that mutates
+    /// `IRONHERMES_HOME`, mirroring `provider.rs`'s `env_lock` pattern —
+    /// per-module, not crate-shared.
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        use std::sync::OnceLock;
+        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// Test double implementing `CronJobWriter` that records its call count,
+    /// so "the writer is never called" is an assertion rather than an
+    /// inference.
+    struct RecordingWriter {
+        calls: AtomicUsize,
+    }
+
+    impl RecordingWriter {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl CronJobWriter for RecordingWriter {
+        fn create_job_from_blueprint(&self, _spec: CronJobSpec) -> Result<String, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok("recorded-job-id".to_string())
+        }
+    }
+
+    fn local_ctx() -> CommandContext {
+        CommandContext::new(crate::types::Platform::Local, "test-session".to_string())
+    }
+
+    fn remote_ctx() -> CommandContext {
+        CommandContext::new(crate::types::Platform::Telegram, "test-session".to_string())
+    }
+
+    #[test]
+    fn list_with_no_subcommand_equals_list() {
+        let ctx = local_ctx();
+        let a = cmd_blueprint(&[], &ctx);
+        let b = cmd_blueprint(&["list"], &ctx);
+        assert_eq!(a, b, "no-args and explicit 'list' must produce identical output");
+    }
+
+    #[test]
+    fn list_output_is_declaration_order_and_stable() {
+        let ctx = local_ctx();
+        let a = cmd_blueprint(&["list"], &ctx);
+        let b = cmd_blueprint(&["list"], &ctx);
+        assert_eq!(a, b, "list output must be byte-identical across invocations");
+
+        let CommandResult::Output(text) = &a else {
+            panic!("expected Output, got {a:?}");
+        };
+        let mut last_pos = 0usize;
+        for bp in crate::blueprint::catalog() {
+            let pos = text[last_pos..]
+                .find(bp.key)
+                .unwrap_or_else(|| panic!("key {:?} missing (or out of order) in list output", bp.key));
+            last_pos += pos + bp.key.len();
+        }
+    }
+
+    #[test]
+    fn show_renders_every_slot_in_declaration_order() {
+        let ctx = local_ctx();
+        let result = cmd_blueprint(&["show", "morning-brief"], &ctx);
+        let CommandResult::Output(text) = &result else {
+            panic!("expected Output, got {result:?}");
+        };
+        let bp = crate::blueprint::find_blueprint("morning-brief").expect("must exist");
+        let mut last_pos = 0usize;
+        for slot in bp.slots {
+            let pos = text[last_pos..]
+                .find(slot.label)
+                .unwrap_or_else(|| panic!("slot label {:?} missing (or out of order) in show output", slot.label));
+            last_pos += pos + slot.label.len();
+        }
+    }
+
+    #[test]
+    fn show_unknown_key_lists_candidates() {
+        let ctx = local_ctx();
+        let result = cmd_blueprint(&["show", "definitely-not-a-real-blueprint-key"], &ctx);
+        let CommandResult::Error(text) = &result else {
+            panic!("expected Error, got {result:?}");
+        };
+        let real_key = crate::blueprint::catalog()[0].key;
+        assert!(text.contains(real_key), "error must contain a real catalog key: {text}");
+    }
+
+    #[test]
+    fn unknown_verb_suggests_a_known_one() {
+        // `suggest_typo` (shared by every slash command, including /cron's
+        // own unknown-verb branch) only suggests within Levenshtein distance
+        // 2 — an arbitrary unrelated word like "frobnicate" produces no
+        // suggestion at all, so this must be a genuine near-typo of one of
+        // the three known verbs to exercise the suggestion path.
+        let ctx = local_ctx();
+        let result = cmd_blueprint(&["lst"], &ctx);
+        let CommandResult::Error(text) = &result else {
+            panic!("expected Error, got {result:?}");
+        };
+        assert!(
+            text.contains("list") || text.contains("show") || text.contains("run"),
+            "error must name one of the three known verbs: {text}"
+        );
+    }
+
+    #[test]
+    fn run_without_key_is_a_usage_error() {
+        let writer = Arc::new(RecordingWriter::new());
+        let ctx = local_ctx().with_cron_job_writer(writer.clone());
+        let result = cmd_blueprint(&["run"], &ctx);
+        assert!(matches!(result, CommandResult::Error(_)), "expected Error, got {result:?}");
+        assert_eq!(writer.calls.load(Ordering::SeqCst), 0, "writer must not be called");
+    }
+
+    #[test]
+    fn run_without_writer_configured_reports_not_configured() {
+        let ctx = local_ctx(); // no cron_job_writer wired
+        let result = cmd_blueprint(&["run", "morning-brief", "time=08:00"], &ctx);
+        match result {
+            CommandResult::Output(text) => {
+                assert!(text.contains("not configured"), "got: {text}")
+            }
+            other => panic!("expected Output (not a panic), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn slot_parser_rejoins_a_multi_word_quoted_value() {
+        let tail: &[&str] = &["topic=\"AI", "and", "robotics\""];
+        let pairs = parse_slot_pairs(tail);
+        assert_eq!(pairs, vec![("topic".to_string(), "AI and robotics".to_string())]);
+    }
+
+    #[test]
+    fn slot_parser_handles_single_word_unquoted_value() {
+        let tail: &[&str] = &["topic=AI"];
+        let pairs = parse_slot_pairs(tail);
+        assert_eq!(pairs, vec![("topic".to_string(), "AI".to_string())]);
+    }
+
+    #[test]
+    fn slot_parser_ignores_a_token_without_an_equals_sign() {
+        let tail: &[&str] = &["justastraytoken", "time=08:00"];
+        let pairs = parse_slot_pairs(tail);
+        assert_eq!(pairs, vec![("time".to_string(), "08:00".to_string())]);
+    }
+
+    #[test]
+    fn run_on_a_remote_platform_is_refused_when_the_flag_is_false() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let writer = Arc::new(RecordingWriter::new());
+        let ctx = remote_ctx().with_cron_job_writer(writer.clone());
+        let result = cmd_blueprint(&["run", "morning-brief", "time=08:00"], &ctx);
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        let CommandResult::Error(text) = &result else {
+            panic!("expected Error, got {result:?}");
+        };
+        assert!(
+            text.contains("remote_blueprint_run_enabled"),
+            "error must name the config flag: {text}"
+        );
+        assert_eq!(writer.calls.load(Ordering::SeqCst), 0, "writer must never be called");
+    }
+
+    #[test]
+    fn run_on_local_platform_is_allowed_regardless_of_the_flag() {
+        // No env isolation needed: Platform::Local skips the gate entirely,
+        // so this must succeed regardless of whatever config.yaml (if any)
+        // happens to be on the machine running this test.
+        let writer = Arc::new(RecordingWriter::new());
+        let ctx = local_ctx().with_cron_job_writer(writer.clone());
+        let result = cmd_blueprint(&["run", "morning-brief", "time=08:00"], &ctx);
+        assert!(matches!(result, CommandResult::Output(_)), "expected Output, got {result:?}");
+        assert_eq!(writer.calls.load(Ordering::SeqCst), 1, "writer must be called exactly once");
+    }
+
+    // -------------------------------------------------------------------------
+    // cmd_blueprint_save tests (D-14, Phase 49.6 Plan 03)
+    // -------------------------------------------------------------------------
+
+    /// Test double implementing `BlueprintSaver` that records its call count
+    /// and the request it was called with, so "the saver is never called" is
+    /// an assertion rather than an inference.
+    struct RecordingSaver {
+        calls: AtomicUsize,
+    }
+
+    impl RecordingSaver {
+        fn new() -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl BlueprintSaver for RecordingSaver {
+        fn save_job_as_blueprint(
+            &self,
+            _req: BlueprintSaveRequest,
+        ) -> Result<String, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok("recorded-blueprint".to_string())
+        }
+    }
+
+    fn ctx_for(platform: crate::types::Platform) -> CommandContext {
+        CommandContext::new(platform, "test-session".to_string())
+    }
+
+    #[test]
+    fn cmd_blueprint_save_on_telegram_is_refused_even_with_a_handle_wired_and_flag_true() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // Write a config with remote_blueprint_run_enabled: true — the save
+        // gate must ignore this entirely, unlike run's gate.
+        std::fs::write(
+            tmp.path().join("config.yaml"),
+            "security:\n  remote_blueprint_run_enabled: true\n",
+        )
+        .expect("write config.yaml");
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let saver = Arc::new(RecordingSaver::new());
+        let ctx = ctx_for(crate::types::Platform::Telegram).with_blueprint_saver(saver.clone());
+        let result = cmd_blueprint(&["save", "my-job", "a", "description"], &ctx);
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        let CommandResult::Error(text) = &result else {
+            panic!("expected Error, got {result:?}");
+        };
+        assert!(text.contains("Telegram"), "error must name the platform: {text}");
+        assert!(
+            !text.contains("security.") && !text.contains("remote_blueprint_run_enabled"),
+            "error must not mention any config KEY: {text}"
+        );
+        assert_eq!(saver.calls.load(Ordering::SeqCst), 0, "saver must never be called");
+    }
+
+    #[test]
+    fn cmd_blueprint_save_is_refused_on_web_and_apiserver_platforms() {
+        for platform in [crate::types::Platform::Web, crate::types::Platform::ApiServer] {
+            let saver = Arc::new(RecordingSaver::new());
+            let ctx = ctx_for(platform.clone()).with_blueprint_saver(saver.clone());
+            let result = cmd_blueprint(&["save", "my-job", "a", "description"], &ctx);
+            let CommandResult::Error(text) = &result else {
+                panic!("expected Error for {platform:?}, got {result:?}");
+            };
+            assert!(
+                text.contains(&format!("{platform:?}")),
+                "error must name the platform {platform:?}: {text}"
+            );
+            assert_eq!(
+                saver.calls.load(Ordering::SeqCst),
+                0,
+                "saver must never be called for {platform:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cmd_blueprint_save_on_local_with_recording_double_calls_it_exactly_once() {
+        let saver = Arc::new(RecordingSaver::new());
+        let ctx = local_ctx().with_blueprint_saver(saver.clone());
+        let result = cmd_blueprint(&["save", "my-job", "a", "description", "body"], &ctx);
+        assert!(matches!(result, CommandResult::Output(_)), "expected Output, got {result:?}");
+        assert_eq!(saver.calls.load(Ordering::SeqCst), 1, "saver must be called exactly once");
+    }
+
+    #[test]
+    fn cmd_blueprint_save_on_local_with_no_saver_configured_reports_not_configured() {
+        let ctx = local_ctx(); // no blueprint_saver wired
+        let result = cmd_blueprint(&["save", "my-job", "a", "description"], &ctx);
+        match result {
+            CommandResult::Output(text) => {
+                assert!(text.contains("not configured"), "got: {text}")
+            }
+            other => panic!("expected Output (not a panic), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cmd_blueprint_save_list_show_run_are_unchanged_by_the_new_save_arm() {
+        let ctx = local_ctx();
+        // list/show still dispatch exactly as before.
+        assert_eq!(cmd_blueprint(&[], &ctx), cmd_blueprint(&["list"], &ctx));
+        assert!(matches!(
+            cmd_blueprint(&["show", "morning-brief"], &ctx),
+            CommandResult::Output(_)
+        ));
+        let writer = Arc::new(RecordingWriter::new());
+        let run_ctx = local_ctx().with_cron_job_writer(writer.clone());
+        let result = cmd_blueprint(&["run", "morning-brief", "time=08:00"], &run_ctx);
+        assert!(matches!(result, CommandResult::Output(_)), "expected Output, got {result:?}");
+        assert_eq!(writer.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn cmd_blueprint_save_unknown_verb_near_save_suggests_save() {
+        let ctx = local_ctx();
+        let result = cmd_blueprint(&["sav"], &ctx);
+        let CommandResult::Error(text) = &result else {
+            panic!("expected Error, got {result:?}");
+        };
+        assert!(text.contains("save"), "error must suggest 'save': {text}");
     }
 }

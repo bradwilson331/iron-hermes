@@ -46,11 +46,15 @@
     <key>WorkingDirectory</key>
     <string>__HOME__</string>
 
+    <!-- 48.3 D-06: previously a separate gateway.out.log / gateway.err.log
+         pair; both now point at the single canonical gateway log so an
+         operator can grep one file instead of two. Old pre-48.3 files on
+         disk simply stop growing. -->
     <key>StandardOutPath</key>
-    <string>__HOME__/.ironhermes/logs/gateway.out.log</string>
+    <string>__HOME__/.ironhermes/logs/gateway.log</string>
 
     <key>StandardErrorPath</key>
-    <string>__HOME__/.ironhermes/logs/gateway.err.log</string>
+    <string>__HOME__/.ironhermes/logs/gateway.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>

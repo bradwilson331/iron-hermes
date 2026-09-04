@@ -594,7 +594,7 @@ tools:
   # --- Web-tool provider chains (Phase 41.3 D-08) ---
   # Each tool tries its configured providers in order; an entry whose
   # credential is absent is skipped, a failing entry falls through to the
-  # next, and an unknown provider name is a validation error `hermes doctor`
+  # next, and an unknown provider name is a validation error `ironhermes doctor`
   # reports. Every chain below shows its shipped default order — uncomment
   # and reorder to change it, e.g. to promote a provider ahead of another or
   # demote a scraping-only fallback. Legal values are per-tool (see

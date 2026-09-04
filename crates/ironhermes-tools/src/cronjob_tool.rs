@@ -336,6 +336,7 @@ fn handle_update(store: &mut JobStore, args: &Value) -> Value {
         schedule: new_schedule,
         schedule_display: new_schedule_display,
         skills,
+        ..Default::default()
     };
 
     match store.update_job(&canonical_id, updates) {

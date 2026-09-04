@@ -24,7 +24,7 @@
 //! only inside the confirm handler's spawned closure, never across an
 //! `.await`.
 
-use crate::server::profile_api::delete_profile;
+use crate::server::profile_api::archive_profile;
 use dioxus::prelude::*;
 
 /// Phase 50.1 Plan 06 (UI-SPEC E6 partial): whether the typed confirmation
@@ -57,8 +57,14 @@ pub fn DeleteBotConfirm(bot_name: String, on_dismiss: EventHandler<()>, on_delet
     let can_confirm = matches && !is_deleting;
 
     let title = format!("Delete {bot_name}?");
+    // Phase 49.4 Plan 08 (D-18): the backend now ARCHIVES rather than
+    // permanently removes — `profile_api::delete_profile` was renamed to
+    // `archive_profile` and rewritten as a guarded move. This copy is
+    // corrected to match the UI-SPEC Copywriting Contract's locked
+    // "Destructive confirmation" row, which this modal previously
+    // contradicted ("This cannot be undone" was no longer true).
     let body = format!(
-        "This permanently deletes the bot \"{bot_name}\" and its profile at ~/.ironhermes/profiles/{bot_name} — including its config, memory, sessions, and skills. This cannot be undone. Type the bot's name to confirm."
+        "Type the profile name to confirm. This archives the bot \"{bot_name}\" — its config, memory, sessions, skills, .env, and logs are preserved, not deleted."
     );
     let placeholder = format!("Type \"{bot_name}\" to confirm");
 
@@ -72,7 +78,7 @@ pub fn DeleteBotConfirm(bot_name: String, on_dismiss: EventHandler<()>, on_delet
         let mut deleting_sig = deleting;
         let mut error_sig = error;
         spawn(async move {
-            match delete_profile(name_to_delete).await {
+            match archive_profile(name_to_delete).await {
                 Ok(()) => {
                     deleting_sig.set(false);
                     on_deleted.call(());

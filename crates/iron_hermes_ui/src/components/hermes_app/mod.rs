@@ -88,6 +88,10 @@ pub mod hud_chrome;
 pub mod kanban_config;
 pub mod mic_button;
 pub mod orb_canvas;
+// Phase 49.4 Plan 11 (D-19): topbar active-profile indicator + chat-scope
+// quick switch, mounted as a flex child of `.topbar-row` between
+// `Breadcrumb` and `SysMeta`.
+pub mod profile_topbar;
 pub mod realtime_session;
 pub mod screen_router;
 pub mod screens;
@@ -337,8 +341,23 @@ pub fn HermesApp() -> Element {
     // closure's `@mention` detection (below) reads this via call syntax
     // (a plain synchronous read, never held across an `.await`) so a
     // mention target list is known BEFORE the outbound WS send.
-    let roster_names_resource =
-        use_resource(move || async move { crate::server::profile_api::list_profiles().await });
+    // Phase 49.4 hotfix — ONE shared `list_profiles` fetch at root.
+    // `active_profile_refresh` is declared HERE (moved up from its former
+    // mid-body position) so both the shared resource below and the topbar's
+    // refresh context read the same tick. Every boot-path consumer (topbar,
+    // the @mention roster below, the gateway scope selector) reads the
+    // resulting `SharedProfilesCtx` instead of firing its own expensive
+    // `list_profiles` (a full `Config::load_from` per profile) on mount —
+    // the mount-time herd that saturated the WASM client and froze the UI.
+    let active_profile_refresh: Signal<u32> = use_signal(|| 0);
+    use_context_provider(|| profile_topbar::TopbarProfileRefreshCtx(active_profile_refresh));
+    let shared_profiles: Resource<Result<Vec<crate::protocol::ProfileRow>, ServerFnError>> =
+        use_resource(move || {
+            let _tick = active_profile_refresh();
+            async move { crate::server::profile_api::list_profiles().await }
+        });
+    use_context_provider(|| profile_topbar::SharedProfilesCtx(shared_profiles));
+    let roster_names_resource = shared_profiles;
     let mut next_id = use_signal(|| 1u64);
     let mut session_id = use_signal(|| "pending".to_string());
     // Phase 46.9 Plan 03 (D-08/D-09): denominator starts at 0 (pre-resolve
@@ -1064,6 +1083,15 @@ pub fn HermesApp() -> Element {
     // consumers (Dioxus context-panic rule, see MEMORY.md).
     use_context_provider(|| AuthedContext(authed));
 
+    // Phase 49.4 Plan 11 (D-19): the topbar active-profile refresh signal
+    // and its `SharedProfilesCtx` companion are now declared and provided
+    // together near the top of this function (search `active_profile_refresh`)
+    // so the shared root-level `list_profiles` resource can read the same
+    // tick. They MUST live at the HermesApp root — the topbar and the Soul
+    // page's activation surface are siblings under this root, so a
+    // child-level provider would panic the other (Dioxus context-panic rule,
+    // see crates/iron_hermes_ui/CLAUDE.md and MEMORY.md).
+
     // Phase 40.5 Plan 01 (D-04, D-05, D-07, D-09, D-10): orb customisation + per-identity
     // voice contexts. Provided at HermesApp root (Dioxus context-panic rule: child providers
     // panic ancestor/sibling consumers — see MEMORY.md). Signals declared early in this
@@ -1095,9 +1123,13 @@ pub fn HermesApp() -> Element {
     // `SysMeta` renders the real active-model id, active provider, and real
     // server uptime — the SAME `get_config_summary` fetch that seeds the
     // tokens denominator above (single source, D-09).
+    // Phase 49.4 Plan 03 (D-22 / UI-SPEC E16): before the first poll resolves,
+    // and for any unavailable value, the readout renders an em-dash — not an
+    // empty string or a collapsed element — so no layout shift occurs when
+    // real values land.
     let (active_model, active_provider, server_uptime_secs) = match config_summary() {
         Some(Ok(summary)) => (summary.model, summary.provider, summary.uptime_secs),
-        _ => ("…".to_string(), "…".to_string(), 0u64),
+        _ => ("\u{2014}".to_string(), "\u{2014}".to_string(), 0u64),
     };
 
     // Phase 46.9 Plan 10 (GAP-2/D-07): client-side 1Hz uptime ticker, seeded
@@ -1124,22 +1156,37 @@ pub fn HermesApp() -> Element {
 
     rsx! {
         hud_chrome::HudChrome {}
-        breadcrumb::Breadcrumb {}
         div { class: "app", id: "app",
-            // GAP-11 (47.4-16 Task 3): SysMeta now lives inside `div.app`
-            // rather than as its sibling. `.app` (screens.css) is
-            // `position: relative` with a non-`auto` z-index, which makes
-            // it a stacking context — a sibling readout can never be
-            // layered against anything inside that context no matter what
-            // z-index it carries. That's why a `position: fixed` drawer
-            // (z-index: 200, inside `.app`) was painting UNDER `.sys-meta`
-            // (z-index: 70, a root sibling) despite the numbers saying
-            // otherwise. Reparenting puts both in one stacking context so
-            // the authored layer values finally resolve as intended.
-            sys_meta::SysMeta {
-                model: active_model,
-                provider: active_provider,
-                uptime_secs: ticking_uptime_secs,
+            // GAP-11 (47.4-16 Task 3): SysMeta lives inside `div.app` rather
+            // than as its sibling. `.app` (screens.css) is `position:
+            // relative` with a non-`auto` z-index, which makes it a
+            // stacking context — a sibling readout can never be layered
+            // against anything inside that context no matter what z-index
+            // it carries. That's why a `position: fixed` drawer (z-index:
+            // 200, inside `.app`) was painting UNDER `.sys-meta` (z-index:
+            // 70, a root sibling) despite the numbers saying otherwise.
+            // Reparenting puts both in one stacking context so the
+            // authored layer values finally resolve as intended.
+            //
+            // Phase 49.4 Plan 03 (D-22): Breadcrumb moves in here too,
+            // wrapped together with SysMeta in `.topbar-row` so they become
+            // flex siblings in one bounded row — the wrapper is placed
+            // inside `div.app` (rather than pulling SysMeta back out to be
+            // Breadcrumb's sibling at the root) to preserve the GAP-11
+            // stacking-context fix above.
+            //
+            // Phase 49.4 Plan 11 (D-19): TopbarProfileSwitch mounts between
+            // Breadcrumb and SysMeta — a third flex child of the SAME row,
+            // never a fixed-position element of its own, so Breadcrumb
+            // still shrinks first and SysMeta still never truncates.
+            div { class: "topbar-row",
+                breadcrumb::Breadcrumb {}
+                profile_topbar::TopbarProfileSwitch {}
+                sys_meta::SysMeta {
+                    model: active_model,
+                    provider: active_provider,
+                    uptime_secs: ticking_uptime_secs,
+                }
             }
             screen_router::ScreenRouter {}
         }

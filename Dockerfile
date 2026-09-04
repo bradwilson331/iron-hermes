@@ -17,9 +17,11 @@
 #      default) has no resolvable API key. Exempt for a loopback base_url
 #      (local Ollama / vLLM), so keyless local dev is unaffected.
 #
-# RUNTIME PROCESSES (quick task 260825-dww): the container runs TWO processes.
-#   - `iron_hermes_ui` in the foreground as PID 1. Container health and
-#     lifecycle are tied to this process alone, unchanged from before.
+# RUNTIME PROCESSES (quick task 260825-dww): the container runs TWO workloads
+# under tini as PID 1.
+#   - `iron_hermes_ui`, the web server. Container health and lifecycle are
+#     tied to this process alone, unchanged: when it exits, the container
+#     exits with its status.
 #   - `ironhermes gateway --non-interactive` in the background, best-effort,
 #     hosting the cron / kanban / notifier scheduler loops the UI server does
 #     not. It logs to $IRONHERMES_HOME/logs/gateway.log. The gateway refuses
@@ -27,6 +29,11 @@
 #     state); when that happens the entrypoint warns loudly and keeps serving
 #     the UI — it never takes the container down.
 #   Opt out with -e IRONHERMES_GATEWAY=0.
+#
+#   Both get a graceful SIGTERM on `podman stop` / `docker stop`: tini
+#   forwards the signal to the entrypoint, which signals both and waits up to
+#   IRONHERMES_GATEWAY_STOP_TIMEOUT seconds (default 5) for the gateway to
+#   finish shutting down. See the ENTRYPOINT note at the bottom of this file.
 #
 # Build: podman build -t ironhermes .
 #
@@ -140,14 +147,46 @@ FROM docker.io/library/debian:trixie-slim AS runtime
 # - libasound2t64: ALSA runtime for cpal/rodio audio (renamed from libasound2
 #   by Debian's 64-bit time_t transition; plain `libasound2` is gone in trixie)
 # - curl: compose healthcheck (GET http://localhost:8080/)
+# - tini: PID 1 init. It forwards SIGTERM to its direct child — the entrypoint
+#   script — so that script can run an orderly shutdown of BOTH processes
+#   instead of the signal dying at an app server that knows nothing about the
+#   gateway. It also reaps any genuinely orphaned process, the standard PID-1
+#   duty an app server does not perform. See the ENTRYPOINT note at the bottom
+#   of this file.
+# - vim-tiny: in-container editor, so `podman exec -it ironhermes vi
+#   /opt/data/config.yaml` works for config/.env repair on a live container.
+#   The package registers the /usr/bin/vi alternative; the `ln -s` below is a
+#   belt-and-braces fallback for the case where it does not.
+# - chromium + fonts-liberation: the 11 browser_* tools (Phase 25.1) drive a
+#   REAL chromium process over CDP via chromiumoxide — not WebDriver, not a
+#   bundled Playwright runtime. `find_chromium_binary()`
+#   (crates/ironhermes-tools/src/browser_session.rs) probes, in order:
+#   BROWSER_PATH, CHROMIUM_PATH, config browser.chromium_path, the PATH names
+#   chromium-browser/chromium/google-chrome/chrome, then the Linux platform
+#   paths /usr/bin/chromium, /usr/bin/chromium-browser, /usr/bin/google-chrome,
+#   /snap/bin/chromium. Debian's `chromium` package installs exactly
+#   /usr/bin/chromium, which satisfies both the PATH and platform-path
+#   branches; CHROMIUM_PATH is also pinned below so discovery never depends on
+#   PATH ordering. fonts-liberation stops browser_vision screenshots from
+#   rendering tofu boxes for every glyph.
+#   COST: chromium pulls 171 additional packages on trixie, including
+#   x11-utils and xdg-utils. Measured on a full build: 1.11 GB with it vs
+#   377 MB without — roughly 730 MB, about two thirds of the image, for a
+#   toolset that is disabled by default. Drop chromium, fonts-liberation, and
+#   the CHROMIUM_PATH ENV for deployments that never enable it.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         python3 \
         ca-certificates \
         procps \
         libasound2t64 \
-        curl && \
-    rm -rf /var/lib/apt/lists/*
+        curl \
+        tini \
+        vim-tiny \
+        chromium \
+        fonts-liberation && \
+    rm -rf /var/lib/apt/lists/* && \
+    { [ -e /usr/bin/vi ] || ln -s /usr/bin/vim.tiny /usr/bin/vi; }
 
 # gosu from dedicated stage (avoids apt security-repo dependency)
 COPY --chmod=0755 --from=gosu_source /gosu /usr/local/bin/gosu
@@ -158,6 +197,33 @@ RUN useradd -u 10000 -m -d /opt/data ironhermes
 # CLI (management) + the fullstack web bundle (server binary + public/ assets)
 COPY --from=builder /build/target/release/ironhermes /usr/local/bin/ironhermes
 COPY --from=builder /build/target/dx/iron_hermes_ui/release/web/ /opt/ironhermes/web/
+
+# Skill bundles (read-only reference copies baked into the image).
+#
+# The skills the agent actually loads live on the /opt/data volume: the
+# default search roots are $IRONHERMES_HOME/skills and $HOME/.agents/skills
+# (build_skill_search_paths in ironhermes-core/src/skills.rs), and HOME for
+# the ironhermes user IS /opt/data. Baking them here and seeding the volume
+# from the entrypoint (cp -rn, skip-if-exists) means image upgrades ship new
+# skills while operator edits and Hub installs on the volume are preserved.
+#
+# skills/ and optional-skills/ are kept as SEPARATE roots on purpose:
+#   * skills/ seeds $IRONHERMES_HOME/skills — scanned by every call site,
+#     including the ones that hardcode that root rather than reading
+#     skills.extra_paths.
+#   * optional-skills/ seeds $IRONHERMES_HOME/optional-skills — NOT scanned by
+#     default, which is what "optional" means. Opt in either by adding the
+#     path to skills.extra_paths in config.yaml (which also gives those skills
+#     the Official trust label, since resolve_source keys off an
+#     "optional-skills" path component) or via the web UI's skill-import
+#     wizard, whose Local Path quick-pick already probes exactly this
+#     directory (list_known_skill_dirs in skills_import_api.rs).
+#
+# Layout on both sides is <root>/<category>/<slug>/SKILL.md — the loader's
+# scan depth is bounded at 2, so the category level must stay directly under
+# the search root. Do not nest optional-skills/ inside skills/.
+COPY --chown=ironhermes:ironhermes skills/ /opt/ironhermes/skills/
+COPY --chown=ironhermes:ironhermes optional-skills/ /opt/ironhermes/optional-skills/
 
 # Templates and entrypoints
 COPY --chown=ironhermes:ironhermes env.example /opt/ironhermes/.env.example
@@ -186,11 +252,59 @@ ENV PORT=8080
 # (any case) all disable it. The entrypoint keeps its own `${...:-1}` default
 # regardless, for the case where the script runs outside this image.
 ENV IRONHERMES_GATEWAY=1
+# Pin the chromium binary for the browser_* toolset rather than relying on
+# find_chromium_binary's PATH walk. CHROMIUM_PATH is authoritative when set to
+# a non-empty value: a valid file wins outright, an invalid one returns None
+# (no fall-through), so this must track the chromium package's install path.
+#
+# ONE thing is still required before the browser tools appear in the model's
+# schema list, and it is a deliberate opt-in:
+#   tools.toolsets.browser.enabled: true in config.yaml. The browser toolset
+#   is default-disabled (Phase 25.1 D-04, high blast radius) and a regression
+#   test pins that default.
+#
+# browser.no_sandbox is deliberately NOT set. Chromium's sandbox comes up fine
+# as UID 10000 under rootless podman — verified in this image with
+# `chromium --headless --dump-dom about:blank` (exit 0, sandbox intact). It
+# only fails where the host disables unprivileged user namespaces (Ubuntu
+# 23.10+ AppArmor and similar), or when the container is forced to run as root
+# and chromium refuses outright. The root case is best fixed by not running as
+# root; see docs/CONTAINER.md §6 before disabling the sandbox.
+ENV CHROMIUM_PATH=/usr/bin/chromium
+
+# How long (seconds) to give the background gateway to shut down cleanly after
+# it is sent SIGTERM, before the entrypoint stops waiting and lets the
+# container finish tearing down. Keep it BELOW the container runtime's own stop
+# grace period (`podman stop`/`docker stop` default: 10s, override with
+# `--time`), or the runtime SIGKILLs PID 1 mid-drain and the wait is wasted.
+ENV IRONHERMES_GATEWAY_STOP_TIMEOUT=5
 
 VOLUME ["/opt/data"]
 
 EXPOSE 8080
 
-# Privilege-drop, seed ~/.ironhermes, launch the background gateway
-# (best-effort), then exec the web server on 0.0.0.0:8080.
-ENTRYPOINT ["/usr/local/bin/web-entrypoint.sh"]
+# tini is PID 1; the entrypoint runs as its direct child.
+#
+# tini's job here is signal forwarding: it passes SIGTERM to its direct child,
+# the entrypoint script, instead of the signal dying at an app server that
+# knows nothing about the gateway. It also performs the usual PID-1 reaping of
+# orphaned processes.
+#
+# The entrypoint therefore no longer `exec`s the web server. It runs
+# `iron_hermes_ui` in the background, traps SIGTERM/SIGINT, and on shutdown
+# signals BOTH processes and waits (bounded, see
+# IRONHERMES_GATEWAY_STOP_TIMEOUT) for the gateway to finish. The gateway's own
+# SIGTERM handler (`shutdown_signal` in ironhermes-gateway/src/runner.rs) then
+# runs its ordinary shutdown path — MCP teardown, task drain,
+# `PidLockGuard::Drop` removing gateway.pid.
+#
+# Container health and lifecycle remain tied to `iron_hermes_ui` alone,
+# unchanged: when it exits, the entrypoint stops the gateway and exits with the
+# web server's exit code, which tini propagates as the container's.
+#
+# Side effect of dropping the `exec`: the entrypoint shell now stays alive as
+# the gateway's parent and reaps it, so a gateway that exits early no longer
+# lingers as a zombie for the container's lifetime. `--init` is no longer
+# needed for that (verified: `ps` shows zero Z-state processes after an
+# immediately-refusing gateway).
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/web-entrypoint.sh"]

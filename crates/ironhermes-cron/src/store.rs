@@ -73,8 +73,83 @@ impl From<LegacyCronJob> for CronJob {
             enabled_toolsets: None,
             workdir: None,
             last_delivery_error: None,
+            continuity: false,
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// NewJobSpec — full-surface job creation input (D-15)
+// ---------------------------------------------------------------------------
+
+/// Every argument `JobStore::add_job` takes today, plus the nine advanced
+/// fields (`model`, `provider`, `base_url`, `script`, `no_agent`,
+/// `context_from`, `enabled_toolsets`, `workdir`) and `continuity` — the full
+/// surface of `CronJob`'s creation-time fields. `add_job_spec` is the single
+/// `CronJob { .. }` construction site for job creation; `add_job` builds one
+/// of these from its narrow positional args and delegates.
+///
+/// `ScheduleParsed` has no meaningful default, so this does not derive
+/// `Default` — use [`NewJobSpec::new`] and assign the fields you need.
+#[derive(Debug, Clone)]
+pub struct NewJobSpec {
+    pub name: String,
+    pub prompt: String,
+    pub schedule: ScheduleParsed,
+    pub schedule_display: String,
+    pub deliver: String,
+    pub skills: Vec<String>,
+    pub origin: Option<JobOrigin>,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub base_url: Option<String>,
+    pub script: Option<String>,
+    pub no_agent: bool,
+    pub context_from: Option<Vec<String>>,
+    pub enabled_toolsets: Option<Vec<String>>,
+    pub workdir: Option<String>,
+    pub continuity: bool,
+}
+
+impl NewJobSpec {
+    /// A spec carrying only the required fields. `skills` starts empty,
+    /// `origin` starts `None`, and every advanced field plus `continuity`
+    /// starts at its zero value — callers assign the ones they care about.
+    pub fn new(
+        name: impl Into<String>,
+        prompt: impl Into<String>,
+        schedule: ScheduleParsed,
+        schedule_display: impl Into<String>,
+        deliver: impl Into<String>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            prompt: prompt.into(),
+            schedule,
+            schedule_display: schedule_display.into(),
+            deliver: deliver.into(),
+            skills: Vec::new(),
+            origin: None,
+            model: None,
+            provider: None,
+            base_url: None,
+            script: None,
+            no_agent: false,
+            context_from: None,
+            enabled_toolsets: None,
+            workdir: None,
+            continuity: false,
+        }
+    }
+}
+
+/// An empty or whitespace-only string is indistinguishable from a real value
+/// (e.g. a provider name) once it reaches the resolution layer below, so
+/// both job creation ([`JobStore::add_job_spec`]) and partial updates
+/// ([`JobStore::update_job`]) normalize it to `None` for the five
+/// `Option<String>` advanced fields.
+fn normalize_optional_string(value: Option<String>) -> Option<String> {
+    value.filter(|s| !s.trim().is_empty())
 }
 
 // ---------------------------------------------------------------------------
@@ -89,6 +164,15 @@ pub struct JobUpdate {
     pub schedule: Option<ScheduleParsed>,
     pub schedule_display: Option<String>,
     pub skills: Option<Vec<String>>,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub base_url: Option<String>,
+    pub script: Option<String>,
+    pub workdir: Option<String>,
+    pub context_from: Option<Vec<String>>,
+    pub enabled_toolsets: Option<Vec<String>>,
+    pub no_agent: Option<bool>,
+    pub continuity: Option<bool>,
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +332,67 @@ impl JobStore {
         Ok(())
     }
 
-    /// Create a new job, persist it, and return a clone of the created record.
+    /// Create a new job from a full spec, persist it, and return a clone of
+    /// the created record. The single `CronJob { .. }` construction site for
+    /// job creation — [`JobStore::add_job`] is a thin wrapper that delegates
+    /// here.
+    pub fn add_job_spec(&mut self, spec: NewJobSpec) -> Result<CronJob> {
+        let now = Utc::now();
+        let next_run_at = compute_next_run(&spec.schedule, now)?;
+
+        // Auto-set repeat.times=Some(1) for Once kind
+        let repeat = match &spec.schedule {
+            ScheduleParsed::Once { .. } => RepeatConfig {
+                times: Some(1),
+                completed: 0,
+            },
+            _ => RepeatConfig::default(),
+        };
+
+        let job = CronJob {
+            id: Uuid::new_v4().to_string(),
+            name: spec.name,
+            prompt: spec.prompt,
+            skills: spec.skills,
+            schedule: spec.schedule,
+            schedule_display: spec.schedule_display,
+            repeat,
+            enabled: true,
+            state: JobState::Scheduled,
+            paused_at: None,
+            paused_reason: None,
+            deliver: spec.deliver,
+            origin: spec.origin,
+            created_at: now,
+            next_run_at,
+            last_run_at: None,
+            last_status: None,
+            last_error: None,
+            model: normalize_optional_string(spec.model),
+            provider: normalize_optional_string(spec.provider),
+            base_url: normalize_optional_string(spec.base_url),
+            script: normalize_optional_string(spec.script),
+            no_agent: spec.no_agent,
+            context_from: spec.context_from,
+            enabled_toolsets: spec.enabled_toolsets,
+            workdir: normalize_optional_string(spec.workdir),
+            last_delivery_error: None,
+            continuity: spec.continuity,
+        };
+
+        info!("Adding cron job '{}' (id={})", job.name, job.id);
+        self.jobs.push(job.clone());
+        self.save()?;
+        Ok(job)
+    }
+
+    /// Create a new job carrying only the fields this narrow entry point
+    /// predates: name, prompt, schedule, delivery target, skills, and
+    /// origin. Every one of the nine advanced fields plus `continuity` is
+    /// left at its zero value — no per-job model/provider override, no
+    /// output-dir scripting, no cross-job context, no continuity — silently,
+    /// with no error. Callers needing any of those must use
+    /// [`JobStore::add_job_spec`] instead.
     #[allow(clippy::too_many_arguments)]
     pub fn add_job(
         &mut self,
@@ -260,53 +404,10 @@ impl JobStore {
         skills: Vec<String>,
         origin: Option<JobOrigin>,
     ) -> Result<CronJob> {
-        let now = Utc::now();
-        let next_run_at = compute_next_run(&schedule, now)?;
-
-        // Auto-set repeat.times=Some(1) for Once kind
-        let repeat = match &schedule {
-            ScheduleParsed::Once { .. } => RepeatConfig {
-                times: Some(1),
-                completed: 0,
-            },
-            _ => RepeatConfig::default(),
-        };
-
-        let display = schedule_display.into();
-        let job = CronJob {
-            id: Uuid::new_v4().to_string(),
-            name: name.into(),
-            prompt: prompt.into(),
-            skills,
-            schedule,
-            schedule_display: display,
-            repeat,
-            enabled: true,
-            state: JobState::Scheduled,
-            paused_at: None,
-            paused_reason: None,
-            deliver: deliver.into(),
-            origin,
-            created_at: now,
-            next_run_at,
-            last_run_at: None,
-            last_status: None,
-            last_error: None,
-            model: None,
-            provider: None,
-            base_url: None,
-            script: None,
-            no_agent: false,
-            context_from: None,
-            enabled_toolsets: None,
-            workdir: None,
-            last_delivery_error: None,
-        };
-
-        info!("Adding cron job '{}' (id={})", job.name, job.id);
-        self.jobs.push(job.clone());
-        self.save()?;
-        Ok(job)
+        let mut spec = NewJobSpec::new(name, prompt, schedule, schedule_display, deliver);
+        spec.skills = skills;
+        spec.origin = origin;
+        self.add_job_spec(spec)
     }
 
     /// Partially update a job by id.
@@ -328,6 +429,33 @@ impl JobStore {
         }
         if let Some(skills) = updates.skills {
             job.skills = skills;
+        }
+        if let Some(model) = updates.model {
+            job.model = normalize_optional_string(Some(model));
+        }
+        if let Some(provider) = updates.provider {
+            job.provider = normalize_optional_string(Some(provider));
+        }
+        if let Some(base_url) = updates.base_url {
+            job.base_url = normalize_optional_string(Some(base_url));
+        }
+        if let Some(script) = updates.script {
+            job.script = normalize_optional_string(Some(script));
+        }
+        if let Some(workdir) = updates.workdir {
+            job.workdir = normalize_optional_string(Some(workdir));
+        }
+        if let Some(context_from) = updates.context_from {
+            job.context_from = Some(context_from);
+        }
+        if let Some(enabled_toolsets) = updates.enabled_toolsets {
+            job.enabled_toolsets = Some(enabled_toolsets);
+        }
+        if let Some(no_agent) = updates.no_agent {
+            job.no_agent = no_agent;
+        }
+        if let Some(continuity) = updates.continuity {
+            job.continuity = continuity;
         }
         if let Some(schedule) = updates.schedule {
             // Recompute next_run_at when schedule changes
@@ -808,6 +936,37 @@ mod tests {
         assert_eq!(job.prompt, "do the thing");
         assert!(job.skills.is_empty());
         assert_eq!(job.state, JobState::Scheduled);
+    }
+
+    /// D-16: a job migrated through `LegacyCronJob::from` — which predates
+    /// `continuity` entirely — must come out with `continuity == false`, not
+    /// silently inheriting some other default. `LegacyCronJob` is private to
+    /// this module, so (per plan deviation, see 49.5-03-SUMMARY.md) this test
+    /// lives here rather than in job.rs's `cronjob_serde_tests`, exercising
+    /// the same file-based migration path `store_open_legacy_jobs_json_migrates`
+    /// already uses.
+    #[test]
+    fn legacy_migration_sets_continuity_false() {
+        let (_dir, cron_dir) = tmp_store_dir();
+        fs::create_dir_all(&cron_dir).unwrap();
+
+        let legacy_json = serde_json::json!([{
+            "id": "legacy-id-2",
+            "name": "legacy-job-2",
+            "agent_input": "do the thing",
+            "schedule": "0 9 * * *",
+            "deliver": "local",
+            "enabled": true,
+            "created_at": "2026-01-01T00:00:00Z",
+            "next_run": "2026-01-02T09:00:00Z",
+            "last_run": null,
+            "last_output": null
+        }]);
+        fs::write(cron_dir.join("jobs.json"), legacy_json.to_string()).unwrap();
+
+        let store = JobStore::open(cron_dir).expect("open with legacy");
+        let job = &store.list_jobs()[0];
+        assert!(!job.continuity, "legacy-migrated job must not silently opt into continuity");
     }
 
     // --- add_job() ---
@@ -1499,5 +1658,244 @@ mod store_phase_32_1_tests {
             None,
             "job-a last_delivery_error must remain None"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// job_spec_widening_tests (D-15) — NewJobSpec / add_job_spec / widened JobUpdate
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod job_spec_widening_tests {
+    use super::*;
+    use crate::job::ScheduleParsed;
+    use tempfile::TempDir;
+
+    fn tmp_store() -> (TempDir, JobStore) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cron_dir = dir.path().join("cron");
+        let store = JobStore::open(cron_dir).expect("store");
+        (dir, store)
+    }
+
+    fn interval_sched(minutes: u32) -> ScheduleParsed {
+        ScheduleParsed::Interval {
+            minutes,
+            display: format!("every {}m", minutes),
+        }
+    }
+
+    #[test]
+    fn add_job_wrapper_matches_spec_with_zero_advanced_fields() {
+        let (_dir1, mut store1) = tmp_store();
+        let via_wrapper = store1
+            .add_job(
+                "job-via-wrapper",
+                "do something",
+                interval_sched(60),
+                "every 60m",
+                "local",
+                vec![],
+                None,
+            )
+            .expect("add_job");
+
+        let (_dir2, mut store2) = tmp_store();
+        let spec = NewJobSpec::new(
+            "job-via-wrapper",
+            "do something",
+            interval_sched(60),
+            "every 60m",
+            "local",
+        );
+        let via_spec = store2.add_job_spec(spec).expect("add_job_spec");
+
+        // id and created_at are freshly generated per call and are expected
+        // to differ; everything else must match byte-for-byte.
+        assert_eq!(via_wrapper.name, via_spec.name);
+        assert_eq!(via_wrapper.prompt, via_spec.prompt);
+        assert_eq!(via_wrapper.skills, via_spec.skills);
+        assert_eq!(via_wrapper.schedule, via_spec.schedule);
+        assert_eq!(via_wrapper.schedule_display, via_spec.schedule_display);
+        assert_eq!(via_wrapper.deliver, via_spec.deliver);
+        assert_eq!(via_wrapper.origin, via_spec.origin);
+        assert_eq!(via_wrapper.enabled, via_spec.enabled);
+        assert_eq!(via_wrapper.state, via_spec.state);
+        assert_eq!(via_wrapper.model, via_spec.model);
+        assert_eq!(via_wrapper.provider, via_spec.provider);
+        assert_eq!(via_wrapper.base_url, via_spec.base_url);
+        assert_eq!(via_wrapper.script, via_spec.script);
+        assert_eq!(via_wrapper.no_agent, via_spec.no_agent);
+        assert_eq!(via_wrapper.context_from, via_spec.context_from);
+        assert_eq!(via_wrapper.enabled_toolsets, via_spec.enabled_toolsets);
+        assert_eq!(via_wrapper.workdir, via_spec.workdir);
+        assert_eq!(via_wrapper.continuity, via_spec.continuity);
+        assert_ne!(via_wrapper.id, via_spec.id);
+    }
+
+    #[test]
+    fn add_job_spec_persists_every_advanced_field() {
+        let (dir, mut store) = tmp_store();
+        let cron_dir = dir.path().join("cron");
+
+        let mut spec = NewJobSpec::new(
+            "full-spec-job",
+            "do something",
+            interval_sched(30),
+            "every 30m",
+            "local",
+        );
+        spec.model = Some("claude-3-opus".to_string());
+        spec.provider = Some("anthropic".to_string());
+        spec.base_url = Some("https://api.anthropic.com".to_string());
+        spec.script = Some("check.sh".to_string());
+        spec.no_agent = true;
+        spec.context_from = Some(vec!["job-a".to_string(), "job-b".to_string()]);
+        spec.enabled_toolsets = Some(vec!["web".to_string(), "code".to_string()]);
+        spec.workdir = Some("/home/user/projects".to_string());
+        spec.continuity = true;
+
+        let created = store.add_job_spec(spec).expect("add_job_spec");
+        let created_id = created.id.clone();
+
+        let reopened = JobStore::open(cron_dir).expect("reopen");
+        let job = reopened.get_job(&created_id).expect("job persisted");
+
+        assert_eq!(job.model.as_deref(), Some("claude-3-opus"));
+        assert_eq!(job.provider.as_deref(), Some("anthropic"));
+        assert_eq!(job.base_url.as_deref(), Some("https://api.anthropic.com"));
+        assert_eq!(job.script.as_deref(), Some("check.sh"));
+        assert!(job.no_agent);
+        assert_eq!(
+            job.context_from.as_deref(),
+            Some(["job-a".to_string(), "job-b".to_string()].as_slice())
+        );
+        assert_eq!(
+            job.enabled_toolsets.as_deref(),
+            Some(["web".to_string(), "code".to_string()].as_slice())
+        );
+        assert_eq!(job.workdir.as_deref(), Some("/home/user/projects"));
+        assert!(job.continuity);
+    }
+
+    #[test]
+    fn add_job_spec_normalizes_empty_strings_to_none() {
+        let (_dir, mut store) = tmp_store();
+        let mut spec = NewJobSpec::new(
+            "empty-string-job",
+            "do something",
+            interval_sched(60),
+            "every 60m",
+            "local",
+        );
+        spec.provider = Some(String::new());
+        spec.model = Some(String::new());
+        spec.base_url = Some(String::new());
+        spec.script = Some(String::new());
+        spec.workdir = Some(String::new());
+
+        let job = store.add_job_spec(spec).expect("add_job_spec");
+        assert_eq!(job.provider, None);
+        assert_eq!(job.model, None);
+        assert_eq!(job.base_url, None);
+        assert_eq!(job.script, None);
+        assert_eq!(job.workdir, None);
+    }
+
+    fn full_spec_job(store: &mut JobStore) -> CronJob {
+        let mut spec = NewJobSpec::new(
+            "advanced-job",
+            "do something",
+            interval_sched(60),
+            "every 60m",
+            "local",
+        );
+        spec.model = Some("claude-3-opus".to_string());
+        spec.provider = Some("anthropic".to_string());
+        spec.base_url = Some("https://api.anthropic.com".to_string());
+        spec.script = Some("check.sh".to_string());
+        spec.no_agent = true;
+        spec.context_from = Some(vec!["job-a".to_string()]);
+        spec.enabled_toolsets = Some(vec!["web".to_string()]);
+        spec.workdir = Some("/home/user/projects".to_string());
+        spec.continuity = true;
+        store.add_job_spec(spec).expect("add_job_spec")
+    }
+
+    #[test]
+    fn update_job_applies_each_advanced_field_independently() {
+        let (_dir, mut store) = tmp_store();
+        let job = full_spec_job(&mut store);
+
+        let updated = store
+            .update_job(
+                &job.id,
+                JobUpdate {
+                    model: Some("claude-3-sonnet".to_string()),
+                    ..Default::default()
+                },
+            )
+            .expect("update_job");
+
+        assert_eq!(updated.model.as_deref(), Some("claude-3-sonnet"));
+        // Every other advanced field (and continuity) must be untouched.
+        assert_eq!(updated.provider.as_deref(), Some("anthropic"));
+        assert_eq!(
+            updated.base_url.as_deref(),
+            Some("https://api.anthropic.com")
+        );
+        assert_eq!(updated.script.as_deref(), Some("check.sh"));
+        assert!(updated.no_agent);
+        assert_eq!(
+            updated.context_from.as_deref(),
+            Some(["job-a".to_string()].as_slice())
+        );
+        assert_eq!(
+            updated.enabled_toolsets.as_deref(),
+            Some(["web".to_string()].as_slice())
+        );
+        assert_eq!(updated.workdir.as_deref(), Some("/home/user/projects"));
+        assert!(updated.continuity);
+    }
+
+    #[test]
+    fn update_job_none_leaves_field_unchanged() {
+        let (_dir, mut store) = tmp_store();
+        let job = full_spec_job(&mut store);
+        let before = job.clone();
+
+        let updated = store
+            .update_job(&job.id, JobUpdate::default())
+            .expect("update_job");
+
+        assert_eq!(updated.model, before.model);
+        assert_eq!(updated.provider, before.provider);
+        assert_eq!(updated.base_url, before.base_url);
+        assert_eq!(updated.script, before.script);
+        assert_eq!(updated.no_agent, before.no_agent);
+        assert_eq!(updated.context_from, before.context_from);
+        assert_eq!(updated.enabled_toolsets, before.enabled_toolsets);
+        assert_eq!(updated.workdir, before.workdir);
+        assert_eq!(updated.continuity, before.continuity);
+    }
+
+    #[test]
+    fn update_job_can_clear_a_list_field() {
+        let (_dir, mut store) = tmp_store();
+        let job = full_spec_job(&mut store);
+
+        let updated = store
+            .update_job(
+                &job.id,
+                JobUpdate {
+                    context_from: Some(vec![]),
+                    enabled_toolsets: Some(vec![]),
+                    ..Default::default()
+                },
+            )
+            .expect("update_job");
+
+        assert_eq!(updated.context_from, Some(vec![]));
+        assert_eq!(updated.enabled_toolsets, Some(vec![]));
     }
 }

@@ -696,6 +696,20 @@ pub struct Config {
     /// files (no `display:` key) parse cleanly via `#[serde(default)]`.
     #[serde(default)]
     pub display: DisplayConfig,
+    /// Phase 49.4 Plan 08 (D-14): persisted profile activation-with-scope
+    /// state, read via [`Self::load`]/[`Self::save`] like every other block
+    /// here — the same web config write gate
+    /// (`security.web_config_write_enabled`) already guards every other
+    /// browser-reachable write surface in this config. `None` for `name`
+    /// means "no activation record" — an un-activated install resolves
+    /// every surface from the pre-existing environment-derived active
+    /// profile (`current_profile()`), unchanged. Read by
+    /// `iron_hermes_ui::server::profile_activation_api::resolve_active_profile_for`,
+    /// which owns the scope-coverage rule; this crate stores the record
+    /// only and does not interpret `scope`. Pre-49.4-08 `config.yaml` files
+    /// (no `active_profile:` block) parse cleanly via `#[serde(default)]`.
+    #[serde(default)]
+    pub active_profile: ActiveProfileConfig,
 }
 
 /// Phase 46.9 Plan 11 (GAP-4/GAP-5): footer clock display configuration.
@@ -717,6 +731,28 @@ pub struct DisplayConfig {
     pub timezone: Option<String>,
     pub extra_timezones: Vec<String>,
     pub hour12: Option<bool>,
+}
+
+/// Phase 49.4 Plan 08 (D-14): the on-disk shape of a persisted profile
+/// activation-with-scope record.
+///
+/// Deliberately a plain `Option<String>` pair rather than embedding
+/// `iron_hermes_ui`'s `ActivationScope`/`ActiveProfileRecord` wire DTOs —
+/// this crate cannot depend on `iron_hermes_ui` (the dependency runs the
+/// other direction), so the config-file shape and the wire DTO are two
+/// distinct types that `profile_activation_api.rs`'s
+/// `read_active_profile_record`/`write_active_profile_record` convert
+/// between. `scope` is the literal string `"chat_only"` or `"everywhere"`;
+/// any other value (or `None`) is treated as "no valid record" by the
+/// reader, which falls back to the environment-derived active profile
+/// rather than erroring — this struct itself never validates `scope`, it
+/// only stores what was written.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ActiveProfileConfig {
+    pub name: Option<String>,
+    pub scope: Option<String>,
+    pub updated_at_ms: Option<i64>,
 }
 
 /// Phase 46.1 D-01: global additive MCP-OAuth issuer allowlist configuration.
@@ -2921,6 +2957,22 @@ impl Default for WebConfig {
 #[serde(default)]
 pub struct WebUiConfig {
     pub auth: WebUiAuthConfig,
+    /// D-01 / D-06 (49.1.1): the deployment's public origin(s), used as the
+    /// allowlist for the WebSocket CSWSH defense-in-depth check
+    /// (`iron_hermes_ui::server::kanban_ws::is_cross_origin_ws_upgrade`).
+    /// Deliberately a sibling of `auth`, NOT nested inside it — this value
+    /// is the deployment's public identity, which authentication merely
+    /// consumes, and D-05 names it the future anchor for the OAuth callback
+    /// route, which is not authentication.
+    ///
+    /// `config.yaml`'s list wins when non-empty; otherwise the
+    /// comma-separated `IRONHERMES_WEB_ALLOWED_ORIGINS` env var is read;
+    /// otherwise the value is unconfigured. `["*"]` is the explicit
+    /// escape hatch for a trusted LAN. Layering is resolved in
+    /// `iron_hermes_ui::server::auth::auth_config_from`, the same division
+    /// of labour the `password_hash` doc above describes — this struct only
+    /// carries what's on disk in `config.yaml`.
+    pub allowed_origins: Vec<String>,
 }
 
 /// Phase 47.3 D-06/D-07: single-operator credential + session settings for
@@ -2945,8 +2997,9 @@ pub struct WebUiAuthConfig {
     /// flash-of-wrong-theme.
     pub login_theme: String,
     /// Adds `Secure` to the session cookie. Default `false` — plain-LAN HTTP
-    /// would otherwise never send the cookie back. Cannot safely be `true`
-    /// until this project ships a TLS story (AUTH-DESIGN §7 / Deferred Ideas).
+    /// would otherwise never send the cookie back. Set `true` whenever TLS
+    /// terminates in front of this server, including at a reverse proxy or
+    /// load balancer (D-08 (49.1.1)).
     pub cookie_secure: bool,
     /// Absolute session lifetime, in hours. Default 168 (7 days).
     pub session_ttl_hours: u64,
@@ -3289,6 +3342,18 @@ pub struct SecurityConfig {
     /// A lifecycle action on the Tools page requires BOTH flags to be `true` —
     /// neither one alone suffices (`gateway_control_api::process_control_gate_message`).
     pub web_process_control_enabled: bool,
+    /// Phase 49.5 Plan 05 (T-49.5-05-01): a THIRD, independent opt-in — separate
+    /// from both flags above — that authorizes a remote gateway chat surface
+    /// (Telegram/Discord/Slack/etc., anything that is not `Platform::Local`) to
+    /// create scheduled cron jobs via `/blueprint run`. Defaults `false`
+    /// (closed). Authorizing browser-initiated writes to `config.yaml`
+    /// (`web_config_write_enabled`) is not the same capability as authorizing a
+    /// remote chat message to schedule future agent execution on the
+    /// operator's machine — an operator who enabled the first has not thereby
+    /// consented to the second, so `/blueprint run`'s remote-origin gate never
+    /// consults `web_config_write_enabled`. CLI and TUI (`Platform::Local`) are
+    /// local trusted surfaces and are ungated regardless of this flag.
+    pub remote_blueprint_run_enabled: bool,
 }
 // Phase 49.1 Plan 07 Task 4: the manual `impl Default for SecurityConfig` this
 // struct carried while `redact_secrets: true` was a field (a non-derivable
@@ -6162,6 +6227,38 @@ security:
         assert!(config.security.web_config_write_enabled);
     }
 
+    /// Phase 49.5 Plan 05 (T-49.5-05-01 must_haves #1): `remote_blueprint_run_enabled`
+    /// defaults false — the third, independent security flag.
+    #[test]
+    fn remote_blueprint_run_enabled_defaults_to_false() {
+        let default_sc = SecurityConfig::default();
+        assert!(
+            !default_sc.remote_blueprint_run_enabled,
+            "remote_blueprint_run_enabled default must be false"
+        );
+    }
+
+    /// Phase 49.5 Plan 05 (T-49.5-05-01 must_haves #1): default-closed must be
+    /// proven, not asserted — a config.yaml that omits the key entirely (not
+    /// merely sets it explicitly false) must still deserialize to false. Also
+    /// proves the flag stays independent of `web_config_write_enabled` being
+    /// explicitly true, mirroring `security_web_process_control_default_false`.
+    #[test]
+    fn remote_blueprint_run_enabled_absent_key_deserializes_false() {
+        let yaml = r#"
+security:
+  web_config_write_enabled: true
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert!(
+            !config.security.remote_blueprint_run_enabled,
+            "missing remote_blueprint_run_enabled in YAML must fall back to false, \
+             even when web_config_write_enabled is explicitly true — the two gates \
+             are independent"
+        );
+        assert!(config.security.web_config_write_enabled);
+    }
+
     /// Phase 49.1 Plan 07 Task 4 (D-06/D-09 backward-compat requirement):
     /// `SecurityConfig::redact_secrets` was removed as a dead config flag
     /// (nothing ever read it -- see `API-DATA-003`) but the key had shipped
@@ -6181,9 +6278,8 @@ security:
   web_config_write_enabled: true
   web_process_control_enabled: true
 "#;
-        let config: Config = serde_yaml::from_str(yaml).expect(
-            "a config.yaml carrying the now-removed redact_secrets key must still parse",
-        );
+        let config: Config = serde_yaml::from_str(yaml)
+            .expect("a config.yaml carrying the now-removed redact_secrets key must still parse");
         assert!(
             config.security.web_config_write_enabled,
             "the other security fields in the same YAML block must still deserialize correctly"
@@ -6537,6 +6633,34 @@ display:
             reloaded.web_ui.auth.cookie_secure,
             config.web_ui.auth.cookie_secure
         );
+    }
+
+    /// D-01 / D-06 (49.1.1): a `web_ui:` block that mentions `auth:` but
+    /// omits `allowed_origins` must still deserialize, with the field
+    /// defaulting to an empty vec (`WebUiConfig`'s struct-level
+    /// `#[serde(default)]` covers it, same as `web_ui_missing_from_yaml_falls_back_to_defaults`
+    /// above covers a wholly-absent `web_ui:` key).
+    #[test]
+    fn web_ui_allowed_origins_missing_from_yaml_defaults_to_empty() {
+        let yaml = "web_ui:\n  auth:\n    login_theme: basic\n";
+        let config: Config = serde_yaml::from_str(yaml).expect("Config must deserialize");
+        assert!(
+            config.web_ui.allowed_origins.is_empty(),
+            "allowed_origins must default to an empty vec when omitted from web_ui:"
+        );
+    }
+
+    /// D-06: `allowed_origins` lives on `WebUiConfig`, a sibling of `auth`
+    /// — NOT nested inside `WebUiAuthConfig`. This test fails to compile
+    /// (not just at runtime) if `allowed_origins` is ever moved into
+    /// `WebUiAuthConfig`'s field list, since the struct literal below
+    /// would then be missing a field.
+    #[test]
+    fn web_ui_allowed_origins_is_a_sibling_of_auth() {
+        let _ = WebUiConfig {
+            auth: WebUiAuthConfig::default(),
+            allowed_origins: Vec::new(),
+        };
     }
 
     /// D-06 prohibition: operator credentials must NOT live on `WebConfig`

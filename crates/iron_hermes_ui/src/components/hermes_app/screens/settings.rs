@@ -99,9 +99,6 @@ pub fn ScreenSettings(is_active: bool) -> Element {
                 div { class: "screen-header-left",
                     div { class: "screen-tag", "// MODULE 12" }
                     h1 { class: "screen-title", "Settings" }
-                    p { class: "screen-sub",
-                        "Voice, STT, TTS & VAD settings write back to config.yaml. Model/provider runtime fields are managed in config.yaml. UI preferences persist to localStorage."
-                    }
                 }
             }
 
