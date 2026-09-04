@@ -27,10 +27,11 @@
 
 use super::ProfileDialogContext;
 use super::advanced::AdvancedProfilePane;
+use super::secrets_source_picker::{SecretsSourcePicker, VAULT_REASON_BUILD_LACKS_FEATURE};
 use crate::components::hermes_app::widgets::avatar_picker::AvatarPicker;
 use crate::protocol::{
     BotAvatarDescriptor, CloneFromChoice, CreateProfileRequest, DuplicateProfileRequest, KeyMode,
-    KeyStatus, ProfileHealth, VerifyOutcome, VerifyReport,
+    KeyRow, KeyStatus, ProfileHealth, SecretSource, VerifyOutcome, VerifyReport,
 };
 use dioxus::prelude::*;
 
@@ -78,6 +79,27 @@ const MANUAL_KEY_TARGET: &str = "OPENROUTER_API_KEY";
 const RESERVED_NAMES: [&str; 3] = ["default", "current", "none"];
 #[allow(dead_code)] // used in validate_name_client_side; dead_code fires under --all-features
 const PROFILE_NAME_MAX_LEN: usize = 64;
+
+/// Phase 49.4.1 Plan 02 (D-07): the pre-existing `KeyMode` breadth
+/// control's eyebrow — a named constant (not an inline literal at the rsx!
+/// site) so [`render_step_two_sections_order`] and the actual render can
+/// never drift apart.
+const KEY_INHERITANCE_SECTION_LABEL: &str = "KEY INHERITANCE — FROM ~/.IRONHERMES/.ENV";
+
+/// Phase 49.4.1 Plan 02 (D-07): step 2's section eyebrows in the ORDER they
+/// are emitted — the test seat `wizard_step_two_renders_secrets_source_
+/// above_key_inheritance` asserts `SECRETS SOURCE`'s index here is smaller
+/// than `KEY INHERITANCE`'s. The rsx! below renders `SecretsSourcePicker`
+/// (whose own label is `secrets_source_picker::SECRETS_SOURCE_SECTION_
+/// LABEL`) before [`KEY_INHERITANCE_SECTION_LABEL`], so this list and the
+/// actual render share the same two constants and cannot drift.
+#[allow(dead_code)] // test seat only — consumed by wizard_pure_fn_tests, never by rsx! (the rsx! renders these same two constants directly)
+pub(crate) fn render_step_two_sections_order() -> Vec<&'static str> {
+    vec![
+        super::secrets_source_picker::SECRETS_SOURCE_SECTION_LABEL,
+        KEY_INHERITANCE_SECTION_LABEL,
+    ]
+}
 
 /// Step spine. Display-only in this phase — no click-to-jump (matches the
 /// canvas, which drives `next`/`back` only from the footer).
@@ -248,6 +270,31 @@ fn key_row_status_label_and_class(status: &KeyStatus) -> (&'static str, &'static
     }
 }
 
+/// Phase 49.4.1 Plan 02 (UI-SPEC E5): the resolved-key preview row markup,
+/// lifted out so both the live `Some(Ok(rows))` render and the E5 backstop
+/// (dimmed previous rows while re-resolution runs) share ONE row
+/// implementation — row markup, `--accent-primary` key names, and
+/// `--success`/`--warn` status classes are unchanged from before this plan.
+fn render_key_table_rows(rows: &[KeyRow]) -> Element {
+    rsx! {
+        for row in rows.iter().cloned() {
+            {
+                let (status_label, status_class) = key_row_status_label_and_class(&row.status);
+                rsx! {
+                    div { class: "kn-key-row", key: "{row.name}",
+                        span {
+                            style: "font-size: var(--fs-13); color: var(--accent-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto;",
+                            "{row.name}"
+                        }
+                        span { style: "font-size: var(--fs-13); color: var(--fg-faint);", "{row.masked}" }
+                        span { class: status_class, "{status_label}" }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Phase 47.4 Plan 08 (reuse discipline): the VERIFY doctor-block renderer,
 /// shared verbatim between this wizard's step 3 and the profile detail
 /// drawer's on-demand VERIFY action — the identical Pending/Success/
@@ -402,9 +449,31 @@ pub fn CreateProfileWizard(
     let mut key_mode_kind: Signal<KeyModeKind> = use_signal(|| KeyModeKind::LlmOnly);
     let mut explicit_keys_input: Signal<String> = use_signal(String::new);
     let mut force: Signal<bool> = use_signal(|| false);
-    let mut manual_key_value: Signal<String> = use_signal(String::new);
+    // Phase 49.4.1 Plan 03 (D-04/D-05/D-11): the Provided-keys working copy —
+    // owned here, threaded into `SecretsSourcePicker` (the "one component,
+    // two mounts" rule), and read back out at submit time. Typed rows and a
+    // dropped/chosen file both populate this SAME signal — the picker's own
+    // one key-carrying path.
+    let mut manual_keys: Signal<Vec<(String, String)>> = use_signal(Vec::new);
     let mut create_error: Signal<Option<String>> = use_signal(|| None);
     let mut creating: Signal<bool> = use_signal(|| false);
+
+    // Phase 49.4.1 Plan 02 (D-04): the operator's step-2 secrets-source
+    // choice — registered unconditionally alongside the wizard's other
+    // signals (Pattern E). `RootEnv` pre-selection matches the `default`
+    // pill (UI-SPEC E1: "there is no zero-selection state").
+    let secrets_source: Signal<SecretSource> = use_signal(|| SecretSource::RootEnv);
+    // Phase 49.4.1 Plan 02 (D-10): a plain `use_resource` — never a
+    // `use_server_future` with a `?` early return followed by `.restart()`,
+    // the crate-wide discipline this file's own top-of-file note carries.
+    let availability_resource = use_resource(move || async move {
+        crate::server::profile_api::secrets_source_availability().await
+    });
+    // Phase 49.4.1 Plan 02 (UI-SPEC E5 backstop): the last successfully-
+    // resolved preview rows, held so a source change dims the existing
+    // table instead of clearing it to empty — an empty table must always
+    // mean "this source resolved nothing", never "still working".
+    let mut last_resolved_preview: Signal<Option<Vec<KeyRow>>> = use_signal(|| None);
 
     // ---- Step 3: VERIFY ----
     // `verify_trigger` forces a fresh probe on VERIFY AGAIN without ever
@@ -428,7 +497,6 @@ pub fn CreateProfileWizard(
         KeyModeKind::Explicit => KeyMode::Explicit(explicit_names.clone()),
     };
     let force_val = *force.read();
-    let manual_key_val = manual_key_value.read().clone();
 
     let command_preview = render_command_preview(&name_val, force_val, &current_key_mode);
     let current_step = *step.read();
@@ -449,22 +517,40 @@ pub fn CreateProfileWizard(
     let preview_resource = use_resource(move || {
         let kind = *key_mode_kind.read();
         let explicit_raw = explicit_keys_input.read().clone();
-        let manual = manual_key_value.read().clone();
+        // Phase 49.4.1 Plan 03 (D-04/D-11): reading the picker's working
+        // copy here (before the `async move` block) is what makes Dioxus
+        // re-run this resource natively whenever a typed row or a completed
+        // upload changes it — mirrors `key_mode_kind`/`explicit_keys_input`
+        // immediately above. Never a manual resource-restart call.
+        let manual_rows = manual_keys.read().clone();
+        // Phase 49.4.1 Plan 02 (D-04): reading the signal here (before the
+        // `async move` block) is what makes Dioxus re-run this resource
+        // natively when the source changes — mirrors `key_mode_kind`/
+        // `explicit_keys_input` immediately above. Never a manual
+        // resource-restart call.
+        let source = *secrets_source.read();
         async move {
             let mode = match kind {
                 KeyModeKind::LlmOnly => KeyMode::LlmOnly,
                 KeyModeKind::AllKeys => KeyMode::AllKeys,
                 KeyModeKind::Explicit => KeyMode::Explicit(parse_explicit_names(&explicit_raw)),
             };
-            let manual_keys = if manual.trim().is_empty() {
-                Vec::new()
-            } else {
-                vec![(MANUAL_KEY_TARGET.to_string(), manual)]
-            };
-            crate::server::profile_api::preview_resolved_keys(mode, manual_keys).await
+            let manual_keys =
+                super::secrets_source_picker::submit_ready_manual_keys(&manual_rows);
+            crate::server::profile_api::preview_resolved_keys(mode, manual_keys, source).await
         }
     });
     let preview_snapshot = preview_resource();
+
+    // Phase 49.4.1 Plan 02 (UI-SPEC E5 backstop): mirror a successful
+    // resolution into `last_resolved_preview` so the render below can show
+    // those rows, dimmed, while a source change re-runs the resource above
+    // rather than clearing the table to empty.
+    use_effect(move || {
+        if let Some(Ok(rows)) = preview_resource() {
+            last_resolved_preview.set(Some(rows));
+        }
+    });
 
     let has_llm_key_resolved = matches!(
         &preview_snapshot,
@@ -474,6 +560,39 @@ pub fn CreateProfileWizard(
         })
     );
     let show_manual_key_field = matches!(&preview_snapshot, Some(Ok(_))) && !has_llm_key_resolved;
+
+    // Phase 49.4.1 Plan 03: the pre-existing single-field manual-key flow
+    // always targeted MANUAL_KEY_TARGET as a hard-coded name — that
+    // behaviour stays reachable now that entry lives in the picker's
+    // Provided-keys row: the first time no LLM key resolves, seed an empty
+    // working copy with a row pre-named MANUAL_KEY_TARGET so the "no LLM
+    // provider key resolved" prompt still lands on the same key. Never
+    // overwrites rows the operator has already started typing or uploaded.
+    // Reads `preview_resource()` directly inside the effect (mirrors the
+    // `last_resolved_preview` effect immediately above) — a plain bool
+    // computed earlier in render does not subscribe an effect to anything,
+    // so it would only ever fire once, on mount.
+    use_effect(move || {
+        if let Some(Ok(rows)) = preview_resource() {
+            let resolved = rows.iter().any(|r| {
+                CLIENT_LLM_KEY_ALLOWLIST.contains(&r.name.as_str())
+                    && matches!(r.status, KeyStatus::Inherited | KeyStatus::ManuallySet)
+            });
+            if !resolved && manual_keys.peek().is_empty() {
+                manual_keys.set(vec![(MANUAL_KEY_TARGET.to_string(), String::new())]);
+            }
+        }
+    });
+
+    // Phase 49.4.1 Plan 02 (D-10, UI-SPEC E1): while `availability_resource`
+    // is unresolved, the vault row is born disabled with the build-level
+    // reason rather than momentarily selectable — no row is ever
+    // selectable-before-known. Both mounts (this one and the drawer's) read
+    // from the SAME `secrets_source_availability` server fn.
+    let (vault_available, vault_reason) = match availability_resource() {
+        Some(Ok(availability)) => (availability.vault_available, availability.vault_reason),
+        _ => (false, Some(VAULT_REASON_BUILD_LACKS_FEATURE.to_string())),
+    };
 
     // ---- Step 3 verify probe. ----
     // Only actually calls the server while `step == Verify` — fires on
@@ -531,12 +650,13 @@ pub fn CreateProfileWizard(
             }
         };
         let force_owned = *force.read();
-        let manual_val = manual_key_value.read().clone();
-        let manual_keys: Vec<(String, String)> = if manual_val.trim().is_empty() {
-            Vec::new()
-        } else {
-            vec![(MANUAL_KEY_TARGET.to_string(), manual_val)]
-        };
+        // Phase 49.4.1 Plan 03 (D-04/D-11): the picker's Provided-keys
+        // working copy — blank/partially-blank rows dropped here (UI-SPEC
+        // E4), never raised as a submit-time error.
+        let manual_keys_owned =
+            super::secrets_source_picker::submit_ready_manual_keys(&manual_keys.read());
+        // Phase 49.4.1 Plan 02 (D-04): the operator's step-2 choice.
+        let secrets_source_owned = *secrets_source.read();
         // Phase 50.1 Plan 06 (D-17): clone-from mode replaces the
         // create_profile call with duplicate_profile entirely — the two
         // contracts are incompatible (see protocol.rs's DuplicateProfileRequest
@@ -553,7 +673,7 @@ pub fn CreateProfileWizard(
         let mut creating_sig = creating;
         let mut create_error_sig = create_error;
         let mut step_sig = step;
-        let mut manual_key_value_sig = manual_key_value;
+        let mut manual_keys_sig = manual_keys;
         let name_for_created = name_owned.clone();
         let avatar_descriptor_for_submit = avatar_descriptor;
         spawn(async move {
@@ -571,7 +691,8 @@ pub fn CreateProfileWizard(
                     name: name_owned.clone(),
                     key_mode: key_mode_owned,
                     force: force_owned,
-                    manual_keys,
+                    manual_keys: manual_keys_owned,
+                    secret_source: secrets_source_owned,
                 };
                 crate::server::profile_api::create_profile(req)
                     .await
@@ -580,10 +701,10 @@ pub fn CreateProfileWizard(
             creating_sig.set(false);
             match result {
                 Ok(_created_name) => {
-                    // D-13: drop the typed value immediately after the
-                    // write, whether or not it was actually used — never
-                    // redisplayed, mirroring providers.rs:541-542.
-                    manual_key_value_sig.set(String::new());
+                    // D-13: drop the typed/uploaded rows immediately after
+                    // the write, whether or not they were actually used —
+                    // never redisplayed, mirroring providers.rs:541-542.
+                    manual_keys_sig.set(Vec::new());
                     step_sig.set(WizardStep::Verify);
                     // Phase 49.4 Plan 10 (D-15): the template path writes
                     // the starter persona NOW that the profile exists —
@@ -919,7 +1040,20 @@ pub fn CreateProfileWizard(
                             }
                         }
                     } else if current_step == WizardStep::ConfigKeys {
-                        label { class: "kn-modal-label", "KEY INHERITANCE — FROM ~/.IRONHERMES/.ENV" }
+                        // Phase 49.4.1 Plan 02 (D-04/D-07): SECRETS SOURCE
+                        // renders FIRST — reading order top-to-bottom is
+                        // provenance, then breadth (UI-SPEC "Visual
+                        // hierarchy at the two mounts"). Both mounts share
+                        // ONE component (D-05) and the SAME
+                        // `secrets_source_availability` payload.
+                        SecretsSourcePicker {
+                            source: secrets_source,
+                            vault_available,
+                            vault_reason: vault_reason.clone(),
+                            disabled: *creating.read(),
+                            manual_keys,
+                        }
+                        label { class: "kn-modal-label", "{KEY_INHERITANCE_SECTION_LABEL}" }
                         div {
                             style: "display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-2) 0; cursor: pointer;",
                             onclick: move |_| key_mode_kind.set(KeyModeKind::LlmOnly),
@@ -983,42 +1117,39 @@ pub fn CreateProfileWizard(
                                 }
                             } else {
                                 match &preview_snapshot {
-                                    None => rsx! {
-                                        div { class: "kn-drawer-loading", "Resolving keys from ~/.ironhermes/.env…" }
+                                    // Phase 49.4.1 Plan 02 (UI-SPEC E5
+                                    // backstop): a source change re-runs
+                                    // `preview_resource` (None while
+                                    // in-flight) — if a previous resolution
+                                    // exists, show it dimmed instead of
+                                    // clearing to empty. An empty table must
+                                    // always mean "this source resolved
+                                    // nothing", never "still working".
+                                    None => match last_resolved_preview.read().clone() {
+                                        Some(previous_rows) => rsx! {
+                                            div { style: "opacity: 0.5;", {render_key_table_rows(&previous_rows)} }
+                                        },
+                                        None => rsx! {
+                                            div { class: "kn-drawer-loading", "Resolving keys from ~/.ironhermes/.env…" }
+                                        },
                                     },
                                     Some(Err(_)) => rsx! {
                                         div { class: "kn-modal-error", "Could not read ~/.ironhermes/.env. Check permissions and retry." }
                                     },
-                                    Some(Ok(rows)) => rsx! {
-                                        for row in rows.iter().cloned() {
-                                            {
-                                                let (status_label, status_class) = key_row_status_label_and_class(&row.status);
-                                                rsx! {
-                                                    div { class: "kn-key-row", key: "{row.name}",
-                                                        span {
-                                                            style: "font-size: var(--fs-13); color: var(--accent-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1 1 auto;",
-                                                            "{row.name}"
-                                                        }
-                                                        span { style: "font-size: var(--fs-13); color: var(--fg-faint);", "{row.masked}" }
-                                                        span { class: status_class, "{status_label}" }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    },
+                                    Some(Ok(rows)) => render_key_table_rows(rows),
                                 }
                             }
                         }
                         if show_manual_key_field {
-                            label { class: "kn-modal-label", "MANUAL KEY — {MANUAL_KEY_TARGET}" }
-                            input {
-                                class: "kn-key-input",
-                                r#type: "password",
-                                value: "{manual_key_val}",
-                                oninput: move |evt| manual_key_value.set(evt.value()),
-                            }
+                            // Phase 49.4.1 Plan 03 (D-04/D-05): the manual
+                            // key field this hint used to render inline now
+                            // lives inside the SecretsSourcePicker's
+                            // Provided-keys row (D-05's one component) —
+                            // pre-seeded with MANUAL_KEY_TARGET by the
+                            // effect above, so this stays a pointer to that
+                            // row rather than a second input.
                             div { style: "font-size: var(--fs-11); color: var(--fg-dim);",
-                                "No LLM provider key resolved above. A kanban worker with no provider key crashes at judge-build. Enter one here, or add it to the root .env and switch mode."
+                                "No LLM provider key resolved above. A kanban worker with no provider key crashes at judge-build. Select \"Provided keys\" above and enter one, or add it to the root .env and switch mode."
                             }
                         }
                         label { class: "kn-modal-checkbox",
@@ -1032,6 +1163,14 @@ pub fn CreateProfileWizard(
                         }
                         if let Some(err) = create_error.read().clone() {
                             div { class: "kn-modal-error", "{err}" }
+                            // Phase 49.4.1 Plan 02 (D-06, UI-SPEC Copywriting
+                            // Contract): the secondary explanatory line
+                            // beneath the D-06 fail-loud box — same
+                            // `.kn-modal-hint--info` treatment the drawer's
+                            // SYNC error uses.
+                            div { class: "kn-modal-hint--info",
+                                "Add the key to that source, or pick a different source, then try again."
+                            }
                         }
                     } else {
                         // ---- Step 3: VERIFY ----
@@ -1291,6 +1430,29 @@ mod wizard_pure_fn_tests {
         assert_eq!(
             render_command_preview("   ", false, &KeyMode::LlmOnly),
             "scripts/make-kanban-profile name"
+        );
+    }
+
+    /// D-07: step 2's SECRETS SOURCE eyebrow must render ABOVE the
+    /// pre-existing KEY INHERITANCE eyebrow — provenance before breadth,
+    /// per UI-SPEC "Visual hierarchy at the two mounts". Machine-checkable
+    /// via the SAME ordered definition the rsx! mounts from
+    /// ([`render_step_two_sections_order`]), so the seat and the actual
+    /// render cannot drift apart.
+    #[test]
+    fn wizard_step_two_renders_secrets_source_above_key_inheritance() {
+        let order = render_step_two_sections_order();
+        let secrets_source_idx = order
+            .iter()
+            .position(|s| *s == super::super::secrets_source_picker::SECRETS_SOURCE_SECTION_LABEL)
+            .expect("SECRETS SOURCE eyebrow must be present");
+        let key_inheritance_idx = order
+            .iter()
+            .position(|s| *s == KEY_INHERITANCE_SECTION_LABEL)
+            .expect("KEY INHERITANCE eyebrow must be present");
+        assert!(
+            secrets_source_idx < key_inheritance_idx,
+            "SECRETS SOURCE must render before KEY INHERITANCE: {order:?}"
         );
     }
 }

@@ -138,17 +138,28 @@ fn profile_api_never_mutates_env_or_force_unwraps_in_production_code() {
 }
 
 /// D-06: no per-profile secret-storage path anywhere in this file — not a
-/// namespaced write, not even a mention of the word. Whole-file check (not
-/// scoped to production code) since the tests must not reference it either.
+/// namespaced write, not even a call into the vault crate.
+///
+/// Phase 49.4.1 Plan 02 (D-10): narrowed from a blanket "no mention of the
+/// word `vault`" ban — see `tests/profile_key_masking.rs`'s copy of this
+/// test for the full rationale (this phase's own CONTEXT.md/threat model
+/// sanctions a READ-ONLY vault-availability check; only an actual vault
+/// STORAGE call site remains forbidden).
 #[test]
 fn profile_api_never_mentions_vault_storage() {
     let src = read("src/server/profile_api.rs");
-    assert_eq!(
-        src.matches("vault").count(),
-        0,
-        "profile_api.rs must never reference vault storage — D-06 keeps keys \
-         in the plaintext profile .env only"
-    );
+    for forbidden in [
+        "ironhermes_vault",
+        "RustyVault",
+        "resolve_vault_config",
+        "apply_vault_fallback",
+    ] {
+        assert!(
+            !src.contains(forbidden),
+            "profile_api.rs must never reference vault storage — D-06 keeps keys \
+             in the plaintext profile .env only (found {forbidden:?})"
+        );
+    }
 }
 
 /// T-47.4-03-I2: the atomic-0600 idiom's signature markers are present —
@@ -249,24 +260,33 @@ fn render_profile_env_verifies_its_own_output_against_the_real_parser() {
     );
 }
 
-/// Pins both production call sites to propagate the fallible render result
+/// Pins every production call site to propagate the fallible render result
 /// rather than unwrap it, so a self-check failure always refuses the write.
 ///
 /// Phase 48.2 Plan 07 (D-09 checkpoint, option b): `render_profile_env` was
 /// lifted into a thin wrapper delegating to `render_profile_env_with_stamp`
 /// (see that fn's own module doc) so the tool-credentials module can thread
 /// an extra provenance stamp through the SAME write core rather than
-/// forking it. The two write-implementation call sites this test pins are
-/// therefore split across both names now: `create_profile_impl` still calls
+/// forking it. The write-implementation call sites this test pins were
+/// therefore split across both names: `create_profile_impl` still calls
 /// `render_profile_env(` directly, and `save_profile_key_impl_with_stamp`
-/// (the new shared core `save_profile_key_impl` delegates to) calls
-/// `render_profile_env_with_stamp(`. The wrapper's own one-line delegation
-/// — `render_profile_env_with_stamp(name, entries, None)`, a tail
-/// expression inside `render_profile_env`'s body — is a THIRD textual hit
-/// but not a `?`-propagated call site (it has no trailing `?;`; the
-/// function's own `-> Result<String, String>` signature is what propagates
-/// it), so it is excluded from the count by exact line match, and checked
-/// separately below.
+/// (the shared core `save_profile_key_impl` delegates to) calls
+/// `render_profile_env_with_stamp(`.
+///
+/// Phase 49.4.1 (D-01/D-02): `sync_profile_secrets_impl` adds a THIRD real
+/// call site — `render_profile_env_with_stamp(name, &merged_sorted, None)`
+/// — reusing the same shared renderer rather than a second implementation
+/// (see that fn's own doc comment). This is the count growing legitimately,
+/// not the discipline weakening: every call site pinned below still must
+/// propagate via `?`, never unwrap.
+///
+/// The wrapper's own one-line delegation —
+/// `render_profile_env_with_stamp(name, entries, None)`, a tail expression
+/// inside `render_profile_env`'s body — is a textual hit but not a
+/// `?`-propagated call site (it has no trailing `?;`; the function's own
+/// `-> Result<String, String>` signature is what propagates it), so it is
+/// excluded from the count by exact line match, and checked separately
+/// below.
 #[test]
 fn both_write_paths_propagate_the_render_result() {
     let stripped = strip_comment_lines(&profile_api_production_src());
@@ -284,8 +304,8 @@ fn both_write_paths_propagate_the_render_result() {
 
     assert_eq!(
         call_sites.len(),
-        2,
-        "expected exactly 2 production call sites of render_profile_env(/render_profile_env_with_stamp(, found {}: {call_sites:?}",
+        3,
+        "expected exactly 3 production call sites of render_profile_env(/render_profile_env_with_stamp(, found {}: {call_sites:?}",
         call_sites.len()
     );
 

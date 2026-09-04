@@ -13,6 +13,7 @@
 pub mod advanced;
 pub mod create_dialog;
 pub mod edit_dialog;
+pub mod secrets_source_picker;
 pub mod switcher;
 
 /// Phase 50.1 Plan 02 (D-10): selects which caller is rendering the shared

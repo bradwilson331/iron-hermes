@@ -202,14 +202,30 @@ fn profile_detail_carries_no_reachability_field() {
 }
 
 /// D-06: no per-profile secret-storage path anywhere in this file — not a
-/// namespaced write, not even a mention of the word.
+/// namespaced write, not even a call into the vault crate.
+///
+/// Phase 49.4.1 Plan 02 (D-10): narrowed from a blanket "no mention of the
+/// word `vault`" ban — this phase's own CONTEXT.md/threat model sanctions a
+/// READ-ONLY vault-availability check (`compute_secrets_source_availability`
+/// inspecting `config.vault.enabled` and `cfg!(feature = "rusty-vault")`) so
+/// the picker's Vault row can report WHY it's disabled instead of silently
+/// omitting it (T-49.4.1-08: "no vault call site is added — D-10 only READS
+/// whether the feature and flag are present"). What must still never appear
+/// is an actual vault STORAGE call site — the strings below are exactly the
+/// ones a `RustyVaultStore`/`ironhermes_vault` integration would introduce.
 #[test]
 fn profile_api_never_mentions_vault_storage() {
     let src = read("src/server/profile_api.rs");
-    assert_eq!(
-        src.matches("vault").count(),
-        0,
-        "profile_api.rs must never reference vault storage — D-06 keeps keys \
-         in the plaintext profile .env only"
-    );
+    for forbidden in [
+        "ironhermes_vault",
+        "RustyVault",
+        "resolve_vault_config",
+        "apply_vault_fallback",
+    ] {
+        assert!(
+            !src.contains(forbidden),
+            "profile_api.rs must never reference vault storage — D-06 keeps keys \
+             in the plaintext profile .env only (found {forbidden:?})"
+        );
+    }
 }

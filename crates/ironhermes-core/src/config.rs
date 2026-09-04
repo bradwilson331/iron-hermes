@@ -710,6 +710,23 @@ pub struct Config {
     /// (no `active_profile:` block) parse cleanly via `#[serde(default)]`.
     #[serde(default)]
     pub active_profile: ActiveProfileConfig,
+    /// Phase 49.4.1 (D-01/D-05): a profile's remembered secrets-source
+    /// selection — which of `root_env` / `container_env` / `vault` /
+    /// `provided` (see `iron_hermes_ui::protocol::SecretSource::config_str`,
+    /// this crate cannot depend on that wasm-facing crate) a re-sync last
+    /// used, so re-opening the picker pre-selects it. MUST be a modelled
+    /// field, not a raw unmodeled YAML key: `update_profile_config_impl`
+    /// performs a full typed `Config::load_from` -> `cfg.save_to` round-trip
+    /// on the same file, and an unmodeled top-level key would be silently
+    /// dropped by it (`Config` carries no `deny_unknown_fields`, so unknown
+    /// keys are dropped, not rejected). `None` means "no remembered source"
+    /// — either never synced, or a hand-edited/legacy value that failed to
+    /// parse; the closed four-value set is enforced at the call site
+    /// (`SecretSource::from_config_str`), not by this crate. Pre-49.4.1
+    /// `config.yaml` files (no `secrets_source:` key) parse cleanly via
+    /// `#[serde(default)]`.
+    #[serde(default)]
+    pub secrets_source: Option<String>,
 }
 
 /// Phase 46.9 Plan 11 (GAP-4/GAP-5): footer clock display configuration.

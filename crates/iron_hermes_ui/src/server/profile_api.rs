@@ -72,7 +72,15 @@ use crate::protocol::{ProfileGap, ProfileHealth};
 use crate::protocol::{
     CreateProfileRequest, DuplicateProfileRequest, KeyMode, KeyRow, KeyStatus,
     ProfileConfigWritePayload, ProfileDetail, ProfilePersona, ProfileRow, ProfileSkillRow,
+    SecretSource, SecretsSourceAvailability, SyncProfileSecretsRequest, SyncProfileSecretsResponse,
 };
+
+// Phase 49.4.1: `root_provider_connection_fields` builds a
+// `BTreeMap<String, serde_yaml::Mapping>` — deterministic iteration order
+// for the registry mirror, unlike `HashMap`. Only reachable from the
+// `feature = "server"`-gated fns below.
+#[cfg(feature = "server")]
+use std::collections::BTreeMap;
 
 /// Phase 47.4 Plan 01 (D-08): the five-name LLM-provider key allowlist.
 /// Mirrors `scripts/make-kanban-profile:39` `DEFAULT_KEYS` exactly, same
@@ -233,6 +241,58 @@ pub(crate) fn read_env_keys(path: &Path) -> Result<HashMap<String, String>, Stri
         out.insert(k, v);
     }
     Ok(out)
+}
+
+/// Phase 49.4.1 Plan 03 (D-11): the UI-SPEC Copywriting Contract's locked
+/// error string for a malformed provided-keys upload — declared once here so
+/// the server response and any client-side fallback both reference this
+/// constant rather than restating the words. Never interpolates anything
+/// from the uploaded file.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) const UPLOADED_DOTENV_PARSE_ERROR: &str =
+    "That file has a malformed line — content withheld. Fix the file (KEY=value per line) and try again.";
+
+/// Phase 49.4.1 Plan 03 (D-04/D-11): parses a dropped/chosen file's bytes as
+/// dotenv — the fourth secrets source, "Provided keys". Uses the SAME real
+/// `dotenvy` reader `read_env_keys` and `verify_env_round_trip` use (via
+/// `dotenvy::from_read_iter` over an in-memory `Cursor`, never a second
+/// hand-rolled parser), so the upload cannot disagree with what the writer
+/// and the dispatch gate will later read.
+///
+/// Every parse or validation error returns the single fixed
+/// [`UPLOADED_DOTENV_PARSE_ERROR`] (for a malformed line or non-UTF-8 bytes)
+/// or a message naming only the offending key NAME (for a name/value
+/// rejected by the existing [`validate_key_name`]/[`validate_key_value`]) —
+/// this fn never interpolates a `dotenvy::Error` or any raw byte of the
+/// input, mirroring `read_env_keys`'s own D-13 discipline (this is the
+/// fourth instance of that discipline in this codebase, per the threat
+/// register). The discard is structural: the iteration error is bound to a
+/// wildcard at the match site, so no binding exists in scope that a later
+/// edit could accidentally format.
+///
+/// All-or-nothing: the first malformed line rejects the whole input rather
+/// than skipping it — a half-imported key set is a silent partial success,
+/// the exact defect class this phase exists to remove (UI-SPEC E3
+/// "Partial/incomplete"). A file that parses and validates cleanly but
+/// supplies no key for the profile's main provider is NOT rejected here —
+/// that is D-06's job, enforced later by the post-write dispatch-gate
+/// re-check in `create_profile_impl`/`sync_profile_secrets_impl`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn parse_uploaded_dotenv(bytes: &[u8]) -> Result<Vec<(String, String)>, String> {
+    // Reject non-UTF-8 up front with the same fixed message, rather than
+    // producing a decode error whose Display could embed the offending
+    // bytes.
+    if std::str::from_utf8(bytes).is_err() {
+        return Err(UPLOADED_DOTENV_PARSE_ERROR.to_string());
+    }
+    let mut pairs = Vec::new();
+    for item in dotenvy::from_read_iter(std::io::Cursor::new(bytes)) {
+        let (key, value) = item.map_err(|_| UPLOADED_DOTENV_PARSE_ERROR.to_string())?;
+        validate_key_name(&key).map_err(|e| format!("invalid manual key: {e}"))?;
+        validate_key_value(&value).map_err(|e| format!("invalid manual key '{key}': {e}"))?;
+        pairs.push((key, value));
+    }
+    Ok(pairs)
 }
 
 /// Phase 47.4 Plan 11 (GAP-1): whether a profile's configured MAIN provider
@@ -697,12 +757,20 @@ pub(crate) fn write_env_atomic_0600(final_path: &Path, contents: &str) -> std::i
 /// `#[server]`-wrapped fn" precedent (`provider_config_api.rs`'s
 /// `merge_provider_payload`, `tests/kanban_board_read.rs`'s own module
 /// doc). Called from `create_profile` inside `spawn_blocking`.
+///
+/// Phase 49.4.1 Plan 02 (D-04/D-06/D-09): `secret_source` resolves the key
+/// map through the SAME `build_source_map` the sync path uses — the create
+/// path is its second caller, not a parallel copy — and a post-write
+/// dispatch-gate re-check returns `Err` (never `Ok`) when the chosen source
+/// resolves no key for the profile's main provider, exactly mirroring
+/// `sync_profile_secrets_impl`'s D-06 check.
 #[cfg(feature = "server")]
 pub(crate) fn create_profile_impl(
     name: &str,
     key_mode: &KeyMode,
     force: bool,
     manual_keys: Vec<(String, SecretString)>,
+    secret_source: SecretSource,
     config: &ironhermes_core::config::Config,
 ) -> Result<Vec<KeyRow>, String> {
     // Step 1 (D-08): validate via the real ironhermes_core fn, reused not
@@ -741,7 +809,11 @@ pub(crate) fn create_profile_impl(
     // config.yaml: byte copy from root — never round-tripped through a
     // YAML (de)serializer, which would silently rewrite unknown keys
     // (mirrors the script's own :87-94 behavior, including the SKIPPED
-    // branch when no root config.yaml exists yet to copy).
+    // branch when no root config.yaml exists yet to copy). Phase 49.4.1
+    // Plan 02: this is deliberately NOT followed by a `mirror_providers_
+    // subtree` call — at creation the profile's config.yaml IS a byte copy
+    // of root's, so its registry already matches and mirroring would be a
+    // no-op that only costs the file its comments.
     if !existing_config || force {
         let root_config_path = ironhermes_core::get_hermes_home().join("config.yaml");
         if root_config_path.is_file() {
@@ -750,12 +822,13 @@ pub(crate) fn create_profile_impl(
         }
     }
 
-    // Resolve inherited keys from the root .env (a missing root .env
-    // resolves nothing — not an error), then overlay manual_keys (manual
+    // Phase 49.4.1 Plan 02 (D-04/D-09): resolve keys from the
+    // OPERATOR-CHOSEN source via the SAME build_source_map the sync path
+    // uses (a missing root .env still resolves nothing — not an error, per
+    // build_source_map's RootEnv arm), then overlay manual_keys (manual
     // wins for a name present in both).
-    let root_env_path = ironhermes_core::get_hermes_home().join(".env");
-    let root_env_map = read_env_keys(&root_env_path).map_err(|e| format!("read root .env: {e}"))?;
-    let mut resolved = resolve_inherited_keys(&root_env_map, key_mode, config);
+    let source_map = build_source_map(secret_source, config, &[])?;
+    let mut resolved = resolve_inherited_keys(&source_map, key_mode, config);
     let manual_names: std::collections::HashSet<String> =
         manual_keys.iter().map(|(k, _)| k.clone()).collect();
     for (key, secret) in &manual_keys {
@@ -802,6 +875,24 @@ pub(crate) fn create_profile_impl(
         })
         .collect();
     rows.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // Phase 49.4.1 Plan 02 (D-06): post-write loud failure — structurally
+    // identical to sync_profile_secrets_impl's own Step 8. Reports failure
+    // AFTER the directory and files exist: the profile is left in place so
+    // the drawer's SYNC can repair it without a re-create (D-05). Never
+    // deletes the profile directory on this branch.
+    if let ironhermes_core::dispatch_gate::DispatchDecision::Refuse { .. } =
+        ironhermes_core::dispatch_gate::evaluate_profile_dispatch(name)
+    {
+        let profile_provider = ironhermes_core::config::Config::load_from(&config_path)
+            .map(|c| c.model.provider)
+            .unwrap_or_default();
+        return Err(format!(
+            "\u{2715} {} has no key for provider \"{profile_provider}\" — profile not created.",
+            secret_source.label()
+        ));
+    }
+
     Ok(rows)
 }
 
@@ -842,6 +933,7 @@ pub async fn create_profile(req: CreateProfileRequest) -> Result<Vec<KeyRow>, Se
             key_mode,
             force,
             manual_keys,
+            secret_source,
         } = req;
         // D-13: wrap manual key values in SecretString the moment they are
         // available — before they cross into spawn_blocking, and before
@@ -852,7 +944,7 @@ pub async fn create_profile(req: CreateProfileRequest) -> Result<Vec<KeyRow>, Se
             .collect();
 
         let rows = tokio::task::spawn_blocking(move || {
-            create_profile_impl(&name, &key_mode, force, manual_keys, &config)
+            create_profile_impl(&name, &key_mode, force, manual_keys, secret_source, &config)
         })
         .await
         .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
@@ -865,6 +957,419 @@ pub async fn create_profile(req: CreateProfileRequest) -> Result<Vec<KeyRow>, Se
         let _ = req;
         Err(ServerFnError::new(
             "create_profile unavailable without `server` feature",
+        ))
+    }
+}
+
+// ============================================================================
+// Phase 49.4.1 (D-01/D-02/D-03/D-06/D-08/D-09): sync_profile_secrets — a
+// repeatable re-sync of an EXISTING profile's provider registry + keys from
+// a chosen SecretSource. Tracer slice: wires ONLY RootEnv/ContainerEnv end
+// to end; Vault/Provided return a stated-reason Err until Plan 02/03 fill
+// them within this phase.
+// ============================================================================
+
+/// Phase 49.4.1 (D-03): the four connection-field keys this phase's
+/// registry mirror is allowed to touch — never `default_model` or
+/// `fallback_providers`.
+#[cfg(feature = "server")]
+pub(crate) const MIRRORED_PROVIDER_CONNECTION_FIELDS: [&str; 4] =
+    ["base_url", "api_key_env", "api_mode", "disabled"];
+
+/// Phase 49.4.1 (D-03): walks `config.providers` and builds, per provider, a
+/// `serde_yaml::Mapping` containing ONLY [`MIRRORED_PROVIDER_CONNECTION_FIELDS`]
+/// — never `default_model`/`fallback_providers`, which a profile may have
+/// deliberately overridden (root `openrouter.default_model` is an opus
+/// model while a profile may pin a haiku one, and the per-provider value
+/// overrides `model.default`). A field is present in the mapping only when
+/// the root entry's corresponding `Option` is `Some`; an absent root value
+/// leaves the profile's existing value alone rather than clearing it.
+#[cfg(feature = "server")]
+pub(crate) fn root_provider_connection_fields(
+    config: &ironhermes_core::config::Config,
+) -> BTreeMap<String, serde_yaml::Mapping> {
+    let mut out = BTreeMap::new();
+    for (name, prov) in &config.providers {
+        let mut entry = serde_yaml::Mapping::new();
+        if let Some(base_url) = &prov.base_url {
+            entry.insert(
+                serde_yaml::Value::String("base_url".to_string()),
+                serde_yaml::Value::String(base_url.clone()),
+            );
+        }
+        if let Some(api_key_env) = &prov.api_key_env {
+            entry.insert(
+                serde_yaml::Value::String("api_key_env".to_string()),
+                serde_yaml::Value::String(api_key_env.clone()),
+            );
+        }
+        if let Some(api_mode) = &prov.api_mode {
+            let value = serde_yaml::to_value(api_mode).unwrap_or(serde_yaml::Value::Null);
+            entry.insert(serde_yaml::Value::String("api_mode".to_string()), value);
+        }
+        if let Some(disabled) = prov.disabled {
+            entry.insert(
+                serde_yaml::Value::String("disabled".to_string()),
+                serde_yaml::Value::Bool(disabled),
+            );
+        }
+        debug_assert!(
+            entry
+                .keys()
+                .all(|k| MIRRORED_PROVIDER_CONNECTION_FIELDS.contains(&k.as_str().unwrap_or_default())),
+            "root_provider_connection_fields must only ever populate the D-03 connection-field allowlist"
+        );
+        out.insert(name.clone(), entry);
+    }
+    out
+}
+
+/// Phase 49.4.1 (D-09): the pure, testable seat — keeps only names ending in
+/// one of [`ROOT_KEY_PATTERN_SUFFIXES`] and drops empty values. Takes an
+/// owned iterator so a test never has to mutate the process environment.
+#[cfg(feature = "server")]
+pub(crate) fn container_env_key_map_from<I: IntoIterator<Item = (String, String)>>(
+    vars: I,
+) -> HashMap<String, String> {
+    vars.into_iter()
+        .filter(|(k, v)| {
+            !v.is_empty()
+                && ROOT_KEY_PATTERN_SUFFIXES
+                    .iter()
+                    .any(|suffix| k.ends_with(suffix))
+        })
+        .collect()
+}
+
+/// Phase 49.4.1 (D-09): the one-line production wrapper over the real
+/// process environment — the container-environment source's raw candidate
+/// map, T-49.4.1-02's mitigation for the "an `AllKeys` sweep must not
+/// persist the hosting platform's own env vars" threat.
+#[cfg(feature = "server")]
+pub(crate) fn container_env_key_map() -> HashMap<String, String> {
+    container_env_key_map_from(std::env::vars())
+}
+
+/// Phase 49.4.1 (D-01/D-07): resolves the raw candidate map for `source`,
+/// independent of `KeyMode` (D-07's orthogonality — breadth filtering
+/// happens downstream in [`resolve_inherited_keys`]).
+///
+/// Phase 49.4.1 Plan 03 (D-04/D-10/D-11): `Provided` builds its map directly
+/// from the caller-supplied `manual_keys` slice — the SAME slice manual
+/// typed fields and an uploaded file's parsed pairs both populate, so there
+/// is exactly one key-carrying path, never two. `Vault` returns an `Err`
+/// carrying the same availability reason [`compute_secrets_source_availability`]
+/// reports, so a request that somehow selects the unavailable vault source
+/// fails closed with the explanation the UI already shows, rather than
+/// resolving an empty map and falling through to a confusing empty-
+/// resolution message. No vault call site is added here — this reads only
+/// the same build-feature/config-flag facts the availability computation
+/// already reads.
+#[cfg(feature = "server")]
+pub(crate) fn build_source_map(
+    source: SecretSource,
+    config: &ironhermes_core::config::Config,
+    manual_keys: &[(String, String)],
+) -> Result<HashMap<String, String>, String> {
+    match source {
+        SecretSource::RootEnv => {
+            let root_env_path = ironhermes_core::get_hermes_home().join(".env");
+            read_env_keys(&root_env_path).map_err(|e| format!("read root .env: {e}"))
+        }
+        SecretSource::ContainerEnv => Ok(container_env_key_map()),
+        SecretSource::Provided => Ok(manual_keys.iter().cloned().collect()),
+        SecretSource::Vault => {
+            let availability = compute_secrets_source_availability(config);
+            Err(availability
+                .vault_reason
+                .unwrap_or_else(|| "Vault is not available".to_string()))
+        }
+    }
+}
+
+/// Phase 49.4.1 Plan 02 (D-10): the pure inner seat — takes
+/// `feature_present` as a parameter (rather than evaluating `cfg!` itself)
+/// so a test can exercise the config-level branch under either feature set.
+/// The build-level reason wins when both blockers apply: a feature-absent
+/// build cannot be repaired by flipping a config flag, so telling the
+/// operator to flip it would send them down a dead end.
+#[cfg(feature = "server")]
+pub(crate) fn compute_secrets_source_availability_with(
+    feature_present: bool,
+    config: &ironhermes_core::config::Config,
+) -> SecretsSourceAvailability {
+    use crate::components::hermes_app::screens::profile_shared::secrets_source_picker::{
+        VAULT_REASON_BUILD_LACKS_FEATURE, VAULT_REASON_DISABLED_IN_CONFIG,
+    };
+
+    if !feature_present {
+        SecretsSourceAvailability {
+            vault_available: false,
+            vault_reason: Some(VAULT_REASON_BUILD_LACKS_FEATURE.to_string()),
+        }
+    } else if !config.vault.enabled {
+        SecretsSourceAvailability {
+            vault_available: false,
+            vault_reason: Some(VAULT_REASON_DISABLED_IN_CONFIG.to_string()),
+        }
+    } else {
+        SecretsSourceAvailability {
+            vault_available: true,
+            vault_reason: None,
+        }
+    }
+}
+
+/// Phase 49.4.1 Plan 02 (D-10): server-computed vault availability, so both
+/// mounts (wizard step 2 and the profile detail drawer) learn the same
+/// answer from one place — replaces Plan 01's inline build-time constant.
+/// Pure and disk-I/O-free (given an already-loaded `Config`), so it is
+/// directly unit-testable, mirroring `check_profile_write_gate` /
+/// `classify_profile_health`'s "test the logic layer" discipline in this
+/// file. Delegates to [`compute_secrets_source_availability_with`], passing
+/// `cfg!(feature = "rusty-vault")` as a real evaluated constant rather than
+/// `#[cfg]`-splitting this fn's body — both branches type-check under
+/// either feature set and this stays a single testable seat.
+#[cfg(feature = "server")]
+pub(crate) fn compute_secrets_source_availability(
+    config: &ironhermes_core::config::Config,
+) -> SecretsSourceAvailability {
+    compute_secrets_source_availability_with(cfg!(feature = "rusty-vault"), config)
+}
+
+/// Phase 49.4.1 Plan 02 (D-10): the `SECRETS SOURCE` section's vault-
+/// availability READ. Follows `fetch_profile_detail`'s ungated-read
+/// precedent — a fresh `Config::load()`, no `check_profile_write_gate` call
+/// (that gate belongs to writes, not reads).
+#[server]
+pub async fn secrets_source_availability() -> Result<SecretsSourceAvailability, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        let config = ironhermes_core::config::Config::load()
+            .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
+        Ok(compute_secrets_source_availability(&config))
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        Err(ServerFnError::new(
+            "secrets_source_availability unavailable without `server` feature",
+        ))
+    }
+}
+
+/// Phase 49.4.1 (D-01/D-02/D-03/D-06/D-08): the sync's pure/synchronous/
+/// disk-only impl — mirrors `create_profile_impl`'s testability precedent
+/// so it is directly unit-testable without a server runtime. Refuses on a
+/// NON-existing profile dir (sync targets an EXISTING profile, which is
+/// what makes it repair a profile that has already drifted from root);
+/// mirrors the `providers:` connection fields from `config` (the freshly-
+/// loaded ROOT config the caller passes in); additively merges the
+/// resolved keys into the profile's `.env` (D-02 — a key already present
+/// that the source does not supply is never removed); and re-checks
+/// `evaluate_profile_dispatch` after the write so a source that resolves
+/// nothing for the profile's main provider returns `Err`, never a silent
+/// `Ok` into a still-broken profile (D-06). Never rolls the write back on
+/// that `Err` — the write is the best-effort repair and the sync is
+/// idempotent, so a second attempt after adding the key succeeds.
+#[cfg(feature = "server")]
+pub(crate) fn sync_profile_secrets_impl(
+    name: &str,
+    source: SecretSource,
+    key_mode: &KeyMode,
+    manual_keys: Vec<(String, SecretString)>,
+    config: &ironhermes_core::config::Config,
+) -> Result<SyncProfileSecretsResponse, String> {
+    // Step 1 (mirrors create_profile_impl): validate before any path is
+    // constructed or any byte is written.
+    ironhermes_core::profile::validate_profile_name(name)
+        .map_err(|e| format!("invalid profile name: {e}"))?;
+
+    // Step 2: validate every manual_keys entry at this pure-impl boundary,
+    // reusing the same validators create_profile_impl already calls — never
+    // a second validator. Never interpolates a value into the error (D-13).
+    for (key, secret) in &manual_keys {
+        validate_key_name(key).map_err(|e| format!("invalid manual key: {e}"))?;
+        validate_key_value(secret.expose_secret())
+            .map_err(|e| format!("invalid manual key '{key}': {e}"))?;
+    }
+
+    // Step 3: sync targets an EXISTING profile — refuse when it isn't one.
+    let profile_dir = profile_dir_for(name);
+    if !profile_dir.is_dir() {
+        return Err(format!(
+            "profile '{name}' has no directory — sync targets an existing profile, not a new one"
+        ));
+    }
+
+    // Step 4: the source map.
+    let manual_pairs: Vec<(String, String)> = manual_keys
+        .iter()
+        .map(|(k, v)| (k.clone(), v.expose_secret().to_string()))
+        .collect();
+    let source_map = build_source_map(source, config, &manual_pairs)?;
+
+    // Step 5: widen the source (caller-side change only) — resolve_inherited_keys
+    // itself needs zero changes.
+    let resolved = resolve_inherited_keys(&source_map, key_mode, config);
+
+    // Step 6: providers:-subtree YAML surgery, connection fields only.
+    let config_path = profile_dir.join("config.yaml");
+    let providers_mirrored = ironhermes_core::config_setter::mirror_providers_subtree(
+        &config_path,
+        &root_provider_connection_fields(config),
+        Some(source.config_str()),
+    )
+    .map_err(|e| format!("mirror providers registry: {e}"))?;
+
+    // Step 7: ADDITIVE .env merge (D-02) — a resolved value wins for a name
+    // present in both; a name the source did not supply is never removed.
+    let env_path = profile_dir.join(".env");
+    let mut merged = read_env_keys(&env_path).map_err(|e| format!("read profile .env: {e}"))?;
+    for (key, value) in &resolved {
+        merged.insert(key.clone(), value.clone());
+    }
+    let mut merged_sorted: Vec<(String, String)> = merged.into_iter().collect();
+    merged_sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    // `None` for the stamp: the remembered source lives in config.yaml (a
+    // .env is exactly the artifact this sync exists to regenerate), and
+    // `None` keeps the rendered header byte-identical to every existing
+    // generated `.env`.
+    let contents = render_profile_env_with_stamp(name, &merged_sorted, None)?;
+    write_env_atomic_0600(&env_path, &contents).map_err(|e| format!("write .env: {e}"))?;
+
+    // Step 8: D-06 loud failure — post-write dispatch-gate re-check. Never
+    // return Ok into a still-broken profile.
+    if let ironhermes_core::dispatch_gate::DispatchDecision::Refuse { .. } =
+        ironhermes_core::dispatch_gate::evaluate_profile_dispatch(name)
+    {
+        let profile_provider = ironhermes_core::config::Config::load_from(&config_path)
+            .map(|c| c.model.provider)
+            .unwrap_or_default();
+        return Err(format!(
+            "\u{2715} {} has no key for provider \"{profile_provider}\" — profile not synced.",
+            source.label()
+        ));
+    }
+
+    // Step 9: on Allow, build masked KeyRows from the merged map.
+    let final_env_map: HashMap<String, String> = merged_sorted.iter().cloned().collect();
+    let mut rows: Vec<KeyRow> = final_env_map
+        .iter()
+        .map(|(key, value)| {
+            let source_val = source_map.get(key);
+            KeyRow {
+                name: key.clone(),
+                status: classify_key_status(source_val, Some(value)),
+                masked: mask_key_value(value),
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+
+    Ok(SyncProfileSecretsResponse {
+        keys: rows,
+        source,
+        providers_mirrored,
+    })
+}
+
+/// Phase 49.4.1 (D-01/D-05/D-06/D-08): re-sync an EXISTING profile's
+/// provider registry and keys from a chosen [`SecretSource`]. Follows
+/// `update_profile_config`'s four-step protocol verbatim: validate, fresh
+/// `Config::load()`, `check_profile_write_gate` (never a second write path
+/// that skips it), then `spawn_blocking` the impl. Wraps each manual value
+/// in `SecretString` before it crosses into `spawn_blocking`, exactly as
+/// `create_profile` already does.
+#[server]
+pub async fn sync_profile_secrets(
+    req: SyncProfileSecretsRequest,
+) -> Result<SyncProfileSecretsResponse, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        ironhermes_core::profile::validate_profile_name(&req.name)
+            .map_err(|e| ServerFnError::new(format!("invalid profile name: {e}")))?;
+
+        let config = ironhermes_core::config::Config::load()
+            .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
+        check_profile_write_gate(&config).map_err(ServerFnError::new)?;
+
+        let SyncProfileSecretsRequest {
+            name,
+            source,
+            key_mode,
+            manual_keys,
+        } = req;
+        // D-13: wrap manual key values in SecretString the moment they are
+        // available — before they cross into spawn_blocking.
+        let manual_keys: Vec<(String, SecretString)> = manual_keys
+            .into_iter()
+            .map(|(k, v)| (k, SecretString::from(v)))
+            .collect();
+
+        let response = tokio::task::spawn_blocking(move || {
+            sync_profile_secrets_impl(&name, source, &key_mode, manual_keys, &config)
+        })
+        .await
+        .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
+        .map_err(ServerFnError::new)?;
+
+        Ok(response)
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = req;
+        Err(ServerFnError::new(
+            "sync_profile_secrets unavailable without `server` feature",
+        ))
+    }
+}
+
+/// Phase 49.4.1 Plan 03 (D-04/D-11): parses a dropped/chosen provided-keys
+/// file for display — the UI's call after reading a file locally via the
+/// browser File API. Returns MASKED [`KeyRow`]s built with the existing
+/// `mask_key_value`, so the HTTP response carries no readable key material
+/// back across the boundary — the client already holds the plaintext it
+/// uploaded (the bytes it just sent), so it populates its own manual-key
+/// rows from what it read locally; this response exists only to confirm the
+/// parse and drive the display list.
+///
+/// This fn performs no disk write, so it does not call
+/// [`check_profile_write_gate`] — that gate is enforced later, at
+/// `create_profile`/`sync_profile_secrets`, which is where the bytes
+/// actually land (T-49.4.1-01, accepted: the only effect of a bare parse is
+/// to echo back masked names the caller already supplied).
+#[server]
+pub async fn parse_provided_keys_file(bytes: Vec<u8>) -> Result<Vec<KeyRow>, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        let pairs = tokio::task::spawn_blocking(move || parse_uploaded_dotenv(&bytes))
+            .await
+            .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
+            .map_err(ServerFnError::new)?;
+
+        // D-13: wrap each value in SecretString immediately once it is back
+        // in hand, mirroring `create_profile`'s "wrap the moment it is
+        // available" discipline — even though only the masked marker ever
+        // leaves this fn.
+        let rows: Vec<KeyRow> = pairs
+            .into_iter()
+            .map(|(name, value)| {
+                let secret = SecretString::from(value);
+                KeyRow {
+                    name,
+                    status: KeyStatus::ManuallySet,
+                    masked: mask_key_value(secret.expose_secret()),
+                }
+            })
+            .collect();
+
+        Ok(rows)
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = bytes;
+        Err(ServerFnError::new(
+            "parse_provided_keys_file unavailable without `server` feature",
         ))
     }
 }
@@ -1410,19 +1915,25 @@ pub async fn archive_profile(name: String) -> Result<(), ServerFnError> {
 /// is appended as its own row — mirrors `create_profile_impl`'s own
 /// overlay-and-append rule for the same reason (a manual key targeting a
 /// name the mode doesn't cover must still be visible before create).
+///
+/// Phase 49.4.1 Plan 02 (D-04): `secret_source` builds its candidate map
+/// through the SAME `build_source_map` `create_profile_impl` uses — if the
+/// preview and the write ever resolved from different maps the preview
+/// would promise a key the write does not deliver, a subtler instance of
+/// the silent-success defect this phase exists to remove.
 #[cfg(feature = "server")]
 pub(crate) fn preview_resolved_keys_impl(
     key_mode: &KeyMode,
     manual_keys: Vec<(String, SecretString)>,
+    secret_source: SecretSource,
     config: &ironhermes_core::config::Config,
 ) -> Result<Vec<KeyRow>, String> {
-    let root_env_path = ironhermes_core::get_hermes_home().join(".env");
-    let root_env_map = read_env_keys(&root_env_path).map_err(|e| format!("read root .env: {e}"))?;
+    let source_map = build_source_map(secret_source, config, &[])?;
 
     let base_names: Vec<String> = match key_mode {
         KeyMode::LlmOnly => provider_key_env_names(config),
         KeyMode::AllKeys => {
-            let mut matched: Vec<String> = root_env_map
+            let mut matched: Vec<String> = source_map
                 .keys()
                 .filter(|k| {
                     ROOT_KEY_PATTERN_SUFFIXES
@@ -1453,9 +1964,9 @@ pub(crate) fn preview_resolved_keys_impl(
     let rows: Vec<KeyRow> = names
         .into_iter()
         .map(|name| {
-            let root_val = root_env_map.get(&name).filter(|v| !v.is_empty());
+            let source_val = source_map.get(&name).filter(|v| !v.is_empty());
             let manual_val = manual_map.get(&name).filter(|v| !v.is_empty());
-            let (status, masked) = match (root_val, manual_val) {
+            let (status, masked) = match (source_val, manual_val) {
                 (_, Some(m)) => (KeyStatus::ManuallySet, mask_key_value(m)),
                 (Some(r), None) => (KeyStatus::Inherited, mask_key_value(r)),
                 (None, None) => (KeyStatus::Missing, mask_key_value("")),
@@ -1466,14 +1977,18 @@ pub(crate) fn preview_resolved_keys_impl(
     Ok(rows)
 }
 
-/// Phase 47.4 Plan 07 (D-07/D-13): the wizard step-2 preview endpoint. Reads
-/// only the root `.env`; never touches a profile directory and never writes
-/// anything. Registered/auth-gated identically to every other fn in this
-/// module (see this file's module doc).
+/// Phase 47.4 Plan 07 (D-07/D-13): the wizard step-2 preview endpoint. Never
+/// touches a profile directory and never writes anything. Registered/
+/// auth-gated identically to every other fn in this module (see this
+/// file's module doc).
+///
+/// Phase 49.4.1 Plan 02 (D-04): `secret_source` selects which map this
+/// preview resolves from — the operator's step-2 choice, not always root.
 #[server]
 pub async fn preview_resolved_keys(
     key_mode: KeyMode,
     manual_keys: Vec<(String, String)>,
+    secret_source: SecretSource,
 ) -> Result<Vec<KeyRow>, ServerFnError> {
     #[cfg(feature = "server")]
     {
@@ -1487,7 +2002,7 @@ pub async fn preview_resolved_keys(
             .map(|(k, v)| (k, SecretString::from(v)))
             .collect();
         let rows = tokio::task::spawn_blocking(move || {
-            preview_resolved_keys_impl(&key_mode, manual_keys, &config)
+            preview_resolved_keys_impl(&key_mode, manual_keys, secret_source, &config)
         })
         .await
         .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
@@ -1496,7 +2011,7 @@ pub async fn preview_resolved_keys(
     }
     #[cfg(not(feature = "server"))]
     {
-        let _ = (key_mode, manual_keys);
+        let _ = (key_mode, manual_keys, secret_source);
         Err(ServerFnError::new(
             "preview_resolved_keys unavailable without `server` feature",
         ))
@@ -1634,6 +2149,14 @@ pub(crate) fn fetch_profile_detail_impl(name: &str) -> Result<ProfileDetail, Str
     let config =
         ironhermes_core::config::Config::load().map_err(|e| format!("Config load failed: {e}"))?;
 
+    // Phase 49.4.1 (D-01/D-05): the remembered source lives on the
+    // PROFILE's own config.yaml, not root's — `loaded_profile_config` is
+    // `None` when that file is missing or failed to parse, in which case
+    // there is nothing to remember yet.
+    let secrets_source = loaded_profile_config
+        .as_ref()
+        .and_then(|cfg| cfg.secrets_source.clone());
+
     Ok(ProfileDetail {
         name: name.to_string(),
         dir: dir.to_string_lossy().to_string(),
@@ -1643,6 +2166,7 @@ pub(crate) fn fetch_profile_detail_impl(name: &str) -> Result<ProfileDetail, Str
         model_default,
         keys,
         web_config_write_enabled: config.security.web_config_write_enabled,
+        secrets_source,
     })
 }
 
@@ -3188,7 +3712,7 @@ mod profile_scaffold_tests {
             .save_to(&dir.path().join("config.yaml"))
             .expect("root config.yaml");
 
-        let rows = create_profile_impl("kanban-worker", &KeyMode::LlmOnly, false, Vec::new(), &Config::default())
+        let rows = create_profile_impl("kanban-worker", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default())
             .expect("create should succeed");
         assert!(!rows.is_empty());
 
@@ -3202,8 +3726,13 @@ mod profile_scaffold_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         fs::write(dir.path().join(".env"), "OPENROUTER_API_KEY=sk-abc\n").expect("root .env");
+        // Phase 49.4.1 (D-06): the post-write dispatch-gate re-check needs a
+        // profile config.yaml to evaluate against.
+        Config::default()
+            .save_to(&dir.path().join("config.yaml"))
+            .expect("root config.yaml");
 
-        create_profile_impl("perm-test", &KeyMode::LlmOnly, false, Vec::new(), &Config::default())
+        create_profile_impl("perm-test", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default())
             .expect("create should succeed");
 
         use std::os::unix::fs::PermissionsExt;
@@ -3222,8 +3751,11 @@ mod profile_scaffold_tests {
         root_cfg
             .save_to(&dir.path().join("config.yaml"))
             .expect("root config.yaml");
+        // Phase 49.4.1 (D-06): the post-write dispatch-gate re-check needs a
+        // resolvable key for the main provider.
+        fs::write(dir.path().join(".env"), "OPENROUTER_API_KEY=sk-abc\n").expect("root .env");
 
-        create_profile_impl("byte-copy-profile", &KeyMode::LlmOnly, false, Vec::new(), &Config::default())
+        create_profile_impl("byte-copy-profile", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default())
             .expect("create should succeed");
 
         let root_bytes = fs::read(dir.path().join("config.yaml")).expect("read root config.yaml");
@@ -3247,15 +3779,29 @@ mod profile_scaffold_tests {
             &KeyMode::LlmOnly,
             false,
             Vec::new(),
+            SecretSource::RootEnv,
             &Config::default(),
         );
+        // Phase 49.4.1 (D-06): the script's SKIPPED branch (missing root
+        // config.yaml does not crash the copy step) is UNCHANGED — but a
+        // profile with no config.yaml has no `model.provider` at all and can
+        // never dispatch, so the phase's own loud-failure discipline now
+        // surfaces that as an Err rather than a silent Ok. The profile
+        // directory and its (keyless) .env are still left in place.
         assert!(
-            result.is_ok(),
-            "a missing root config.yaml must not fail the whole create (script's SKIPPED branch)"
+            result.is_err(),
+            "a profile with no config.yaml can never dispatch — D-06 must report that, not Ok"
         );
-        assert!(!profile_dir_for("no-root-config-profile")
-            .join("config.yaml")
-            .exists());
+        assert!(
+            !profile_dir_for("no-root-config-profile")
+                .join("config.yaml")
+                .exists(),
+            "the SKIPPED branch itself is unchanged: still no config.yaml copied"
+        );
+        assert!(
+            profile_dir_for("no-root-config-profile").join(".env").is_file(),
+            "the .env write is independent of the config.yaml copy and must still happen"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -3271,7 +3817,7 @@ mod profile_scaffold_tests {
             .save_to(&dir.path().join("config.yaml"))
             .expect("root config.yaml");
 
-        create_profile_impl("clobber-test", &KeyMode::LlmOnly, false, Vec::new(), &Config::default())
+        create_profile_impl("clobber-test", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default())
             .expect("first create should succeed");
 
         let profile_dir = profile_dir_for("clobber-test");
@@ -3280,7 +3826,7 @@ mod profile_scaffold_tests {
         let sentinel_cfg: &[u8] = b"sentinel: untouched\n";
         fs::write(profile_dir.join("config.yaml"), sentinel_cfg).expect("stomp profile config");
 
-        let result = create_profile_impl("clobber-test", &KeyMode::LlmOnly, false, Vec::new(), &Config::default());
+        let result = create_profile_impl("clobber-test", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default());
         assert!(
             result.is_err(),
             "second create without --force must return Err"
@@ -3307,7 +3853,7 @@ mod profile_scaffold_tests {
             .save_to(&dir.path().join("config.yaml"))
             .expect("root config.yaml");
 
-        create_profile_impl("force-test", &KeyMode::LlmOnly, false, Vec::new(), &Config::default())
+        create_profile_impl("force-test", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default())
             .expect("first create should succeed");
 
         let profile_dir = profile_dir_for("force-test");
@@ -3322,7 +3868,7 @@ mod profile_scaffold_tests {
         fs::write(dir.path().join(".env"), "OPENROUTER_API_KEY=sk-second\n")
             .expect("update root .env");
 
-        create_profile_impl("force-test", &KeyMode::LlmOnly, true, Vec::new(), &Config::default())
+        create_profile_impl("force-test", &KeyMode::LlmOnly, true, Vec::new(), SecretSource::RootEnv, &Config::default())
             .expect("forced create should succeed");
 
         let env_after = fs::read_to_string(profile_dir.join(".env")).expect("read .env after");
@@ -3353,8 +3899,13 @@ mod profile_scaffold_tests {
             "OPENROUTER_API_KEY=sk-abc123\nTELEGRAM_BOT_TOKEN=tg-should-not-appear\n",
         )
         .expect("root .env");
+        // Phase 49.4.1 (D-06): the post-write dispatch-gate re-check needs a
+        // profile config.yaml to evaluate against.
+        Config::default()
+            .save_to(&dir.path().join("config.yaml"))
+            .expect("root config.yaml");
 
-        let rows = create_profile_impl("llm-only-profile", &KeyMode::LlmOnly, false, Vec::new(), &Config::default())
+        let rows = create_profile_impl("llm-only-profile", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default())
             .expect("create should succeed");
 
         assert!(rows.iter().any(|r| r.name == "OPENROUTER_API_KEY"));
@@ -3388,8 +3939,13 @@ mod profile_scaffold_tests {
             "OPENROUTER_API_KEY=sk-abc\nTELEGRAM_BOT_TOKEN=tg-xyz\nSOME_RANDOM_VAR=nope\nFAL_KEY=fal-123\n",
         )
         .expect("root .env");
+        // Phase 49.4.1 (D-06): the post-write dispatch-gate re-check needs a
+        // profile config.yaml to evaluate against.
+        Config::default()
+            .save_to(&dir.path().join("config.yaml"))
+            .expect("root config.yaml");
 
-        let rows = create_profile_impl("all-keys-profile", &KeyMode::AllKeys, false, Vec::new(), &Config::default())
+        let rows = create_profile_impl("all-keys-profile", &KeyMode::AllKeys, false, Vec::new(), SecretSource::RootEnv, &Config::default())
             .expect("create should succeed");
         let names: std::collections::HashSet<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains("OPENROUTER_API_KEY"));
@@ -3410,12 +3966,18 @@ mod profile_scaffold_tests {
             "OPENROUTER_API_KEY=sk-abc\nANTHROPIC_API_KEY=sk-def\n",
         )
         .expect("root .env");
+        // Phase 49.4.1 (D-06): the post-write dispatch-gate re-check needs a
+        // profile config.yaml to evaluate against.
+        Config::default()
+            .save_to(&dir.path().join("config.yaml"))
+            .expect("root config.yaml");
 
         let rows = create_profile_impl(
             "explicit-profile",
             &KeyMode::Explicit(vec!["OPENROUTER_API_KEY".to_string()]),
             false,
             Vec::new(),
+            SecretSource::RootEnv,
             &Config::default(),
         )
         .expect("create should succeed");
@@ -3433,12 +3995,17 @@ mod profile_scaffold_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         fs::write(dir.path().join(".env"), "OPENROUTER_API_KEY=root-value\n").expect("root .env");
+        // Phase 49.4.1 (D-06): the post-write dispatch-gate re-check needs a
+        // profile config.yaml to evaluate against.
+        Config::default()
+            .save_to(&dir.path().join("config.yaml"))
+            .expect("root config.yaml");
 
         let manual = vec![(
             "OPENROUTER_API_KEY".to_string(),
             SecretString::from("manual-value".to_string()),
         )];
-        let rows = create_profile_impl("manual-override-profile", &KeyMode::LlmOnly, false, manual, &Config::default())
+        let rows = create_profile_impl("manual-override-profile", &KeyMode::LlmOnly, false, manual, SecretSource::RootEnv, &Config::default())
             .expect("create should succeed");
 
         let row = rows
@@ -3484,6 +4051,7 @@ mod profile_scaffold_tests {
             &KeyMode::LlmOnly,
             false,
             manual,
+            SecretSource::RootEnv,
             &Config::default(),
         );
         let err =
@@ -3514,6 +4082,7 @@ mod profile_scaffold_tests {
             &KeyMode::LlmOnly,
             false,
             manual,
+            SecretSource::RootEnv,
             &Config::default(),
         );
         let err =
@@ -3532,6 +4101,22 @@ mod profile_scaffold_tests {
     fn create_profile_impl_writes_only_validated_entries_on_the_happy_path() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
+        // Phase 49.4.1 (D-06): this test's own point is the manual-key
+        // validation happy path with NO root .env at all (so the manual key
+        // is the profile's ONLY entry) — a real provider key would add a
+        // second row and break the exact-count assertions below. Point
+        // `model.provider` at a NON-builtin, keyless provider so the
+        // post-write dispatch-gate re-check's step-6 carve-out allows the
+        // profile regardless of which keys got resolved.
+        let mut root_cfg = Config::default();
+        root_cfg.model.provider = "keyless-test-provider".to_string();
+        root_cfg.providers.insert(
+            "keyless-test-provider".to_string(),
+            ironhermes_core::config::ProviderConfig::default(),
+        );
+        root_cfg
+            .save_to(&dir.path().join("config.yaml"))
+            .expect("root config.yaml");
 
         let manual = vec![(
             "CUSTOM_KEY".to_string(),
@@ -3542,6 +4127,7 @@ mod profile_scaffold_tests {
             &KeyMode::LlmOnly,
             false,
             manual,
+            SecretSource::RootEnv,
             &Config::default(),
         )
         .expect("a legitimate manual key must still succeed");
@@ -3567,7 +4153,7 @@ mod profile_scaffold_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
 
-        let result = create_profile_impl("default", &KeyMode::LlmOnly, false, Vec::new(), &Config::default());
+        let result = create_profile_impl("default", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default());
         assert!(result.is_err());
 
         assert!(
@@ -3582,8 +4168,8 @@ mod profile_scaffold_tests {
         let _guard = home(&dir);
 
         let before = walk_all(dir.path());
-        let _ = create_profile_impl("../../etc/passwd", &KeyMode::LlmOnly, false, Vec::new(), &Config::default());
-        let _ = create_profile_impl("..", &KeyMode::LlmOnly, false, Vec::new(), &Config::default());
+        let _ = create_profile_impl("../../etc/passwd", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default());
+        let _ = create_profile_impl("..", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default());
         let after = walk_all(dir.path());
         assert_eq!(
             before, after,
@@ -3619,10 +4205,26 @@ mod profile_scaffold_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         // Deliberately no root .env written at all.
+        // Phase 49.4.1 (D-06): the post-write dispatch-gate re-check needs a
+        // profile config.yaml to evaluate against — added so the refusal
+        // below is provably about "zero keys resolved", not "no config.yaml
+        // at all" (that combination is `missing_root_config_yaml_does_not_
+        // fail_creation`'s own scenario).
+        Config::default()
+            .save_to(&dir.path().join("config.yaml"))
+            .expect("root config.yaml");
 
-        let rows = create_profile_impl("no-root-env-profile", &KeyMode::LlmOnly, false, Vec::new(), &Config::default())
-            .expect("missing root .env must not be an error");
-        assert!(rows.is_empty());
+        let result = create_profile_impl("no-root-env-profile", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default());
+        // Phase 49.4.1 (D-06): a missing root .env resolving ZERO keys for
+        // the main provider is exactly the silent-success shape this phase
+        // exists to close — the resolution itself is still not an "error"
+        // in the write-mechanics sense (no crash, the .env still gets
+        // written), but the OVERALL create must now report the loud
+        // failure instead of a green `Ok(vec![])`.
+        assert!(
+            result.is_err(),
+            "zero resolved keys for the main provider must now be a loud failure (D-06)"
+        );
 
         let profile_env = fs::read_to_string(profile_dir_for("no-root-env-profile").join(".env"))
             .expect("profile .env should still be written (empty key set)");
@@ -3646,8 +4248,13 @@ mod profile_scaffold_tests {
             format!("OPENROUTER_API_KEY={secret_value}\n"),
         )
         .expect("root .env");
+        // Phase 49.4.1 (D-06): the post-write dispatch-gate re-check needs a
+        // profile config.yaml to evaluate against.
+        Config::default()
+            .save_to(&dir.path().join("config.yaml"))
+            .expect("root config.yaml");
 
-        let rows = create_profile_impl("no-leak-profile", &KeyMode::LlmOnly, false, Vec::new(), &Config::default())
+        let rows = create_profile_impl("no-leak-profile", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default())
             .expect("create should succeed");
 
         let serialized = serde_json::to_string(&rows).expect("serialize KeyRow response");
@@ -3663,8 +4270,13 @@ mod profile_scaffold_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         fs::write(dir.path().join(".env"), "OPENROUTER_API_KEY=sk-abc\n").expect("root .env");
+        // Phase 49.4.1 (D-06): the post-write dispatch-gate re-check needs a
+        // profile config.yaml to evaluate against.
+        Config::default()
+            .save_to(&dir.path().join("config.yaml"))
+            .expect("root config.yaml");
 
-        create_profile_impl("provenance-profile", &KeyMode::LlmOnly, false, Vec::new(), &Config::default())
+        create_profile_impl("provenance-profile", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default())
             .expect("create should succeed");
 
         let profile_env = fs::read_to_string(profile_dir_for("provenance-profile").join(".env"))
@@ -4394,7 +5006,7 @@ mod profile_preview_tests {
         let _guard = home(&dir);
         std::fs::write(dir.path().join(".env"), "OPENROUTER_API_KEY=sk-abc\n").expect("root .env");
 
-        let rows = preview_resolved_keys_impl(&KeyMode::LlmOnly, Vec::new(), &Config::default())
+        let rows = preview_resolved_keys_impl(&KeyMode::LlmOnly, Vec::new(), SecretSource::RootEnv, &Config::default())
             .expect("preview should succeed");
         assert_eq!(rows.len(), 5, "LlmOnly must always render all 5 allowlist rows");
         let resolved = rows
@@ -4420,7 +5032,7 @@ mod profile_preview_tests {
         )
         .expect("root .env");
 
-        let rows = preview_resolved_keys_impl(&KeyMode::AllKeys, Vec::new(), &Config::default())
+        let rows = preview_resolved_keys_impl(&KeyMode::AllKeys, Vec::new(), SecretSource::RootEnv, &Config::default())
             .expect("preview should succeed");
         let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains(&"OPENROUTER_API_KEY"));
@@ -4437,6 +5049,7 @@ mod profile_preview_tests {
         let rows = preview_resolved_keys_impl(
             &KeyMode::Explicit(vec!["CUSTOM_KEY".to_string(), "OTHER_KEY".to_string()]),
             Vec::new(),
+            SecretSource::RootEnv,
             &Config::default(),
         )
         .expect("preview should succeed");
@@ -4462,7 +5075,7 @@ mod profile_preview_tests {
             secrecy::SecretString::from("sk-manual".to_string()),
         )];
         let rows =
-            preview_resolved_keys_impl(&KeyMode::LlmOnly, manual, &Config::default()).expect("preview should succeed");
+            preview_resolved_keys_impl(&KeyMode::LlmOnly, manual, SecretSource::RootEnv, &Config::default()).expect("preview should succeed");
         let row = rows
             .iter()
             .find(|r| r.name == "OPENROUTER_API_KEY")
@@ -4479,7 +5092,7 @@ mod profile_preview_tests {
         std::fs::write(dir.path().join(".env"), format!("OPENROUTER_API_KEY={secret}\n"))
             .expect("root .env");
 
-        let rows = preview_resolved_keys_impl(&KeyMode::LlmOnly, Vec::new(), &Config::default())
+        let rows = preview_resolved_keys_impl(&KeyMode::LlmOnly, Vec::new(), SecretSource::RootEnv, &Config::default())
             .expect("preview should succeed");
         let json = serde_json::to_string(&rows).expect("serialize");
         assert!(
@@ -5274,6 +5887,21 @@ mod profile_key_masking_tests {
             "ZEBRA_API_KEY=sk-z\nMID_API_KEY=sk-m\n",
         )
         .expect("root .env");
+        // Phase 49.4.1 (D-06): this test's own point is the WRITTEN ORDER
+        // (WR-01) of an exact three-name set (ALPHA/MID/ZEBRA) — adding a
+        // real OPENROUTER_API_KEY would change that set. Point
+        // `model.provider` at a NON-builtin, keyless provider so the
+        // post-write dispatch-gate re-check's step-6 carve-out allows the
+        // profile regardless of which keys got resolved.
+        let mut root_cfg = Config::default();
+        root_cfg.model.provider = "keyless-test-provider".to_string();
+        root_cfg.providers.insert(
+            "keyless-test-provider".to_string(),
+            ironhermes_core::config::ProviderConfig::default(),
+        );
+        root_cfg
+            .save_to(&dir.path().join("config.yaml"))
+            .expect("root config.yaml");
 
         // A manual key alphabetically BEFORE both inherited names — the
         // overlay pushes it to the end of `resolved` (T-47.4-18-03), so
@@ -5288,6 +5916,7 @@ mod profile_key_masking_tests {
             &KeyMode::AllKeys,
             false,
             manual,
+            SecretSource::RootEnv,
             &Config::default(),
         )
         .expect("create should succeed");
@@ -6187,6 +6816,15 @@ mod profile_env_encoding_tests {
         const CANARY_VALUE: &str = "root-credential-do-not-leak-create-path";
         let _canary = ScopedEnv::set(CANARY_NAME, CANARY_VALUE);
 
+        // Phase 49.4.1 (D-06): the post-write dispatch-gate re-check needs a
+        // resolvable key for the main provider and a profile config.yaml to
+        // evaluate against — unrelated to this test's own CR-03 concern
+        // (the manual "SOME_KEY" value must round-trip literally).
+        fs::write(dir.path().join(".env"), "OPENROUTER_API_KEY=sk-abc\n").expect("root .env");
+        Config::default()
+            .save_to(&dir.path().join("config.yaml"))
+            .expect("root config.yaml");
+
         let submitted_value = format!("${{{CANARY_NAME}}}");
         let manual = vec![(
             "SOME_KEY".to_string(),
@@ -6197,6 +6835,7 @@ mod profile_env_encoding_tests {
             &KeyMode::LlmOnly,
             false,
             manual,
+            SecretSource::RootEnv,
             &Config::default(),
         )
         .expect("create_profile_impl should succeed");
@@ -6234,12 +6873,18 @@ mod profile_env_encoding_tests {
             "OPENROUTER_API_KEY='sk-with a space'\nGROQ_API_KEY='sk-with\ta-tab'\n",
         )
         .expect("write root .env");
+        // Phase 49.4.1 (D-06): the post-write dispatch-gate re-check needs a
+        // profile config.yaml to evaluate against.
+        Config::default()
+            .save_to(&dir.path().join("config.yaml"))
+            .expect("root config.yaml");
 
         let rows = create_profile_impl(
             "inherited-hostile-profile",
             &KeyMode::AllKeys,
             false,
             Vec::new(),
+            SecretSource::RootEnv,
             &Config::default(),
         )
         .expect("create_profile_impl should succeed");
@@ -6329,6 +6974,1104 @@ mod profile_env_encoding_tests {
         assert!(
             !err.contains("Error parsing line"),
             "the self-check error must never contain a raw dotenvy line fragment: {err}"
+        );
+    }
+}
+
+// ============================================================================
+// Phase 49.4.1 (D-01/D-02/D-03/D-06/D-08/D-09): sync_profile_secrets tests.
+// ============================================================================
+
+/// See `profile_health_tests`'s own module doc for why these live here
+/// rather than under `crates/iron_hermes_ui/tests/` — `iron_hermes_ui` is a
+/// bin-only crate, so integration tests cannot reach `pub(crate)` items.
+///
+/// Run with (mutates process-global `IRONHERMES_HOME`, so `--test-threads=1`
+/// is required):
+///   `cargo test -p iron_hermes_ui --features server profile_secrets_source_tests -- --test-threads=1`
+#[cfg(all(test, feature = "server"))]
+mod profile_secrets_source_tests {
+    use super::*;
+    use ironhermes_core::config::Config;
+    use std::fs;
+
+    /// RAII guard that sets an env var and restores the previous value on
+    /// drop. Copied verbatim from `profile_health_tests`'s own copy (itself
+    /// copied from `ironhermes-kanban/src/paths.rs:449-475`).
+    struct ScopedEnv {
+        key: String,
+        prev: Option<String>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: single-threaded test context; no concurrent env access.
+            unsafe { std::env::set_var(key, value) };
+            Self {
+                key: key.to_string(),
+                prev,
+            }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            // SAFETY: single-threaded test context; no concurrent env access.
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var(&self.key, v) },
+                None => unsafe { std::env::remove_var(&self.key) },
+            }
+        }
+    }
+
+    fn provider_cfg(
+        api_key_env: Option<&str>,
+        disabled: Option<bool>,
+    ) -> ironhermes_core::config::ProviderConfig {
+        ironhermes_core::config::ProviderConfig {
+            api_key_env: api_key_env.map(|s| s.to_string()),
+            disabled,
+            ..Default::default()
+        }
+    }
+
+    /// The tracer's own end-to-end proof: a profile the dispatch gate
+    /// refuses (unknown provider — its own config.yaml has no registry
+    /// entry, only `model.provider`) transitions to allowed by syncing from
+    /// `SecretSource::ContainerEnv`, with no manual file edits between the
+    /// two `evaluate_profile_dispatch` assertions.
+    #[test]
+    fn sync_from_container_env_repairs_a_profile_the_dispatch_gate_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
+
+        // Root config.yaml declares a provider whose key env var name is
+        // distinctive — never collides with a real operator env var.
+        let mut root_cfg = Config::default();
+        root_cfg.providers.insert(
+            "moonshot".to_string(),
+            provider_cfg(Some("MOONSHOT_TRACER_API_KEY"), None),
+        );
+        root_cfg
+            .save_to(&ironhermes_core::get_hermes_home().join("config.yaml"))
+            .expect("save root config.yaml");
+
+        // Profile names that same provider under model.provider, but its
+        // own config.yaml has NO registry entry for it — the two-sided
+        // staleness this phase exists to repair — and an empty .env.
+        let name = "tracer-profile";
+        let profile_dir = profile_dir_for(name);
+        fs::create_dir_all(&profile_dir).expect("mkdir profile dir");
+        let mut profile_cfg = Config::default();
+        profile_cfg.model.provider = "moonshot".to_string();
+        profile_cfg.model.default = "moonshot-v1".to_string();
+        profile_cfg
+            .save_to(&profile_dir.join("config.yaml"))
+            .expect("save profile config.yaml");
+        fs::write(profile_dir.join(".env"), "").expect("write empty .env");
+
+        // Before: the dispatch gate refuses (unknown provider — no registry
+        // entry at all).
+        let before = ironhermes_core::dispatch_gate::evaluate_profile_dispatch(name);
+        assert!(
+            matches!(
+                before,
+                ironhermes_core::dispatch_gate::DispatchDecision::Refuse { .. }
+            ),
+            "expected Refuse before sync, got {before:?}"
+        );
+
+        // Set the container env var — the SecretSource::ContainerEnv
+        // source this tracer wires end to end.
+        let _key = ScopedEnv::set("MOONSHOT_TRACER_API_KEY", "sk-tracer-value");
+
+        let root_config_for_sync = Config::load().expect("load root config for sync");
+        let response = sync_profile_secrets_impl(
+            name,
+            SecretSource::ContainerEnv,
+            &KeyMode::LlmOnly,
+            Vec::new(),
+            &root_config_for_sync,
+        )
+        .expect("sync must succeed once the key is present in the container env");
+
+        assert_eq!(response.source, SecretSource::ContainerEnv);
+        assert_eq!(response.providers_mirrored, 1);
+
+        // After: config.yaml carries the mirrored provider, .env carries
+        // the key, and the dispatch gate now allows.
+        let synced_cfg = Config::load_from(&profile_dir.join("config.yaml"))
+            .expect("synced config.yaml must parse");
+        assert!(
+            synced_cfg.providers.contains_key("moonshot"),
+            "sync must mirror the moonshot provider entry onto the profile"
+        );
+        assert_eq!(
+            synced_cfg
+                .providers
+                .get("moonshot")
+                .and_then(|p| p.api_key_env.as_deref()),
+            Some("MOONSHOT_TRACER_API_KEY")
+        );
+        assert_eq!(synced_cfg.secrets_source.as_deref(), Some("container_env"));
+
+        let env_map = read_env_keys(&profile_dir.join(".env")).expect("synced .env must parse");
+        assert_eq!(
+            env_map
+                .get("MOONSHOT_TRACER_API_KEY")
+                .map(String::as_str),
+            Some("sk-tracer-value")
+        );
+
+        let after = ironhermes_core::dispatch_gate::evaluate_profile_dispatch(name);
+        assert_eq!(
+            after,
+            ironhermes_core::dispatch_gate::DispatchDecision::Allow,
+            "expected Allow after sync, got {after:?}"
+        );
+    }
+
+    /// D-13/D-11: `SyncProfileSecretsRequest`'s hand-written `Debug` must
+    /// never leak `manual_keys` material, under either `{:?}` or `{:#?}`.
+    #[test]
+    fn sync_request_debug_redacts_manual_keys() {
+        const MARKER: &str = "sentinel-do-not-leak-8f3c1a";
+        let req = SyncProfileSecretsRequest {
+            name: "some-profile".to_string(),
+            source: SecretSource::ContainerEnv,
+            key_mode: KeyMode::LlmOnly,
+            manual_keys: vec![("SOME_KEY".to_string(), MARKER.to_string())],
+        };
+        let compact = format!("{req:?}");
+        let pretty = format!("{req:#?}");
+        assert!(!compact.contains(MARKER), "compact Debug leaked: {compact}");
+        assert!(!pretty.contains(MARKER), "pretty Debug leaked: {pretty}");
+    }
+
+    /// D-09: the container-environment filter must keep only names ending
+    /// in `_API_KEY`/`_KEY`/`_TOKEN` with a non-empty value — platform vars
+    /// like `PORT`/`HOSTNAME`/`PATH` must never reach a synced `.env`.
+    #[test]
+    fn container_env_map_keeps_only_api_key_key_token_suffixes() {
+        let input = vec![
+            ("PORT".to_string(), "8080".to_string()),
+            ("HOSTNAME".to_string(), "web-1".to_string()),
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("LANG".to_string(), "en_US.UTF-8".to_string()),
+            ("MOONSHOT_API_KEY".to_string(), "sk-a".to_string()),
+            ("SOME_KEY".to_string(), "sk-b".to_string()),
+            ("SOME_TOKEN".to_string(), "sk-c".to_string()),
+            ("EMPTY_API_KEY".to_string(), String::new()),
+        ];
+        let result = container_env_key_map_from(input);
+        assert_eq!(
+            result.len(),
+            3,
+            "expected exactly the three non-empty suffix matches, got {result:?}"
+        );
+        for platform_var in ["PORT", "HOSTNAME", "PATH", "LANG"] {
+            assert!(
+                !result.contains_key(platform_var),
+                "{platform_var} must not appear in the filtered map"
+            );
+        }
+        assert_eq!(result.get("MOONSHOT_API_KEY").map(String::as_str), Some("sk-a"));
+        assert_eq!(result.get("SOME_KEY").map(String::as_str), Some("sk-b"));
+        assert_eq!(result.get("SOME_TOKEN").map(String::as_str), Some("sk-c"));
+        assert!(!result.contains_key("EMPTY_API_KEY"));
+    }
+
+    /// D-03: the registry mirror copies ONLY the four connection fields and
+    /// preserves a pre-existing `default_model`/`fallback_providers`. Root's
+    /// `openrouter.default_model` is an opus model while the profile pins a
+    /// haiku one, and the per-provider value overrides the top-level
+    /// `model.default` (`provider.rs:412`) — a wholesale mirror would
+    /// silently promote every call on this profile from haiku to opus.
+    #[test]
+    fn registry_mirror_copies_connection_fields_and_preserves_default_model() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
+
+        let mut root_cfg = Config::default();
+        let mut root_provider = provider_cfg(Some("OPENROUTER_API_KEY"), Some(false));
+        root_provider.base_url = Some("https://root.example/v1".to_string());
+        root_provider.api_mode = Some(ironhermes_core::config::ApiMode::ChatCompletions);
+        root_provider.default_model = Some("anthropic/claude-opus-4.7".to_string());
+        root_provider.fallback_providers = vec!["anthropic".to_string(), "openai".to_string()];
+        root_cfg.providers.insert("openrouter".to_string(), root_provider);
+
+        let profile_dir = profile_dir_for("mirror-preserve-profile");
+        fs::create_dir_all(&profile_dir).expect("mkdir profile dir");
+        let mut profile_cfg = Config::default();
+        let mut profile_provider = provider_cfg(Some("STALE_OPENROUTER_KEY"), Some(true));
+        profile_provider.base_url = Some("https://stale.example/v1".to_string());
+        profile_provider.default_model = Some("anthropic/claude-haiku-4.5".to_string());
+        profile_provider.fallback_providers = vec!["ollama".to_string()];
+        profile_cfg
+            .providers
+            .insert("openrouter".to_string(), profile_provider);
+        let profile_cfg_path = profile_dir.join("config.yaml");
+        profile_cfg
+            .save_to(&profile_cfg_path)
+            .expect("save profile config.yaml");
+
+        let touched = ironhermes_core::config_setter::mirror_providers_subtree(
+            &profile_cfg_path,
+            &root_provider_connection_fields(&root_cfg),
+            Some("root_env"),
+        )
+        .expect("mirror must succeed");
+        assert_eq!(touched, 1);
+
+        let after =
+            Config::load_from(&profile_cfg_path).expect("mirrored config.yaml must parse");
+        let entry = after
+            .providers
+            .get("openrouter")
+            .expect("openrouter entry must survive the mirror");
+        assert_eq!(entry.base_url.as_deref(), Some("https://root.example/v1"));
+        assert_eq!(entry.api_key_env.as_deref(), Some("OPENROUTER_API_KEY"));
+        assert_eq!(
+            entry.api_mode,
+            Some(ironhermes_core::config::ApiMode::ChatCompletions)
+        );
+        assert_eq!(entry.disabled, Some(false));
+        assert_eq!(
+            entry.default_model.as_deref(),
+            Some("anthropic/claude-haiku-4.5"),
+            "the mirror must never touch default_model"
+        );
+        assert_eq!(
+            entry.fallback_providers,
+            vec!["ollama".to_string()],
+            "the mirror must never touch fallback_providers"
+        );
+    }
+
+    /// D-12: sibling top-level sections of a profile's config.yaml survive
+    /// the mirror byte-for-byte in VALUE (comments are a stated, accepted
+    /// exception — `serde_yaml` has no comment-carrying value, so this test
+    /// deliberately makes no assertion about comments).
+    #[test]
+    fn registry_mirror_leaves_sibling_config_sections_untouched() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
+
+        let mut root_cfg = Config::default();
+        root_cfg
+            .providers
+            .insert("llama".to_string(), provider_cfg(None, None));
+        root_cfg
+            .save_to(&ironhermes_core::get_hermes_home().join("config.yaml"))
+            .expect("save root config.yaml");
+
+        let profile_dir = profile_dir_for("mirror-sibling-sections-profile");
+        fs::create_dir_all(&profile_dir).expect("mkdir profile dir");
+        let mut profile_cfg = Config::default();
+        profile_cfg.model.provider = "llama".to_string();
+        profile_cfg.model.default = "distinctive-sibling-model".to_string();
+        profile_cfg.skills.disabled = vec!["distinctive-sibling-skill".to_string()];
+        let profile_cfg_path = profile_dir.join("config.yaml");
+        profile_cfg
+            .save_to(&profile_cfg_path)
+            .expect("save profile config.yaml");
+
+        ironhermes_core::config_setter::mirror_providers_subtree(
+            &profile_cfg_path,
+            &root_provider_connection_fields(&root_cfg),
+            Some("root_env"),
+        )
+        .expect("mirror must succeed");
+
+        let after =
+            Config::load_from(&profile_cfg_path).expect("mirrored config.yaml must parse");
+        assert_eq!(after.model.provider, "llama");
+        assert_eq!(after.model.default, "distinctive-sibling-model");
+        assert_eq!(
+            after.skills.disabled,
+            vec!["distinctive-sibling-skill".to_string()]
+        );
+    }
+
+    /// D-06: the phase's entire reason for existing — a source that
+    /// resolves nothing for the profile's main provider must return `Err`,
+    /// never a silent `Ok` into a still-broken profile.
+    #[test]
+    fn sync_reports_no_key_for_provider_instead_of_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
+
+        let mut root_cfg = Config::default();
+        root_cfg.providers.insert(
+            "venice".to_string(),
+            provider_cfg(Some("VENICE_UNSET_API_KEY"), None),
+        );
+        root_cfg
+            .save_to(&ironhermes_core::get_hermes_home().join("config.yaml"))
+            .expect("save root config.yaml");
+
+        let name = "no-key-for-provider-profile";
+        let profile_dir = profile_dir_for(name);
+        fs::create_dir_all(&profile_dir).expect("mkdir profile dir");
+        let mut profile_cfg = Config::default();
+        profile_cfg.model.provider = "venice".to_string();
+        profile_cfg
+            .save_to(&profile_dir.join("config.yaml"))
+            .expect("save profile config.yaml");
+        fs::write(profile_dir.join(".env"), "").expect("write empty .env");
+
+        // Deliberately no ScopedEnv::set for VENICE_UNSET_API_KEY — it
+        // stays absent from the container environment.
+        let root_config_for_sync = Config::load().expect("load root config for sync");
+        let err = sync_profile_secrets_impl(
+            name,
+            SecretSource::ContainerEnv,
+            &KeyMode::LlmOnly,
+            Vec::new(),
+            &root_config_for_sync,
+        )
+        .expect_err("a source with no key for the main provider must return Err, not Ok");
+
+        assert!(err.contains("venice"), "error must name the provider: {err}");
+        assert!(
+            err.contains(SecretSource::ContainerEnv.label()),
+            "error must name the source label: {err}"
+        );
+        assert!(
+            !err.to_lowercase().contains("success"),
+            "error must never contain success wording: {err}"
+        );
+    }
+
+    /// D-10: the vault row's reported reason across all four combinations
+    /// of (feature present or absent) x (`vault.enabled` true or false),
+    /// asserting the build-level reason wins when both blockers apply.
+    #[test]
+    fn vault_row_is_unavailable_with_the_build_level_reason_taking_precedence() {
+        use crate::components::hermes_app::screens::profile_shared::secrets_source_picker::{
+            VAULT_REASON_BUILD_LACKS_FEATURE, VAULT_REASON_DISABLED_IN_CONFIG,
+        };
+
+        let mut enabled_cfg = Config::default();
+        enabled_cfg.vault.enabled = true;
+        let mut disabled_cfg = Config::default();
+        disabled_cfg.vault.enabled = false;
+
+        // Feature absent, config either way — the build-level reason wins.
+        for cfg in [&enabled_cfg, &disabled_cfg] {
+            let result = compute_secrets_source_availability_with(false, cfg);
+            assert!(!result.vault_available, "feature-absent must be unavailable");
+            assert_eq!(
+                result.vault_reason.as_deref(),
+                Some(VAULT_REASON_BUILD_LACKS_FEATURE),
+                "feature-absent must report the build-level reason regardless of vault.enabled"
+            );
+        }
+
+        // Feature present, config disabled — the config-level reason.
+        let disabled_result = compute_secrets_source_availability_with(true, &disabled_cfg);
+        assert!(!disabled_result.vault_available);
+        assert_eq!(
+            disabled_result.vault_reason.as_deref(),
+            Some(VAULT_REASON_DISABLED_IN_CONFIG)
+        );
+
+        // Feature present, config enabled — available, no reason.
+        let enabled_result = compute_secrets_source_availability_with(true, &enabled_cfg);
+        assert!(enabled_result.vault_available);
+        assert_eq!(enabled_result.vault_reason, None);
+    }
+
+    /// D-02: a key already present in the profile's `.env` that the chosen
+    /// source does not supply must survive a successful sync unchanged.
+    #[test]
+    fn sync_preserves_a_preexisting_profile_env_key_not_in_the_source() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
+
+        let mut root_cfg = Config::default();
+        root_cfg.providers.insert(
+            "minimax".to_string(),
+            provider_cfg(Some("MINIMAX_SYNC_API_KEY"), None),
+        );
+        root_cfg
+            .save_to(&ironhermes_core::get_hermes_home().join("config.yaml"))
+            .expect("save root config.yaml");
+
+        let name = "preserve-preexisting-key-profile";
+        let profile_dir = profile_dir_for(name);
+        fs::create_dir_all(&profile_dir).expect("mkdir profile dir");
+        let mut profile_cfg = Config::default();
+        profile_cfg.model.provider = "minimax".to_string();
+        profile_cfg
+            .save_to(&profile_dir.join("config.yaml"))
+            .expect("save profile config.yaml");
+        fs::write(profile_dir.join(".env"), "PREEXISTING_UNTOUCHED_KEY='keep-me'\n")
+            .expect("seed .env");
+
+        let _key = ScopedEnv::set("MINIMAX_SYNC_API_KEY", "sk-minimax-value");
+        let root_config_for_sync = Config::load().expect("load root config for sync");
+        sync_profile_secrets_impl(
+            name,
+            SecretSource::ContainerEnv,
+            &KeyMode::LlmOnly,
+            Vec::new(),
+            &root_config_for_sync,
+        )
+        .expect("sync must succeed");
+
+        let env_map = read_env_keys(&profile_dir.join(".env")).expect("synced .env must parse");
+        assert_eq!(
+            env_map.get("PREEXISTING_UNTOUCHED_KEY").map(String::as_str),
+            Some("keep-me"),
+            "a key not supplied by the source must survive the sync unchanged"
+        );
+        assert_eq!(
+            env_map.get("MINIMAX_SYNC_API_KEY").map(String::as_str),
+            Some("sk-minimax-value")
+        );
+    }
+
+    /// Behavioural proof (stronger than a source grep) that the sync writer
+    /// delegates to the ONE shared `render_profile_env_with_stamp` renderer
+    /// and its round-trip verifier, rather than being a second
+    /// implementation — only that fn emits `PROFILE_ENV_PROVENANCE_PREFIX`.
+    #[test]
+    fn sync_written_env_round_trips_through_the_real_dotenv_reader() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
+
+        let mut root_cfg = Config::default();
+        root_cfg.providers.insert(
+            "merge".to_string(),
+            provider_cfg(Some("MERGE_ROUNDTRIP_API_KEY"), None),
+        );
+        root_cfg
+            .save_to(&ironhermes_core::get_hermes_home().join("config.yaml"))
+            .expect("save root config.yaml");
+
+        let name = "roundtrip-profile";
+        let profile_dir = profile_dir_for(name);
+        fs::create_dir_all(&profile_dir).expect("mkdir profile dir");
+        let mut profile_cfg = Config::default();
+        profile_cfg.model.provider = "merge".to_string();
+        profile_cfg
+            .save_to(&profile_dir.join("config.yaml"))
+            .expect("save profile config.yaml");
+        fs::write(profile_dir.join(".env"), "").expect("write empty .env");
+
+        let tricky_value = "va lue with # and a ' quote";
+        let _key = ScopedEnv::set("MERGE_ROUNDTRIP_API_KEY", tricky_value);
+        let root_config_for_sync = Config::load().expect("load root config for sync");
+        sync_profile_secrets_impl(
+            name,
+            SecretSource::ContainerEnv,
+            &KeyMode::LlmOnly,
+            Vec::new(),
+            &root_config_for_sync,
+        )
+        .expect("sync must succeed");
+
+        let env_path = profile_dir.join(".env");
+        let raw = fs::read_to_string(&env_path).expect("read synced .env");
+        assert!(
+            raw.starts_with(PROFILE_ENV_PROVENANCE_PREFIX),
+            "the synced .env must delegate to render_profile_env_with_stamp's shared header, not a second writer"
+        );
+
+        let env_map =
+            read_env_keys(&env_path).expect("synced .env must parse via the real dotenvy reader");
+        assert_eq!(
+            env_map.get("MERGE_ROUNDTRIP_API_KEY").map(String::as_str),
+            Some(tricky_value)
+        );
+    }
+
+    /// D-01: running the sync twice against the same fixture must leave
+    /// both disk artifacts byte-identical after run two as after run one.
+    #[test]
+    fn sync_is_idempotent_across_two_consecutive_runs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
+
+        let mut root_cfg = Config::default();
+        root_cfg.providers.insert(
+            "huggingface".to_string(),
+            provider_cfg(Some("HF_IDEMPOTENT_API_KEY"), None),
+        );
+        root_cfg
+            .save_to(&ironhermes_core::get_hermes_home().join("config.yaml"))
+            .expect("save root config.yaml");
+
+        let name = "idempotent-profile";
+        let profile_dir = profile_dir_for(name);
+        fs::create_dir_all(&profile_dir).expect("mkdir profile dir");
+        let mut profile_cfg = Config::default();
+        profile_cfg.model.provider = "huggingface".to_string();
+        profile_cfg
+            .save_to(&profile_dir.join("config.yaml"))
+            .expect("save profile config.yaml");
+        fs::write(profile_dir.join(".env"), "").expect("write empty .env");
+
+        let _key = ScopedEnv::set("HF_IDEMPOTENT_API_KEY", "sk-hf-value");
+        let config_path = profile_dir.join("config.yaml");
+        let env_path = profile_dir.join(".env");
+
+        let root_config_1 = Config::load().expect("load root config for sync run 1");
+        sync_profile_secrets_impl(
+            name,
+            SecretSource::ContainerEnv,
+            &KeyMode::LlmOnly,
+            Vec::new(),
+            &root_config_1,
+        )
+        .expect("first sync must succeed");
+        let config_bytes_1 = fs::read(&config_path).expect("read config.yaml after run 1");
+        let env_bytes_1 = fs::read(&env_path).expect("read .env after run 1");
+
+        let root_config_2 = Config::load().expect("load root config for sync run 2");
+        sync_profile_secrets_impl(
+            name,
+            SecretSource::ContainerEnv,
+            &KeyMode::LlmOnly,
+            Vec::new(),
+            &root_config_2,
+        )
+        .expect("second sync must succeed");
+        let config_bytes_2 = fs::read(&config_path).expect("read config.yaml after run 2");
+        let env_bytes_2 = fs::read(&env_path).expect("read .env after run 2");
+
+        assert_eq!(
+            config_bytes_1, config_bytes_2,
+            "config.yaml must be byte-identical across two consecutive syncs"
+        );
+        assert_eq!(
+            env_bytes_1, env_bytes_2,
+            "the .env must be byte-identical across two consecutive syncs"
+        );
+    }
+
+    /// D-11 discipline on this plan's paths: a malformed pre-existing
+    /// profile `.env` must refuse via the fixed-string family, never
+    /// leaking the raw failing line (mirrors
+    /// `read_env_keys_parse_error_never_leaks_the_line`).
+    #[test]
+    fn sync_env_read_error_never_leaks_the_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
+
+        let mut root_cfg = Config::default();
+        root_cfg.providers.insert(
+            "moonshot".to_string(),
+            provider_cfg(Some("MOONSHOT_LEAK_TEST_API_KEY"), None),
+        );
+        root_cfg
+            .save_to(&ironhermes_core::get_hermes_home().join("config.yaml"))
+            .expect("save root config.yaml");
+
+        let name = "malformed-env-profile";
+        let profile_dir = profile_dir_for(name);
+        fs::create_dir_all(&profile_dir).expect("mkdir profile dir");
+        let mut profile_cfg = Config::default();
+        profile_cfg.model.provider = "moonshot".to_string();
+        profile_cfg
+            .save_to(&profile_dir.join("config.yaml"))
+            .expect("save profile config.yaml");
+
+        const MARKER: &str = "sentinel-secret-do-not-leak-3e9f";
+        fs::write(
+            profile_dir.join(".env"),
+            format!("MALFORMED_LINE_{MARKER}\n"),
+        )
+        .expect("write malformed .env");
+
+        let _key = ScopedEnv::set("MOONSHOT_LEAK_TEST_API_KEY", "sk-value");
+        let root_config_for_sync = Config::load().expect("load root config for sync");
+        let err = sync_profile_secrets_impl(
+            name,
+            SecretSource::ContainerEnv,
+            &KeyMode::LlmOnly,
+            Vec::new(),
+            &root_config_for_sync,
+        )
+        .expect_err("a malformed existing .env must refuse, not silently drop the parse error");
+
+        assert!(
+            !err.contains(MARKER),
+            "the sync error must never leak the raw .env line: {err}"
+        );
+    }
+
+    /// D-07: `SecretSource` (provenance) and `KeyMode` (breadth) are
+    /// orthogonal axes — every pairing is constructible, `build_source_map`
+    /// depends only on the source, `resolve_inherited_keys`'s name
+    /// selection depends only on the mode, and `KeyMode` still has exactly
+    /// its three original variants.
+    #[test]
+    fn secret_source_and_key_mode_are_independent_axes() {
+        let sources = [
+            SecretSource::RootEnv,
+            SecretSource::ContainerEnv,
+            SecretSource::Vault,
+            SecretSource::Provided,
+        ];
+        let modes = [
+            KeyMode::LlmOnly,
+            KeyMode::AllKeys,
+            KeyMode::Explicit(vec!["SOME_KEY".to_string()]),
+        ];
+
+        let mut pairing_count = 0;
+        for source in sources {
+            for mode in &modes {
+                let _req = SyncProfileSecretsRequest {
+                    name: "axis-check".to_string(),
+                    source,
+                    key_mode: mode.clone(),
+                    manual_keys: Vec::new(),
+                };
+                pairing_count += 1;
+            }
+        }
+        assert_eq!(pairing_count, 12, "every (SecretSource, KeyMode) pairing must be constructible");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
+        let cfg = Config::default();
+        for source in [SecretSource::RootEnv, SecretSource::ContainerEnv] {
+            let a = build_source_map(source, &cfg, &[]);
+            let b = build_source_map(source, &cfg, &[]);
+            assert_eq!(
+                a.is_ok(),
+                b.is_ok(),
+                "build_source_map must be deterministic for a fixed source, independent of any KeyMode"
+            );
+        }
+
+        let mut source_map = HashMap::new();
+        source_map.insert("OPENROUTER_API_KEY".to_string(), "sk-a".to_string());
+        source_map.insert("CUSTOM_KEY".to_string(), "sk-b".to_string());
+        let llm_only = resolve_inherited_keys(&source_map, &KeyMode::LlmOnly, &cfg);
+        let explicit = resolve_inherited_keys(
+            &source_map,
+            &KeyMode::Explicit(vec!["CUSTOM_KEY".to_string()]),
+            &cfg,
+        );
+        assert!(llm_only.iter().any(|(k, _)| k == "OPENROUTER_API_KEY"));
+        assert!(!llm_only.iter().any(|(k, _)| k == "CUSTOM_KEY"));
+        assert_eq!(explicit, vec![("CUSTOM_KEY".to_string(), "sk-b".to_string())]);
+
+        fn assert_exactly_three_variants(mode: &KeyMode) {
+            match mode {
+                KeyMode::LlmOnly | KeyMode::AllKeys | KeyMode::Explicit(_) => {}
+            }
+        }
+        for mode in &modes {
+            assert_exactly_three_variants(mode);
+        }
+    }
+
+    /// The persisted `config_str` vocabulary round-trips in both
+    /// directions; an unrecognised string degrades to `None`.
+    #[test]
+    fn secret_source_config_str_round_trips_all_four_variants() {
+        for source in [
+            SecretSource::RootEnv,
+            SecretSource::ContainerEnv,
+            SecretSource::Vault,
+            SecretSource::Provided,
+        ] {
+            assert_eq!(
+                SecretSource::from_config_str(source.config_str()),
+                Some(source)
+            );
+        }
+        assert_eq!(SecretSource::from_config_str("not-a-real-value"), None);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 49.4.1 Plan 02 (D-04/D-06/D-09): create_profile_impl /
+    // preview_resolved_keys_impl source-awareness — the create path's
+    // second entry point into build_source_map, and the same D-06 loud
+    // failure sync_profile_secrets_impl already has.
+    // ------------------------------------------------------------------
+
+    /// D-09: `create_profile_impl` with `SecretSource::ContainerEnv` writes
+    /// only names ending `_API_KEY`/`_KEY`/`_TOKEN` that are non-empty in
+    /// the process environment — platform names like PORT/HOSTNAME never
+    /// reach the written `.env`, mirroring the sync path's own filter test.
+    #[test]
+    fn create_from_container_env_writes_only_suffix_matched_keys() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
+
+        Config::default()
+            .save_to(&ironhermes_core::get_hermes_home().join("config.yaml"))
+            .expect("save root config.yaml");
+
+        let _key = ScopedEnv::set("OPENROUTER_API_KEY", "sk-container-value");
+        let _port = ScopedEnv::set("PORT", "8080");
+        let _host = ScopedEnv::set("HOSTNAME", "web-1");
+
+        let rows = create_profile_impl(
+            "container-create-profile",
+            &KeyMode::AllKeys,
+            false,
+            Vec::new(),
+            SecretSource::ContainerEnv,
+            &Config::default(),
+        )
+        .expect("create from a resolvable container-env key must succeed");
+
+        assert!(rows.iter().any(|r| r.name == "OPENROUTER_API_KEY"));
+        assert!(!rows.iter().any(|r| r.name == "PORT"));
+        assert!(!rows.iter().any(|r| r.name == "HOSTNAME"));
+
+        let env_map = read_env_keys(&profile_dir_for("container-create-profile").join(".env"))
+            .expect("read written .env");
+        assert_eq!(
+            env_map.get("OPENROUTER_API_KEY").map(String::as_str),
+            Some("sk-container-value")
+        );
+        assert!(!env_map.contains_key("PORT"));
+        assert!(!env_map.contains_key("HOSTNAME"));
+    }
+
+    /// D-06: `create_profile_impl` returns `Err` — never a `Vec<KeyRow>` —
+    /// when the post-write dispatch-gate evaluation refuses, and the error
+    /// names both the source label and the provider. The profile directory
+    /// stays in place so the drawer's SYNC can repair it without a
+    /// re-create (D-05).
+    #[test]
+    fn create_reports_no_key_for_provider_instead_of_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
+
+        let mut root_cfg = Config::default();
+        root_cfg.providers.insert(
+            "venice".to_string(),
+            provider_cfg(Some("VENICE_CREATE_UNSET_API_KEY"), None),
+        );
+        root_cfg.model.provider = "venice".to_string();
+        root_cfg
+            .save_to(&ironhermes_core::get_hermes_home().join("config.yaml"))
+            .expect("save root config.yaml");
+
+        // Deliberately no ScopedEnv::set for VENICE_CREATE_UNSET_API_KEY —
+        // it stays absent from the container environment.
+        let err = create_profile_impl(
+            "create-no-key-profile",
+            &KeyMode::LlmOnly,
+            false,
+            Vec::new(),
+            SecretSource::ContainerEnv,
+            &root_cfg,
+        )
+        .expect_err("a source with no key for the main provider must return Err, not Ok");
+
+        assert!(err.contains("venice"), "error must name the provider: {err}");
+        assert!(
+            err.contains(SecretSource::ContainerEnv.label()),
+            "error must name the source label: {err}"
+        );
+        assert!(
+            !err.to_lowercase().contains("success"),
+            "error must never contain success wording: {err}"
+        );
+        assert!(
+            profile_dir_for("create-no-key-profile").is_dir(),
+            "the profile directory must stay in place so SYNC can repair it (D-05)"
+        );
+    }
+
+    /// The step-2 preview must never promise a key the write does not
+    /// deliver — both fns resolve their key-name set through the SAME
+    /// `build_source_map`.
+    #[test]
+    fn preview_and_create_resolve_from_the_same_source_map() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
+
+        Config::default()
+            .save_to(&ironhermes_core::get_hermes_home().join("config.yaml"))
+            .expect("save root config.yaml");
+
+        let _key = ScopedEnv::set("OPENROUTER_API_KEY", "sk-container-value");
+        let _extra = ScopedEnv::set("EXTRA_SERVICE_TOKEN", "tok-value");
+
+        let preview_rows = preview_resolved_keys_impl(
+            &KeyMode::AllKeys,
+            Vec::new(),
+            SecretSource::ContainerEnv,
+            &Config::default(),
+        )
+        .expect("preview should succeed");
+        let preview_names: std::collections::BTreeSet<String> =
+            preview_rows.into_iter().map(|r| r.name).collect();
+
+        let create_rows = create_profile_impl(
+            "preview-parity-profile",
+            &KeyMode::AllKeys,
+            false,
+            Vec::new(),
+            SecretSource::ContainerEnv,
+            &Config::default(),
+        )
+        .expect("create should succeed");
+        let create_names: std::collections::BTreeSet<String> =
+            create_rows.into_iter().map(|r| r.name).collect();
+
+        assert_eq!(
+            preview_names, create_names,
+            "the preview and the write must resolve the same key-name set for the same source"
+        );
+    }
+
+    /// D-04: a `CreateProfileRequest` JSON payload serialized before this
+    /// field existed still deserializes, defaulting to `SecretSource::
+    /// RootEnv` — the pre-phase behaviour.
+    #[test]
+    fn create_request_without_secret_source_defaults_to_root_env() {
+        let json = serde_json::json!({
+            "name": "legacy-payload-profile",
+            "key_mode": "LlmOnly",
+            "force": false,
+            "manual_keys": []
+        });
+        let req: CreateProfileRequest =
+            serde_json::from_value(json).expect("a payload missing secret_source must still deserialize");
+        assert_eq!(req.secret_source, SecretSource::RootEnv);
+    }
+
+    /// D-13/D-11: an error raised while reading a malformed root `.env`
+    /// contains none of that file's line content.
+    #[test]
+    fn create_env_read_error_never_leaks_the_line() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
+
+        Config::default()
+            .save_to(&ironhermes_core::get_hermes_home().join("config.yaml"))
+            .expect("save root config.yaml");
+
+        const MARKER: &str = "sentinel-create-leak-7c2a9f";
+        fs::write(
+            ironhermes_core::get_hermes_home().join(".env"),
+            format!("MALFORMED_LINE_{MARKER}\n"),
+        )
+        .expect("write malformed root .env");
+
+        let err = create_profile_impl(
+            "malformed-root-env-profile",
+            &KeyMode::LlmOnly,
+            false,
+            Vec::new(),
+            SecretSource::RootEnv,
+            &Config::default(),
+        )
+        .expect_err("a malformed root .env must be refused, not silently accepted");
+
+        assert!(
+            !err.contains(MARKER),
+            "the create error must never contain the malformed line content: {err}"
+        );
+    }
+
+    /// D-04: `create_profile_impl` with `SecretSource::RootEnv` resolves
+    /// exactly the keys it resolved before this phase, so an existing
+    /// wizard flow is byte-identical in outcome.
+    #[test]
+    fn create_with_root_env_source_is_unchanged_from_pre_phase_behaviour() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
+        fs::write(
+            ironhermes_core::get_hermes_home().join(".env"),
+            "OPENROUTER_API_KEY=sk-root-value\nTELEGRAM_BOT_TOKEN=tg-should-not-appear\n",
+        )
+        .expect("write root .env");
+        Config::default()
+            .save_to(&ironhermes_core::get_hermes_home().join("config.yaml"))
+            .expect("save root config.yaml");
+
+        let rows = create_profile_impl(
+            "root-env-parity-profile",
+            &KeyMode::LlmOnly,
+            false,
+            Vec::new(),
+            SecretSource::RootEnv,
+            &Config::default(),
+        )
+        .expect("create should succeed");
+
+        assert!(rows.iter().any(|r| r.name == "OPENROUTER_API_KEY"));
+        assert!(!rows.iter().any(|r| r.name == "TELEGRAM_BOT_TOKEN"));
+
+        let env_map = read_env_keys(&profile_dir_for("root-env-parity-profile").join(".env"))
+            .expect("read written .env");
+        assert_eq!(
+            env_map.get("OPENROUTER_API_KEY").map(String::as_str),
+            Some("sk-root-value")
+        );
+    }
+
+    /// D-11 (T-49.4.1-03): the fourth instance of the never-interpolate-the-
+    /// dotenvy-error discipline — sibling of `read_env_keys_parse_error_
+    /// never_leaks_the_line` and `refuse_reason_never_leaks_the_env_line_
+    /// content`, this is the UPLOAD path.
+    #[test]
+    fn uploaded_dotenv_parse_error_never_leaks_the_line() {
+        const SENTINEL: &str = "sk-D11-CANARY-must-never-surface";
+        let bytes = format!("GOOD_KEY=fine\nBAD_KEY='{SENTINEL}\n").into_bytes();
+
+        let err =
+            parse_uploaded_dotenv(&bytes).expect_err("unterminated quote must be a parse error");
+
+        assert_eq!(err, UPLOADED_DOTENV_PARSE_ERROR);
+        assert!(
+            !err.contains(SENTINEL),
+            "upload parse error must not contain the failing line's value; got: {err}"
+        );
+        assert!(
+            !err.contains("BAD_KEY"),
+            "upload parse error must not name the failing line at all; got: {err}"
+        );
+    }
+
+    /// D-11 routing: the parsed pairs are consumed by `build_source_map`'s
+    /// `Provided` arm from the SAME `manual_keys` slice the typed fields
+    /// populate — there is no second key-carrying field or fn.
+    #[test]
+    fn uploaded_keys_travel_on_the_existing_manual_keys_field() {
+        let bytes = b"OPENROUTER_API_KEY=sk-uploaded-value\n".to_vec();
+        let pairs = parse_uploaded_dotenv(&bytes).expect("well-formed upload must parse");
+        assert_eq!(
+            pairs,
+            vec![(
+                "OPENROUTER_API_KEY".to_string(),
+                "sk-uploaded-value".to_string()
+            )]
+        );
+
+        let map = build_source_map(SecretSource::Provided, &Config::default(), &pairs)
+            .expect("Provided source must resolve from the manual_keys slice");
+        assert_eq!(
+            map.get("OPENROUTER_API_KEY").map(String::as_str),
+            Some("sk-uploaded-value")
+        );
+    }
+
+    /// D-11 validation: uploaded key names and values route through the SAME
+    /// `validate_key_name`/`validate_key_value` `create_profile_impl` already
+    /// calls — a rejected entry names at most the key NAME, never the value.
+    #[test]
+    fn uploaded_key_validation_reuses_the_existing_validators() {
+        let bad_name = b"lowercase_key=some-value\n".to_vec();
+        let err = parse_uploaded_dotenv(&bad_name).expect_err("invalid key name must be rejected");
+        assert!(
+            err.contains("lowercase_key"),
+            "rejection must name the invalid key; got: {err}"
+        );
+        assert!(
+            !err.contains("some-value"),
+            "rejection must never echo the value; got: {err}"
+        );
+
+        let bad_value = b"GOOD_KEY_NAME=\n".to_vec();
+        let err2 = parse_uploaded_dotenv(&bad_value).expect_err("empty value must be rejected");
+        assert!(
+            err2.contains("GOOD_KEY_NAME"),
+            "rejection must name the key; got: {err2}"
+        );
+    }
+
+    /// UI-SPEC E3 "Partial/incomplete": one malformed line among several
+    /// valid ones rejects the WHOLE file — never a partial pair list.
+    #[test]
+    fn uploaded_dotenv_parse_is_all_or_nothing() {
+        let bytes = b"GOOD_ONE=value-one\nBAD_TWO='unterminated\nGOOD_THREE=value-three\n".to_vec();
+        let err = parse_uploaded_dotenv(&bytes)
+            .expect_err("one malformed line must reject the whole file");
+        assert_eq!(err, UPLOADED_DOTENV_PARSE_ERROR);
+    }
+
+    /// D-06: a provided-keys file that parses cleanly but supplies no key for
+    /// the profile's main provider is NOT a parse failure — it is accepted
+    /// by the parser/source-map and refused later by the existing post-write
+    /// dispatch-gate check, with the D-06 message, never the D-11 parse
+    /// message.
+    #[test]
+    fn provided_source_with_no_key_for_main_provider_fails_loud_not_at_parse_time() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
+
+        let mut root_cfg = Config::default();
+        root_cfg.providers.insert(
+            "moonshot".to_string(),
+            provider_cfg(Some("MOONSHOT_D11_API_KEY"), None),
+        );
+        root_cfg
+            .save_to(&ironhermes_core::get_hermes_home().join("config.yaml"))
+            .expect("save root config.yaml");
+
+        let name = "provided-no-key-profile";
+        let profile_dir = profile_dir_for(name);
+        fs::create_dir_all(&profile_dir).expect("mkdir profile dir");
+        let mut profile_cfg = Config::default();
+        profile_cfg.model.provider = "moonshot".to_string();
+        profile_cfg
+            .save_to(&profile_dir.join("config.yaml"))
+            .expect("save profile config.yaml");
+        fs::write(profile_dir.join(".env"), "").expect("write empty .env");
+
+        // A cleanly-parsed provided-keys upload that supplies an unrelated
+        // key, not the profile's main provider's key.
+        let manual_keys = vec![(
+            "TELEGRAM_BOT_TOKEN".to_string(),
+            SecretString::from("tg-unrelated-value".to_string()),
+        )];
+
+        let root_config_for_sync = Config::load().expect("load root config for sync");
+        let err = sync_profile_secrets_impl(
+            name,
+            SecretSource::Provided,
+            &KeyMode::LlmOnly,
+            manual_keys,
+            &root_config_for_sync,
+        )
+        .expect_err("a source with no key for the main provider must fail loud");
+
+        assert!(
+            err.contains("no key for provider \"moonshot\""),
+            "must be the D-06 loud failure, not a parse error; got: {err}"
+        );
+        assert!(
+            !err.contains(UPLOADED_DOTENV_PARSE_ERROR),
+            "must not be the parse-error message; got: {err}"
+        );
+    }
+
+    /// Guards against the deferred "stale-vs-root health as a distinct
+    /// ProfileGap" idea creeping into this phase. An exhaustive match with
+    /// no wildcard arm fails to COMPILE the moment a fifth variant is added
+    /// without updating this fn, which is the strongest "exactly four"
+    /// assertion Rust's type system can make.
+    #[test]
+    fn profile_gap_variant_set_is_unchanged_by_this_phase() {
+        fn variant_index(gap: &ProfileGap) -> u8 {
+            match gap {
+                ProfileGap::MissingDir => 0,
+                ProfileGap::MissingConfigYaml => 1,
+                ProfileGap::NoResolvableKey => 2,
+                ProfileGap::NoKeyForProvider(_) => 3,
+            }
+        }
+        assert_eq!(variant_index(&ProfileGap::MissingDir), 0);
+        assert_eq!(variant_index(&ProfileGap::MissingConfigYaml), 1);
+        assert_eq!(variant_index(&ProfileGap::NoResolvableKey), 2);
+        assert_eq!(
+            variant_index(&ProfileGap::NoKeyForProvider("x".to_string())),
+            3
         );
     }
 }

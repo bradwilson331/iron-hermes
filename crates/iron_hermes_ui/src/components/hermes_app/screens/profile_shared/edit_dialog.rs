@@ -40,17 +40,20 @@
 
 use super::advanced::AdvancedProfilePane;
 use super::create_dialog::render_verify_doctor_block;
+use super::secrets_source_picker::{SecretsSourcePicker, VAULT_REASON_BUILD_LACKS_FEATURE};
 use super::ProfileDialogContext;
 use crate::components::hermes_app::screens::bot_roster::delete_confirm::DeleteBotConfirm;
 use crate::components::hermes_app::screens::bot_roster::npub_row::BotNpubRow;
 use crate::components::hermes_app::screens::bot_roster::routines::BotRoutinesSection;
 use crate::components::hermes_app::widgets::avatar_picker::AvatarPicker;
 use crate::protocol::{
-    BotAvatarDescriptor, DuplicateProfileRequest, KeyRow, KeyStatus, ProfileConfigWritePayload,
-    ProfileDetail, ProfileGap, ProfileHealth, VerifyReport,
+    BotAvatarDescriptor, DuplicateProfileRequest, KeyMode, KeyRow, KeyStatus,
+    ProfileConfigWritePayload, ProfileDetail, ProfileGap, ProfileHealth, SecretSource,
+    SyncProfileSecretsRequest, VerifyReport,
 };
 use crate::server::profile_api::{
-    fetch_profile_detail, list_profiles, save_profile_key, update_profile_config,
+    fetch_profile_detail, list_profiles, save_profile_key, secrets_source_availability,
+    sync_profile_secrets, update_profile_config,
 };
 use crate::server::profile_verify_api::verify_profile;
 use dioxus::prelude::*;
@@ -265,6 +268,30 @@ pub fn ProfileDetailDrawer(
     let mut save_error: Signal<Option<String>> = use_signal(|| None);
     let mut save_hint: Signal<Option<String>> = use_signal(|| None);
 
+    // Phase 49.4.1 (D-01/D-05): Secrets Source working copy + SYNC action
+    // state — registered unconditionally alongside the drawer's other
+    // signals (Pattern E). Seeded from the loaded detail's remembered
+    // source in the fetch-on-change effect below, same as `provider_wc`/
+    // `model_wc`.
+    let mut secrets_source_wc: Signal<SecretSource> = use_signal(|| SecretSource::RootEnv);
+    // Phase 49.4.1 Plan 03 (D-04/D-05/D-11): the Provided-keys working copy
+    // for the drawer mount — threaded into `SecretsSourcePicker` (D-05's
+    // "one component, two mounts" rule) and read back out into
+    // `SyncProfileSecretsRequest.manual_keys` at SYNC time.
+    let mut manual_keys: Signal<Vec<(String, String)>> = use_signal(Vec::new);
+    let syncing: Signal<bool> = use_signal(|| false);
+    let mut sync_error: Signal<Option<String>> = use_signal(|| None);
+    // Always-visible overwrite-warning hint (UI-SPEC E8) — a `Signal`
+    // rather than a literal so a future plan can vary its text without
+    // touching the render shape; this plan seeds it once and never clears
+    // it, matching "visible before, during and after the action".
+    let sync_hint: Signal<Option<String>> = use_signal(|| {
+        Some(
+            "This will overwrite this profile's provider registry and add any newly-resolved keys."
+                .to_string(),
+        )
+    });
+
     // Verify section (Section 4) state — the probe runs ONLY on the
     // explicit VERIFY click (D-11/D-09), never on open, profile change, or
     // render. `verify_started` distinguishes "never clicked" (render
@@ -299,6 +326,13 @@ pub fn ProfileDetailDrawer(
     let provider_options_resource = use_resource(move || async move {
         crate::server::provider_config_api::get_provider_config().await
     });
+    // Phase 49.4.1 Plan 02 (D-10): server-computed vault availability, the
+    // SAME payload the wizard's step-2 mount reads — replaces this Plan's
+    // Task 2 predecessor inline `cfg!` computation. A plain `use_resource`,
+    // never a `use_server_future` with a `?` early return (this file's own
+    // top-of-file discipline note).
+    let availability_resource =
+        use_resource(move || async move { secrets_source_availability().await });
     let model_options_resource = use_resource(move || {
         // Phase 49.4 hotfix: skip the model fetch while the drawer is closed.
         // This drawer is mounted UNCONDITIONALLY on the Agents (BotRoster) and
@@ -354,12 +388,29 @@ pub fn ProfileDetailDrawer(
                 duplicate_error.set(None);
                 delete_confirm_open.set(false);
                 group_error.set(None);
+                sync_error.set(None);
+                // Phase 49.4.1 Plan 03 (D-13): never carry one profile's
+                // typed/uploaded manual keys onto a different profile's
+                // drawer view.
+                manual_keys.set(Vec::new());
                 spawn(async move {
                     let id_for_meta = id.clone();
                     match fetch_profile_detail(id).await {
                         Ok(detail) => {
                             provider_wc.set(detail.provider.clone().unwrap_or_default());
                             model_wc.set(detail.model_default.clone().unwrap_or_default());
+                            // Phase 49.4.1 (D-01/D-05): seed the picker from
+                            // the profile's remembered source; an absent or
+                            // unrecognised value pre-selects Root .env, the
+                            // overall app default (E1: "there is no zero-
+                            // selection state").
+                            secrets_source_wc.set(
+                                detail
+                                    .secrets_source
+                                    .as_deref()
+                                    .and_then(SecretSource::from_config_str)
+                                    .unwrap_or(SecretSource::RootEnv),
+                            );
                             load_state.set(DetailLoadState::Loaded(detail));
                         }
                         Err(_e) => {
@@ -411,6 +462,14 @@ pub fn ProfileDetailDrawer(
     let is_default_profile = name_str == DELETION_PROTECTED_PROFILE_NAME;
 
     let state_snapshot = load_state.read().clone();
+
+    // Phase 49.4.1 Plan 02 (D-10, UI-SPEC E1): while `availability_resource`
+    // is unresolved, the vault row is born disabled with the build-level
+    // reason rather than momentarily selectable.
+    let (vault_available, vault_reason) = match availability_resource() {
+        Some(Ok(availability)) => (availability.vault_available, availability.vault_reason),
+        _ => (false, Some(VAULT_REASON_BUILD_LACKS_FEATURE.to_string())),
+    };
 
     let aria_label = format!("Profile detail: {name_str}");
 
@@ -477,6 +536,59 @@ pub fn ProfileDetailDrawer(
                 Err(e) => {
                     saving_sig.set(false);
                     save_error_sig.set(Some(format!("{e}")));
+                }
+            }
+        });
+    };
+
+    // Phase 49.4.1 (D-01/D-05/D-06): SECRETS SOURCE section's SYNC handler.
+    // Never a second confirmation modal — the always-visible overwrite hint
+    // (`sync_hint`) is the entire confirmation surface, matching the
+    // existing `--force` checkbox note's weight.
+    let name_for_sync = name_str.clone();
+    let on_sync_click = move |_| {
+        let profile_name = name_for_sync.clone();
+        let source_val = *secrets_source_wc.read();
+        // Phase 49.4.1 Plan 03 (D-04/D-11): the picker's Provided-keys
+        // working copy — blank/partially-blank rows dropped here (UI-SPEC
+        // E4), never raised as a submit-time error.
+        let manual_keys_owned =
+            super::secrets_source_picker::submit_ready_manual_keys(&manual_keys.read());
+        let mut syncing_sig = syncing;
+        let mut sync_error_sig = sync_error;
+        let mut load_state_sig = load_state;
+        let mut manual_keys_sig = manual_keys;
+        syncing_sig.set(true);
+        sync_error_sig.set(None);
+        spawn(async move {
+            let req = SyncProfileSecretsRequest {
+                name: profile_name.clone(),
+                source: source_val,
+                // No key-mode picker on the drawer today — LlmOnly derives
+                // its name set from the ROOT config's own `providers:`
+                // registry (`provider_key_env_names`), so it exactly covers
+                // the connection fields this same sync just mirrored down.
+                key_mode: KeyMode::LlmOnly,
+                manual_keys: manual_keys_owned,
+            };
+            match sync_profile_secrets(req).await {
+                Ok(_response) => {
+                    syncing_sig.set(false);
+                    sync_error_sig.set(None);
+                    // D-13: drop the typed/uploaded rows immediately after
+                    // the write — never redisplayed.
+                    manual_keys_sig.set(Vec::new());
+                    on_profile_updated.call(());
+                    // Re-fetch: the sync just rewrote the provider registry
+                    // and the .env — the drawer's own KEYS table and health
+                    // dot must reflect that, not only the parent list.
+                    if let Ok(detail) = fetch_profile_detail(profile_name).await {
+                        load_state_sig.set(DetailLoadState::Loaded(detail));
+                    }
+                }
+                Err(e) => {
+                    syncing_sig.set(false);
+                    sync_error_sig.set(Some(format!("{e}")));
                 }
             }
         });
@@ -846,6 +958,37 @@ pub fn ProfileDetailDrawer(
                                     disabled: !write_enabled,
                                     onclick: move |_| add_form_open.set(true),
                                     "+ ADD KEY"
+                                }
+                            }
+                        }
+
+                        // Section 3.5 — Secrets Source (D-01/D-04/D-05/D-06/
+                        // D-07/D-10). Placed after KEYS and before VERIFY so
+                        // the operator picks a source, syncs, then verifies.
+                        // Not gated on `ProfileDialogContext::Bot` — D-05
+                        // requires this mount for profiles generally,
+                        // including the Kanban context.
+                        div { class: "kn-drawer-section",
+                            SecretsSourcePicker {
+                                source: secrets_source_wc,
+                                vault_available,
+                                vault_reason: vault_reason.clone(),
+                                disabled: !write_enabled || *syncing.read(),
+                                manual_keys,
+                            }
+                            button {
+                                class: "kn-action-btn",
+                                disabled: !write_enabled || *syncing.read(),
+                                onclick: on_sync_click,
+                                if *syncing.read() { "SYNCING…" } else { "SYNC" }
+                            }
+                            if let Some(hint) = sync_hint.read().clone() {
+                                div { class: "kn-modal-hint--info", "{hint}" }
+                            }
+                            if let Some(err) = sync_error.read().clone() {
+                                div { class: "kn-modal-error", "{err}" }
+                                div { class: "kn-modal-hint--info",
+                                    "Add the key to that source, or pick a different source, then try again."
                                 }
                             }
                         }

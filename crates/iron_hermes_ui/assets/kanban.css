@@ -1364,6 +1364,42 @@
     outline: none;
 }
 
+/* Phase 49.4.1 Plan 03 (D-04/D-11): the "Provided keys" row's OS-file drop
+ * target — inert at rest (--w-border, no accent) so it never competes with
+ * the selected-source dot; structural pattern copied from chat.rs's own
+ * ondragover/ondragleave/ondrop precedent, but the COLOR comes from this
+ * surface's own family, never chat.rs's --teal (UI-SPEC "New tokens/classes
+ * this phase needs"). A fixed position (relative, for the overlay) and no
+ * literal pixel values beyond the border width. */
+.kn-dropzone {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--sp-2);
+    padding: var(--sp-4);
+    border: 1px solid var(--w-border);
+    background: var(--w-bg-3);
+}
+
+.kn-dropzone[data-drop-active="true"] {
+    border-color: var(--accent-primary);
+    background: color-mix(in srgb, var(--accent-primary) 10%, var(--w-bg-3));
+}
+
+.kn-drop-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: var(--fs-13);
+    font-weight: 700;
+    color: var(--accent-primary);
+    background: color-mix(in srgb, var(--accent-primary) 10%, var(--w-bg-3));
+    pointer-events: none;
+}
+
 /* Phase 47.4 Plan 15 (GAP-9): per-row OVERRIDE/SET toggle — declared drift,
  * not in the UI-SPEC's "New classes required" table (see 47.4-15-SUMMARY.md). */
 .kn-key-edit-toggle {

@@ -688,6 +688,12 @@ pub struct ProfileDetail {
     pub model_default: Option<String>,
     pub keys: Vec<KeyRow>,
     pub web_config_write_enabled: bool,
+    /// Phase 49.4.1 (D-01/D-05): the profile's remembered secrets-source
+    /// selection, in [`SecretSource::config_str`] vocabulary — `None` means
+    /// no remembered source (never synced, or an unparsed/hand-edited
+    /// value). Lets the drawer pre-select the picker on mount without a
+    /// second load effect.
+    pub secrets_source: Option<String>,
 }
 
 /// Phase 47.4 (D-07): the wizard's key-inheritance mode. `Explicit` carries
@@ -712,6 +718,19 @@ pub struct CreateProfileRequest {
     pub key_mode: KeyMode,
     pub force: bool,
     pub manual_keys: Vec<(String, String)>,
+    /// Phase 49.4.1 Plan 02 (D-04): which [`SecretSource`] the create path
+    /// resolves keys/registry connection fields from. `#[serde(default)]`
+    /// so a payload serialized before this field existed still deserializes
+    /// to the pre-phase behaviour (D-04's costly-reversibility mitigation)
+    /// rather than failing.
+    #[serde(default = "default_create_secret_source")]
+    pub secret_source: SecretSource,
+}
+
+/// [`CreateProfileRequest::secret_source`]'s serde default — the pre-phase
+/// behaviour (root `.env` only).
+fn default_create_secret_source() -> SecretSource {
+    SecretSource::RootEnv
 }
 
 /// D-13: redacts `manual_keys` unconditionally — printing this value can
@@ -723,8 +742,114 @@ impl std::fmt::Debug for CreateProfileRequest {
             .field("key_mode", &self.key_mode)
             .field("force", &self.force)
             .field("manual_keys", &"<redacted>")
+            .field("secret_source", &self.secret_source)
             .finish()
     }
+}
+
+/// Phase 49.4.1 (D-04/D-07): the secrets-provenance axis — WHERE a
+/// profile's provider connection fields and key material are sourced from
+/// on create or re-sync. Orthogonal to [`KeyMode`] (which key NAMES);
+/// neither replaces the other and a profile carries one of each (D-07). A
+/// closed set of four, no fifth variant — wire contract locked by the
+/// 49.4.1-01 Task 1 checkpoint (variant names, serde representation,
+/// persisted `config_str` vocabulary, and operator-facing labels all
+/// approved verbatim).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SecretSource {
+    RootEnv,
+    ContainerEnv,
+    Vault,
+    Provided,
+}
+
+impl SecretSource {
+    /// Operator-facing label — UI-SPEC Copywriting Contract, locked.
+    pub fn label(&self) -> &'static str {
+        match self {
+            SecretSource::RootEnv => "Root .env",
+            SecretSource::ContainerEnv => "Container environment",
+            SecretSource::Vault => "Vault",
+            SecretSource::Provided => "Provided keys",
+        }
+    }
+
+    /// Persisted `config.yaml` vocabulary — deliberately a SEPARATE
+    /// snake_case string set from the serde wire representation above, so
+    /// the on-disk file reads as configuration rather than as Rust. Pinned
+    /// round-trip: [`SecretSource::from_config_str`].
+    pub fn config_str(&self) -> &'static str {
+        match self {
+            SecretSource::RootEnv => "root_env",
+            SecretSource::ContainerEnv => "container_env",
+            SecretSource::Vault => "vault",
+            SecretSource::Provided => "provided",
+        }
+    }
+
+    /// Total over the four [`SecretSource::config_str`] values; `None` for
+    /// anything else — an unrecognised or hand-edited value degrades to "no
+    /// remembered source" rather than to a wrong one.
+    pub fn from_config_str(s: &str) -> Option<SecretSource> {
+        match s {
+            "root_env" => Some(SecretSource::RootEnv),
+            "container_env" => Some(SecretSource::ContainerEnv),
+            "vault" => Some(SecretSource::Vault),
+            "provided" => Some(SecretSource::Provided),
+            _ => None,
+        }
+    }
+}
+
+/// Phase 49.4.1 Plan 02 (D-10): server-computed answer to "is the Vault
+/// source selectable, and if not, why" — shipped in the SAME payload that
+/// renders the `SECRETS SOURCE` section (UI-SPEC E1/E2: no separate
+/// in-flight state for the row itself). Carries no key material, so a
+/// derived `Debug` is correct here (unlike [`CreateProfileRequest`], which
+/// can carry plaintext).
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SecretsSourceAvailability {
+    pub vault_available: bool,
+    /// One of the two UI-SPEC "D-10 vault-disabled reason string(s)" when
+    /// `vault_available` is `false`; `None` when it is `true`.
+    pub vault_reason: Option<String>,
+}
+
+/// Phase 49.4.1 (D-01/D-05/D-06): re-sync an EXISTING profile's provider
+/// registry and keys from a chosen [`SecretSource`]. Deliberately does NOT
+/// derive `Debug` — `manual_keys` can carry plaintext key material (Plan
+/// 03's provided-keys path). See the hand-written `Debug` impl below,
+/// structurally identical to [`CreateProfileRequest`]'s.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SyncProfileSecretsRequest {
+    pub name: String,
+    pub source: SecretSource,
+    pub key_mode: KeyMode,
+    pub manual_keys: Vec<(String, String)>,
+}
+
+/// D-11: redacts `manual_keys` unconditionally — printing this value can
+/// never leak key material, even under `{:#?}`.
+impl std::fmt::Debug for SyncProfileSecretsRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncProfileSecretsRequest")
+            .field("name", &self.name)
+            .field("source", &self.source)
+            .field("key_mode", &self.key_mode)
+            .field("manual_keys", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Phase 49.4.1 (D-06): the sync's success payload — the profile's
+/// refreshed key rows, the source that was used, and how many `providers:`
+/// entries the registry mirror touched. A sync that fails D-06's loud-
+/// failure check never produces this value; the caller sees `Err` instead.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SyncProfileSecretsResponse {
+    pub keys: Vec<KeyRow>,
+    pub source: SecretSource,
+    pub providers_mirrored: usize,
 }
 
 /// Phase 47.4 (D-04): `Option`-per-field merge payload for the profile
