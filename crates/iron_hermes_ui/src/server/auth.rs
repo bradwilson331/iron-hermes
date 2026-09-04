@@ -27,14 +27,14 @@ use std::time::{Duration, Instant};
 
 use argon2::password_hash::PasswordHash;
 use argon2::{Argon2, PasswordVerifier};
+use axum::Json;
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Request, State};
-use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use parking_lot::RwLock;
 use rand::RngCore as _;
 use serde::Deserialize;
@@ -162,6 +162,57 @@ pub async fn auth_config_from(
     // `config.web_ui` directly, NOT through `web_ui_auth` — D-06 places
     // this key one level up from `auth`. No vault leg (D-01 names none for
     // this key).
+    // 49.1.1 follow-up: drop a trailing DNS root label from an allowlist entry.
+    //
+    // `https://host.` is a legal FQDN — the trailing dot is the explicit root
+    // label — so it parses, validates, and canonicalizes cleanly, and
+    // `Url::origin()` PRESERVES it. Browsers never send it in `Origin`, so a
+    // byte-exact compare against `https://host` fails and every WebSocket
+    // upgrade is refused by a server that started without complaint. A live
+    // deployment lost a debugging round to exactly this.
+    //
+    // Safe in one direction only, which is why it is a normalization rather
+    // than a rejection: `host.` and `host` are the same host by DNS
+    // definition, so removing the root label can only turn a false REJECT into
+    // a correct accept. It cannot make a foreign origin match — you cannot
+    // reach a different host by deleting a root label. Scheme and port are
+    // untouched.
+    //
+    // Applied here rather than inside `validate_web_redirect_base`: that
+    // validator is shared with MCP OAuth redirect-base handling, where the
+    // exact-string contract has different consequences. This is the
+    // allowlist's own comparison, so it normalizes for its own comparison.
+    fn strip_root_label(origin: &str) -> String {
+        let Ok(mut parsed) = url::Url::parse(origin) else {
+            return origin.to_string();
+        };
+        let Some(host) = parsed.host_str() else {
+            return origin.to_string();
+        };
+        let Some(stripped) = host.strip_suffix('.') else {
+            return origin.to_string();
+        };
+        // Own the stripped host before touching `parsed`: `stripped` borrows
+        // from it, and `set_host` needs it mutably.
+        let stripped = stripped.to_string();
+        // A bare "." is not a host; leave such input untouched for the
+        // validator's own rules to have already judged.
+        if stripped.is_empty() || parsed.set_host(Some(&stripped)).is_err() {
+            return origin.to_string();
+        }
+        parsed.origin().ascii_serialization()
+    }
+
+    // Which source supplied the list, for the boot-time log below. An operator
+    // who set the env var and is being rejected anyway needs to see that
+    // config.yaml won instead — that is the whole failure mode.
+    let origins_source: &'static str = if !config.web_ui.allowed_origins.is_empty() {
+        "config.yaml (web_ui.allowed_origins)"
+    } else if std::env::var("IRONHERMES_WEB_ALLOWED_ORIGINS").is_ok() {
+        "IRONHERMES_WEB_ALLOWED_ORIGINS env var"
+    } else {
+        "unset"
+    };
     let raw_allowed_origins: Vec<String> = if !config.web_ui.allowed_origins.is_empty() {
         config.web_ui.allowed_origins.clone()
     } else if let Ok(v) = std::env::var("IRONHERMES_WEB_ALLOWED_ORIGINS") {
@@ -189,7 +240,7 @@ pub async fn auth_config_from(
         let mut canonicalized = Vec::with_capacity(raw_allowed_origins.len());
         for (index, entry) in raw_allowed_origins.iter().enumerate() {
             match ironhermes_mcp::security::validate_web_redirect_base(entry) {
-                Ok(normalized) => canonicalized.push(normalized),
+                Ok(normalized) => canonicalized.push(strip_root_label(&normalized)),
                 Err(reason) => {
                     anyhow::bail!(
                         "web_ui.allowed_origins / IRONHERMES_WEB_ALLOWED_ORIGINS: \
@@ -202,6 +253,47 @@ pub async fn auth_config_from(
     };
     let allowed_origins =
         crate::server::kanban_ws::AllowedOriginsConfig::resolve(&canonicalized_allowed_origins);
+
+    // 49.1.1 follow-up: log the RESOLVED allowlist once, at boot.
+    //
+    // T-49.1.1-12 keeps the origin set out of the per-rejection warn line, so
+    // that it cannot land in the access log on every failed upgrade. That
+    // decision stands — but it left the resolved list observable nowhere at
+    // all, and a byte-exact comparison whose accepted failure mode is a FALSE
+    // REJECT (T-49.1.1-11) is undiagnosable without it: the operator sees
+    // `variant="explicit"` and their own origin rejected, with no way to tell
+    // what the server actually loaded or which source supplied it. That is
+    // exactly the diagnostic vacuum D-07 and T-49.1.1-15 exist to prevent, and
+    // it cost a live debugging round on the sliplane deployment.
+    //
+    // A once-at-boot line is a different risk profile from a per-request one:
+    // it does not scale with traffic, it is not attacker-triggerable, and the
+    // values are the deployment's own public URLs. `source` is included
+    // because the config.yaml-wins precedence is the likeliest way to have the
+    // env var set and silently ignored.
+    match &allowed_origins {
+        crate::server::kanban_ws::AllowedOriginsConfig::Explicit(list) => {
+            tracing::info!(
+                target: "iron_hermes_ui::auth",
+                source = origins_source,
+                origins = %list.join(", "),
+                "web UI origin allowlist resolved — WebSocket upgrades must send one of these exact origins"
+            );
+        }
+        crate::server::kanban_ws::AllowedOriginsConfig::Any => {
+            tracing::warn!(
+                target: "iron_hermes_ui::auth",
+                source = origins_source,
+                "web UI origin allowlist is \"*\" — any browser origin is accepted (a missing Origin header is still rejected)"
+            );
+        }
+        crate::server::kanban_ws::AllowedOriginsConfig::Unconfigured => {
+            tracing::info!(
+                target: "iron_hermes_ui::auth",
+                "web UI origin allowlist unconfigured — falling back to the Host-derived origin (loopback/LAN posture)"
+            );
+        }
+    }
 
     Ok(AuthConfig {
         password_hash,
@@ -905,7 +997,7 @@ mod tests {
     /// `state_with_password` below is the common case with a fresh,
     /// intentionally-leaked tempdir per call.
     fn state_with_password_at(pw: &str, home: &std::path::Path) -> Arc<AuthState> {
-        use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+        use argon2::password_hash::{PasswordHasher, SaltString, rand_core::OsRng};
         let salt = SaltString::generate(&mut OsRng);
         let hash = Argon2::default()
             .hash_password(pw.as_bytes(), &salt)
@@ -961,6 +1053,115 @@ mod tests {
     // -------------------------------------------------------------------
     // D-01 / D-06 (49.1.1): auth_config_from's allowed_origins layering.
     // -------------------------------------------------------------------
+
+    /// 49.1.1 follow-up: the canonicalizer must not alter an already-canonical
+    /// origin, and must reduce the shapes an operator plausibly types to that
+    /// same form. A live deployment was rejected with `variant="explicit"`
+    /// while sending exactly its configured origin, and the first hypothesis
+    /// was that canonicalization appended a trailing slash (the validator is
+    /// named `validate_web_redirect_base`, and a *base* URL normally keeps
+    /// one). It does not — it returns `Url::origin().ascii_serialization()`.
+    /// Pinning that here so the next incident rules this out in a test run
+    /// instead of a live debugging round.
+    #[tokio::test]
+    async fn allowed_origins_canonicalization_is_origin_form_not_base_form() {
+        for input in [
+            "https://iron-hermes.sliplane.app",
+            "https://iron-hermes.sliplane.app/",
+            "https://iron-hermes.sliplane.app:443",
+        ] {
+            let config = ironhermes_core::config::Config {
+                web_ui: ironhermes_core::config::WebUiConfig {
+                    allowed_origins: vec![input.to_string()],
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            let resolved = auth_config_from(&config).await.expect("must resolve");
+            assert_eq!(
+                resolved.allowed_origins,
+                crate::server::kanban_ws::AllowedOriginsConfig::Explicit(vec![
+                    "https://iron-hermes.sliplane.app".to_string()
+                ]),
+                "{input} must canonicalize to the bare origin, with no trailing slash \
+                 and no default port — it is compared byte-exactly against the browser's \
+                 Origin header"
+            );
+        }
+    }
+
+    /// 49.1.1 follow-up: the trailing-dot FQDN that caused a live outage.
+    ///
+    /// `https://iron-hermes.sliplane.app.` is a legal fully-qualified name —
+    /// the trailing dot is the explicit DNS root label — so it passed every
+    /// guard the phase built (valid URL, valid host, https scheme, no path),
+    /// the server booted clean, and only the byte-exact allowlist compare
+    /// failed. `Url::origin()` preserves the dot; browsers never send it.
+    /// Fails against the pre-fix canonicalization.
+    #[tokio::test]
+    async fn allowed_origins_trailing_root_label_is_normalized() {
+        let config = ironhermes_core::config::Config {
+            web_ui: ironhermes_core::config::WebUiConfig {
+                allowed_origins: vec!["https://iron-hermes.sliplane.app.".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolved = auth_config_from(&config).await.expect("must resolve");
+        assert_eq!(
+            resolved.allowed_origins,
+            crate::server::kanban_ws::AllowedOriginsConfig::Explicit(vec![
+                "https://iron-hermes.sliplane.app".to_string()
+            ]),
+            "a trailing DNS root label must be dropped — it names the same host, \
+             and the browser's Origin never carries it"
+        );
+    }
+
+    /// The normalization must not reach past the host: scheme and a
+    /// non-default port survive it untouched. Guards against a future
+    /// 'simplify' that strips the dot with naive string surgery.
+    #[tokio::test]
+    async fn trailing_root_label_normalization_preserves_scheme_and_port() {
+        let config = ironhermes_core::config::Config {
+            web_ui: ironhermes_core::config::WebUiConfig {
+                allowed_origins: vec!["http://internal.example.:8080".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolved = auth_config_from(&config).await.expect("must resolve");
+        assert_eq!(
+            resolved.allowed_origins,
+            crate::server::kanban_ws::AllowedOriginsConfig::Explicit(vec![
+                "http://internal.example:8080".to_string()
+            ]),
+        );
+    }
+
+    /// 49.1.1 follow-up: scheme is part of the origin, so an `http://` entry
+    /// does NOT match an `https://` browser origin. This is the likeliest
+    /// operator error behind a false reject, and it fails silently — the entry
+    /// is a perfectly valid URL, so startup succeeds and only the WebSocket
+    /// upgrade is refused.
+    #[tokio::test]
+    async fn allowed_origins_scheme_is_significant() {
+        let config = ironhermes_core::config::Config {
+            web_ui: ironhermes_core::config::WebUiConfig {
+                allowed_origins: vec!["http://iron-hermes.sliplane.app".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let resolved = auth_config_from(&config).await.expect("must resolve");
+        assert_eq!(
+            resolved.allowed_origins,
+            crate::server::kanban_ws::AllowedOriginsConfig::Explicit(vec![
+                "http://iron-hermes.sliplane.app".to_string()
+            ]),
+            "an http:// entry must stay http:// — it will not match an https:// browser origin"
+        );
+    }
 
     #[tokio::test]
     async fn auth_config_from_reads_config_yaml_allowed_origins() {
