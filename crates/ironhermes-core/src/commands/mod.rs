@@ -39,7 +39,14 @@ pub enum PlatformFilter {
     CliAndAcp,
     /// Gateway/messaging only — any platform that is NOT Local and NOT ApiServer
     GatewayOnly,
-    /// Universal: CLI + gateway (NOT ACP/ApiServer)
+    /// Universal: every platform except `ApiServer` — CLI, gateway
+    /// messaging platforms AND Web. (Phase 49.7 Plan 05 drive-by fix: this
+    /// comment previously read "CLI + gateway (NOT ACP/ApiServer)", which
+    /// omitted Web even though `is_available_on`'s `*platform !=
+    /// Platform::ApiServer` check has always included it. `/goal` and
+    /// `/loop`'s accepted web gap — resolving on Web but returning a
+    /// not-configured message — is a direct consequence of this
+    /// implementation, so the comment is load-bearing for the next reader.)
     Universal,
 }
 
@@ -352,6 +359,30 @@ pub enum CommandResult {
     /// happens at the gateway boundary, mirroring how `NewSession` is
     /// intercepted by the gateway/TUI handlers.
     Queued { message: String },
+
+    /// Phase 49.7 Plan 05 (D-02/D-06/D-08): `/goal <text> [--budget N]`
+    /// resolved successfully. `cmd_goal` performs no I/O and no async
+    /// work — it only parses the objective/budget and returns this
+    /// variant. `dispatch()` is synchronous
+    /// (`ironhermes-core/src/async_bridge.rs`'s own doc comment forbids
+    /// blocking a per-token path on `block_on_sync`), so the actual
+    /// budget-bounded, judge-evaluated multi-turn loop must run OUTSIDE
+    /// `dispatch()` — each surface that receives this variant is
+    /// responsible for spawning it.
+    ///
+    /// Three dispatch sites need an arm: `ironhermes-gateway/src/handler.rs`,
+    /// `ironhermes-cli/src/tui_rata/commands.rs`, and
+    /// `iron_hermes_ui/src/server/ws.rs`. Only the first two match
+    /// `CommandResult` exhaustively — `ws.rs` closes its match with a
+    /// `other => format!("{other:?}")` `Debug` wildcard, so its arm is
+    /// MANDATORY rather than compiler-enforced; omitting it would leak the
+    /// user's `objective` string into the browser. `iron_hermes_ui` wires
+    /// no goal-loop executor in this phase (accepted gap, Phase 49.7
+    /// Plan 05) and must render an honest not-configured message instead.
+    StartGoalLoop {
+        objective: String,
+        budget: Option<u32>,
+    },
 
     /// Phase 36.17.3 (D-06 amended): `/pause` — toggle queue drain pause state.
     /// TUI maps to AtomicBool flip in `handle_session_control` (Plan 05);

@@ -462,9 +462,9 @@ async fn two_consecutive_judge_errors_block() {
 
     let judge_fn: JudgeFn = Arc::new(move |_req: JudgeRequest| {
         Box::pin(async move {
-            Err(ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
-                "simulated provider failure: rate-limited"
-            )))
+            Err(ironhermes_kanban::judge::JudgeError::Provider(
+                "simulated provider failure: rate-limited".to_string(),
+            ))
         })
     });
 

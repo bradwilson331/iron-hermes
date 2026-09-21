@@ -96,6 +96,20 @@ pub enum VaultCommands {
         /// Only list keys starting with this prefix.
         #[arg(long)]
         prefix: Option<String>,
+        /// List the leaf names stored under ONE profile's own vault prefix
+        /// (`secret/profiles/<slug>/`) instead of the root provider namespace.
+        ///
+        /// Phase 51 UAT gap (2026-09-12): `migrate-profile` tells the operator to delete the
+        /// plaintext backup "once resolution from the vault is verified", and D-15 makes a
+        /// names-only listing the only verification available. Without this flag there was no
+        /// CLI surface for `secret/profiles/<slug>/` at all — the default listing is rooted at
+        /// `secret/providers/` BY DESIGN and cannot reach it — so a successful migration was
+        /// indistinguishable from a failed one.
+        ///
+        /// Named `--for-profile`, not `--profile`: `--profile` is the global
+        /// home-pivot flag (Phase 24, D-07) and means something different.
+        #[arg(long, value_name = "SLUG")]
+        for_profile: Option<String>,
     },
     /// Import provider API keys from `~/.ironhermes/.env` into the vault (D-04).
     ///
@@ -106,6 +120,26 @@ pub enum VaultCommands {
     /// leaves that key's line in `.env` untouched. Scope is provider API keys only
     /// (D-02/D-13) — never platform/gateway/telegram tokens or profile `.env`s.
     Migrate,
+    /// Import ONE kanban worker profile's provider credential from its own `.env`
+    /// into the vault (Phase 51, D-04/D-10/D-14) — a NEW, independent subcommand
+    /// from `Migrate` above, never a flag on it (`Migrate`'s own doc comment says
+    /// its scope is "never ... profile `.env`s").
+    ///
+    /// Ordered flow, safe-by-ordering: preflight (abort before anything is written
+    /// if the vault is sealed/uninitialized/unreachable) → `0600` timestamped
+    /// backup of the FULL original profile `.env` → write through
+    /// [`ironhermes_vault::ProfileSecretStore::put_profile_secret`] at
+    /// `secret/profiles/{slug}/{provider}` → scrub only that key's line, preserving
+    /// every other byte → print the backup path. `--dry-run` reports what would
+    /// move and writes nothing at all.
+    MigrateProfile {
+        /// The profile slug (its directory name under `profiles/`).
+        slug: String,
+        /// Report what would move and write nothing — no backup, no vault entry,
+        /// no `.env` change.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -118,8 +152,14 @@ pub async fn handle_vault_command(cmd: VaultCommands) -> Result<()> {
         VaultCommands::Init => cmd_init().await,
         VaultCommands::Unlock => cmd_unlock().await,
         VaultCommands::Set { key } => cmd_set(key).await,
-        VaultCommands::List { prefix } => cmd_list(prefix).await,
+        VaultCommands::List {
+            prefix,
+            for_profile,
+        } => cmd_list(prefix, for_profile).await,
         VaultCommands::Migrate => cmd_migrate().await,
+        VaultCommands::MigrateProfile { slug, dry_run } => {
+            crate::profile_migrate::migrate_profile(slug, dry_run).await
+        }
     }
 }
 
@@ -331,12 +371,92 @@ async fn cmd_set(key: String) -> Result<()> {
 // cmd_list (D-15: names only, never values)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// `vault list --for-profile <slug>`'s backend call, feature-gated like `cmd_init`/`cmd_unlock`
+/// above — it needs the concrete `RustyVaultStore`/`ProfileSecretStore` types, not just the
+/// `SecretStore` trait object `open_store` returns. Pre-existing Phase-51 gap (this crate's
+/// own default build has never compiled without `--features rusty-vault`, but nothing exercised
+/// that path until `scripts/ci-gates.sh`'s `-p`-scoped Gate 3, which gets no workspace feature
+/// unification): this block used to be inlined directly in `cmd_list` with no `#[cfg]` guard at
+/// all.
+#[cfg(feature = "rusty-vault")]
+async fn list_profile_secret_names_for(
+    resolved: &ironhermes_vault::VaultConfig,
+    slug: &str,
+) -> Result<Vec<String>> {
+    // `open_async` (Phase 51 Plan 17, CR-05): this fn is async, so the blocking
+    // sync-bridge inside `RustyVaultStore::open` must not run on this thread.
+    let store = ironhermes_vault::RustyVaultStore::open_async(&resolved.rusty_vault)
+        .await
+        .context("failed to open vault store — run `ironhermes vault init`/`unlock` first")?;
+    let profile_store = ironhermes_vault::ProfileSecretStore::from_rusty_vault_store(&store);
+    let mut names = profile_store
+        .list_profile_secret_names(slug)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to list vault secrets for profile {slug:?} — is the vault unsealed? run \
+                 `ironhermes vault unlock`"
+            )
+        })?;
+    names.sort();
+    Ok(names)
+}
+
+#[cfg(not(feature = "rusty-vault"))]
+async fn list_profile_secret_names_for(
+    _resolved: &ironhermes_vault::VaultConfig,
+    _slug: &str,
+) -> Result<Vec<String>> {
+    anyhow::bail!(
+        "vault list --for-profile requires the `rusty-vault` feature — rebuild with `--features rusty-vault`"
+    )
+}
+
 /// List secret key NAMES only, optionally prefix-filtered, sorted (D-03/D-15).
 ///
 /// An empty vault prints nothing and exits `Ok(())` (not an error).
-async fn cmd_list(prefix: Option<String>) -> Result<()> {
+async fn cmd_list(prefix: Option<String>, for_profile: Option<String>) -> Result<()> {
     let config = Config::load().unwrap_or_default();
     let resolved = resolve_vault_config(&config);
+
+    // `--for-profile` reads a DIFFERENT namespace (`secret/profiles/<slug>/`) through a
+    // different type. It is not a filter over the default listing: `RustyVaultStore`'s own
+    // `list_secrets` is rooted at the fixed `secret/providers/` constant and cannot reach
+    // profile paths at any `prefix` argument (see `rusty_vault_store.rs`'s `list_request`
+    // doc). Routing through `ProfileSecretStore` keeps that namespace boundary intact rather
+    // than widening the root listing to cross it.
+    if let Some(slug) = for_profile {
+        // Resolve the vault from the PROFILE's own config.yaml, exactly as
+        // `vault migrate-profile` does (`profile_migrate.rs`) — so this listing reads the
+        // same vault that command wrote to. Resolving from the root config instead would
+        // silently look in a different place for any profile that pins its own `data_dir`.
+        ironhermes_core::profile::validate_profile_name(&slug)
+            .map_err(|e| anyhow::anyhow!("\"{slug}\" is not a valid profile name: {e}"))?;
+        let profile_dir = ironhermes_core::get_hermes_home()
+            .join(ironhermes_core::constants::PROFILES_SUBDIR)
+            .join(&slug);
+        if !profile_dir.is_dir() {
+            anyhow::bail!(
+                "profile \"{slug}\" has no directory at {}",
+                profile_dir.display()
+            );
+        }
+        let config_path = profile_dir.join("config.yaml");
+        if !config_path.is_file() {
+            anyhow::bail!("profile \"{slug}\" has no config.yaml");
+        }
+        let profile_config = Config::load_from(&config_path)
+            .with_context(|| format!("profile \"{slug}\" config.yaml did not parse"))?;
+        let resolved = resolve_vault_config(&profile_config);
+
+        let list_result = list_profile_secret_names_for(&resolved, &slug).await;
+
+        record_audit("vault_list", "-", list_result.is_ok()).await?;
+        for name in &list_result? {
+            println!("{name}");
+        }
+        return Ok(());
+    }
 
     let list_result: Result<Vec<String>> = async {
         let store = ironhermes_vault::open_store(&resolved)

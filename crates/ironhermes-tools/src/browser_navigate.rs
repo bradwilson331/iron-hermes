@@ -12,7 +12,9 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::browser_session::{BrowserSession, find_chromium_binary};
+use crate::browser_session::{
+    BrowserSession, configured_browser_engine_available, configured_engine_prerequisite,
+};
 use crate::registry::{Prerequisite, Tool};
 
 pub struct BrowserNavigateTool {
@@ -67,19 +69,11 @@ impl Tool for BrowserNavigateTool {
     }
 
     fn is_available(&self) -> bool {
-        find_chromium_binary(None).is_some()
+        configured_browser_engine_available(&self.config.browser)
     }
 
     fn prerequisites(&self) -> Vec<Prerequisite> {
-        vec![Prerequisite {
-            kind: "binary_present".to_string(),
-            name: "chromium-or-chrome".to_string(),
-            description:
-                "Chromium or Google Chrome browser binary on PATH or at a standard install location"
-                    .to_string(),
-            required: true,
-            group: None,
-        }]
+        vec![configured_engine_prerequisite(&self.config.browser)]
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {

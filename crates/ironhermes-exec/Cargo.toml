@@ -1,6 +1,7 @@
 [package]
 name = "ironhermes-exec"
 version.workspace = true
+authors.workspace = true
 edition = "2024"
 
 [features]

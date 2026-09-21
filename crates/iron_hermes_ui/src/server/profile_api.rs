@@ -327,8 +327,14 @@ pub(crate) enum ProviderKeyState {
 /// `config.yaml`), the provider identity itself is unknown, so this falls
 /// back to the pre-Plan-11 all-keys-absent rule (`fallback_resolvable_count`)
 /// rather than asking the gate to evaluate a provider it cannot name.
+///
+/// Phase 51 (D-14): `async` — the shared gate awaits `ProfileSecretStore`'s
+/// vault branch. `AllowFromVault` maps to the SAME `ProviderKeyState::Resolved`
+/// as `Allow`: a vault-backed profile is a healthy profile, and this UI surface
+/// has no distinct badge for "resolved from the vault" yet (out of this phase's
+/// scope — see the SUMMARY for the follow-up note).
 #[cfg(feature = "server")]
-pub(crate) fn compute_provider_key_state(
+pub(crate) async fn compute_provider_key_state(
     profile_name: &str,
     config_effectively_present: bool,
     provider: Option<&str>,
@@ -343,8 +349,13 @@ pub(crate) fn compute_provider_key_state(
             }
         };
     }
-    match ironhermes_core::dispatch_gate::evaluate_profile_dispatch(profile_name) {
+    match ironhermes_core::dispatch_gate::evaluate_profile_dispatch(profile_name).await {
         ironhermes_core::dispatch_gate::DispatchDecision::Allow => ProviderKeyState::Resolved,
+        // Phase 51 (D-14): a vault-backed Allow is still a healthy, resolved
+        // profile from this UI surface's point of view — no distinct badge yet.
+        ironhermes_core::dispatch_gate::DispatchDecision::AllowFromVault => {
+            ProviderKeyState::Resolved
+        }
         ironhermes_core::dispatch_gate::DispatchDecision::Refuse { .. } => {
             ProviderKeyState::Missing {
                 provider: provider.unwrap_or_default().to_string(),
@@ -400,6 +411,21 @@ pub(crate) fn classify_profile_health(
     }
 }
 
+/// Phase 51 (D-14): the disk-only fields `list_profiles`'s `spawn_blocking`
+/// scan collects for one profile, before the (now-`async`) dispatch-gate
+/// check runs. Never leaves this file — purely an internal seam between the
+/// blocking disk scan and the async gate-check loop that follows it.
+#[cfg(feature = "server")]
+struct ProfileDiskRow {
+    name: String,
+    dir_exists: bool,
+    config_effectively_present: bool,
+    provider: Option<String>,
+    model_default: Option<String>,
+    key_count: usize,
+    resolvable_llm_key_count: usize,
+}
+
 /// Phase 47.4 Plan 01 (D-08 / D-11): enumerate `$IRONHERMES_HOME/profiles/*`
 /// and classify each one. A missing profiles root is `Ok(vec![])` — a
 /// fresh machine has no profiles yet, that is not an enumeration failure.
@@ -411,105 +437,130 @@ pub(crate) fn classify_profile_health(
 pub async fn list_profiles() -> Result<Vec<ProfileRow>, ServerFnError> {
     #[cfg(feature = "server")]
     {
-        let rows = tokio::task::spawn_blocking(move || -> Result<Vec<ProfileRow>, String> {
-            let root = ironhermes_core::get_hermes_home().join(ironhermes_core::PROFILES_SUBDIR);
-            let mut names: Vec<String> = Vec::new();
-            match std::fs::read_dir(&root) {
-                Ok(entries) => {
-                    for entry in entries {
-                        let entry = entry.map_err(|e| format!("read_dir entry: {e}"))?;
-                        let file_type = entry.file_type().map_err(|e| format!("file_type: {e}"))?;
-                        if !file_type.is_dir() {
-                            continue;
-                        }
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        if name.starts_with('.') {
-                            continue;
-                        }
-                        names.push(name);
-                    }
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    // Fresh machine, no profiles yet — not an enumeration error.
-                    return Ok(Vec::new());
-                }
-                Err(e) => return Err(format!("read_dir({root:?}): {e}")),
-            }
-            names.sort();
-
-            let mut rows = Vec::with_capacity(names.len());
-            for name in names {
-                let dir = profile_dir_for(&name);
-                let dir_exists = dir.is_dir();
-
-                let config_path = dir.join("config.yaml");
-                let config_yaml_on_disk = config_path.is_file();
-                let (loaded_config, provider, model_default, config_parsed_ok) =
-                    if config_yaml_on_disk {
-                        match ironhermes_core::config::Config::load_from(&config_path) {
-                            Ok(cfg) => {
-                                let provider = Some(cfg.model.provider.clone());
-                                let model_default = Some(cfg.model.default.clone());
-                                (Some(cfg), provider, model_default, true)
+        // Phase 51 (D-14): the per-profile dispatch-gate check
+        // (`compute_provider_key_state`) now awaits the vault-aware gate, so it
+        // can no longer run inside this `spawn_blocking` closure. The disk scan
+        // + per-profile disk reads stay inside `spawn_blocking` exactly as
+        // before (unchanged blocking-I/O-off-the-executor-thread shape);
+        // `spawn_blocking` now returns the disk-only intermediate rows, and the
+        // gate check + final `ProfileRow` assembly happen in this fn's own
+        // async body afterward.
+        let disk_rows = tokio::task::spawn_blocking(
+            move || -> Result<Vec<ProfileDiskRow>, String> {
+                let root = ironhermes_core::get_hermes_home().join(ironhermes_core::PROFILES_SUBDIR);
+                let mut names: Vec<String> = Vec::new();
+                match std::fs::read_dir(&root) {
+                    Ok(entries) => {
+                        for entry in entries {
+                            let entry = entry.map_err(|e| format!("read_dir entry: {e}"))?;
+                            let file_type =
+                                entry.file_type().map_err(|e| format!("file_type: {e}"))?;
+                            if !file_type.is_dir() {
+                                continue;
                             }
-                            // A present-but-malformed config.yaml degrades to
-                            // the same gap as an absent file — one bad profile
-                            // never fails the whole enumeration.
-                            Err(_) => (None, None, None, false),
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            if name.starts_with('.') {
+                                continue;
+                            }
+                            names.push(name);
                         }
-                    } else {
-                        (None, None, None, false)
-                    };
-                let config_effectively_present = config_yaml_on_disk && config_parsed_ok;
-
-                let env_path = dir.join(".env");
-                // A malformed .env degrades the same way — the whole
-                // enumeration must not fail on one bad profile.
-                let env_map = read_env_keys(&env_path).unwrap_or_default();
-                let key_count = env_map.len();
-                // Provider-registry-derived when the config parsed (GAP-1);
-                // falls back to the compatibility floor when it did not,
-                // since there is no Config to derive a wider set from.
-                let resolvable_llm_key_count = match &loaded_config {
-                    Some(cfg) => {
-                        let names = provider_key_env_names(cfg);
-                        names
-                            .iter()
-                            .filter(|k| env_map.get(k.as_str()).map(|v| !v.is_empty()).unwrap_or(false))
-                            .count()
                     }
-                    None => LLM_KEY_ALLOWLIST
-                        .iter()
-                        .filter(|k| env_map.get(**k).map(|v| !v.is_empty()).unwrap_or(false))
-                        .count(),
-                };
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // Fresh machine, no profiles yet — not an enumeration error.
+                        return Ok(Vec::new());
+                    }
+                    Err(e) => return Err(format!("read_dir({root:?}): {e}")),
+                }
+                names.sort();
 
-                let provider_key = compute_provider_key_state(
-                    &name,
-                    config_effectively_present,
-                    provider.as_deref(),
-                    resolvable_llm_key_count,
-                );
-                let (health, gaps) = classify_profile_health(
-                    dir_exists,
-                    config_effectively_present,
-                    provider_key,
-                );
+                let mut disk_rows = Vec::with_capacity(names.len());
+                for name in names {
+                    let dir = profile_dir_for(&name);
+                    let dir_exists = dir.is_dir();
 
-                rows.push(ProfileRow {
-                    name,
-                    health,
-                    gaps,
-                    provider,
-                    model_default,
-                    key_count,
-                });
-            }
-            Ok(rows)
-        })
+                    let config_path = dir.join("config.yaml");
+                    let config_yaml_on_disk = config_path.is_file();
+                    let (loaded_config, provider, model_default, config_parsed_ok) =
+                        if config_yaml_on_disk {
+                            match ironhermes_core::config::Config::load_from(&config_path) {
+                                Ok(cfg) => {
+                                    let provider = Some(cfg.model.provider.clone());
+                                    let model_default = Some(cfg.model.default.clone());
+                                    (Some(cfg), provider, model_default, true)
+                                }
+                                // A present-but-malformed config.yaml degrades to
+                                // the same gap as an absent file — one bad profile
+                                // never fails the whole enumeration.
+                                Err(_) => (None, None, None, false),
+                            }
+                        } else {
+                            (None, None, None, false)
+                        };
+                    let config_effectively_present = config_yaml_on_disk && config_parsed_ok;
+
+                    let env_path = dir.join(".env");
+                    // A malformed .env degrades the same way — the whole
+                    // enumeration must not fail on one bad profile.
+                    let env_map = read_env_keys(&env_path).unwrap_or_default();
+                    let key_count = env_map.len();
+                    // Provider-registry-derived when the config parsed (GAP-1);
+                    // falls back to the compatibility floor when it did not,
+                    // since there is no Config to derive a wider set from.
+                    let resolvable_llm_key_count = match &loaded_config {
+                        Some(cfg) => {
+                            let names = provider_key_env_names(cfg);
+                            names
+                                .iter()
+                                .filter(|k| env_map.get(k.as_str()).map(|v| !v.is_empty()).unwrap_or(false))
+                                .count()
+                        }
+                        None => LLM_KEY_ALLOWLIST
+                            .iter()
+                            .filter(|k| env_map.get(**k).map(|v| !v.is_empty()).unwrap_or(false))
+                            .count(),
+                    };
+
+                    disk_rows.push(ProfileDiskRow {
+                        name,
+                        dir_exists,
+                        config_effectively_present,
+                        provider,
+                        model_default,
+                        key_count,
+                        resolvable_llm_key_count,
+                    });
+                }
+                Ok(disk_rows)
+            },
+        )
         .await
         .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
         .map_err(ServerFnError::new)?;
+
+        let mut rows = Vec::with_capacity(disk_rows.len());
+        for disk_row in disk_rows {
+            let provider_key = compute_provider_key_state(
+                &disk_row.name,
+                disk_row.config_effectively_present,
+                disk_row.provider.as_deref(),
+                disk_row.resolvable_llm_key_count,
+            )
+            .await;
+            let (health, gaps) = classify_profile_health(
+                disk_row.dir_exists,
+                disk_row.config_effectively_present,
+                provider_key,
+            );
+
+            rows.push(ProfileRow {
+                name: disk_row.name,
+                health,
+                gaps,
+                provider: disk_row.provider,
+                model_default: disk_row.model_default,
+                key_count: disk_row.key_count,
+            });
+        }
         Ok(rows)
     }
     #[cfg(not(feature = "server"))]
@@ -764,8 +815,19 @@ pub(crate) fn write_env_atomic_0600(final_path: &Path, contents: &str) -> std::i
 /// dispatch-gate re-check returns `Err` (never `Ok`) when the chosen source
 /// resolves no key for the profile's main provider, exactly mirroring
 /// `sync_profile_secrets_impl`'s D-06 check.
+// Phase 51 Plan 17 (CR-05, second half): restores the `spawn_blocking` split
+// `897add029` deleted, following `list_profiles`' shape — the synchronous
+// disk work (steps 1-8 below) runs on the blocking pool; only the
+// genuinely-async post-write dispatch-gate re-check (step 9) is awaited in
+// this fn's own async body afterward. `897add029` made the WHOLE function
+// `async` and dropped its `spawn_blocking` wrapper entirely when the gate
+// became `async` — that moved every disk write (profile directory creation,
+// the `0600` `.env` write, the `config.yaml` byte copy) onto the calling
+// Dioxus server-fn task, exactly the hazard this plan closes. Its ~30
+// existing test call sites stay `#[tokio::test]`/`.await`ed — this fn is
+// still `async` overall, only its INTERNALS are re-split.
 #[cfg(feature = "server")]
-pub(crate) fn create_profile_impl(
+pub(crate) async fn create_profile_impl(
     name: &str,
     key_mode: &KeyMode,
     force: bool,
@@ -773,117 +835,139 @@ pub(crate) fn create_profile_impl(
     secret_source: SecretSource,
     config: &ironhermes_core::config::Config,
 ) -> Result<Vec<KeyRow>, String> {
-    // Step 1 (D-08): validate via the real ironhermes_core fn, reused not
-    // re-implemented. Runs before any path is constructed or any byte is
-    // written — a rejected name creates nothing on disk (T-47.4-03-T1).
-    ironhermes_core::profile::validate_profile_name(name)
-        .map_err(|e| format!("invalid profile name: {e}"))?;
+    let name_for_blocking = name.to_string();
+    let key_mode_for_blocking = key_mode.clone();
+    let config_for_blocking = config.clone();
 
-    // Phase 47.4 Plan 18 (CR-02, T-47.4-18-01/02): validate every
-    // manual_keys entry at this pure-impl boundary, before any path is
-    // constructed or any byte written — a rejected entry creates nothing on
-    // disk, matching the validate_profile_name discipline directly above.
-    // Never interpolates a value into the error (D-13) — `key` below is the
-    // NAME, which validate_key_name's own error text already names too.
-    for (key, secret) in &manual_keys {
-        validate_key_name(key).map_err(|e| format!("invalid manual key: {e}"))?;
-        validate_key_value(secret.expose_secret())
-            .map_err(|e| format!("invalid manual key '{key}': {e}"))?;
-    }
+    let rows: Vec<KeyRow> = tokio::task::spawn_blocking(move || -> Result<Vec<KeyRow>, String> {
+        let name = name_for_blocking.as_str();
+        let key_mode = &key_mode_for_blocking;
+        let config = &config_for_blocking;
 
-    let profile_dir = profile_dir_for(name);
-    let config_path = profile_dir.join("config.yaml");
-    let env_path = profile_dir.join(".env");
+        // Step 1 (D-08): validate via the real ironhermes_core fn, reused not
+        // re-implemented. Runs before any path is constructed or any byte is
+        // written — a rejected name creates nothing on disk (T-47.4-03-T1).
+        ironhermes_core::profile::validate_profile_name(name)
+            .map_err(|e| format!("invalid profile name: {e}"))?;
 
-    let existing_config = config_path.is_file();
-    let existing_env = env_path.is_file();
-    if profile_dir.is_dir() && (existing_config || existing_env) && !force {
-        return Err(format!(
-            "profile '{name}' already exists — pass --force to overwrite its config.yaml/.env"
-        ));
-    }
-
-    std::fs::create_dir_all(&profile_dir)
-        .map_err(|e| format!("create_dir_all({profile_dir:?}): {e}"))?;
-
-    // config.yaml: byte copy from root — never round-tripped through a
-    // YAML (de)serializer, which would silently rewrite unknown keys
-    // (mirrors the script's own :87-94 behavior, including the SKIPPED
-    // branch when no root config.yaml exists yet to copy). Phase 49.4.1
-    // Plan 02: this is deliberately NOT followed by a `mirror_providers_
-    // subtree` call — at creation the profile's config.yaml IS a byte copy
-    // of root's, so its registry already matches and mirroring would be a
-    // no-op that only costs the file its comments.
-    if !existing_config || force {
-        let root_config_path = ironhermes_core::get_hermes_home().join("config.yaml");
-        if root_config_path.is_file() {
-            std::fs::copy(&root_config_path, &config_path)
-                .map_err(|e| format!("copy config.yaml: {e}"))?;
+        // Phase 47.4 Plan 18 (CR-02, T-47.4-18-01/02): validate every
+        // manual_keys entry at this pure-impl boundary, before any path is
+        // constructed or any byte written — a rejected entry creates nothing on
+        // disk, matching the validate_profile_name discipline directly above.
+        // Never interpolates a value into the error (D-13) — `key` below is the
+        // NAME, which validate_key_name's own error text already names too.
+        for (key, secret) in &manual_keys {
+            validate_key_name(key).map_err(|e| format!("invalid manual key: {e}"))?;
+            validate_key_value(secret.expose_secret())
+                .map_err(|e| format!("invalid manual key '{key}': {e}"))?;
         }
-    }
 
-    // Phase 49.4.1 Plan 02 (D-04/D-09): resolve keys from the
-    // OPERATOR-CHOSEN source via the SAME build_source_map the sync path
-    // uses (a missing root .env still resolves nothing — not an error, per
-    // build_source_map's RootEnv arm), then overlay manual_keys (manual
-    // wins for a name present in both).
-    let source_map = build_source_map(secret_source, config, &[])?;
-    let mut resolved = resolve_inherited_keys(&source_map, key_mode, config);
-    let manual_names: std::collections::HashSet<String> =
-        manual_keys.iter().map(|(k, _)| k.clone()).collect();
-    for (key, secret) in &manual_keys {
-        let value = secret.expose_secret().to_string();
-        match resolved.iter_mut().find(|(k, _)| k == key) {
-            Some(existing) => existing.1 = value,
-            None => resolved.push((key.clone(), value)),
+        let profile_dir = profile_dir_for(name);
+        let config_path = profile_dir.join("config.yaml");
+        let env_path = profile_dir.join(".env");
+
+        let existing_config = config_path.is_file();
+        let existing_env = env_path.is_file();
+        if profile_dir.is_dir() && (existing_config || existing_env) && !force {
+            return Err(format!(
+                "profile '{name}' already exists — pass --force to overwrite its config.yaml/.env"
+            ));
         }
-    }
 
-    let keep_existing_env = existing_env && !force;
-    if !keep_existing_env {
-        // Phase 47.4 Plan 18 (WR-01): sort before render, matching
-        // `save_profile_key_impl`'s existing discipline ("so a rewrite is
-        // deterministic") — an unsorted forged duplicate landing after an
-        // already-resolved inherited key would otherwise win the
-        // `read_env_keys` `HashMap` insert on the next parse, silently
-        // changing which credential a dispatched worker uses. Sorts the
-        // final list only; the manual-overlay-wins logic above is
-        // untouched.
-        resolved.sort_by(|a, b| a.0.cmp(&b.0));
-        let contents = render_profile_env(name, &resolved)?;
-        write_env_atomic_0600(&env_path, &contents).map_err(|e| format!("write .env: {e}"))?;
-    }
+        std::fs::create_dir_all(&profile_dir)
+            .map_err(|e| format!("create_dir_all({profile_dir:?}): {e}"))?;
 
-    // Build the returned rows from what is now actually on disk — the
-    // fresh write, or the untouched existing file if kept.
-    let final_env_map: HashMap<String, String> = if keep_existing_env {
-        read_env_keys(&env_path).map_err(|e| format!("read written .env: {e}"))?
-    } else {
-        resolved.iter().cloned().collect()
-    };
+        // config.yaml: byte copy from root — never round-tripped through a
+        // YAML (de)serializer, which would silently rewrite unknown keys
+        // (mirrors the script's own :87-94 behavior, including the SKIPPED
+        // branch when no root config.yaml exists yet to copy). Phase 49.4.1
+        // Plan 02: this is deliberately NOT followed by a `mirror_providers_
+        // subtree` call — at creation the profile's config.yaml IS a byte copy
+        // of root's, so its registry already matches and mirroring would be a
+        // no-op that only costs the file its comments.
+        if !existing_config || force {
+            let root_config_path = ironhermes_core::get_hermes_home().join("config.yaml");
+            if root_config_path.is_file() {
+                std::fs::copy(&root_config_path, &config_path)
+                    .map_err(|e| format!("copy config.yaml: {e}"))?;
+            }
+        }
 
-    let mut rows: Vec<KeyRow> = final_env_map
-        .iter()
-        .map(|(key, value)| KeyRow {
-            name: key.clone(),
-            status: if manual_names.contains(key) {
-                KeyStatus::ManuallySet
-            } else {
-                KeyStatus::Inherited
-            },
-            masked: mask_key_value(value),
-        })
-        .collect();
-    rows.sort_by(|a, b| a.name.cmp(&b.name));
+        // Phase 49.4.1 Plan 02 (D-04/D-09): resolve keys from the
+        // OPERATOR-CHOSEN source via the SAME build_source_map the sync path
+        // uses (a missing root .env still resolves nothing — not an error, per
+        // build_source_map's RootEnv arm), then overlay manual_keys (manual
+        // wins for a name present in both).
+        let source_map = build_source_map(secret_source, config, &[])?;
+        let mut resolved = resolve_inherited_keys(&source_map, key_mode, config);
+        let manual_names: std::collections::HashSet<String> =
+            manual_keys.iter().map(|(k, _)| k.clone()).collect();
+        for (key, secret) in &manual_keys {
+            let value = secret.expose_secret().to_string();
+            match resolved.iter_mut().find(|(k, _)| k == key) {
+                Some(existing) => existing.1 = value,
+                None => resolved.push((key.clone(), value)),
+            }
+        }
 
-    // Phase 49.4.1 Plan 02 (D-06): post-write loud failure — structurally
-    // identical to sync_profile_secrets_impl's own Step 8. Reports failure
-    // AFTER the directory and files exist: the profile is left in place so
-    // the drawer's SYNC can repair it without a re-create (D-05). Never
-    // deletes the profile directory on this branch.
+        let keep_existing_env = existing_env && !force;
+        if !keep_existing_env {
+            // Phase 47.4 Plan 18 (WR-01): sort before render, matching
+            // `save_profile_key_impl`'s existing discipline ("so a rewrite is
+            // deterministic") — an unsorted forged duplicate landing after an
+            // already-resolved inherited key would otherwise win the
+            // `read_env_keys` `HashMap` insert on the next parse, silently
+            // changing which credential a dispatched worker uses. Sorts the
+            // final list only; the manual-overlay-wins logic above is
+            // untouched.
+            resolved.sort_by(|a, b| a.0.cmp(&b.0));
+            let contents = render_profile_env(name, &resolved)?;
+            write_env_atomic_0600(&env_path, &contents).map_err(|e| format!("write .env: {e}"))?;
+        }
+
+        // Build the returned rows from what is now actually on disk — the
+        // fresh write, or the untouched existing file if kept.
+        let final_env_map: HashMap<String, String> = if keep_existing_env {
+            read_env_keys(&env_path).map_err(|e| format!("read written .env: {e}"))?
+        } else {
+            resolved.iter().cloned().collect()
+        };
+
+        let mut rows: Vec<KeyRow> = final_env_map
+            .iter()
+            .map(|(key, value)| KeyRow {
+                name: key.clone(),
+                status: if manual_names.contains(key) {
+                    KeyStatus::ManuallySet
+                } else {
+                    KeyStatus::Inherited
+                },
+                masked: mask_key_value(value),
+            })
+            .collect();
+        rows.sort_by(|a, b| a.name.cmp(&b.name));
+
+        Ok(rows)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking join: {e}"))??;
+
+    // Step 9 (D-06): post-write loud failure — structurally identical to
+    // `sync_profile_secrets_impl`'s own Step 8. Reports failure AFTER the
+    // directory and files exist: the profile is left in place so the
+    // drawer's SYNC can repair it without a re-create (D-05). Never deletes
+    // the profile directory on this branch.
+    //
+    // Phase 51 (D-14): the ONE genuinely-async step, awaited here — outside
+    // `spawn_blocking`, per this plan's own restored split. This is one of
+    // `profile_api.rs`'s three required production call sites of the
+    // vault-aware entry point (source_facts #5/#6); an `AllowFromVault`
+    // decision correctly does NOT trigger this `if let`, since it is not a
+    // `Refuse`.
     if let ironhermes_core::dispatch_gate::DispatchDecision::Refuse { .. } =
-        ironhermes_core::dispatch_gate::evaluate_profile_dispatch(name)
+        ironhermes_core::dispatch_gate::evaluate_profile_dispatch(name).await
     {
+        let config_path = profile_dir_for(name).join("config.yaml");
         let profile_provider = ironhermes_core::config::Config::load_from(&config_path)
             .map(|c| c.model.provider)
             .unwrap_or_default();
@@ -943,12 +1027,13 @@ pub async fn create_profile(req: CreateProfileRequest) -> Result<Vec<KeyRow>, Se
             .map(|(k, v)| (k, SecretString::from(v)))
             .collect();
 
-        let rows = tokio::task::spawn_blocking(move || {
-            create_profile_impl(&name, &key_mode, force, manual_keys, secret_source, &config)
-        })
-        .await
-        .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
-        .map_err(ServerFnError::new)?;
+        // Phase 51 (D-14): `create_profile_impl` is now `async` (it awaits the
+        // vault-aware dispatch gate), so it can no longer run inside a
+        // `spawn_blocking` closure without a forbidden blocking bridge — awaited
+        // directly instead.
+        let rows = create_profile_impl(&name, &key_mode, force, manual_keys, secret_source, &config)
+            .await
+            .map_err(ServerFnError::new)?;
 
         Ok(rows)
     }
@@ -1171,78 +1256,123 @@ pub async fn secrets_source_availability() -> Result<SecretsSourceAvailability, 
 /// `Ok` into a still-broken profile (D-06). Never rolls the write back on
 /// that `Err` — the write is the best-effort repair and the sync is
 /// idempotent, so a second attempt after adding the key succeeds.
+// Phase 51 Plan 17 (CR-05, second half): restores the `spawn_blocking` split
+// `897add029` deleted, following `list_profiles`' shape — steps 1-7 (all
+// synchronous disk work: validation, the `providers:` YAML surgery, the
+// `0600` `.env` write) run on the blocking pool; only step 8's genuinely-
+// async post-write dispatch-gate re-check is awaited in this fn's own async
+// body afterward, with step 9's (disk-free) row assembly following it. Its
+// ~9 existing test call sites stay `#[tokio::test]`/`.await`ed — this fn is
+// still `async` overall, only its INTERNALS are re-split.
 #[cfg(feature = "server")]
-pub(crate) fn sync_profile_secrets_impl(
+pub(crate) async fn sync_profile_secrets_impl(
     name: &str,
     source: SecretSource,
     key_mode: &KeyMode,
     manual_keys: Vec<(String, SecretString)>,
     config: &ironhermes_core::config::Config,
 ) -> Result<SyncProfileSecretsResponse, String> {
-    // Step 1 (mirrors create_profile_impl): validate before any path is
-    // constructed or any byte is written.
-    ironhermes_core::profile::validate_profile_name(name)
-        .map_err(|e| format!("invalid profile name: {e}"))?;
-
-    // Step 2: validate every manual_keys entry at this pure-impl boundary,
-    // reusing the same validators create_profile_impl already calls — never
-    // a second validator. Never interpolates a value into the error (D-13).
-    for (key, secret) in &manual_keys {
-        validate_key_name(key).map_err(|e| format!("invalid manual key: {e}"))?;
-        validate_key_value(secret.expose_secret())
-            .map_err(|e| format!("invalid manual key '{key}': {e}"))?;
+    /// Phase 51 (D-14): the disk-only outputs steps 1-7's `spawn_blocking`
+    /// closure hands to the (now-async) step 8 gate check and step 9's
+    /// row assembly. Never leaves this fn — an internal seam only, mirroring
+    /// `list_profiles`' `ProfileDiskRow`.
+    struct SyncDiskResult {
+        source_map: HashMap<String, String>,
+        merged_sorted: Vec<(String, String)>,
+        providers_mirrored: usize,
+        config_path: PathBuf,
     }
 
-    // Step 3: sync targets an EXISTING profile — refuse when it isn't one.
-    let profile_dir = profile_dir_for(name);
-    if !profile_dir.is_dir() {
-        return Err(format!(
-            "profile '{name}' has no directory — sync targets an existing profile, not a new one"
-        ));
-    }
+    let name_for_blocking = name.to_string();
+    let key_mode_for_blocking = key_mode.clone();
+    let config_for_blocking = config.clone();
 
-    // Step 4: the source map.
-    let manual_pairs: Vec<(String, String)> = manual_keys
-        .iter()
-        .map(|(k, v)| (k.clone(), v.expose_secret().to_string()))
-        .collect();
-    let source_map = build_source_map(source, config, &manual_pairs)?;
+    let disk = tokio::task::spawn_blocking(move || -> Result<SyncDiskResult, String> {
+        let name = name_for_blocking.as_str();
+        let key_mode = &key_mode_for_blocking;
+        let config = &config_for_blocking;
 
-    // Step 5: widen the source (caller-side change only) — resolve_inherited_keys
-    // itself needs zero changes.
-    let resolved = resolve_inherited_keys(&source_map, key_mode, config);
+        // Step 1 (mirrors create_profile_impl): validate before any path is
+        // constructed or any byte is written.
+        ironhermes_core::profile::validate_profile_name(name)
+            .map_err(|e| format!("invalid profile name: {e}"))?;
 
-    // Step 6: providers:-subtree YAML surgery, connection fields only.
-    let config_path = profile_dir.join("config.yaml");
-    let providers_mirrored = ironhermes_core::config_setter::mirror_providers_subtree(
-        &config_path,
-        &root_provider_connection_fields(config),
-        Some(source.config_str()),
-    )
-    .map_err(|e| format!("mirror providers registry: {e}"))?;
+        // Step 2: validate every manual_keys entry at this pure-impl boundary,
+        // reusing the same validators create_profile_impl already calls — never
+        // a second validator. Never interpolates a value into the error (D-13).
+        for (key, secret) in &manual_keys {
+            validate_key_name(key).map_err(|e| format!("invalid manual key: {e}"))?;
+            validate_key_value(secret.expose_secret())
+                .map_err(|e| format!("invalid manual key '{key}': {e}"))?;
+        }
 
-    // Step 7: ADDITIVE .env merge (D-02) — a resolved value wins for a name
-    // present in both; a name the source did not supply is never removed.
-    let env_path = profile_dir.join(".env");
-    let mut merged = read_env_keys(&env_path).map_err(|e| format!("read profile .env: {e}"))?;
-    for (key, value) in &resolved {
-        merged.insert(key.clone(), value.clone());
-    }
-    let mut merged_sorted: Vec<(String, String)> = merged.into_iter().collect();
-    merged_sorted.sort_by(|a, b| a.0.cmp(&b.0));
-    // `None` for the stamp: the remembered source lives in config.yaml (a
-    // .env is exactly the artifact this sync exists to regenerate), and
-    // `None` keeps the rendered header byte-identical to every existing
-    // generated `.env`.
-    let contents = render_profile_env_with_stamp(name, &merged_sorted, None)?;
-    write_env_atomic_0600(&env_path, &contents).map_err(|e| format!("write .env: {e}"))?;
+        // Step 3: sync targets an EXISTING profile — refuse when it isn't one.
+        let profile_dir = profile_dir_for(name);
+        if !profile_dir.is_dir() {
+            return Err(format!(
+                "profile '{name}' has no directory — sync targets an existing profile, not a new one"
+            ));
+        }
+
+        // Step 4: the source map.
+        let manual_pairs: Vec<(String, String)> = manual_keys
+            .iter()
+            .map(|(k, v)| (k.clone(), v.expose_secret().to_string()))
+            .collect();
+        let source_map = build_source_map(source, config, &manual_pairs)?;
+
+        // Step 5: widen the source (caller-side change only) — resolve_inherited_keys
+        // itself needs zero changes.
+        let resolved = resolve_inherited_keys(&source_map, key_mode, config);
+
+        // Step 6: providers:-subtree YAML surgery, connection fields only.
+        let config_path = profile_dir.join("config.yaml");
+        let providers_mirrored = ironhermes_core::config_setter::mirror_providers_subtree(
+            &config_path,
+            &root_provider_connection_fields(config),
+            Some(source.config_str()),
+        )
+        .map_err(|e| format!("mirror providers registry: {e}"))?;
+
+        // Step 7: ADDITIVE .env merge (D-02) — a resolved value wins for a name
+        // present in both; a name the source did not supply is never removed.
+        let env_path = profile_dir.join(".env");
+        let mut merged = read_env_keys(&env_path).map_err(|e| format!("read profile .env: {e}"))?;
+        for (key, value) in &resolved {
+            merged.insert(key.clone(), value.clone());
+        }
+        let mut merged_sorted: Vec<(String, String)> = merged.into_iter().collect();
+        merged_sorted.sort_by(|a, b| a.0.cmp(&b.0));
+        // `None` for the stamp: the remembered source lives in config.yaml (a
+        // .env is exactly the artifact this sync exists to regenerate), and
+        // `None` keeps the rendered header byte-identical to every existing
+        // generated `.env`.
+        let contents = render_profile_env_with_stamp(name, &merged_sorted, None)?;
+        write_env_atomic_0600(&env_path, &contents).map_err(|e| format!("write .env: {e}"))?;
+
+        Ok(SyncDiskResult {
+            source_map,
+            merged_sorted,
+            providers_mirrored,
+            config_path,
+        })
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking join: {e}"))??;
 
     // Step 8: D-06 loud failure — post-write dispatch-gate re-check. Never
     // return Ok into a still-broken profile.
+    //
+    // Phase 51 (D-14): the ONE genuinely-async step, awaited here — outside
+    // `spawn_blocking`, per this plan's own restored split. This is one of
+    // `profile_api.rs`'s three required production call sites of the
+    // vault-aware entry point (source_facts #5/#6); an `AllowFromVault`
+    // decision correctly does NOT trigger this `if let`, since it is not a
+    // `Refuse`.
     if let ironhermes_core::dispatch_gate::DispatchDecision::Refuse { .. } =
-        ironhermes_core::dispatch_gate::evaluate_profile_dispatch(name)
+        ironhermes_core::dispatch_gate::evaluate_profile_dispatch(name).await
     {
-        let profile_provider = ironhermes_core::config::Config::load_from(&config_path)
+        let profile_provider = ironhermes_core::config::Config::load_from(&disk.config_path)
             .map(|c| c.model.provider)
             .unwrap_or_default();
         return Err(format!(
@@ -1251,12 +1381,14 @@ pub(crate) fn sync_profile_secrets_impl(
         ));
     }
 
-    // Step 9: on Allow, build masked KeyRows from the merged map.
-    let final_env_map: HashMap<String, String> = merged_sorted.iter().cloned().collect();
+    // Step 9: on Allow, build masked KeyRows from the merged map. Disk-free
+    // (pure computation over step 7's output) — no need to be back on the
+    // blocking pool for this.
+    let final_env_map: HashMap<String, String> = disk.merged_sorted.iter().cloned().collect();
     let mut rows: Vec<KeyRow> = final_env_map
         .iter()
         .map(|(key, value)| {
-            let source_val = source_map.get(key);
+            let source_val = disk.source_map.get(key);
             KeyRow {
                 name: key.clone(),
                 status: classify_key_status(source_val, Some(value)),
@@ -1269,7 +1401,7 @@ pub(crate) fn sync_profile_secrets_impl(
     Ok(SyncProfileSecretsResponse {
         keys: rows,
         source,
-        providers_mirrored,
+        providers_mirrored: disk.providers_mirrored,
     })
 }
 
@@ -1306,12 +1438,13 @@ pub async fn sync_profile_secrets(
             .map(|(k, v)| (k, SecretString::from(v)))
             .collect();
 
-        let response = tokio::task::spawn_blocking(move || {
-            sync_profile_secrets_impl(&name, source, &key_mode, manual_keys, &config)
-        })
-        .await
-        .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
-        .map_err(ServerFnError::new)?;
+        // Phase 51 (D-14): `sync_profile_secrets_impl` is now `async` (it
+        // awaits the vault-aware dispatch gate), so it can no longer run
+        // inside a `spawn_blocking` closure without a forbidden blocking
+        // bridge — awaited directly instead.
+        let response = sync_profile_secrets_impl(&name, source, &key_mode, manual_keys, &config)
+            .await
+            .map_err(ServerFnError::new)?;
 
         Ok(response)
     }
@@ -2054,119 +2187,162 @@ pub(crate) fn classify_key_status(root: Option<&String>, profile: Option<&String
 /// is directly testable without a server runtime. Called from
 /// `fetch_profile_detail` inside `spawn_blocking`.
 #[cfg(feature = "server")]
-pub(crate) fn fetch_profile_detail_impl(name: &str) -> Result<ProfileDetail, String> {
-    let dir = profile_dir_for(name);
-    if !dir.is_dir() {
-        return Err(format!("profile '{name}' does not exist"));
+// Phase 51 Plan 17 (CR-05, second half): restores the `spawn_blocking` split
+// `897add029` deleted, following `list_profiles`' shape — every disk read
+// (both `.env` files, `config.yaml`, the root `Config::load()`) runs on the
+// blocking pool; only `compute_provider_key_state`'s genuinely-async
+// dispatch-gate call is awaited in this fn's own async body afterward. Its
+// ~9 test call sites stay `#[tokio::test]`/`.await`ed — this fn is still
+// `async` overall, only its INTERNALS are re-split.
+pub(crate) async fn fetch_profile_detail_impl(name: &str) -> Result<ProfileDetail, String> {
+    /// Phase 51 (D-14): the disk-only outputs the `spawn_blocking` closure
+    /// hands to the (now-async) gate-check tail. Never leaves this fn — an
+    /// internal seam only, mirroring `list_profiles`' `ProfileDiskRow`.
+    struct DetailDiskResult {
+        dir: PathBuf,
+        provider: Option<String>,
+        model_default: Option<String>,
+        config_effectively_present: bool,
+        keys: Vec<KeyRow>,
+        resolvable_llm_key_count: usize,
+        secrets_source: Option<String>,
+        web_config_write_enabled: bool,
     }
 
-    // config.yaml: same on-disk-presence + parse-fallibility handling as
-    // `list_profiles` — a missing OR malformed file degrades provider/
-    // model_default to None and surfaces as a ProfileGap::MissingConfigYaml
-    // via classify_profile_health below, never failing the whole call.
-    let config_path = dir.join("config.yaml");
-    let config_yaml_on_disk = config_path.is_file();
-    let (loaded_profile_config, provider, model_default, config_effectively_present) =
-        if config_yaml_on_disk {
-            match ironhermes_core::config::Config::load_from(&config_path) {
-                Ok(cfg) => {
-                    let provider = Some(cfg.model.provider.clone());
-                    let model_default = Some(cfg.model.default.clone());
-                    (Some(cfg), provider, model_default, true)
+    let name_for_blocking = name.to_string();
+    let disk = tokio::task::spawn_blocking(move || -> Result<DetailDiskResult, String> {
+        let name = name_for_blocking.as_str();
+        let dir = profile_dir_for(name);
+        if !dir.is_dir() {
+            return Err(format!("profile '{name}' does not exist"));
+        }
+
+        // config.yaml: same on-disk-presence + parse-fallibility handling as
+        // `list_profiles` — a missing OR malformed file degrades provider/
+        // model_default to None and surfaces as a ProfileGap::MissingConfigYaml
+        // via classify_profile_health below, never failing the whole call.
+        let config_path = dir.join("config.yaml");
+        let config_yaml_on_disk = config_path.is_file();
+        let (loaded_profile_config, provider, model_default, config_effectively_present) =
+            if config_yaml_on_disk {
+                match ironhermes_core::config::Config::load_from(&config_path) {
+                    Ok(cfg) => {
+                        let provider = Some(cfg.model.provider.clone());
+                        let model_default = Some(cfg.model.default.clone());
+                        (Some(cfg), provider, model_default, true)
+                    }
+                    Err(_) => (None, None, None, false),
                 }
-                Err(_) => (None, None, None, false),
-            }
-        } else {
-            (None, None, None, false)
+            } else {
+                (None, None, None, false)
+            };
+
+        // Read BOTH .env files — a malformed one on either side propagates Err
+        // as a value (T-47.4-05-D1 mitigation), never a panic.
+        let root_env_path = ironhermes_core::get_hermes_home().join(".env");
+        let root_env = read_env_keys(&root_env_path).map_err(|e| format!("read root .env: {e}"))?;
+        let profile_env_path = dir.join(".env");
+        let profile_env =
+            read_env_keys(&profile_env_path).map_err(|e| format!("read profile .env: {e}"))?;
+
+        // Row set: the provider-registry-derived key names (GAP-1: was the
+        // fixed five-name floor), in order, so a missing key is always a
+        // visible Missing row, plus every name present in the profile .env that
+        // isn't already in that set, sorted alphabetically after it. Falls back
+        // to the compatibility floor when the profile's own config.yaml didn't
+        // parse (no Config to derive a wider set from).
+        let allowlist_names: Vec<String> = match &loaded_profile_config {
+            Some(cfg) => provider_key_env_names(cfg),
+            None => LLM_KEY_ALLOWLIST.iter().map(|s| s.to_string()).collect(),
         };
+        let mut names: Vec<String> = allowlist_names.clone();
+        let mut extra: Vec<String> = profile_env
+            .keys()
+            .filter(|k| !allowlist_names.iter().any(|n| n.as_str() == k.as_str()))
+            .cloned()
+            .collect();
+        extra.sort();
+        names.extend(extra);
 
-    // Read BOTH .env files — a malformed one on either side propagates Err
-    // as a value (T-47.4-05-D1 mitigation), never a panic.
-    let root_env_path = ironhermes_core::get_hermes_home().join(".env");
-    let root_env = read_env_keys(&root_env_path).map_err(|e| format!("read root .env: {e}"))?;
-    let profile_env_path = dir.join(".env");
-    let profile_env =
-        read_env_keys(&profile_env_path).map_err(|e| format!("read profile .env: {e}"))?;
+        let keys: Vec<KeyRow> = names
+            .into_iter()
+            .map(|key_name| {
+                let root_val = root_env.get(&key_name);
+                let profile_val = profile_env.get(&key_name);
+                let status = classify_key_status(root_val, profile_val);
+                // mask_key_value only needs presence, not the real value — but
+                // whichever candidate is non-empty is what's "present" here.
+                let value_for_mask = profile_val
+                    .filter(|v| !v.is_empty())
+                    .or_else(|| root_val.filter(|v| !v.is_empty()));
+                let masked = mask_key_value(value_for_mask.map(String::as_str).unwrap_or(""));
+                KeyRow {
+                    name: key_name,
+                    status,
+                    masked,
+                }
+            })
+            .collect();
 
-    // Row set: the provider-registry-derived key names (GAP-1: was the
-    // fixed five-name floor), in order, so a missing key is always a
-    // visible Missing row, plus every name present in the profile .env that
-    // isn't already in that set, sorted alphabetically after it. Falls back
-    // to the compatibility floor when the profile's own config.yaml didn't
-    // parse (no Config to derive a wider set from).
-    let allowlist_names: Vec<String> = match &loaded_profile_config {
-        Some(cfg) => provider_key_env_names(cfg),
-        None => LLM_KEY_ALLOWLIST.iter().map(|s| s.to_string()).collect(),
-    };
-    let mut names: Vec<String> = allowlist_names.clone();
-    let mut extra: Vec<String> = profile_env
-        .keys()
-        .filter(|k| !allowlist_names.iter().any(|n| n.as_str() == k.as_str()))
-        .cloned()
-        .collect();
-    extra.sort();
-    names.extend(extra);
+        // Health/gaps input: same rule `list_profiles` uses, resolved against
+        // the PROFILE's own .env only (not root) — mirrors list_profiles' own
+        // resolvable-key filter exactly, so the two call sites can never
+        // disagree for the same disk state (GAP-1: now provider-aware via the
+        // single `ironhermes_core::dispatch_gate` predicate).
+        let resolvable_llm_key_count = allowlist_names
+            .iter()
+            .filter(|k| profile_env.get(k.as_str()).map(|v| !v.is_empty()).unwrap_or(false))
+            .count();
 
-    let keys: Vec<KeyRow> = names
-        .into_iter()
-        .map(|key_name| {
-            let root_val = root_env.get(&key_name);
-            let profile_val = profile_env.get(&key_name);
-            let status = classify_key_status(root_val, profile_val);
-            // mask_key_value only needs presence, not the real value — but
-            // whichever candidate is non-empty is what's "present" here.
-            let value_for_mask = profile_val
-                .filter(|v| !v.is_empty())
-                .or_else(|| root_val.filter(|v| !v.is_empty()));
-            let masked = mask_key_value(value_for_mask.map(String::as_str).unwrap_or(""));
-            KeyRow {
-                name: key_name,
-                status,
-                masked,
-            }
+        // web_config_write_enabled: the root flag, not profile-specific —
+        // reported truthfully so the client can render a disabled-write state.
+        let root_config = ironhermes_core::config::Config::load()
+            .map_err(|e| format!("Config load failed: {e}"))?;
+
+        // Phase 49.4.1 (D-01/D-05): the remembered source lives on the
+        // PROFILE's own config.yaml, not root's — `loaded_profile_config` is
+        // `None` when that file is missing or failed to parse, in which case
+        // there is nothing to remember yet.
+        let secrets_source = loaded_profile_config
+            .as_ref()
+            .and_then(|cfg| cfg.secrets_source.clone());
+
+        Ok(DetailDiskResult {
+            dir,
+            provider,
+            model_default,
+            config_effectively_present,
+            keys,
+            resolvable_llm_key_count,
+            secrets_source,
+            web_config_write_enabled: root_config.security.web_config_write_enabled,
         })
-        .collect();
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking join: {e}"))??;
 
-    // Health/gaps: same rule `list_profiles` uses, resolved against the
-    // PROFILE's own .env only (not root) — mirrors list_profiles' own
-    // resolvable-key filter exactly, so the two call sites can never
-    // disagree for the same disk state (GAP-1: now provider-aware via the
-    // single `ironhermes_core::dispatch_gate` predicate).
-    let resolvable_llm_key_count = allowlist_names
-        .iter()
-        .filter(|k| profile_env.get(k.as_str()).map(|v| !v.is_empty()).unwrap_or(false))
-        .count();
+    // The ONE genuinely-async step, awaited here — outside `spawn_blocking`,
+    // per this plan's own restored split.
     let provider_key = compute_provider_key_state(
         name,
-        config_effectively_present,
-        provider.as_deref(),
-        resolvable_llm_key_count,
-    );
-    let (health, gaps) = classify_profile_health(true, config_effectively_present, provider_key);
-
-    // web_config_write_enabled: the root flag, not profile-specific —
-    // reported truthfully so the client can render a disabled-write state.
-    let config =
-        ironhermes_core::config::Config::load().map_err(|e| format!("Config load failed: {e}"))?;
-
-    // Phase 49.4.1 (D-01/D-05): the remembered source lives on the
-    // PROFILE's own config.yaml, not root's — `loaded_profile_config` is
-    // `None` when that file is missing or failed to parse, in which case
-    // there is nothing to remember yet.
-    let secrets_source = loaded_profile_config
-        .as_ref()
-        .and_then(|cfg| cfg.secrets_source.clone());
+        disk.config_effectively_present,
+        disk.provider.as_deref(),
+        disk.resolvable_llm_key_count,
+    )
+    .await;
+    let (health, gaps) =
+        classify_profile_health(true, disk.config_effectively_present, provider_key);
 
     Ok(ProfileDetail {
         name: name.to_string(),
-        dir: dir.to_string_lossy().to_string(),
+        dir: disk.dir.to_string_lossy().to_string(),
         health,
         gaps,
-        provider,
-        model_default,
-        keys,
-        web_config_write_enabled: config.security.web_config_write_enabled,
-        secrets_source,
+        provider: disk.provider,
+        model_default: disk.model_default,
+        keys: disk.keys,
+        web_config_write_enabled: disk.web_config_write_enabled,
+        secrets_source: disk.secrets_source,
     })
 }
 
@@ -2184,9 +2360,13 @@ pub async fn fetch_profile_detail(name: String) -> Result<ProfileDetail, ServerF
         ironhermes_core::profile::validate_profile_name(&name)
             .map_err(|e| ServerFnError::new(format!("invalid profile name: {e}")))?;
 
-        let detail = tokio::task::spawn_blocking(move || fetch_profile_detail_impl(&name))
+        // Phase 51 (D-14): `fetch_profile_detail_impl` is now `async` (it awaits
+        // the vault-aware dispatch gate), so it can no longer run inside a
+        // `spawn_blocking` closure without a forbidden blocking bridge — awaited
+        // directly instead, matching every other vault-aware call site in this
+        // file.
+        let detail = fetch_profile_detail_impl(&name)
             .await
-            .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
             .map_err(ServerFnError::new)?;
         Ok(detail)
     }
@@ -3333,8 +3513,8 @@ mod profile_health_tests {
     // performs, minus the #[server] macro / spawn_blocking wrapper.
     // -------------------------------------------------------------------
 
-    #[test]
-    fn end_to_end_configured_profile_fixture() {
+    #[tokio::test]
+    async fn end_to_end_configured_profile_fixture() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
 
@@ -3366,7 +3546,8 @@ mod profile_health_tests {
             config_yaml_exists,
             Some(loaded.model.provider.as_str()),
             resolvable,
-        );
+        )
+        .await;
 
         let (health, gaps) = classify_profile_health(dir_exists, config_yaml_exists, provider_key);
         assert_eq!(health, ProfileHealth::Configured);
@@ -3500,8 +3681,8 @@ mod profile_health_tests {
     // and the keyless-provider carve-out.
     // -------------------------------------------------------------------
 
-    #[test]
-    fn bdev01_shape_classifies_incomplete_not_configured() {
+    #[tokio::test]
+    async fn bdev01_shape_classifies_incomplete_not_configured() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
 
@@ -3544,7 +3725,8 @@ mod profile_health_tests {
             config_yaml_exists,
             Some(loaded.model.provider.as_str()),
             resolvable,
-        );
+        )
+        .await;
         let (health, gaps) = classify_profile_health(dir_exists, config_yaml_exists, provider_key);
         assert_eq!(health, ProfileHealth::Incomplete);
         assert_eq!(
@@ -3553,8 +3735,8 @@ mod profile_health_tests {
         );
     }
 
-    #[test]
-    fn keyless_provider_profile_classifies_configured() {
+    #[tokio::test]
+    async fn keyless_provider_profile_classifies_configured() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
 
@@ -3580,7 +3762,8 @@ mod profile_health_tests {
             config_yaml_exists,
             Some(loaded.model.provider.as_str()),
             0,
-        );
+        )
+        .await;
         let (health, gaps) = classify_profile_health(dir_exists, config_yaml_exists, provider_key);
         assert_eq!(health, ProfileHealth::Configured);
         assert!(gaps.is_empty());
@@ -3703,8 +3886,8 @@ mod profile_scaffold_tests {
     // config.yaml copy.
     // -------------------------------------------------------------------
 
-    #[test]
-    fn creates_config_yaml_and_env_in_profile_dir() {
+    #[tokio::test]
+    async fn creates_config_yaml_and_env_in_profile_dir() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         fs::write(dir.path().join(".env"), "OPENROUTER_API_KEY=sk-abc\n").expect("root .env");
@@ -3712,7 +3895,7 @@ mod profile_scaffold_tests {
             .save_to(&dir.path().join("config.yaml"))
             .expect("root config.yaml");
 
-        let rows = create_profile_impl("kanban-worker", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default())
+        let rows = create_profile_impl("kanban-worker", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default()).await
             .expect("create should succeed");
         assert!(!rows.is_empty());
 
@@ -3721,8 +3904,8 @@ mod profile_scaffold_tests {
         assert!(profile_dir.join(".env").is_file());
     }
 
-    #[test]
-    fn created_env_file_has_mode_0600() {
+    #[tokio::test]
+    async fn created_env_file_has_mode_0600() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         fs::write(dir.path().join(".env"), "OPENROUTER_API_KEY=sk-abc\n").expect("root .env");
@@ -3732,7 +3915,7 @@ mod profile_scaffold_tests {
             .save_to(&dir.path().join("config.yaml"))
             .expect("root config.yaml");
 
-        create_profile_impl("perm-test", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default())
+        create_profile_impl("perm-test", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default()).await
             .expect("create should succeed");
 
         use std::os::unix::fs::PermissionsExt;
@@ -3741,8 +3924,8 @@ mod profile_scaffold_tests {
         assert_eq!(meta.permissions().mode() & 0o777, 0o600);
     }
 
-    #[test]
-    fn created_config_yaml_is_byte_identical_to_root() {
+    #[tokio::test]
+    async fn created_config_yaml_is_byte_identical_to_root() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         let mut root_cfg = Config::default();
@@ -3755,7 +3938,7 @@ mod profile_scaffold_tests {
         // resolvable key for the main provider.
         fs::write(dir.path().join(".env"), "OPENROUTER_API_KEY=sk-abc\n").expect("root .env");
 
-        create_profile_impl("byte-copy-profile", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default())
+        create_profile_impl("byte-copy-profile", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default()).await
             .expect("create should succeed");
 
         let root_bytes = fs::read(dir.path().join("config.yaml")).expect("read root config.yaml");
@@ -3767,8 +3950,8 @@ mod profile_scaffold_tests {
         );
     }
 
-    #[test]
-    fn missing_root_config_yaml_does_not_fail_creation() {
+    #[tokio::test]
+    async fn missing_root_config_yaml_does_not_fail_creation() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         fs::write(dir.path().join(".env"), "OPENROUTER_API_KEY=sk-abc\n").expect("root .env");
@@ -3781,7 +3964,7 @@ mod profile_scaffold_tests {
             Vec::new(),
             SecretSource::RootEnv,
             &Config::default(),
-        );
+        ).await;
         // Phase 49.4.1 (D-06): the script's SKIPPED branch (missing root
         // config.yaml does not crash the copy step) is UNCHANGED — but a
         // profile with no config.yaml has no `model.provider` at all and can
@@ -3808,8 +3991,8 @@ mod profile_scaffold_tests {
     // Behavior 4/5: never-clobber-without-force + force overwrites both.
     // -------------------------------------------------------------------
 
-    #[test]
-    fn second_create_without_force_returns_err_and_leaves_files_untouched() {
+    #[tokio::test]
+    async fn second_create_without_force_returns_err_and_leaves_files_untouched() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         fs::write(dir.path().join(".env"), "OPENROUTER_API_KEY=sk-abc\n").expect("root .env");
@@ -3817,7 +4000,7 @@ mod profile_scaffold_tests {
             .save_to(&dir.path().join("config.yaml"))
             .expect("root config.yaml");
 
-        create_profile_impl("clobber-test", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default())
+        create_profile_impl("clobber-test", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default()).await
             .expect("first create should succeed");
 
         let profile_dir = profile_dir_for("clobber-test");
@@ -3826,7 +4009,7 @@ mod profile_scaffold_tests {
         let sentinel_cfg: &[u8] = b"sentinel: untouched\n";
         fs::write(profile_dir.join("config.yaml"), sentinel_cfg).expect("stomp profile config");
 
-        let result = create_profile_impl("clobber-test", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default());
+        let result = create_profile_impl("clobber-test", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default()).await;
         assert!(
             result.is_err(),
             "second create without --force must return Err"
@@ -3844,8 +4027,8 @@ mod profile_scaffold_tests {
         );
     }
 
-    #[test]
-    fn second_create_with_force_overwrites_both_files() {
+    #[tokio::test]
+    async fn second_create_with_force_overwrites_both_files() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         fs::write(dir.path().join(".env"), "OPENROUTER_API_KEY=sk-first\n").expect("root .env");
@@ -3853,7 +4036,7 @@ mod profile_scaffold_tests {
             .save_to(&dir.path().join("config.yaml"))
             .expect("root config.yaml");
 
-        create_profile_impl("force-test", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default())
+        create_profile_impl("force-test", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default()).await
             .expect("first create should succeed");
 
         let profile_dir = profile_dir_for("force-test");
@@ -3868,7 +4051,7 @@ mod profile_scaffold_tests {
         fs::write(dir.path().join(".env"), "OPENROUTER_API_KEY=sk-second\n")
             .expect("update root .env");
 
-        create_profile_impl("force-test", &KeyMode::LlmOnly, true, Vec::new(), SecretSource::RootEnv, &Config::default())
+        create_profile_impl("force-test", &KeyMode::LlmOnly, true, Vec::new(), SecretSource::RootEnv, &Config::default()).await
             .expect("forced create should succeed");
 
         let env_after = fs::read_to_string(profile_dir.join(".env")).expect("read .env after");
@@ -3890,8 +4073,8 @@ mod profile_scaffold_tests {
     // Behavior 6/7/8: the three key-inheritance modes.
     // -------------------------------------------------------------------
 
-    #[test]
-    fn llm_only_mode_excludes_non_allowlisted_root_vars() {
+    #[tokio::test]
+    async fn llm_only_mode_excludes_non_allowlisted_root_vars() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         fs::write(
@@ -3905,7 +4088,7 @@ mod profile_scaffold_tests {
             .save_to(&dir.path().join("config.yaml"))
             .expect("root config.yaml");
 
-        let rows = create_profile_impl("llm-only-profile", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default())
+        let rows = create_profile_impl("llm-only-profile", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default()).await
             .expect("create should succeed");
 
         assert!(rows.iter().any(|r| r.name == "OPENROUTER_API_KEY"));
@@ -3930,8 +4113,8 @@ mod profile_scaffold_tests {
         );
     }
 
-    #[test]
-    fn all_keys_mode_writes_every_matching_suffix_name() {
+    #[tokio::test]
+    async fn all_keys_mode_writes_every_matching_suffix_name() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         fs::write(
@@ -3945,7 +4128,7 @@ mod profile_scaffold_tests {
             .save_to(&dir.path().join("config.yaml"))
             .expect("root config.yaml");
 
-        let rows = create_profile_impl("all-keys-profile", &KeyMode::AllKeys, false, Vec::new(), SecretSource::RootEnv, &Config::default())
+        let rows = create_profile_impl("all-keys-profile", &KeyMode::AllKeys, false, Vec::new(), SecretSource::RootEnv, &Config::default()).await
             .expect("create should succeed");
         let names: std::collections::HashSet<&str> = rows.iter().map(|r| r.name.as_str()).collect();
         assert!(names.contains("OPENROUTER_API_KEY"));
@@ -3957,8 +4140,8 @@ mod profile_scaffold_tests {
         );
     }
 
-    #[test]
-    fn explicit_mode_writes_exactly_the_listed_names() {
+    #[tokio::test]
+    async fn explicit_mode_writes_exactly_the_listed_names() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         fs::write(
@@ -3979,7 +4162,7 @@ mod profile_scaffold_tests {
             Vec::new(),
             SecretSource::RootEnv,
             &Config::default(),
-        )
+        ).await
         .expect("create should succeed");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "OPENROUTER_API_KEY");
@@ -3990,8 +4173,8 @@ mod profile_scaffold_tests {
     // name.
     // -------------------------------------------------------------------
 
-    #[test]
-    fn manual_key_overrides_inherited_value_for_same_name() {
+    #[tokio::test]
+    async fn manual_key_overrides_inherited_value_for_same_name() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         fs::write(dir.path().join(".env"), "OPENROUTER_API_KEY=root-value\n").expect("root .env");
@@ -4005,7 +4188,7 @@ mod profile_scaffold_tests {
             "OPENROUTER_API_KEY".to_string(),
             SecretString::from("manual-value".to_string()),
         )];
-        let rows = create_profile_impl("manual-override-profile", &KeyMode::LlmOnly, false, manual, SecretSource::RootEnv, &Config::default())
+        let rows = create_profile_impl("manual-override-profile", &KeyMode::LlmOnly, false, manual, SecretSource::RootEnv, &Config::default()).await
             .expect("create should succeed");
 
         let row = rows
@@ -4034,8 +4217,8 @@ mod profile_scaffold_tests {
     // fix in Task 1's <action>.
     // -------------------------------------------------------------------
 
-    #[test]
-    fn create_profile_impl_rejects_a_manual_key_value_forging_a_second_env_line() {
+    #[tokio::test]
+    async fn create_profile_impl_rejects_a_manual_key_value_forging_a_second_env_line() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
 
@@ -4053,7 +4236,7 @@ mod profile_scaffold_tests {
             manual,
             SecretSource::RootEnv,
             &Config::default(),
-        );
+        ).await;
         let err =
             result.expect_err("a manual key value embedding a newline must be rejected (CR-02)");
         assert!(
@@ -4066,8 +4249,8 @@ mod profile_scaffold_tests {
         );
     }
 
-    #[test]
-    fn create_profile_impl_rejects_a_manual_key_name_containing_a_newline() {
+    #[tokio::test]
+    async fn create_profile_impl_rejects_a_manual_key_name_containing_a_newline() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
 
@@ -4084,7 +4267,7 @@ mod profile_scaffold_tests {
             manual,
             SecretSource::RootEnv,
             &Config::default(),
-        );
+        ).await;
         let err =
             result.expect_err("a manual key name embedding a newline must be rejected (CR-02)");
         assert!(
@@ -4097,8 +4280,8 @@ mod profile_scaffold_tests {
         );
     }
 
-    #[test]
-    fn create_profile_impl_writes_only_validated_entries_on_the_happy_path() {
+    #[tokio::test]
+    async fn create_profile_impl_writes_only_validated_entries_on_the_happy_path() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         // Phase 49.4.1 (D-06): this test's own point is the manual-key
@@ -4129,7 +4312,7 @@ mod profile_scaffold_tests {
             manual,
             SecretSource::RootEnv,
             &Config::default(),
-        )
+        ).await
         .expect("a legitimate manual key must still succeed");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "CUSTOM_KEY");
@@ -4148,12 +4331,12 @@ mod profile_scaffold_tests {
     // creates nothing on disk.
     // -------------------------------------------------------------------
 
-    #[test]
-    fn reserved_name_rejected_creates_nothing_on_disk() {
+    #[tokio::test]
+    async fn reserved_name_rejected_creates_nothing_on_disk() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
 
-        let result = create_profile_impl("default", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default());
+        let result = create_profile_impl("default", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default()).await;
         assert!(result.is_err());
 
         assert!(
@@ -4162,14 +4345,14 @@ mod profile_scaffold_tests {
         );
     }
 
-    #[test]
-    fn path_traversal_name_rejected_creates_nothing_outside_profiles() {
+    #[tokio::test]
+    async fn path_traversal_name_rejected_creates_nothing_outside_profiles() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
 
         let before = walk_all(dir.path());
-        let _ = create_profile_impl("../../etc/passwd", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default());
-        let _ = create_profile_impl("..", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default());
+        let _ = create_profile_impl("../../etc/passwd", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default()).await;
+        let _ = create_profile_impl("..", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default()).await;
         let after = walk_all(dir.path());
         assert_eq!(
             before, after,
@@ -4200,8 +4383,8 @@ mod profile_scaffold_tests {
     // Behavior 13: a missing root .env resolves nothing, not an error.
     // -------------------------------------------------------------------
 
-    #[test]
-    fn missing_root_env_resolves_no_keys_not_an_error() {
+    #[tokio::test]
+    async fn missing_root_env_resolves_no_keys_not_an_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         // Deliberately no root .env written at all.
@@ -4214,7 +4397,7 @@ mod profile_scaffold_tests {
             .save_to(&dir.path().join("config.yaml"))
             .expect("root config.yaml");
 
-        let result = create_profile_impl("no-root-env-profile", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default());
+        let result = create_profile_impl("no-root-env-profile", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default()).await;
         // Phase 49.4.1 (D-06): a missing root .env resolving ZERO keys for
         // the main provider is exactly the silent-success shape this phase
         // exists to close — the resolution itself is still not an "error"
@@ -4236,8 +4419,8 @@ mod profile_scaffold_tests {
     // anywhere in the serialized response.
     // -------------------------------------------------------------------
 
-    #[test]
-    fn returned_rows_are_masked_and_contain_no_raw_key_substring() {
+    #[tokio::test]
+    async fn returned_rows_are_masked_and_contain_no_raw_key_substring() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         // A distinctive high-entropy value so a partial match cannot slip
@@ -4254,7 +4437,7 @@ mod profile_scaffold_tests {
             .save_to(&dir.path().join("config.yaml"))
             .expect("root config.yaml");
 
-        let rows = create_profile_impl("no-leak-profile", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default())
+        let rows = create_profile_impl("no-leak-profile", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default()).await
             .expect("create should succeed");
 
         let serialized = serde_json::to_string(&rows).expect("serialize KeyRow response");
@@ -4265,8 +4448,8 @@ mod profile_scaffold_tests {
         assert!(rows.iter().any(|r| r.name == "OPENROUTER_API_KEY"));
     }
 
-    #[test]
-    fn provenance_header_line_is_stamped_on_every_generated_env() {
+    #[tokio::test]
+    async fn provenance_header_line_is_stamped_on_every_generated_env() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         fs::write(dir.path().join(".env"), "OPENROUTER_API_KEY=sk-abc\n").expect("root .env");
@@ -4276,7 +4459,7 @@ mod profile_scaffold_tests {
             .save_to(&dir.path().join("config.yaml"))
             .expect("root config.yaml");
 
-        create_profile_impl("provenance-profile", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default())
+        create_profile_impl("provenance-profile", &KeyMode::LlmOnly, false, Vec::new(), SecretSource::RootEnv, &Config::default()).await
             .expect("create should succeed");
 
         let profile_env = fs::read_to_string(profile_dir_for("provenance-profile").join(".env"))
@@ -5279,8 +5462,8 @@ mod profile_key_masking_tests {
     // fetch_profile_detail_impl
     // -------------------------------------------------------------------
 
-    #[test]
-    fn fetch_profile_detail_fully_configured_returns_configured_no_gaps() {
+    #[tokio::test]
+    async fn fetch_profile_detail_fully_configured_returns_configured_no_gaps() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         let profile_dir = profile_dir_for("detail-configured");
@@ -5295,7 +5478,7 @@ mod profile_key_masking_tests {
         fs::write(&env_path, "ANTHROPIC_API_KEY=sk-abc123\n").expect("write profile .env");
 
         let detail =
-            fetch_profile_detail_impl("detail-configured").expect("fetch_profile_detail_impl");
+            fetch_profile_detail_impl("detail-configured").await.expect("fetch_profile_detail_impl");
         assert_eq!(detail.health, ProfileHealth::Configured);
         assert!(detail.gaps.is_empty());
         assert_eq!(detail.provider.as_deref(), Some("anthropic"));
@@ -5307,8 +5490,8 @@ mod profile_key_masking_tests {
     /// env-only), reproduced inline exactly as `list_profiles`' loop body
     /// computes it — the same three inputs, so the two call sites can never
     /// disagree for identical disk state (T-47.4-05 acceptance criterion).
-    #[test]
-    fn fetch_profile_detail_agrees_with_list_profiles_classification() {
+    #[tokio::test]
+    async fn fetch_profile_detail_agrees_with_list_profiles_classification() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         let name = "detail-vs-list-profile";
@@ -5355,11 +5538,12 @@ mod profile_key_masking_tests {
             config_parsed_ok,
             provider.as_deref(),
             resolvable_llm_key_count,
-        );
+        )
+        .await;
         let (list_profiles_health, list_profiles_gaps) =
             classify_profile_health(dir_exists, config_parsed_ok, provider_key);
 
-        let detail = fetch_profile_detail_impl(name).expect("fetch_profile_detail_impl");
+        let detail = fetch_profile_detail_impl(name).await.expect("fetch_profile_detail_impl");
         assert_eq!(
             detail.health, list_profiles_health,
             "fetch_profile_detail and list_profiles must classify the same disk state identically"
@@ -5367,17 +5551,17 @@ mod profile_key_masking_tests {
         assert_eq!(detail.gaps, list_profiles_gaps);
     }
 
-    #[test]
-    fn fetch_profile_detail_missing_dir_is_error() {
+    #[tokio::test]
+    async fn fetch_profile_detail_missing_dir_is_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         // Deliberately never created.
-        let result = fetch_profile_detail_impl("never-created-profile");
+        let result = fetch_profile_detail_impl("never-created-profile").await;
         assert!(result.is_err(), "a missing profile dir must be an error");
     }
 
-    #[test]
-    fn fetch_profile_detail_malformed_config_yaml_degrades_not_fails() {
+    #[tokio::test]
+    async fn fetch_profile_detail_malformed_config_yaml_degrades_not_fails() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         let profile_dir = profile_dir_for("malformed-config-profile");
@@ -5390,7 +5574,7 @@ mod profile_key_masking_tests {
         )
         .expect("write malformed config.yaml");
 
-        let detail = fetch_profile_detail_impl("malformed-config-profile")
+        let detail = fetch_profile_detail_impl("malformed-config-profile").await
             .expect("a malformed config.yaml must degrade, not fail the whole call");
         assert_eq!(detail.provider, None);
         assert_eq!(detail.model_default, None);
@@ -5400,8 +5584,8 @@ mod profile_key_masking_tests {
             .any(|g| matches!(g, ProfileGap::MissingConfigYaml)));
     }
 
-    #[test]
-    fn fetch_profile_detail_malformed_profile_env_returns_err_not_panic() {
+    #[tokio::test]
+    async fn fetch_profile_detail_malformed_profile_env_returns_err_not_panic() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         let profile_dir = profile_dir_for("malformed-env-profile");
@@ -5412,15 +5596,15 @@ mod profile_key_masking_tests {
         )
         .expect("write malformed .env");
 
-        let result = fetch_profile_detail_impl("malformed-env-profile");
+        let result = fetch_profile_detail_impl("malformed-env-profile").await;
         assert!(
             result.is_err(),
             "a malformed profile .env must return Err, not panic"
         );
     }
 
-    #[test]
-    fn fetch_profile_detail_reports_web_config_write_enabled_truthfully() {
+    #[tokio::test]
+    async fn fetch_profile_detail_reports_web_config_write_enabled_truthfully() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         let profile_dir = profile_dir_for("write-flag-profile");
@@ -5433,22 +5617,22 @@ mod profile_key_masking_tests {
             .expect("save_to root config.yaml");
 
         let detail =
-            fetch_profile_detail_impl("write-flag-profile").expect("fetch_profile_detail_impl");
+            fetch_profile_detail_impl("write-flag-profile").await.expect("fetch_profile_detail_impl");
         assert!(
             detail.web_config_write_enabled,
             "the root's web_config_write_enabled flag must be reported truthfully"
         );
     }
 
-    #[test]
-    fn fetch_profile_detail_missing_llm_key_is_visible_as_missing_row() {
+    #[tokio::test]
+    async fn fetch_profile_detail_missing_llm_key_is_visible_as_missing_row() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         let profile_dir = profile_dir_for("missing-key-row-profile");
         fs::create_dir_all(&profile_dir).expect("mkdir profile dir");
         // No .env at all — every allowlisted key must still appear as a
         // Missing row, not be silently absent from the table.
-        let detail = fetch_profile_detail_impl("missing-key-row-profile")
+        let detail = fetch_profile_detail_impl("missing-key-row-profile").await
             .expect("fetch_profile_detail_impl");
         let row = detail
             .keys
@@ -5459,8 +5643,8 @@ mod profile_key_masking_tests {
         assert_eq!(row.masked, "\u{2014}");
     }
 
-    #[test]
-    fn fetch_profile_detail_no_raw_key_substring_in_serialized_json() {
+    #[tokio::test]
+    async fn fetch_profile_detail_no_raw_key_substring_in_serialized_json() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         let profile_dir = profile_dir_for("no-leak-detail-profile");
@@ -5481,7 +5665,7 @@ mod profile_key_masking_tests {
         .expect("write profile .env");
 
         let detail =
-            fetch_profile_detail_impl("no-leak-detail-profile").expect("fetch_profile_detail_impl");
+            fetch_profile_detail_impl("no-leak-detail-profile").await.expect("fetch_profile_detail_impl");
         let serialized = serde_json::to_string(&detail).expect("serialize ProfileDetail");
         assert!(
             !serialized.contains(root_secret),
@@ -5878,8 +6062,8 @@ mod profile_key_masking_tests {
         );
     }
 
-    #[test]
-    fn create_profile_impl_writes_env_entries_sorted_by_key_name() {
+    #[tokio::test]
+    async fn create_profile_impl_writes_env_entries_sorted_by_key_name() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         fs::write(
@@ -5918,7 +6102,7 @@ mod profile_key_masking_tests {
             manual,
             SecretSource::RootEnv,
             &Config::default(),
-        )
+        ).await
         .expect("create should succeed");
 
         let contents = fs::read_to_string(profile_dir_for("sorted-create-profile").join(".env"))
@@ -6807,8 +6991,8 @@ mod profile_env_encoding_tests {
     /// The CR-03 canary test again, through `create_profile_impl`'s
     /// `manual_keys` overlay rather than `save_profile_key_impl`, confirming
     /// the second write path is covered by the same guarantee.
-    #[test]
-    fn create_profile_manual_key_never_dereferences_a_process_env_var() {
+    #[tokio::test]
+    async fn create_profile_manual_key_never_dereferences_a_process_env_var() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _home = home(&dir);
 
@@ -6837,7 +7021,7 @@ mod profile_env_encoding_tests {
             manual,
             SecretSource::RootEnv,
             &Config::default(),
-        )
+        ).await
         .expect("create_profile_impl should succeed");
 
         let env_path = profile_dir_for("create-canary-profile").join(".env");
@@ -6859,8 +7043,8 @@ mod profile_env_encoding_tests {
     /// writer, not a blocklist, had to be the fix. Also covers the tab
     /// shape (see `save_profile_key_round_trips_every_hostile_value_shape`'s
     /// doc comment for why tab cannot reach the validated entry point).
-    #[test]
-    fn an_inherited_root_env_value_round_trips_through_create_profile() {
+    #[tokio::test]
+    async fn an_inherited_root_env_value_round_trips_through_create_profile() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _home = home(&dir);
 
@@ -6886,7 +7070,7 @@ mod profile_env_encoding_tests {
             Vec::new(),
             SecretSource::RootEnv,
             &Config::default(),
-        )
+        ).await
         .expect("create_profile_impl should succeed");
         assert!(!rows.is_empty());
 
@@ -7041,8 +7225,8 @@ mod profile_secrets_source_tests {
     /// entry, only `model.provider`) transitions to allowed by syncing from
     /// `SecretSource::ContainerEnv`, with no manual file edits between the
     /// two `evaluate_profile_dispatch` assertions.
-    #[test]
-    fn sync_from_container_env_repairs_a_profile_the_dispatch_gate_refused() {
+    #[tokio::test]
+    async fn sync_from_container_env_repairs_a_profile_the_dispatch_gate_refused() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
 
@@ -7073,7 +7257,7 @@ mod profile_secrets_source_tests {
 
         // Before: the dispatch gate refuses (unknown provider — no registry
         // entry at all).
-        let before = ironhermes_core::dispatch_gate::evaluate_profile_dispatch(name);
+        let before = ironhermes_core::dispatch_gate::evaluate_profile_dispatch(name).await;
         assert!(
             matches!(
                 before,
@@ -7093,7 +7277,7 @@ mod profile_secrets_source_tests {
             &KeyMode::LlmOnly,
             Vec::new(),
             &root_config_for_sync,
-        )
+        ).await
         .expect("sync must succeed once the key is present in the container env");
 
         assert_eq!(response.source, SecretSource::ContainerEnv);
@@ -7124,7 +7308,7 @@ mod profile_secrets_source_tests {
             Some("sk-tracer-value")
         );
 
-        let after = ironhermes_core::dispatch_gate::evaluate_profile_dispatch(name);
+        let after = ironhermes_core::dispatch_gate::evaluate_profile_dispatch(name).await;
         assert_eq!(
             after,
             ironhermes_core::dispatch_gate::DispatchDecision::Allow,
@@ -7297,8 +7481,8 @@ mod profile_secrets_source_tests {
     /// D-06: the phase's entire reason for existing — a source that
     /// resolves nothing for the profile's main provider must return `Err`,
     /// never a silent `Ok` into a still-broken profile.
-    #[test]
-    fn sync_reports_no_key_for_provider_instead_of_success() {
+    #[tokio::test]
+    async fn sync_reports_no_key_for_provider_instead_of_success() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
 
@@ -7330,7 +7514,7 @@ mod profile_secrets_source_tests {
             &KeyMode::LlmOnly,
             Vec::new(),
             &root_config_for_sync,
-        )
+        ).await
         .expect_err("a source with no key for the main provider must return Err, not Ok");
 
         assert!(err.contains("venice"), "error must name the provider: {err}");
@@ -7385,8 +7569,8 @@ mod profile_secrets_source_tests {
 
     /// D-02: a key already present in the profile's `.env` that the chosen
     /// source does not supply must survive a successful sync unchanged.
-    #[test]
-    fn sync_preserves_a_preexisting_profile_env_key_not_in_the_source() {
+    #[tokio::test]
+    async fn sync_preserves_a_preexisting_profile_env_key_not_in_the_source() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
 
@@ -7418,7 +7602,7 @@ mod profile_secrets_source_tests {
             &KeyMode::LlmOnly,
             Vec::new(),
             &root_config_for_sync,
-        )
+        ).await
         .expect("sync must succeed");
 
         let env_map = read_env_keys(&profile_dir.join(".env")).expect("synced .env must parse");
@@ -7437,8 +7621,8 @@ mod profile_secrets_source_tests {
     /// delegates to the ONE shared `render_profile_env_with_stamp` renderer
     /// and its round-trip verifier, rather than being a second
     /// implementation — only that fn emits `PROFILE_ENV_PROVENANCE_PREFIX`.
-    #[test]
-    fn sync_written_env_round_trips_through_the_real_dotenv_reader() {
+    #[tokio::test]
+    async fn sync_written_env_round_trips_through_the_real_dotenv_reader() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
 
@@ -7470,7 +7654,7 @@ mod profile_secrets_source_tests {
             &KeyMode::LlmOnly,
             Vec::new(),
             &root_config_for_sync,
-        )
+        ).await
         .expect("sync must succeed");
 
         let env_path = profile_dir.join(".env");
@@ -7490,8 +7674,8 @@ mod profile_secrets_source_tests {
 
     /// D-01: running the sync twice against the same fixture must leave
     /// both disk artifacts byte-identical after run two as after run one.
-    #[test]
-    fn sync_is_idempotent_across_two_consecutive_runs() {
+    #[tokio::test]
+    async fn sync_is_idempotent_across_two_consecutive_runs() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
 
@@ -7525,7 +7709,7 @@ mod profile_secrets_source_tests {
             &KeyMode::LlmOnly,
             Vec::new(),
             &root_config_1,
-        )
+        ).await
         .expect("first sync must succeed");
         let config_bytes_1 = fs::read(&config_path).expect("read config.yaml after run 1");
         let env_bytes_1 = fs::read(&env_path).expect("read .env after run 1");
@@ -7537,7 +7721,7 @@ mod profile_secrets_source_tests {
             &KeyMode::LlmOnly,
             Vec::new(),
             &root_config_2,
-        )
+        ).await
         .expect("second sync must succeed");
         let config_bytes_2 = fs::read(&config_path).expect("read config.yaml after run 2");
         let env_bytes_2 = fs::read(&env_path).expect("read .env after run 2");
@@ -7556,8 +7740,8 @@ mod profile_secrets_source_tests {
     /// profile `.env` must refuse via the fixed-string family, never
     /// leaking the raw failing line (mirrors
     /// `read_env_keys_parse_error_never_leaks_the_line`).
-    #[test]
-    fn sync_env_read_error_never_leaks_the_line() {
+    #[tokio::test]
+    async fn sync_env_read_error_never_leaks_the_line() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
 
@@ -7594,7 +7778,7 @@ mod profile_secrets_source_tests {
             &KeyMode::LlmOnly,
             Vec::new(),
             &root_config_for_sync,
-        )
+        ).await
         .expect_err("a malformed existing .env must refuse, not silently drop the parse error");
 
         assert!(
@@ -7701,8 +7885,8 @@ mod profile_secrets_source_tests {
     /// only names ending `_API_KEY`/`_KEY`/`_TOKEN` that are non-empty in
     /// the process environment — platform names like PORT/HOSTNAME never
     /// reach the written `.env`, mirroring the sync path's own filter test.
-    #[test]
-    fn create_from_container_env_writes_only_suffix_matched_keys() {
+    #[tokio::test]
+    async fn create_from_container_env_writes_only_suffix_matched_keys() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
 
@@ -7721,7 +7905,7 @@ mod profile_secrets_source_tests {
             Vec::new(),
             SecretSource::ContainerEnv,
             &Config::default(),
-        )
+        ).await
         .expect("create from a resolvable container-env key must succeed");
 
         assert!(rows.iter().any(|r| r.name == "OPENROUTER_API_KEY"));
@@ -7743,8 +7927,8 @@ mod profile_secrets_source_tests {
     /// names both the source label and the provider. The profile directory
     /// stays in place so the drawer's SYNC can repair it without a
     /// re-create (D-05).
-    #[test]
-    fn create_reports_no_key_for_provider_instead_of_success() {
+    #[tokio::test]
+    async fn create_reports_no_key_for_provider_instead_of_success() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
 
@@ -7767,7 +7951,7 @@ mod profile_secrets_source_tests {
             Vec::new(),
             SecretSource::ContainerEnv,
             &root_cfg,
-        )
+        ).await
         .expect_err("a source with no key for the main provider must return Err, not Ok");
 
         assert!(err.contains("venice"), "error must name the provider: {err}");
@@ -7788,8 +7972,8 @@ mod profile_secrets_source_tests {
     /// The step-2 preview must never promise a key the write does not
     /// deliver — both fns resolve their key-name set through the SAME
     /// `build_source_map`.
-    #[test]
-    fn preview_and_create_resolve_from_the_same_source_map() {
+    #[tokio::test]
+    async fn preview_and_create_resolve_from_the_same_source_map() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
 
@@ -7817,7 +8001,7 @@ mod profile_secrets_source_tests {
             Vec::new(),
             SecretSource::ContainerEnv,
             &Config::default(),
-        )
+        ).await
         .expect("create should succeed");
         let create_names: std::collections::BTreeSet<String> =
             create_rows.into_iter().map(|r| r.name).collect();
@@ -7846,8 +8030,8 @@ mod profile_secrets_source_tests {
 
     /// D-13/D-11: an error raised while reading a malformed root `.env`
     /// contains none of that file's line content.
-    #[test]
-    fn create_env_read_error_never_leaks_the_line() {
+    #[tokio::test]
+    async fn create_env_read_error_never_leaks_the_line() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
 
@@ -7869,7 +8053,7 @@ mod profile_secrets_source_tests {
             Vec::new(),
             SecretSource::RootEnv,
             &Config::default(),
-        )
+        ).await
         .expect_err("a malformed root .env must be refused, not silently accepted");
 
         assert!(
@@ -7881,8 +8065,8 @@ mod profile_secrets_source_tests {
     /// D-04: `create_profile_impl` with `SecretSource::RootEnv` resolves
     /// exactly the keys it resolved before this phase, so an existing
     /// wizard flow is byte-identical in outcome.
-    #[test]
-    fn create_with_root_env_source_is_unchanged_from_pre_phase_behaviour() {
+    #[tokio::test]
+    async fn create_with_root_env_source_is_unchanged_from_pre_phase_behaviour() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
         fs::write(
@@ -7901,7 +8085,7 @@ mod profile_secrets_source_tests {
             Vec::new(),
             SecretSource::RootEnv,
             &Config::default(),
-        )
+        ).await
         .expect("create should succeed");
 
         assert!(rows.iter().any(|r| r.name == "OPENROUTER_API_KEY"));
@@ -8000,8 +8184,8 @@ mod profile_secrets_source_tests {
     /// by the parser/source-map and refused later by the existing post-write
     /// dispatch-gate check, with the D-06 message, never the D-11 parse
     /// message.
-    #[test]
-    fn provided_source_with_no_key_for_main_provider_fails_loud_not_at_parse_time() {
+    #[tokio::test]
+    async fn provided_source_with_no_key_for_main_provider_fails_loud_not_at_parse_time() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _home = ScopedEnv::set("IRONHERMES_HOME", dir.path().to_str().unwrap());
 
@@ -8038,7 +8222,7 @@ mod profile_secrets_source_tests {
             &KeyMode::LlmOnly,
             manual_keys,
             &root_config_for_sync,
-        )
+        ).await
         .expect_err("a source with no key for the main provider must fail loud");
 
         assert!(

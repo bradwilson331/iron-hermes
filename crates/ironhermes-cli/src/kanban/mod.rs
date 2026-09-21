@@ -389,7 +389,10 @@ pub enum KanbanCommands {
         json: bool,
     },
 
-    /// Run one dispatcher tick (one-shot; gates on DB)
+    /// Run one dispatcher tick (one-shot; gates on DB). Exits before the workers it spawns have
+    /// started, so it cannot host a per-profile vault credential endpoint — vault-backed tasks
+    /// are refused (blocked with a `dispatch gate: ` reason) rather than dispatched. For those,
+    /// use `ironhermes kanban daemon --force` or the gateway-embedded dispatcher instead.
     #[command(name = "dispatch")]
     Dispatch {
         /// Preview what would be claimed (not yet implemented; logs a warning)

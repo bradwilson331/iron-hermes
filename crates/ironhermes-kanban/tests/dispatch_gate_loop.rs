@@ -131,7 +131,8 @@ fn recording_spawn_fn(
         move |task: ironhermes_kanban::types::Task,
               _run: ironhermes_kanban::types::TaskRun,
               _ws: String,
-              _board_slug: String|
+              _board_slug: String,
+              _vault: Option<ironhermes_kanban::worker_spawn::WorkerVaultBootstrap>|
               -> std::pin::Pin<
             Box<dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>> + Send>,
         > {

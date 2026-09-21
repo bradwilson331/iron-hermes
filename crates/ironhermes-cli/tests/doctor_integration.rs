@@ -193,3 +193,112 @@ fn doctor_no_pid_file_is_healthy() {
         stdout
     );
 }
+
+// =============================================================================
+// Phase 53 (Plan 03 Task 3, D-06): ironhermes doctor --browser
+// =============================================================================
+
+/// D-06: plain `ironhermes doctor` (no `--browser`) never prints the
+/// browser section — the flag gates the entire block, so this command stays
+/// exactly as cheap as it was pre-53.
+#[test]
+fn doctor_without_the_browser_flag_performs_no_browser_work() {
+    let bin = match std::env::var("CARGO_BIN_EXE_ironhermes") {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!(
+                "Skipping doctor_without_the_browser_flag_performs_no_browser_work: \
+                 CARGO_BIN_EXE_ironhermes not set"
+            );
+            return;
+        }
+    };
+    let tmp = TempDir::new().unwrap();
+    let out = Command::new(&bin)
+        .env("IRONHERMES_HOME", tmp.path())
+        .args(["doctor"])
+        .output()
+        .expect("ironhermes doctor");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("Browser backend"),
+        "plain `ironhermes doctor` must never print the browser section, got:\n{}",
+        stdout
+    );
+    assert!(
+        out.status.success(),
+        "doctor must exit 0, got: {:?}\nstdout:\n{}",
+        out.status,
+        stdout
+    );
+}
+
+/// D-06: `ironhermes doctor --browser` reports the configured backend and
+/// still exits 0 even when the browser diagnosis fails outright —
+/// `run_doctor_check`'s always-`Ok(())` invariant survives every browser
+/// outcome. `IRONHERMES_BROWSER_TEST_DISABLE=1` forces a deterministic "no
+/// binary" outcome so this assertion does not depend on what is installed
+/// on the machine running it.
+#[test]
+fn doctor_with_the_browser_flag_reports_the_configured_backend_and_still_returns_ok() {
+    let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+    let bin = match std::env::var("CARGO_BIN_EXE_ironhermes") {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!(
+                "Skipping doctor_with_the_browser_flag_reports_the_configured_backend_and_still_returns_ok: \
+                 CARGO_BIN_EXE_ironhermes not set"
+            );
+            return;
+        }
+    };
+    let tmp = TempDir::new().unwrap();
+    let out = Command::new(&bin)
+        .env("IRONHERMES_HOME", tmp.path())
+        .env("IRONHERMES_BROWSER_TEST_DISABLE", "1")
+        .args(["doctor", "--browser"])
+        .output()
+        .expect("ironhermes doctor --browser");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Browser backend"),
+        "expected the browser section header, got:\n{}",
+        stdout
+    );
+    assert!(
+        stdout.contains("Backend: Chromium"),
+        "must name the configured backend (default: Chromium), got:\n{}",
+        stdout
+    );
+    assert!(
+        out.status.success(),
+        "run_doctor_check must still return Ok(()) even when the browser diagnosis fails \
+         outright, got exit status: {:?}\nstdout:\n{}",
+        out.status,
+        stdout
+    );
+}
+
+/// `ironhermes doctor --help` lists the `--browser` flag.
+#[test]
+fn doctor_help_lists_the_browser_flag() {
+    let bin = match std::env::var("CARGO_BIN_EXE_ironhermes") {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!(
+                "Skipping doctor_help_lists_the_browser_flag: CARGO_BIN_EXE_ironhermes not set"
+            );
+            return;
+        }
+    };
+    let out = Command::new(&bin)
+        .args(["doctor", "--help"])
+        .output()
+        .expect("ironhermes doctor --help");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("--browser"),
+        "doctor --help must list --browser, got:\n{}",
+        stdout
+    );
+}

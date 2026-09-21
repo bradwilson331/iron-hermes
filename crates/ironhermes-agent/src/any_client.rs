@@ -19,6 +19,20 @@ use crate::codex_client::CodexClient;
 // AnyClient enum dispatch (D-07, D-08, D-10)
 // =============================================================================
 
+/// Phase 50.4 (D-14, wave 2): shared, swappable resolver handle. Every
+/// construction-time consumer of a `ProviderResolver` that must keep
+/// observing `AgentRuntime::reload_config_and_resolver`'s swaps (the
+/// subagent runner, the vision handle, the summarization handle) stores
+/// one of these instead of a plain `Arc<ProviderResolver>`. `std::sync::RwLock`,
+/// not tokio's — these are read from sync contexts, the same reason
+/// `AgentRuntime`'s own `config_handle`/`resolver_handle`/`client_handle`
+/// use it.
+pub type SharedResolver = Arc<std::sync::RwLock<Arc<ProviderResolver>>>;
+
+/// Phase 50.4 (D-14, wave 2): shared, swappable client handle. Same
+/// hot-swap contract as [`SharedResolver`].
+pub type SharedClient = Arc<std::sync::RwLock<AnyClient>>;
+
 /// Universal client that dispatches to the correct backend based on ApiMode.
 ///
 /// AnyClient is the type used by AgentLoop — it wraps an OpenAI-compatible
@@ -50,6 +64,26 @@ impl AnyClient {
     /// - `ApiMode::AnthropicMessages` → wraps AnthropicClient
     /// - `ApiMode::CodexResponses` → wraps CodexClient
     pub fn from_endpoint(endpoint: &ResolvedEndpoint) -> Result<Self> {
+        // Phase 50.4 (D-09, Rule 2 — missing critical validation, discovered
+        // while writing the reload-failure test): `ProviderResolver::build`
+        // deliberately lets an unrecognized/misconfigured `model.provider`
+        // name through (its own comment: "Unknown main provider will be
+        // caught at resolve_for_main() time... allow build to succeed so
+        // operators can introspect"). A `providers.<name>` entry with no
+        // `base_url` set produces a `ResolvedEndpoint` whose `base_url` is
+        // the empty-string sentinel from that build step. Before this check,
+        // EVERY arm below unconditionally returned `Ok`, so that endpoint
+        // silently produced a client that would only fail later, deep inside
+        // an HTTP call, with a confusing transport error instead of a clear
+        // one. This is also what makes `build_main_client`'s `Result` return
+        // type genuinely reachable — D-09's all-or-nothing reload guarantee
+        // needs a real failure to prove itself against.
+        if endpoint.base_url.trim().is_empty() {
+            return Err(anyhow!(
+                "cannot build a client: base_url is empty — check config.yaml's \
+                 providers.<name>.base_url for the configured provider"
+            ));
+        }
         match endpoint.api_mode {
             ApiMode::ChatCompletions => Ok(AnyClient::ChatCompletions(LlmClient::new(
                 &endpoint.base_url,
@@ -122,6 +156,23 @@ impl AnyClient {
             Self::ChatCompletions(c) => c.model(),
             Self::AnthropicMessages(c) => c.model(),
             Self::CodexResponses(c) => c.model(),
+        }
+    }
+
+    /// Get the base URL from the inner client.
+    ///
+    /// Phase 50.4 (D-14): a read-only accessor over data already in the
+    /// struct, added so a client-rebuild test can observe the endpoint
+    /// actually moving after `AgentRuntime::reload_config_and_resolver` —
+    /// comparing `model()` alone (or a `Debug` string / discriminant) cannot
+    /// distinguish a rebuilt client pointing at the SAME endpoint from one
+    /// pointing at a NEW one. Never format, log, or otherwise expose key
+    /// material through this accessor.
+    pub fn base_url(&self) -> &str {
+        match self {
+            Self::ChatCompletions(c) => c.base_url(),
+            Self::AnthropicMessages(c) => c.base_url(),
+            Self::CodexResponses(c) => c.base_url(),
         }
     }
 
@@ -262,26 +313,53 @@ pub fn wire_fallback_if_configured(mut agent: AgentLoop, resolver: &ProviderReso
 ///   2. `auxiliary` block fallback
 ///   3. Fall through to main provider (if supports_vision)
 ///
-/// Constructed in `ironhermes-cli/src/main.rs` and passed to
-/// `register_browser_tools_with_vision` so that `BrowserVisionTool` routes
-/// multimodal calls through the correct endpoint.
+/// Constructed in `app_runtime_factory.rs::build_app_runtime_bundle` (the
+/// shared registration path run_chat/run_single/run_gateway all call) and,
+/// separately, in `ironhermes-cli/src/tui_rata/event_loop.rs` (the rata TUI
+/// bootstrap, which has no apply-now affordance and wraps its own resolver
+/// in a private handle). Both were found by a repo-wide grep during Phase
+/// 50.4 wave 2 — the `ironhermes-cli/src/main.rs` doc claim above was stale;
+/// `main.rs` itself constructs neither type.
+///
+/// Passed to `register_browser_tools_with_vision` so that `BrowserVisionTool`
+/// routes multimodal calls through the correct endpoint.
+///
+/// Phase 50.4 (D-14, wave 2): wraps a [`SharedResolver`] — a shared,
+/// swappable handle — rather than a boot-time `Arc<ProviderResolver>`
+/// clone, so a vision call made after `AgentRuntime::reload_config_and_resolver`
+/// resolves the NEW resolver, not the one this handle was constructed with.
 pub struct AnyClientVisionHandle {
-    resolver: Arc<ProviderResolver>,
+    resolver: SharedResolver,
 }
 
 impl AnyClientVisionHandle {
-    pub fn new(resolver: Arc<ProviderResolver>) -> Self {
+    pub fn new(resolver: SharedResolver) -> Self {
         Self { resolver }
+    }
+
+    /// The resolver currently visible through the shared handle. Not test
+    /// scaffolding — this is the only way to observe which resolver a
+    /// handle is CURRENTLY serving, and stays compiled in release builds.
+    pub fn resolver(&self) -> Arc<ProviderResolver> {
+        match self.resolver.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 }
 
 #[async_trait]
 impl ironhermes_tools::browser_vision::VisionClientHandle for AnyClientVisionHandle {
     async fn vision_call(&self, prompt: String, image_data_url: String) -> anyhow::Result<String> {
+        // Phase 50.4 (D-14, wave 2): read the resolver into an owned local
+        // ONCE PER CALL — not once per construction — before the D-07
+        // cascade below. The guard drops at the end of this statement, well
+        // before the HTTP call this function awaits further down.
+        let resolver = self.resolver();
         // D-07 cascade: vision role → auxiliary → main provider.
-        let client = match build_role_client(&self.resolver, "vision")? {
+        let client = match build_role_client(&resolver, "vision")? {
             Some(c) => c,
-            None => build_main_client(&self.resolver)?,
+            None => build_main_client(&resolver)?,
         };
 
         // Build a multimodal message: text prompt + image data URL (D-08 PNG base64).
@@ -342,16 +420,31 @@ impl ironhermes_tools::browser_vision::VisionClientHandle for AnyClientVisionHan
 ///   2. `auxiliary` block fallback (`auxiliary.summary` → general aux)
 ///   3. Fall through to main provider (always succeeds — no None reaches WebExtractTool)
 ///
-/// Constructed in `ironhermes-cli/src/main.rs` (run_chat / run_single / run_gateway)
-/// and passed to `register_web_extract_tool` so that `WebExtractTool` routes
-/// summarization calls through the correct endpoint per the operator's config.yaml.
+/// Constructed in `app_runtime_factory.rs::build_app_runtime_bundle` (the
+/// `ironhermes-cli/src/main.rs` doc claim above was stale — see the sibling
+/// note on `AnyClientVisionHandle`) and passed to `register_web_extract_tool`
+/// so that `WebExtractTool` routes summarization calls through the correct
+/// endpoint per the operator's config.yaml.
+///
+/// Phase 50.4 (D-14, wave 2): wraps a [`SharedResolver`] — same hot-swap
+/// contract as [`AnyClientVisionHandle`], and written separately because the
+/// two are independent copies of the same shape, not a shared base.
 pub struct AnyClientSummarizationHandle {
-    resolver: Arc<ProviderResolver>,
+    resolver: SharedResolver,
 }
 
 impl AnyClientSummarizationHandle {
-    pub fn new(resolver: Arc<ProviderResolver>) -> Self {
+    pub fn new(resolver: SharedResolver) -> Self {
         Self { resolver }
+    }
+
+    /// The resolver currently visible through the shared handle. See
+    /// [`AnyClientVisionHandle::resolver`] for the same rationale.
+    pub fn resolver(&self) -> Arc<ProviderResolver> {
+        match self.resolver.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 }
 
@@ -363,10 +456,14 @@ impl ironhermes_core::SummarizationClientHandle for AnyClientSummarizationHandle
         user_prompt: String,
         max_tokens: u32,
     ) -> anyhow::Result<String> {
+        // Phase 50.4 (D-14, wave 2): read once per call, not once per
+        // construction — the guard drops at the end of this statement,
+        // before the HTTP call this function awaits further down.
+        let resolver = self.resolver();
         // Phase 26 D-07 cascade: summarization role → auxiliary → main provider.
-        let client = match build_role_client(&self.resolver, "summarization")? {
+        let client = match build_role_client(&resolver, "summarization")? {
             Some(c) => c,
-            None => build_main_client(&self.resolver)?,
+            None => build_main_client(&resolver)?,
         };
 
         // Text-only message vector (simpler than vision multimodal payload).
@@ -761,6 +858,7 @@ mod tests {
             fallback_providers: vec![],
             model_metadata: None,
             config_context_length: None,
+            provider_model_context_length: None,
             models: vec![],
         }
     }
@@ -907,7 +1005,9 @@ mod tests {
     fn test_any_client_summarization_handle_constructible() {
         let config = Config::default();
         let resolver = ironhermes_core::ProviderResolver::build(&config).unwrap();
-        let handle = AnyClientSummarizationHandle::new(Arc::new(resolver));
+        let handle = AnyClientSummarizationHandle::new(Arc::new(std::sync::RwLock::new(
+            Arc::new(resolver),
+        )));
         let _: Arc<dyn ironhermes_core::SummarizationClientHandle> = Arc::new(handle);
     }
 
@@ -928,8 +1028,9 @@ mod tests {
         let resolver = ironhermes_core::ProviderResolver::build(&config).unwrap();
 
         // 2. Construct the cascade-aware summarization handle and coerce to dyn trait.
-        let handle: Arc<dyn ironhermes_core::SummarizationClientHandle> =
-            Arc::new(AnyClientSummarizationHandle::new(Arc::new(resolver)));
+        let handle: Arc<dyn ironhermes_core::SummarizationClientHandle> = Arc::new(
+            AnyClientSummarizationHandle::new(Arc::new(std::sync::RwLock::new(Arc::new(resolver)))),
+        );
 
         // 3. Construct an empty SkillRegistry from a tempdir (mirrors the production load).
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -948,6 +1049,83 @@ mod tests {
             names.iter().any(|n| n == "web_extract"),
             "D-20 + D-27: web_extract must appear in get_definitions() after register_web_extract_tool. Got: {:?}",
             names
+        );
+    }
+
+    // ── Phase 50.4 (D-14, wave 2): vision/summarization handles follow the reload ──
+
+    fn build_provider_resolver(base_url: &str, model: &str) -> ProviderResolver {
+        let mut config = Config::default();
+        let provider_cfg = ironhermes_core::config::ProviderConfig {
+            base_url: Some(base_url.to_string()),
+            default_model: Some(model.to_string()),
+            ..ironhermes_core::config::ProviderConfig::default()
+        };
+        config
+            .providers
+            .insert("provider_a".to_string(), provider_cfg);
+        config.model.provider = "provider_a".to_string();
+        config.model.default = model.to_string();
+        ProviderResolver::build(&config).expect("ProviderResolver::build must succeed")
+    }
+
+    /// Test 1: a vision handle sharing the runtime's resolver handle reports
+    /// the resolver it was constructed with, then reports the NEW resolver
+    /// after the handle is swapped — the same shared-handle contract
+    /// `AgentRuntime::reload_config_and_resolver` writes into. A handle
+    /// holding a plain `Arc<ProviderResolver>` would report the same value
+    /// both times.
+    #[test]
+    fn vision_handle_resolves_through_the_shared_handle_after_a_swap() {
+        let resolver_a = build_provider_resolver("https://vision-a.example.test", "model-a");
+        let shared: SharedResolver = Arc::new(std::sync::RwLock::new(Arc::new(resolver_a)));
+        let handle = AnyClientVisionHandle::new(shared.clone());
+
+        assert_eq!(handle.resolver().main_provider(), "provider_a");
+        assert_eq!(
+            handle.resolver().resolve_for_main().base_url,
+            "https://vision-a.example.test"
+        );
+
+        let resolver_b = build_provider_resolver("https://vision-b.example.test", "model-b");
+        match shared.write() {
+            Ok(mut guard) => *guard = Arc::new(resolver_b),
+            Err(poisoned) => *poisoned.into_inner() = Arc::new(resolver_b),
+        }
+
+        assert_eq!(
+            handle.resolver().resolve_for_main().base_url,
+            "https://vision-b.example.test",
+            "after the shared handle is written, the vision handle must observe the NEW resolver"
+        );
+    }
+
+    /// Test 2: the identical assertion for `AnyClientSummarizationHandle`,
+    /// written separately because the two structs are independent copies of
+    /// the same shape — fixing one does not fix the other.
+    #[test]
+    fn summarization_handle_resolves_through_the_shared_handle_after_a_swap() {
+        let resolver_a = build_provider_resolver("https://summ-a.example.test", "model-a");
+        let shared: SharedResolver = Arc::new(std::sync::RwLock::new(Arc::new(resolver_a)));
+        let handle = AnyClientSummarizationHandle::new(shared.clone());
+
+        assert_eq!(handle.resolver().main_provider(), "provider_a");
+        assert_eq!(
+            handle.resolver().resolve_for_main().base_url,
+            "https://summ-a.example.test"
+        );
+
+        let resolver_b = build_provider_resolver("https://summ-b.example.test", "model-b");
+        match shared.write() {
+            Ok(mut guard) => *guard = Arc::new(resolver_b),
+            Err(poisoned) => *poisoned.into_inner() = Arc::new(resolver_b),
+        }
+
+        assert_eq!(
+            handle.resolver().resolve_for_main().base_url,
+            "https://summ-b.example.test",
+            "after the shared handle is written, the summarization handle must observe the \
+             NEW resolver"
         );
     }
 }

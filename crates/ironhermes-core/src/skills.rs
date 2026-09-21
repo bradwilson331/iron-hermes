@@ -651,6 +651,17 @@ pub fn compose_blueprint_skill_md(name: &str, body: &str, bp: &BlueprintMetadata
 
 pub struct SkillRegistry {
     skills: Vec<SkillRecord>,
+    /// Catalog-render tiering (skill-catalog-bloats-prompt fix, 2026-09-18):
+    /// canonicalized "priority" search-path roots, i.e. the FIRST
+    /// `priority_root_count` entries of the `search_paths` this registry was
+    /// built from. `filtered_catalog_text` renders a full `- name: description`
+    /// line for skills whose path lives under one of these roots, and collapses
+    /// every other skill into a single counted pointer line.
+    ///
+    /// `None` means "no tiering was requested for this registry" — every skill
+    /// renders in full, which is the behavior every pre-tiering caller (`load`,
+    /// `load_with_paths`, direct test construction) still gets.
+    priority_roots: Option<Vec<PathBuf>>,
 }
 
 // =============================================================================
@@ -780,6 +791,16 @@ fn resolve_source(
         SkillSource::Community
     }
 }
+
+/// Default number of leading [`build_skill_search_paths`] roots treated as
+/// "priority" for catalog rendering (skill-catalog-bloats-prompt fix,
+/// 2026-09-18) — see [`SkillsConfig::catalog_priority_root_count`].
+///
+/// Covers exactly the first 2 hardcoded defaults: `cwd/.ironhermes/skills`
+/// and `<hermes_home>/skills` (the operator's curated set). The 3rd hardcoded
+/// default (`~/.agents/skills`, a shared cross-tool directory) and anything in
+/// `extra_paths` land beyond this count and are tiered to a counted pointer.
+pub const DEFAULT_CATALOG_PRIORITY_ROOT_COUNT: usize = 2;
 
 /// Build the ordered list of skill search paths for a given cwd and SkillsConfig.
 ///
@@ -1042,11 +1063,18 @@ impl SkillRegistry {
     pub fn load_with_config(cwd: &Path, config: &SkillsConfig) -> Self {
         // SKILL-08 kill switch (D-20).
         if !config.enabled {
-            return Self { skills: Vec::new() };
+            return Self {
+                skills: Vec::new(),
+                priority_roots: None,
+            };
         }
 
         let search_paths = build_skill_search_paths(cwd, config);
-        let mut registry = Self::load_with_paths_defcon(&search_paths, config.defcon_level);
+        let mut registry = Self::load_with_paths_defcon_tiered(
+            &search_paths,
+            config.defcon_level,
+            Some(config.catalog_priority_root_count),
+        );
 
         // D-08: recompute trust labels on every load from config.hub.trusted_repos.
         // The primary skills root is get_hermes_home()/skills (where Hub installs
@@ -1116,8 +1144,26 @@ impl SkillRegistry {
     }
 
     /// Load from explicit search paths (useful for testing).
+    ///
+    /// No catalog-render tiering is established — every skill renders in full
+    /// from [`filtered_catalog_text`] regardless of which search path it came
+    /// from. Use [`load_with_paths_tiered`] to exercise tiering directly.
     pub fn load_with_paths(search_paths: &[PathBuf]) -> Self {
         Self::load_with_paths_defcon(search_paths, DefconLevel::default())
+    }
+
+    /// Like [`load_with_paths`] but also establishes catalog-render tiering
+    /// (skill-catalog-bloats-prompt fix, 2026-09-18): skills found under the
+    /// FIRST `priority_root_count` entries of `search_paths` render in full
+    /// from [`filtered_catalog_text`]; skills from any later root collapse
+    /// into one counted pointer line. Exposed as a direct, `SkillsConfig`-free
+    /// entry point for tests exercising the tiering behavior in isolation.
+    pub fn load_with_paths_tiered(search_paths: &[PathBuf], priority_root_count: usize) -> Self {
+        Self::load_with_paths_defcon_tiered(
+            search_paths,
+            DefconLevel::default(),
+            Some(priority_root_count),
+        )
     }
 
     /// Like [`load_with_paths`] but with an explicit DEFCON level for CR-01
@@ -1126,6 +1172,19 @@ impl SkillRegistry {
     pub(crate) fn load_with_paths_defcon(
         search_paths: &[PathBuf],
         defcon_level: DefconLevel,
+    ) -> Self {
+        Self::load_with_paths_defcon_tiered(search_paths, defcon_level, None)
+    }
+
+    /// Like [`load_with_paths_defcon`] but also accepts an optional catalog
+    /// tiering priority-root count (skill-catalog-bloats-prompt fix,
+    /// 2026-09-18). `None` preserves pre-tiering behavior (every skill renders
+    /// in full); `Some(n)` marks the first `n` entries of `search_paths` as
+    /// priority roots (see the `priority_roots` field doc on the struct).
+    pub(crate) fn load_with_paths_defcon_tiered(
+        search_paths: &[PathBuf],
+        defcon_level: DefconLevel,
+        priority_root_count: Option<usize>,
     ) -> Self {
         let mut seen_names: HashSet<String> = HashSet::new();
         let mut skills: Vec<SkillRecord> = Vec::new();
@@ -1218,7 +1277,41 @@ impl SkillRegistry {
             }
         }
 
-        Self { skills }
+        // Establish catalog-render tiering (skill-catalog-bloats-prompt fix,
+        // 2026-09-18): canonicalize the first `priority_root_count` search
+        // paths once here so `filtered_catalog_text` doesn't need env/config
+        // access on every render. Canonicalization is expected to succeed for
+        // every entry that actually yielded a scanned skill (its root must
+        // exist, or nothing under it could have been read above); the
+        // fallback only matters for a priority root that exists but happens
+        // to be unreadable at this exact instant.
+        let priority_roots = priority_root_count.map(|count| {
+            search_paths
+                .iter()
+                .take(count)
+                .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+                .collect::<Vec<_>>()
+        });
+
+        Self {
+            skills,
+            priority_roots,
+        }
+    }
+
+    /// True if `skill_path` (a SKILL.md path) lives under one of this
+    /// registry's priority roots. When tiering was not established for this
+    /// registry (`priority_roots.is_none()`), every skill counts as priority
+    /// — this preserves full-catalog behavior for `load()`/`load_with_paths()`
+    /// and any other pre-tiering construction path.
+    fn is_priority_skill(&self, skill_path: &Path) -> bool {
+        let Some(roots) = &self.priority_roots else {
+            return true;
+        };
+        let canon_skill = skill_path
+            .canonicalize()
+            .unwrap_or_else(|_| skill_path.to_path_buf());
+        roots.iter().any(|root| canon_skill.starts_with(root))
     }
 
     /// Return a compact catalog string: one `- name: description` line per skill.
@@ -1243,21 +1336,44 @@ impl SkillRegistry {
     /// Skills without hermes metadata are always shown.
     ///
     /// D-06: This function is pure and in-memory — it must not perform filesystem or
-    /// environment access. Activation-time checks (credentials, env vars) live elsewhere.
+    /// environment access beyond an in-process path canonicalization used for the
+    /// root-tiering check below (no network, no env reads).
+    ///
+    /// Skill-catalog-bloats-prompt fix (2026-09-18): skills from a registry's
+    /// "priority" roots (see the `priority_roots` field doc on the struct) render as full
+    /// `- name: description` lines, same as before. Skills from any other root
+    /// collapse into a SINGLE trailing line stating the exact count of elided
+    /// skills and pointing at the `skills` tool's `list`/`activate` actions —
+    /// they remain fully reachable, just not pre-paid into every prompt.
     pub fn filtered_catalog_text(
         &self,
         active_toolsets: &std::collections::HashSet<String>,
         active_tools: &std::collections::HashSet<String>,
         connected_mcp_servers: &std::collections::HashSet<String>,
     ) -> String {
-        self.skills
-            .iter()
-            .filter(|s| {
-                skill_passes_filter(s, active_toolsets, active_tools, connected_mcp_servers)
-            })
-            .map(|s| format!("- {}: {}", s.name, s.description))
-            .collect::<Vec<_>>()
-            .join("\n")
+        let mut lines: Vec<String> = Vec::new();
+        let mut elided_count: usize = 0;
+
+        for s in self.skills.iter().filter(|s| {
+            skill_passes_filter(s, active_toolsets, active_tools, connected_mcp_servers)
+        }) {
+            if self.is_priority_skill(&s.path) {
+                lines.push(format!("- {}: {}", s.name, s.description));
+            } else {
+                elided_count += 1;
+            }
+        }
+
+        if elided_count > 0 {
+            lines.push(format!(
+                "- {elided_count} further skills are available from additional configured \
+                 skill directories (not listed above to keep this catalog small) — call the \
+                 skills tool with action \"list\" to see all of them, then action \"activate\" \
+                 with the skill name to use one."
+            ));
+        }
+
+        lines.join("\n")
     }
 
     /// Case-insensitive lookup by skill name.
@@ -2989,6 +3105,142 @@ Body content.
             std::env::var_os(sentinel).is_none(),
             "sentinel env var must not exist after filter call — filter must not touch env"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Debug: skill-catalog-bloats-prompt (2026-09-18) — TIER BY ROOT regression test
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_catalog_render_tiers_secondary_root_to_counted_pointer() {
+        // Root cause (confirmed by measurement): `filtered_catalog_text` enumerated
+        // EVERY skill from EVERY search root with no cap, so a large secondary root
+        // (~/.agents/skills, 1,039 skills in production) alone contributed 418,746
+        // of 440,628 instructions bytes to every turn's system prompt.
+        //
+        // Fix under test: skills whose path lives under a "priority" root render in
+        // full; skills from any later root collapse into ONE counted pointer line.
+        // This test would FAIL if that tiering logic were removed/reverted — it
+        // asserts the secondary root's 50 skill names/descriptions are individually
+        // ABSENT from the rendered text (not merely that the catalog is non-empty).
+        let dir = tempdir().unwrap();
+
+        // Curated (priority) root: 1 skill, must render in full.
+        let curated_root = dir.path().join("curated");
+        fs::create_dir_all(&curated_root).unwrap();
+        let curated_skill_dir = curated_root.join("curated-skill");
+        fs::create_dir_all(&curated_skill_dir).unwrap();
+        fs::write(
+            curated_skill_dir.join("SKILL.md"),
+            make_skill_md("curated-skill", "Curated skill kept in full", ""),
+        )
+        .unwrap();
+
+        // Secondary root: 50 skills, must NOT be individually enumerated.
+        let secondary_root = dir.path().join("secondary");
+        fs::create_dir_all(&secondary_root).unwrap();
+        const SECONDARY_COUNT: usize = 50;
+        for i in 0..SECONDARY_COUNT {
+            let name = format!("secondary-skill-{i}");
+            let skill_dir = secondary_root.join(&name);
+            fs::create_dir_all(&skill_dir).unwrap();
+            fs::write(
+                skill_dir.join("SKILL.md"),
+                make_skill_md(
+                    &name,
+                    &format!(
+                        "Secondary skill number {i} — a long description, the kind that \
+                         inflates the catalog when repeated across hundreds of entries the \
+                         way the real ~/.agents/skills root does in production."
+                    ),
+                    "",
+                ),
+            )
+            .unwrap();
+        }
+
+        // priority_root_count = 1: only `curated_root` (the FIRST search path) is
+        // priority; `secondary_root` (the second) is tiered to a counted pointer.
+        let registry = SkillRegistry::load_with_paths_tiered(
+            &[curated_root.clone(), secondary_root.clone()],
+            1,
+        );
+        assert_eq!(
+            registry.list().len(),
+            1 + SECONDARY_COUNT,
+            "sanity: all skills across both roots must actually be loaded"
+        );
+
+        let catalog =
+            registry.filtered_catalog_text(&HashSet::new(), &HashSet::new(), &HashSet::new());
+
+        assert!(
+            catalog.contains("curated-skill"),
+            "curated (priority) root's skill must render in full: {catalog}"
+        );
+
+        for i in 0..SECONDARY_COUNT {
+            let name = format!("secondary-skill-{i}");
+            assert!(
+                !catalog.contains(&name),
+                "secondary-root skill '{name}' must NOT be individually enumerated: {catalog}"
+            );
+        }
+
+        assert!(
+            catalog.contains(&SECONDARY_COUNT.to_string()),
+            "catalog must explicitly state the COUNT of elided secondary-root skills: {catalog}"
+        );
+
+        // The real regression guard: without tiering, 50 verbose descriptions
+        // would dwarf this bound (each description alone is ~160 bytes).
+        assert!(
+            catalog.len() < 2000,
+            "catalog must stay bounded when a large secondary root is tiered out, \
+             got {} bytes: {catalog}",
+            catalog.len()
+        );
+
+        // Elided skills must remain fully reachable by name — tiering changes
+        // what's pre-rendered into the prompt, not what's activatable.
+        assert!(
+            registry.find("secondary-skill-0").is_some(),
+            "elided skills must remain individually reachable by name via find()"
+        );
+    }
+
+    #[test]
+    fn test_catalog_render_no_tiering_when_priority_count_covers_all_roots() {
+        // Pre-existing single/all-covered-root callers (load(), load_with_paths(),
+        // and any load_with_paths_tiered() call whose count >= number of roots)
+        // must render every skill in full — no silent behavior change for callers
+        // that never asked for tiering.
+        let dir = tempdir().unwrap();
+        let root_a = dir.path().join("a");
+        let root_b = dir.path().join("b");
+        fs::create_dir_all(&root_a).unwrap();
+        fs::create_dir_all(&root_b).unwrap();
+        for (root, name) in [(&root_a, "alpha"), (&root_b, "bravo")] {
+            let skill_dir = root.join(name);
+            fs::create_dir_all(&skill_dir).unwrap();
+            fs::write(
+                skill_dir.join("SKILL.md"),
+                make_skill_md(name, &format!("{name} description"), ""),
+            )
+            .unwrap();
+        }
+
+        // Untiered constructor: both roots must render in full.
+        let untiered = SkillRegistry::load_with_paths(&[root_a.clone(), root_b.clone()]);
+        let untiered_catalog =
+            untiered.filtered_catalog_text(&HashSet::new(), &HashSet::new(), &HashSet::new());
+        assert!(untiered_catalog.contains("alpha") && untiered_catalog.contains("bravo"));
+
+        // priority_root_count covering both roots: still both render in full.
+        let covered = SkillRegistry::load_with_paths_tiered(&[root_a, root_b], 2);
+        let covered_catalog =
+            covered.filtered_catalog_text(&HashSet::new(), &HashSet::new(), &HashSet::new());
+        assert!(covered_catalog.contains("alpha") && covered_catalog.contains("bravo"));
     }
 
     // -------------------------------------------------------------------------

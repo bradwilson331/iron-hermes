@@ -137,6 +137,41 @@ pub fn build_registry() -> Vec<CommandDef> {
         CommandDef::new("image", "Show a clickable chip for an image file", Session)
             .args_hint("<path>")
             .platform(CliOnly),
+        // Phase 49.7 Plan 01 (D-01/D-06/D-07): `/loop` creates a recurring
+        // prompt backed by the cron engine. Universal (CLI + gateway) per
+        // D-07 — the cron store is the durable contract, so a loop created
+        // from CLI chat is queued, not lost. `list`/`stop` are reserved
+        // first tokens (D-06), both wired in Plan 04.
+        // args_hint names all three accepted cadence forms literally so a
+        // user who types outside the grammar can read what IS accepted
+        // without opening the source.
+        CommandDef::new("loop", "Create a recurring prompt (cron-backed)", Session)
+            .args_hint("<every 30m | 30m | cron expr> <prompt> [--budget N] [--tools a,b]")
+            .platform(Universal),
+        // Phase 49.7 Plan 04 (D-06/D-09/D-10): sibling `CommandDef`s for
+        // `/loop`'s two management verbs, mirroring the `/agents interrupt`
+        // / `/agents prune` precedent above so `/help` lists each with its
+        // own one-line description. `loop stop` is deliberately its own
+        // verb (D-09) and does not overload the existing `/stop` entry.
+        CommandDef::new("loop list", "List loops created from this chat", Session)
+            .platform(Universal),
+        CommandDef::new("loop stop", "Stop a loop created from this chat", Session)
+            .args_hint("<id>")
+            .platform(Universal),
+        // Phase 49.7 Plan 05 (D-02/D-06/D-08): `/goal` runs a budget-bounded,
+        // judge-evaluated multi-turn loop inside the live session (its own
+        // loop in ironhermes-agent, not the kanban card-level loop — D-02).
+        // Universal per D-08, matching how `/stop` and `/retry` are already
+        // scoped; resolves on Web (PlatformFilter::Universal above), but
+        // iron_hermes_ui returns an honest not-configured message there
+        // (accepted gap, this plan).
+        CommandDef::new(
+            "goal",
+            "Run a budget-bounded, judge-evaluated multi-turn loop",
+            Session,
+        )
+        .args_hint("<text> [--budget N]")
+        .platform(Universal),
         // -----------------------------------------------------------------------
         // CONFIGURATION
         // -----------------------------------------------------------------------

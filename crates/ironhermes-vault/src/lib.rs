@@ -28,12 +28,47 @@
 pub mod config;
 pub mod env_var_store;
 pub mod error;
+// Phase 51 Plan 07 (D-11): the worker-side client. Deliberately UNCONDITIONAL — see
+// profile_client.rs's own module doc — it has no dependency on the `rusty_vault`
+// crate at all, only tokio/serde_json/secrecy.
+pub mod profile_client;
+#[cfg(feature = "rusty-vault")]
+pub mod profile_endpoint;
+#[cfg(feature = "rusty-vault")]
+pub mod profile_guard;
+pub mod profile_paths;
+#[cfg(feature = "rusty-vault")]
+pub mod profile_policy;
+#[cfg(feature = "rusty-vault")]
+pub mod profile_store;
+#[cfg(feature = "rusty-vault")]
+pub mod profile_token;
 #[cfg(feature = "rusty-vault")]
 pub mod rusty_vault_store;
 
 pub use config::{RustyVaultConfig, VaultConfig};
 pub use env_var_store::EnvVarStore;
 pub use error::VaultError;
+pub use profile_client::{ProfileClientError, read_profile_credential, read_profile_credentials};
+pub use profile_paths::{profile_policy_name, profile_secret_path, profile_secret_prefix};
+#[cfg(feature = "rusty-vault")]
+pub use profile_endpoint::{
+    ProfileCredentialEndpointHandle, TracingProfileGuardAudit, host_profile_credential_endpoint,
+    socket_path as profile_credential_socket_path, spawn_profile_credential_endpoint,
+};
+#[cfg(feature = "rusty-vault")]
+pub use profile_guard::{
+    ProfileGuard, ProfileGuardAudit, register_profile_guard, unregister_profile_guard,
+};
+#[cfg(feature = "rusty-vault")]
+pub use profile_policy::{ensure_profile_policy, render_profile_policy};
+#[cfg(feature = "rusty-vault")]
+pub use profile_store::ProfileSecretStore;
+#[cfg(feature = "rusty-vault")]
+pub use profile_token::{
+    MintedProfileToken, ProfileTokenAudit, mint_profile_token, profile_token_ttl_for_bootstrap,
+    read_profile_secret_with_minted_token,
+};
 #[cfg(feature = "rusty-vault")]
 pub use rusty_vault_store::RustyVaultStore;
 
@@ -83,6 +118,54 @@ pub fn open_store(config: &VaultConfig) -> anyhow::Result<Box<dyn SecretStore>> 
         ))
         .into()),
     }
+}
+
+/// Open a fresh [`RustyVaultStore`] from `rv_config` and mint a profile-scoped token
+/// against it (Phase 51 Plan 07, D-07). This is for a caller that holds **no** hosted
+/// [`profile_endpoint::ProfileCredentialEndpointHandle`] — it opens its OWN, independent
+/// `RustyVaultStore` for the mint, the same "open a store per call" pattern
+/// `ironhermes-core::dispatch_gate`'s vault branch already uses. `core_handle`/
+/// `root_token_secret` are `pub(crate)` on [`RustyVaultStore`] — reachable from here
+/// because this function lives INSIDE the crate.
+///
+/// A caller that DOES hold a hosted handle must use [`mint_profile_token_for_host`]
+/// instead (Phase 51 Plan 11, CR-06 fix). The earlier version of this doc comment claimed
+/// such a caller "cannot reach that handle's own `Core`+root-token — deliberately not
+/// exposed past this crate"; that was false in-crate (the fields were always plain-private,
+/// not actually unreachable to code in this crate) and is the exact premise that produced
+/// the defect. At the pinned `rusty_vault` rev, `TokenStore::new()` performs an
+/// unsynchronized check-then-write on a process-scoped token salt, so a token minted
+/// against a SECOND, independent `Core` disagrees with a DIFFERENT `Core`'s salt and fails
+/// to validate there. Minting through the hosting endpoint's own `Core` instead makes that
+/// defect unreachable by construction — one `Core`, one `TokenStore`, one salt.
+#[cfg(feature = "rusty-vault")]
+pub async fn mint_profile_token_via_config(
+    rv_config: &RustyVaultConfig,
+    slug: &str,
+    ttl: std::time::Duration,
+    sink: &dyn ProfileTokenAudit,
+) -> Result<MintedProfileToken, VaultError> {
+    let store = RustyVaultStore::open(rv_config)?;
+    let core = store.core_handle();
+    let root_token = store.root_token_secret();
+    mint_profile_token(&core, &root_token, slug, ttl, sink).await
+}
+
+/// Mint a profile-scoped token through the HOSTED endpoint's own `Core` + root token
+/// (Phase 51 Plan 11, CR-06 fix — closes T12). Prefer this over
+/// [`mint_profile_token_via_config`] whenever the caller already holds a hosted
+/// [`profile_endpoint::ProfileCredentialEndpointHandle`]: minting and validating through
+/// the SAME `Core` means the same `TokenStore`, the same token salt, by construction —
+/// the upstream `rusty_vault` defect where two independent `Core`s disagree on that salt
+/// (see [`mint_profile_token_via_config`]'s doc) cannot arise on this path.
+#[cfg(feature = "rusty-vault")]
+pub async fn mint_profile_token_for_host(
+    host: &ProfileCredentialEndpointHandle,
+    slug: &str,
+    ttl: std::time::Duration,
+    sink: &dyn ProfileTokenAudit,
+) -> Result<MintedProfileToken, VaultError> {
+    mint_profile_token(host.core(), host.root_token(), slug, ttl, sink).await
 }
 
 #[cfg(test)]

@@ -175,6 +175,44 @@ pub trait MemoryProvider: Send + Sync + 'static {
     fn remove(&mut self, target: MemoryTarget, old_text: &str) -> MemoryResult;
     fn format_for_system_prompt(&self, target: MemoryTarget) -> Option<String>;
     fn to_memory_entries(&self) -> MemoryEntries;
+
+    // ---- Index-addressed sync operations (Plan 50.4-02, D-03/D-04) ----
+    // Defaulted (unlike add/replace/remove above) because other implementors
+    // of this trait already exist and must keep compiling; the default is an
+    // explicit refusal rather than a silent `Ok` so an unsupported provider
+    // cannot make a dropped write look successful (T-50.4-09).
+    fn replace_at(
+        &mut self,
+        _target: MemoryTarget,
+        _idx: usize,
+        _expected_text: &str,
+        _new_content: &str,
+    ) -> MemoryResult {
+        Err(serde_json::json!({
+            "error": "unsupported",
+            "reason": format!(
+                "{} does not support index-addressed replace",
+                self.name()
+            ),
+        })
+        .to_string())
+    }
+
+    fn remove_at(
+        &mut self,
+        _target: MemoryTarget,
+        _idx: usize,
+        _expected_text: &str,
+    ) -> MemoryResult {
+        Err(serde_json::json!({
+            "error": "unsupported",
+            "reason": format!(
+                "{} does not support index-addressed remove",
+                self.name()
+            ),
+        })
+        .to_string())
+    }
 }
 
 fn parse_target(args: &Value) -> anyhow::Result<MemoryTarget> {
@@ -284,6 +322,18 @@ impl MemoryProvider for MemoryStore {
     }
     fn remove(&mut self, target: MemoryTarget, old_text: &str) -> MemoryResult {
         MemoryStore::remove(self, target, old_text)
+    }
+    fn replace_at(
+        &mut self,
+        target: MemoryTarget,
+        idx: usize,
+        expected_text: &str,
+        new_content: &str,
+    ) -> MemoryResult {
+        MemoryStore::replace_at(self, target, idx, expected_text, new_content)
+    }
+    fn remove_at(&mut self, target: MemoryTarget, idx: usize, expected_text: &str) -> MemoryResult {
+        MemoryStore::remove_at(self, target, idx, expected_text)
     }
     fn format_for_system_prompt(&self, target: MemoryTarget) -> Option<String> {
         MemoryStore::format_for_system_prompt(self, target)
@@ -431,5 +481,113 @@ mod tests {
             )
             .expect("add should dispatch via default");
         assert_eq!(ok, "{}");
+    }
+
+    // -------------------------------------------------------------------------
+    // Plan 50.4-02: replace_at / remove_at trait surface (D-03, D-04, T-50.4-09)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_provider_replace_at_default_is_unsupported() {
+        // Minimal provider that does NOT override replace_at/remove_at —
+        // exercises the trait's default impls. T-50.4-09: an unsupported
+        // provider must refuse explicitly, never silently succeed or panic.
+        struct MinimalProviderNoIndexOps;
+
+        #[async_trait]
+        impl MemoryProvider for MinimalProviderNoIndexOps {
+            fn name(&self) -> &'static str {
+                "minimal-no-index-ops"
+            }
+            async fn initialize(
+                &mut self,
+                _session_id: &str,
+                _hermes_home: &Path,
+                _provider_config: &Value,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn prefetch(&self, _session_id: &str) -> anyhow::Result<MemoryEntries> {
+                Ok(MemoryEntries::default())
+            }
+            async fn sync_turn(&self, _s: &str, _e: &MemoryEntries) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn on_session_end(&self, _s: &str, _e: &MemoryEntries) -> anyhow::Result<()> {
+                Ok(())
+            }
+            async fn shutdown(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn load_from_disk(&mut self) -> anyhow::Result<()> {
+                Ok(())
+            }
+            fn add(&mut self, _t: MemoryTarget, _c: &str) -> MemoryResult {
+                Ok("{}".to_string())
+            }
+            fn replace(&mut self, _t: MemoryTarget, _o: &str, _n: &str) -> MemoryResult {
+                Ok("{}".to_string())
+            }
+            fn remove(&mut self, _t: MemoryTarget, _o: &str) -> MemoryResult {
+                Ok("{}".to_string())
+            }
+            fn format_for_system_prompt(&self, _t: MemoryTarget) -> Option<String> {
+                None
+            }
+            fn to_memory_entries(&self) -> MemoryEntries {
+                MemoryEntries::default()
+            }
+        }
+
+        let mut p = MinimalProviderNoIndexOps;
+
+        let replace_err = p
+            .replace_at(MemoryTarget::Memory, 0, "old", "new")
+            .expect_err("default replace_at must refuse, not silently succeed");
+        assert!(
+            replace_err.contains("unsupported"),
+            "got: {replace_err}"
+        );
+
+        let remove_err = p
+            .remove_at(MemoryTarget::Memory, 0, "old")
+            .expect_err("default remove_at must refuse, not silently succeed");
+        assert!(remove_err.contains("unsupported"), "got: {remove_err}");
+    }
+
+    #[test]
+    fn test_memory_store_provider_replace_at_delegates() {
+        // Seed two identically-shaped stores so the inherent call and the
+        // dyn MemoryProvider call operate on the same starting entry, then
+        // compare the results for equality.
+        let seed = |dir: &std::path::Path| {
+            let mut s = MemoryStore::new(dir.to_path_buf());
+            s.load_from_disk().unwrap();
+            s.add(MemoryTarget::Memory, "original entry").unwrap();
+            s
+        };
+
+        let tmp_a = tempfile::TempDir::new().unwrap();
+        let mut store_a = seed(&tmp_a.path().join("memories"));
+        let direct = store_a
+            .replace_at(MemoryTarget::Memory, 0, "original entry", "updated body")
+            .expect("direct inherent call should succeed");
+
+        let tmp_b = tempfile::TempDir::new().unwrap();
+        let mut store_b = seed(&tmp_b.path().join("memories"));
+        let provider: &mut dyn MemoryProvider = &mut store_b;
+        let via_trait = provider
+            .replace_at(MemoryTarget::Memory, 0, "original entry", "updated body")
+            .expect("trait-object call should reach the MemoryStore override, not the default");
+
+        assert_eq!(
+            direct, via_trait,
+            "dyn MemoryProvider::replace_at must produce the same result as the inherent method"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&via_trait).unwrap();
+        assert_eq!(
+            parsed["status"], "replaced_at",
+            "must be a success envelope, not the trait default's `unsupported` refusal"
+        );
     }
 }

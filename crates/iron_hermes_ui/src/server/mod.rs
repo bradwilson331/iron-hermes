@@ -141,6 +141,18 @@ pub mod login_page;
 // macro handles the client/server split, and internal helper fns are gated
 // with `#[cfg(feature = "server")]`.
 pub mod profile_api;
+// Phase 51 Plan 17 (CR-05 / T-51-67, second half): a SEPARATE test-only
+// module rather than a `#[cfg(test)]` mod inside `profile_api.rs` itself —
+// `profile_api_never_mentions_vault_storage`
+// (`tests/profile_key_masking.rs` / `tests/profile_scaffold.rs`) is a
+// literal-source shape lock asserting `profile_api.rs` never contains the
+// strings "ironhermes_vault"/"RustyVault" (D-06: no vault storage call site
+// in that file), and this test needs a real `RustyVaultStore` fixture to
+// exercise `create_profile_impl`'s vault-aware gate re-check. `pub(crate)`
+// visibility makes `create_profile_impl` reachable from here without
+// widening it.
+#[cfg(all(test, feature = "server", feature = "rusty-vault"))]
+mod profile_api_vault_gate_thread_safety_tests;
 // Phase 49.4 Plan 08 (D-14): persisted profile activation-with-scope —
 // `activate_profile`/`get_active_profile`/`resolve_active_profile_for`.
 // Unconditional like `profile_api` — the `#[server]` macro handles the
@@ -243,6 +255,23 @@ pub mod group_settings_api;
 // from `create_room_impl`. No UI change lands in this plan — plan 50.2-17
 // owns the header's `Edit members` control.
 pub mod group_members_api;
+// Phase 52 (D-01/D-03a/D-16): the team-room drive — `run_team_drive`, the
+// leader-decompose / worker-dispatch / leader-synthesis cycle for a room
+// whose `pattern` is `Some`. A single-concern sibling of
+// `group_members_api`, chosen over growing the ~2,800-line
+// `group_chat_api.rs` further. Defines NO second dispatch path and NO
+// second mention grammar: it is a NEW CALLER of
+// `group_chat_api::dispatch_member_turn`, never a re-derivation of it.
+// Deterministic host-orchestrated middleware, NOT an agent-callable tool
+// (`mention_handoff_api`'s own framing, echoed here) — the model only
+// produces text, the host parses and decides. Unlike `group_members_api`,
+// this module has no `#[server]` fn and no wasm-reachable surface — its
+// sole caller (`group_chat_api::run_group_rounds_with_settings`) is itself
+// `#[cfg(feature = "server")]`-gated — so it is gated here too, matching
+// `audio_cache`'s precedent (`#![cfg(feature = "server")]` internally,
+// gated at the declaration too), not `group_members_api`'s.
+#[cfg(feature = "server")]
+pub mod group_team_api;
 // Phase 50.2 Plan 07 (D-20/D-21): the @mention handoff middleware —
 // `dispatch_mention_handoff`. Unconditional like `group_chat_api` — the
 // `#[server]` macro handles the client/server split, and internal helper
@@ -346,3 +375,16 @@ pub mod gateway_platform_status_api;
 // classifier (`classify_import_source`/`normalize_github_identifier`) stays
 // ungated so it compiles on both targets and the client can reuse it.
 pub mod skills_import_api;
+// Phase 51 Plan 14 (T13): shared test-only fixture for a profile the
+// dispatch gate will actually `Allow` — consumed by `cli_handoff`,
+// `group_chat_api`, and `mention_handoff_api`'s bin unit tests. See the
+// module's own doc comment for why a bare `workspace/` directory stopped
+// being a valid fixture after `799fd62b8`.
+#[cfg(all(test, feature = "server"))]
+pub(crate) mod profile_fixture;
+// Phase 52 Plan 01 (Wave 0, D-03b): shared test-only stub script whose
+// reply CHANGES between calls — no `write_stub_script` copy in this crate
+// can express that. Consumed by Plan 04's `group_team_api` test module for
+// the leader-retries-exactly-once test. See the module's own doc comment.
+#[cfg(all(test, feature = "server"))]
+pub(crate) mod stub_script_fixture;

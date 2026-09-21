@@ -16,6 +16,15 @@ pub const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-5";
 // failed tool calls / delegations (see runaway-delegation guard in AgentLoop).
 pub const DEFAULT_MAX_ITERATIONS: usize = 50;
 pub const DEFAULT_CONTEXT_LENGTH: usize = 128_000;
+/// Phase 50.5 (T-50.5-01): sanity ceiling for any context-length candidate
+/// reaching `ResolvedEndpoint::context_length_with_source` from a source
+/// outside the operator's direct control — the model-metadata cache today,
+/// a future provider probe tomorrow. A candidate of `0` or above this
+/// ceiling is rejected at its tier and resolution falls through to the next
+/// tier rather than reaching the compaction budget (guards against a
+/// zero-denominator compaction ratio and an implausibly large window from a
+/// hostile or misbehaving provider response).
+pub const MAX_PLAUSIBLE_CONTEXT_LENGTH: usize = 10_000_000;
 pub const DEFAULT_TOOL_DELAY_SECS: f64 = 1.0;
 
 pub const VALID_REASONING_EFFORTS: &[&str] = &["xhigh", "high", "medium", "low", "minimal"];
@@ -87,6 +96,50 @@ pub fn get_hermes_home() -> PathBuf {
         _ => dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".ironhermes"),
+    }
+}
+
+/// Env var (Phase 51 UAT F-04 fix, commit 1): the pre-`--profile`-pivot
+/// `IRONHERMES_HOME`, stashed by `resolve_and_set_profile`
+/// (`ironhermes-cli/src/main.rs`) immediately BEFORE it overwrites
+/// `IRONHERMES_HOME` for a profile pivot. Read by [`get_root_hermes_home`].
+///
+/// # Why this exists
+///
+/// There is only ever ONE vault, and it lives at the operator's ROOT home —
+/// profiles have PATHS inside it (`secret/profiles/<slug>/…`), never vaults
+/// of their own. Before this fix, `resolve_vault_config`'s empty
+/// `rusty_vault.data_dir` sentinel resolved against whatever
+/// `IRONHERMES_HOME` happened to be at call time — which, under a
+/// profile-pivoted kanban worker, is the PROFILE's own home, producing an
+/// address (`~/.ironhermes/profiles/<slug>/vault`) this system never creates.
+/// A worker with `vault.enabled: true` and any keyless provider would open
+/// that nonexistent store and die with `VaultError::NotInitialized`, AFTER
+/// it had already obtained its own credential over the socket (Phase 51 UAT
+/// finding F-04).
+///
+/// `resolve_and_set_profile` sets this ONLY when it is not already present —
+/// a worker that itself spawns a sub-worker (recursive dispatch) forwards an
+/// already-stashed root value via `worker_spawn.rs`'s `SAFE_SYSTEM_VARS`
+/// allowlist rather than re-stashing its own already-pivoted
+/// `IRONHERMES_HOME`, which would silently reintroduce F-04 one level down.
+pub const IRONHERMES_ROOT_HOME_ENV: &str = "IRONHERMES_ROOT_HOME";
+
+/// Get the ROOT IronHermes home directory — the home in effect BEFORE any
+/// `--profile` pivot. Reads [`IRONHERMES_ROOT_HOME_ENV`] first; falls back to
+/// [`get_hermes_home`] when unset, which covers every unpivoted process
+/// (gateway, bare CLI, tests, cron-runner, the embedded UI server, and any
+/// invocation that never went through `--profile`) — for those, root and
+/// current home are identical, so this is byte-for-byte [`get_hermes_home`].
+///
+/// [`crate::resolve_vault_config`] routes through this — never
+/// [`get_hermes_home`] directly — so a profile-pivoted worker and its
+/// unpivoted dispatcher always agree on the ONE vault location (Phase 51 UAT
+/// F-04).
+pub fn get_root_hermes_home() -> PathBuf {
+    match std::env::var(IRONHERMES_ROOT_HOME_ENV) {
+        Ok(p) if !p.is_empty() => PathBuf::from(p),
+        _ => get_hermes_home(),
     }
 }
 

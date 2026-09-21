@@ -16,6 +16,15 @@
 //!
 //! **No UI change lands in this plan.** `50.2-17` owns the room header's
 //! `Edit members` control and depends on this module's server fn.
+//!
+//! **Phase 52 (D-06/D-07/D-09): this module now owns BOTH halves of the
+//! room-editing surface** — membership ([`update_group_room_members`]) and
+//! team composition ([`update_group_room_team`]). It still defines NO
+//! second validator and NO second persistence path: `update_group_room_team`
+//! calls straight through to `group_chat_store::update_room_team_impl`,
+//! which is built from the SAME `validate_room_members` this module's
+//! sibling fn uses, plus `group_chat_store::validate_team_room_shape` — the
+//! one team-shape invariant every write path shares.
 
 use dioxus::prelude::*;
 
@@ -52,6 +61,46 @@ pub async fn update_group_room_members(
         let _ = req;
         Err(ServerFnError::new(
             "update_group_room_members unavailable without `server` feature",
+        ))
+    }
+}
+
+/// Phase 52 (D-06/D-07/D-09): change an existing room's membership AND team
+/// composition in one write. Follows [`update_group_room_members`]'s
+/// ordering exactly: fresh `Config::load()` → `profile_api::check_profile_write_gate`
+/// (fails closed) → `spawn_blocking` around
+/// `group_chat_store::update_room_team_impl` → map the join error and then
+/// the domain error to `ServerFnError::new`. Membership and team
+/// composition ride the SAME request (`UpdateGroupRoomTeamRequest`)
+/// deliberately — the edit modal edits them as one form, and two separate
+/// server calls would create a real partial-save state.
+#[server]
+pub async fn update_group_room_team(
+    req: crate::protocol::UpdateGroupRoomTeamRequest,
+) -> Result<crate::protocol::GroupRoom, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        let config = ironhermes_core::config::Config::load()
+            .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
+        crate::server::profile_api::check_profile_write_gate(&config)
+            .map_err(ServerFnError::new)?;
+
+        tokio::task::spawn_blocking(move || {
+            crate::server::group_chat_store::update_room_team_impl(
+                &req.room_id,
+                &req.members,
+                &req.team,
+            )
+        })
+        .await
+        .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
+        .map_err(|e| ServerFnError::new(e.to_string()))
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = req;
+        Err(ServerFnError::new(
+            "update_group_room_team unavailable without `server` feature",
         ))
     }
 }
@@ -198,5 +247,56 @@ mod tests {
             vec!["scout".to_string(), "zig".to_string()],
             "G-50.2-2a: fail-closed must be observable in the store, not only in the return value"
         );
+    }
+
+    /// Phase 52 (D-06/D-07/D-09): fail-closed must be observable in the
+    /// STORE, not only in the return value — the same discipline
+    /// [`update_group_room_members_is_refused_when_the_write_gate_is_closed`]
+    /// uses for the membership half of this module's surface.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn update_group_room_team_is_refused_when_the_profile_write_gate_is_closed() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set(
+            "IRONHERMES_HOME",
+            dir.path().to_str().expect("tempdir path must be utf8"),
+        );
+        scaffold_profile("scout");
+        scaffold_profile("zig");
+        write_write_gate_config(dir.path(), false);
+
+        let room = crate::server::group_chat_store::create_room_impl(
+            "Ops Room",
+            &["scout".to_string(), "zig".to_string()],
+        )
+        .expect("create_room_impl should succeed (fixture setup)");
+
+        let mut roles = std::collections::BTreeMap::new();
+        roles.insert("scout".to_string(), crate::protocol::MemberRole::Leader);
+        let result = update_group_room_team(crate::protocol::UpdateGroupRoomTeamRequest {
+            room_id: room.id.clone(),
+            members: vec!["scout".to_string(), "zig".to_string()],
+            team: crate::protocol::GroupRoomTeamSetup {
+                pattern: Some(crate::protocol::TeamPattern::OrchestratorWorkers),
+                roles,
+                max_cycles: None,
+                leader_prompt_override: None,
+                worker_prompt_override: None,
+            },
+        })
+        .await;
+        assert!(
+            result.is_err(),
+            "the write gate must refuse the call when closed"
+        );
+
+        let header_view = crate::server::group_chat_store::load_room_impl(&room.id)
+            .expect("load_room_impl should succeed");
+        assert_eq!(
+            header_view.room.pattern, None,
+            "fail-closed must be observable in the store, not only in the return value"
+        );
+        assert!(header_view.room.roles.is_empty());
     }
 }

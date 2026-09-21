@@ -25,6 +25,36 @@ pub struct ModelMetadata {
     pub capabilities: ModelCapabilities,
 }
 
+/// The only tokenizer default the registry may apply. Phase 50.5 (D-10): this
+/// is a DEFAULT the registry falls back to when a partial cache entry names a
+/// model with no static-table entry and no observed tokenizer — it is never
+/// an observation, and no code path may present it as one.
+pub const DEFAULT_TOKENIZER: &str = "cl100k_base";
+
+/// A model-metadata observation where some fields may be unknown (Phase 50.5, D-10).
+///
+/// A provider `/models` probe or a partial harvest source may see only a
+/// model's context window, not its tokenizer or capabilities. Writing that
+/// observation into a total [`ModelMetadata`] would force a fabricated
+/// tokenizer into the cache, which drives token estimation and therefore the
+/// compaction ratio — the exact defect D-10 rules out. Every field here is
+/// `#[serde(default, skip_serializing_if = "Option::is_none")]` so a probe's
+/// write never emits `null`s for what it did not see, and an old on-disk
+/// cache file (whose fields are all present) still deserializes: each
+/// present value parses into `Some(..)`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PartialModelMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokenizer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<ModelCapabilities>,
+}
+
 /// Registry of model metadata with static table, alias map, and disk cache overlay (per D-01, D-05, D-06).
 #[derive(Debug, Clone)]
 pub struct ModelRegistry {
@@ -110,6 +140,45 @@ impl ModelRegistry {
     /// Cache entries override static table entries for the same key (per D-06).
     pub fn merge_cache(&mut self, entries: HashMap<String, ModelMetadata>) {
         self.cache.extend(entries);
+    }
+
+    /// Merge partially-observed disk cache entries into the registry (Phase 50.5, D-10).
+    ///
+    /// For each entry, resolves a base via [`Self::lookup`] (so aliasing and the
+    /// `provider/` prefix strip apply, matching how the same id is read back later):
+    /// - a base exists: each field is taken from the partial when `Some`, otherwise
+    ///   from the base — a partial can only override a field it actually observed,
+    ///   it can never blank a known tokenizer or capability set (T-50.5-05).
+    /// - no base exists and the partial observed no `context_length`: no entry is
+    ///   inserted at all. This is the branch that preserves D-04 — an unknown model
+    ///   stays unknown rather than acquiring an invented window (T-50.5-06).
+    /// - no base exists and the partial observed `context_length`: a total entry is
+    ///   synthesized from what was observed, falling back to [`DEFAULT_TOKENIZER`]
+    ///   and [`ModelCapabilities::default`] for the rest.
+    pub fn merge_partial_cache(&mut self, entries: HashMap<String, PartialModelMetadata>) {
+        for (id, partial) in entries {
+            let base = self.lookup(&id).cloned();
+            let resolved = match base {
+                Some(base) => ModelMetadata {
+                    context_length: partial.context_length.unwrap_or(base.context_length),
+                    max_output_tokens: partial.max_output_tokens.or(base.max_output_tokens),
+                    tokenizer: partial.tokenizer.unwrap_or(base.tokenizer),
+                    capabilities: partial.capabilities.unwrap_or(base.capabilities),
+                },
+                None => {
+                    let Some(context_length) = partial.context_length else {
+                        continue;
+                    };
+                    ModelMetadata {
+                        context_length,
+                        max_output_tokens: partial.max_output_tokens,
+                        tokenizer: partial.tokenizer.unwrap_or_else(|| DEFAULT_TOKENIZER.to_string()),
+                        capabilities: partial.capabilities.unwrap_or_default(),
+                    }
+                }
+            };
+            self.cache.insert(id, resolved);
+        }
     }
 
     /// Returns all entries (static + cache) sorted by canonical ID.
@@ -528,6 +597,67 @@ mod tests {
             "expected at least 30 models, got {}",
             all.len()
         );
+    }
+
+    #[test]
+    fn partial_over_static_preserves_unobserved_fields() {
+        let mut reg = ModelRegistry::new();
+        let mut entries = HashMap::new();
+        entries.insert(
+            "claude-sonnet-4".to_string(),
+            PartialModelMetadata {
+                context_length: Some(1_048_576),
+                ..Default::default()
+            },
+        );
+        reg.merge_partial_cache(entries);
+        let meta = reg
+            .lookup("claude-sonnet-4")
+            .expect("claude-sonnet-4 should still resolve");
+        assert_eq!(meta.context_length, 1_048_576);
+        // Static values must survive byte-identical — asserted as literals,
+        // not by re-reading the static table (Phase 50.5, D-10).
+        assert_eq!(meta.tokenizer, "cl100k_base");
+        assert_eq!(meta.max_output_tokens, Some(64_000));
+        assert!(meta.capabilities.vision);
+        assert!(meta.capabilities.tool_use);
+        assert!(!meta.capabilities.reasoning);
+        assert!(meta.capabilities.streaming);
+    }
+
+    #[test]
+    fn partial_with_no_window_and_no_static_entry_creates_no_entry() {
+        let mut reg = ModelRegistry::new();
+        let mut entries = HashMap::new();
+        entries.insert(
+            "totally-unknown-model-xyz".to_string(),
+            PartialModelMetadata::default(),
+        );
+        reg.merge_partial_cache(entries);
+        assert!(reg.lookup("totally-unknown-model-xyz").is_none());
+        assert_eq!(
+            reg.context_length_or_default("totally-unknown-model-xyz"),
+            DEFAULT_CONTEXT_LENGTH
+        );
+    }
+
+    #[test]
+    fn partial_with_window_and_no_static_entry_uses_default_tokenizer() {
+        let mut reg = ModelRegistry::new();
+        let mut entries = HashMap::new();
+        entries.insert(
+            "totally-unknown-model-xyz".to_string(),
+            PartialModelMetadata {
+                context_length: Some(1_048_576),
+                ..Default::default()
+            },
+        );
+        reg.merge_partial_cache(entries);
+        let meta = reg
+            .lookup("totally-unknown-model-xyz")
+            .expect("should be inserted since context_length was observed");
+        assert_eq!(meta.context_length, 1_048_576);
+        assert_eq!(meta.tokenizer, DEFAULT_TOKENIZER);
     }
 
     #[test]

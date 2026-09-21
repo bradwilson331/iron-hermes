@@ -1847,26 +1847,51 @@ impl ToolRegistry {
         // via plan 09's AnyClientVisionHandle.
         let vision_client = std::sync::Arc::new(crate::browser_vision::NoOpVisionHandle);
 
-        self.register(Box::new(BrowserBackTool::new(session.clone())));
-        self.register(Box::new(BrowserClickTool::new(session.clone())));
-        self.register(Box::new(BrowserCloseTool::new(session.clone())));
+        self.register(Box::new(BrowserBackTool::new(
+            session.clone(),
+            config.clone(),
+        )));
+        self.register(Box::new(BrowserClickTool::new(
+            session.clone(),
+            config.clone(),
+        )));
+        self.register(Box::new(BrowserCloseTool::new(
+            session.clone(),
+            config.clone(),
+        )));
         self.register(Box::new(BrowserConsoleTool::new(
             session.clone(),
             config.clone(),
         )));
-        self.register(Box::new(BrowserGetImagesTool::new(session.clone())));
+        self.register(Box::new(BrowserGetImagesTool::new(
+            session.clone(),
+            config.clone(),
+        )));
         self.register(Box::new(BrowserNavigateTool::new(
             session.clone(),
             config.clone(),
         )));
-        self.register(Box::new(BrowserPressTool::new(session.clone())));
-        self.register(Box::new(BrowserScrollTool::new(session.clone())));
-        self.register(Box::new(BrowserSnapshotTool::new(session.clone())));
-        self.register(Box::new(BrowserTypeTool::new(session.clone())));
+        self.register(Box::new(BrowserPressTool::new(
+            session.clone(),
+            config.clone(),
+        )));
+        self.register(Box::new(BrowserScrollTool::new(
+            session.clone(),
+            config.clone(),
+        )));
+        self.register(Box::new(BrowserSnapshotTool::new(
+            session.clone(),
+            config.clone(),
+        )));
+        self.register(Box::new(BrowserTypeTool::new(
+            session.clone(),
+            config.clone(),
+        )));
         self.register(Box::new(BrowserVisionTool::new(
             session.clone(),
             resolver,
             vision_client,
+            config,
         )));
     }
 
@@ -1894,26 +1919,51 @@ impl ToolRegistry {
         use crate::browser_type::BrowserTypeTool;
         use crate::browser_vision::BrowserVisionTool;
 
-        self.register(Box::new(BrowserBackTool::new(session.clone())));
-        self.register(Box::new(BrowserClickTool::new(session.clone())));
-        self.register(Box::new(BrowserCloseTool::new(session.clone())));
+        self.register(Box::new(BrowserBackTool::new(
+            session.clone(),
+            config.clone(),
+        )));
+        self.register(Box::new(BrowserClickTool::new(
+            session.clone(),
+            config.clone(),
+        )));
+        self.register(Box::new(BrowserCloseTool::new(
+            session.clone(),
+            config.clone(),
+        )));
         self.register(Box::new(BrowserConsoleTool::new(
             session.clone(),
             config.clone(),
         )));
-        self.register(Box::new(BrowserGetImagesTool::new(session.clone())));
+        self.register(Box::new(BrowserGetImagesTool::new(
+            session.clone(),
+            config.clone(),
+        )));
         self.register(Box::new(BrowserNavigateTool::new(
             session.clone(),
             config.clone(),
         )));
-        self.register(Box::new(BrowserPressTool::new(session.clone())));
-        self.register(Box::new(BrowserScrollTool::new(session.clone())));
-        self.register(Box::new(BrowserSnapshotTool::new(session.clone())));
-        self.register(Box::new(BrowserTypeTool::new(session.clone())));
+        self.register(Box::new(BrowserPressTool::new(
+            session.clone(),
+            config.clone(),
+        )));
+        self.register(Box::new(BrowserScrollTool::new(
+            session.clone(),
+            config.clone(),
+        )));
+        self.register(Box::new(BrowserSnapshotTool::new(
+            session.clone(),
+            config.clone(),
+        )));
+        self.register(Box::new(BrowserTypeTool::new(
+            session.clone(),
+            config.clone(),
+        )));
         self.register(Box::new(BrowserVisionTool::new(
             session.clone(),
             resolver,
             vision_client,
+            config,
         )));
     }
 
@@ -5904,5 +5954,173 @@ mod tests {
             "per-tool disabled list must reach MCP tools (D-20); got: {:?}",
             names
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 53 Plan 04 (D-09/D-10): registry-level browser-toolset
+    // availability. Drive through the registry so these exercise what the
+    // model actually sees, and derive the expected set from the registered
+    // browser toolset itself rather than a hand-written literal count — a
+    // twelfth browser tool added later and not wired to the resolver must
+    // fail these tests too, not silently pass an outdated "11".
+    // -----------------------------------------------------------------------
+
+    /// Give the resolver a vision-capable role so `browser_vision`'s extra
+    /// `vision_capable()` conjunct doesn't fail a test whose point is the
+    /// OTHER ten tools' backend-authority behaviour. Reuses the config's own
+    /// main provider name — always a known endpoint, no real API key needed
+    /// (matches browser_vision.rs's own `dummy_resolver()` convention).
+    fn make_vision_capable(config: &mut ironhermes_core::config::Config) {
+        config.auxiliary = ironhermes_core::config::AuxiliaryConfig {
+            provider: config.model.provider.clone(),
+            model: String::new(),
+        };
+    }
+
+    #[test]
+    fn every_browser_tool_reports_available_on_an_obscura_only_host() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        // SAFETY: env_lock + --test-threads=1 ensure single mutator.
+        unsafe {
+            std::env::remove_var("OBSCURA_PATH");
+        }
+        let mut config = ironhermes_core::config::Config {
+            browser: ironhermes_core::config::BrowserConfig {
+                backend: ironhermes_core::config::BrowserBackend::Obscura,
+                obscura_path: Some("/bin/sh".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        make_vision_capable(&mut config);
+        let resolver = Arc::new(
+            ironhermes_core::provider::ProviderResolver::build(&config)
+                .expect("config must build a resolver"),
+        );
+        let config = Arc::new(config);
+        let session = Arc::new(tokio::sync::Mutex::new(None));
+
+        let mut registry = ToolRegistry::new();
+        registry.register_browser_tools(session, resolver, config);
+        unsafe {
+            std::env::remove_var("OBSCURA_PATH");
+        }
+
+        let browser_tools: Vec<Arc<dyn Tool>> = registry
+            .tools
+            .values()
+            .filter(|t| t.toolset() == "browser")
+            .cloned()
+            .collect();
+        assert!(
+            !browser_tools.is_empty(),
+            "the browser toolset must be registered"
+        );
+        for t in &browser_tools {
+            assert!(
+                t.is_available(),
+                "{} must report available on an Obscura-only host with backend: obscura",
+                t.name()
+            );
+        }
+    }
+
+    #[test]
+    fn every_browser_tool_reports_unavailable_with_no_engine_at_all() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::set_var("IRONHERMES_BROWSER_TEST_DISABLE", "1");
+        }
+        let config = ironhermes_core::config::Config::default();
+        let resolver = Arc::new(
+            ironhermes_core::provider::ProviderResolver::build(&config)
+                .expect("default config must build a resolver"),
+        );
+        let config = Arc::new(config);
+        let session = Arc::new(tokio::sync::Mutex::new(None));
+
+        let mut registry = ToolRegistry::new();
+        registry.register_browser_tools(session, resolver, config);
+
+        // is_available() is a LIVE call — configured_browser_engine_available
+        // re-checks the escape hatch on every invocation, it is not cached at
+        // registration time. Keep IRONHERMES_BROWSER_TEST_DISABLE set through
+        // the assertion loop, or a real Chromium install at a platform
+        // default path (D-05 steps 5-7) could make this test pass for the
+        // wrong reason on a dev machine.
+        let browser_tools: Vec<Arc<dyn Tool>> = registry
+            .tools
+            .values()
+            .filter(|t| t.toolset() == "browser")
+            .cloned()
+            .collect();
+        assert!(
+            !browser_tools.is_empty(),
+            "the browser toolset must be registered"
+        );
+        for t in &browser_tools {
+            assert!(
+                !t.is_available(),
+                "{} must report unavailable with no engine discoverable and no cdp_url",
+                t.name()
+            );
+        }
+        unsafe {
+            std::env::remove_var("IRONHERMES_BROWSER_TEST_DISABLE");
+        }
+    }
+
+    /// D-10 at the registry level: an operator's config-only Chromium path
+    /// makes the whole toolset visible — this is what was broken pre-53
+    /// (every tool called find_chromium_binary(None), discarding
+    /// browser.chromium_path).
+    #[test]
+    fn a_registry_built_with_a_custom_chromium_path_offers_the_browser_toolset() {
+        let _g = env_lock().lock().unwrap_or_else(|p| p.into_inner());
+        unsafe {
+            std::env::remove_var("BROWSER_PATH");
+            std::env::remove_var("CHROMIUM_PATH");
+            std::env::remove_var("IRONHERMES_BROWSER_TEST_DISABLE");
+        }
+        let mut config = ironhermes_core::config::Config {
+            browser: ironhermes_core::config::BrowserConfig {
+                backend: ironhermes_core::config::BrowserBackend::Chromium,
+                chromium_path: Some("/bin/sh".to_string()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        make_vision_capable(&mut config);
+        let resolver = Arc::new(
+            ironhermes_core::provider::ProviderResolver::build(&config)
+                .expect("config must build a resolver"),
+        );
+        let config = Arc::new(config);
+        let session = Arc::new(tokio::sync::Mutex::new(None));
+
+        let mut registry = ToolRegistry::new();
+        registry.register_browser_tools(session, resolver, config);
+        unsafe {
+            std::env::remove_var("BROWSER_PATH");
+            std::env::remove_var("CHROMIUM_PATH");
+        }
+
+        let browser_tools: Vec<Arc<dyn Tool>> = registry
+            .tools
+            .values()
+            .filter(|t| t.toolset() == "browser")
+            .cloned()
+            .collect();
+        assert!(
+            !browser_tools.is_empty(),
+            "the browser toolset must be registered"
+        );
+        for t in &browser_tools {
+            assert!(
+                t.is_available(),
+                "{} must be offered when Chromium exists only at browser.chromium_path (D-10)",
+                t.name()
+            );
+        }
     }
 }

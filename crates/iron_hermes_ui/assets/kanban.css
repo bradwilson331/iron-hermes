@@ -702,6 +702,14 @@
     color: var(--fg-dim);
 }
 
+/* Phase 50.5 (D-11): visually identical to --info today — kept as its own
+   class purely so a future pass can diverge the two without touching call
+   sites. This file runs the tokens.css namespace (--fs-*/--fg-dim/--warning/
+   --danger), never site.css's --gray/--amber. */
+.kn-modal-hint--drift {
+    color: var(--fg-dim);
+}
+
 .kn-modal-error {
     font-size: var(--fs-13);
     color: var(--danger);

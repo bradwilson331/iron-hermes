@@ -169,6 +169,20 @@ pub struct ProviderModelConfig {
     /// When present, per-key merge with provider-level extras — per-model wins (D-03).
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extra_request_options: HashMap<String, serde_json::Value>,
+
+    /// Phase 50.5 (D-01): sparse per-(provider, model) context-window override.
+    ///
+    /// Lives at `providers.<name>.models.<id>.context_length`. This is an
+    /// escape hatch for the CURRENTLY-ASSIGNED model(s) whose window the
+    /// resolver got wrong or does not yet know — never a place to enumerate a
+    /// provider's full catalog ("only for the active models, the cache should
+    /// store the rest"). The normal steady state is zero entries; the
+    /// model-metadata cache (harvested from the provider's own `/models`
+    /// response) does that work instead. `#[serde(default)]` keeps every
+    /// pre-50.5 `config.yaml` parsing unchanged, and `skip_serializing_if`
+    /// keeps a cleared entry from round-tripping a `null` back to disk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<usize>,
 }
 
 // =============================================================================
@@ -281,6 +295,7 @@ mod tests {
             "llama3.1:8b".to_string(),
             ProviderModelConfig {
                 extra_request_options: model_extras,
+                context_length: None,
             },
         );
         map.insert("ollama".to_string(), provider);

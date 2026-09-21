@@ -161,7 +161,13 @@ async fn vault_migrate_backup_and_scrub() {
 
     // D-06/D-15: audit sink carries exactly the provider NAME + {success:true},
     // never the value — vault_init also appends one entry (2 total).
-    let audit_contents = std::fs::read_to_string(dir.path().join("audit.jsonl"))
+    //
+    // Phase 51 Plan 15 (Task 4): the writer is `AuditLog::load`, which has written to
+    // `get_hermes_home()/logs/audit.jsonl` since Phase 48.2 (`audit.rs`'s own
+    // `LOGS_DIRNAME` doc). This test read the pre-48.2 bare-home path and panicked in
+    // `read_to_string` before ever reaching the `PLACEHOLDER_VALUE` assertion below —
+    // fixed here to read the path the writer actually writes.
+    let audit_contents = std::fs::read_to_string(dir.path().join("logs").join("audit.jsonl"))
         .expect("vault migrate must append to audit.jsonl");
     assert!(
         !audit_contents.contains(PLACEHOLDER_VALUE),

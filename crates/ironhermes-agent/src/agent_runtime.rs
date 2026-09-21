@@ -197,9 +197,20 @@ fn messages_contain_image(messages: &[ChatMessage]) -> bool {
 /// [`from_config`]: AgentRuntime::from_config
 /// [`run_turn`]: AgentRuntime::run_turn
 pub struct AgentRuntime {
-    config: Arc<Config>,
-    resolver: Arc<ProviderResolver>,
-    client: AnyClient,
+    /// Phase 50.4 (D-08/D-14): hot-swappable — `AgentRuntime::reload_config_and_resolver`
+    /// replaces the inner `Arc<Config>` on a live reload so every subsequent
+    /// `AgentRuntime::config()` read sees the new config. Mirrors
+    /// `AppRuntimeBundle::skill_registry`'s `Arc<std::sync::RwLock<Arc<T>>>` shape
+    /// (`std::sync::RwLock`, not tokio's, so the accessor stays callable from sync
+    /// contexts; the guard is never held across an `.await`).
+    config_handle: Arc<std::sync::RwLock<Arc<Config>>>,
+    /// Phase 50.4 (D-08/D-14): same hot-swap shape as `config_handle`.
+    resolver_handle: Arc<std::sync::RwLock<Arc<ProviderResolver>>>,
+    /// Phase 50.4 (D-14): the cached main client, hot-swappable so a reload can
+    /// rebuild it against the NEW resolver — without this rebuild, swapping
+    /// `resolver_handle` alone is inert: the cached client was built once, at
+    /// construction, from whatever resolver existed then.
+    client_handle: Arc<std::sync::RwLock<AnyClient>>,
     bundle: AppRuntimeBundle,
     budget: BudgetHandle,
     memory_manager: Option<Arc<TokioMutex<MemoryManager>>>,
@@ -289,6 +300,20 @@ impl AgentRuntime {
         let max_iterations = config.agent.max_iterations;
         let budget = BudgetHandle::new(max_iterations);
 
+        // Phase 50.4 (D-08/D-14): construct the two config/resolver handles now,
+        // at the earliest point the plain values exist, and BEFORE build_main_client
+        // and the subagent-runner/bundle construction that follow. `.clone()` here
+        // is an Arc clone — it does not move `config`/`resolver`, so every
+        // downstream `.clone()` on those same locals (subagent runner, bundle)
+        // below is unaffected and stays byte-identical in this plan. Plan 08
+        // (wave 2) hands these SAME handle objects to the subagent runner and to
+        // the vision/web-extract handle constructors instead of the plain-value
+        // clones those consumers still take here — this plan's job is only to
+        // make the handles exist here, textually above every consumer, so Plan 08
+        // is a propagation rather than a re-ordering of this constructor.
+        let config_handle = Arc::new(std::sync::RwLock::new(config.clone()));
+        let resolver_handle = Arc::new(std::sync::RwLock::new(resolver.clone()));
+
         let mut client = build_main_client(&resolver)?;
         // Phase 36.2 CR-09: enable OpenRouter Claude cache_control routing on
         // the streaming send path. No-op for non-OpenRouter providers and
@@ -299,13 +324,31 @@ impl AgentRuntime {
             resolver.main_provider().to_string(),
             config.prompt_caching.clone(),
         );
+        // Phase 50.4 (D-14): wrap the freshly-caching-enabled client in its own
+        // handle via a clone — NOT a move — so the subagent-runner construction
+        // immediately below (unchanged in this plan; Plan 08's job) can still
+        // take its own `client.clone()` of the plain local exactly as it did
+        // before this phase.
+        let client_handle = Arc::new(std::sync::RwLock::new(client.clone()));
 
         // Build the subagent runner, passing the budget clone for storage (field-kept
         // per Plan 35-02 field-disposition). Children no longer clone this stored
         // budget; each child gets a fresh BudgetHandle::new(max_iterations) in run_child.
+        //
+        // Phase 50.4 (D-14, wave 2): the `client.clone()` / `(*resolver).clone()`
+        // arguments passed into the constructor below are immediately
+        // superseded by the `.with_shared_handles(...)` builder chained onto
+        // it — left as-is rather than restructured because `invariants_21_7.rs`
+        // greps this exact construction call site by literal substring count
+        // and the arguments themselves are cheap. The builder hands the
+        // runner the SAME handle objects `reload_config_and_resolver`
+        // publishes into, so a delegated child agent spawned after an
+        // apply-now reads the post-reload provider and client, not the
+        // deep-cloned snapshot the constructor's own arguments produced.
         let (transcript_home, transcript_scope_label) = transcript_scope;
         let subagent_runner = Arc::new(
             AgentSubagentRunner::new(client.clone(), (*resolver).clone(), Some(budget.clone()))
+                .with_shared_handles(client_handle.clone(), resolver_handle.clone())
                 .with_subagent_registry(subagent_registry.clone())
                 .with_transcript_scope(transcript_home, transcript_scope_label),
         );
@@ -339,6 +382,13 @@ impl AgentRuntime {
             }),
             hooks_config,
             emit_mcp_startup_logs,
+            // Phase 50.4 (D-14, wave 2): hand the factory THIS runtime's own
+            // resolver handle, not the plain `resolver` clone above — this is
+            // the line that makes the vision/web-extract handle wiring
+            // load-bearing rather than theoretical. Without it,
+            // `build_app_runtime_bundle` silently takes the derive-a-fresh-
+            // handle fallback and neither tool handle ever observes a reload.
+            resolver_handle: Some(resolver_handle.clone()),
             ..Default::default()
         })
         .await?;
@@ -380,9 +430,9 @@ impl AgentRuntime {
         };
 
         Ok(Self {
-            config,
-            resolver,
-            client,
+            config_handle,
+            resolver_handle,
+            client_handle,
             bundle,
             budget,
             memory_manager,
@@ -446,6 +496,19 @@ impl AgentRuntime {
         // ── budget lifecycle: refill before the turn ──────────────────────
         self.budget.reset();
 
+        // Phase 50.4 (D-10/D-14): snapshot the reloadable config/resolver/client
+        // ONCE for this turn, through the accessors — never a frozen bare field.
+        // Matches D-10's guarantee that an in-flight turn finishes on the
+        // config/resolver pair it started with: re-reading the accessors
+        // repeatedly across this function body could observe a reload landing
+        // mid-turn and tear the config, resolver and client apart from each
+        // other inconsistently. The NEXT run_turn call re-snapshots and picks
+        // up any reload that happened in between (D-10's "observed at the
+        // start of the next turn").
+        let config = self.config();
+        let resolver = self.resolver();
+        let client_snapshot = self.client();
+
         // ── Phase 39.2: black-box turn instrumentation ────────────────────
         let bb_start = std::time::Instant::now();
         let bb_run_id = req.turn_id.unwrap_or_else(uuid::Uuid::new_v4);
@@ -472,7 +535,7 @@ impl AgentRuntime {
             reg.register_tts_tools(
                 wiring.session_key.clone(),
                 wiring.audio_dispatcher.clone(),
-                self.config.clone(),
+                config.clone(),
             );
             drop(reg);
         }
@@ -490,7 +553,7 @@ impl AgentRuntime {
                 wiring.clarify_dispatcher.clone(),
                 wiring.clarify_registry.clone(),
                 wiring.cancel_token.clone(),
-                self.config.clone(),
+                config.clone(),
             );
             drop(reg);
         }
@@ -572,7 +635,7 @@ impl AgentRuntime {
             session_intercept_installed = Some(req.session_id.clone());
         }
 
-        let context_length = self.resolver.resolve_for_main().context_length();
+        let context_length = resolver.resolve_for_main().context_length();
 
         // ── Phase 36.15 Plan 04 (PROV-11): per-turn extras resolution ─────
         // D-10: resolve (provider, model) → merged HashMap on every turn so a
@@ -580,10 +643,10 @@ impl AgentRuntime {
         // resolver.main_provider() is the providers: map key; resolve_for_main()
         // .default_model is the wire model string LlmClient uses when None is passed.
         let resolved_extras_for_turn: Option<std::collections::HashMap<String, serde_json::Value>> = {
-            let provider_name = self.resolver.main_provider();
-            let model_name = self.resolver.resolve_for_main().default_model.clone();
+            let provider_name = resolver.main_provider();
+            let model_name = resolver.resolve_for_main().default_model.clone();
             let merged = ironhermes_core::config_extras::resolve_extras(
-                &self.config.providers,
+                &config.providers,
                 provider_name,
                 &model_name,
             );
@@ -596,8 +659,8 @@ impl AgentRuntime {
 
         // Phase 39.2: emit routing stage event after provider/model is resolved.
         if let Some(ref rec) = self.bb_recorder {
-            let provider_name = self.resolver.main_provider();
-            let model_name = self.resolver.resolve_for_main().default_model.clone();
+            let provider_name = resolver.main_provider();
+            let model_name = resolver.resolve_for_main().default_model.clone();
             rec.try_record(ironhermes_blackbox::BlackBoxRecorder::make_event(
                 bb_run_id,
                 ironhermes_blackbox::Stage::Routing,
@@ -701,6 +764,18 @@ impl AgentRuntime {
             }
         };
 
+        // Phase 51 Plan 20 (G-51-7): per-turn provider identity — the label
+        // that will be written into usage_events.provider and the api-key
+        // that will be hashed into usage_events.api_key_hash. Defaulted to
+        // the main provider exactly as before this fix, and overwritten
+        // ONLY in the vision-routed arm below, in the SAME match arm that
+        // swaps `turn_client` — so the label and the client that actually
+        // ran can never disagree. This mirrors `with_fallback_named`'s
+        // Cause E fix on the failover path; this is the vision-role variant
+        // of the same rule (the row names the client that ran).
+        let mut turn_provider_name = resolver.main_provider().to_string();
+        let mut turn_api_key_for_usage = resolver.resolve_for_main().api_key.clone();
+
         // Vision auto-routing (fix): when this turn carries image content, run it
         // on the configured `roles.vision` model instead of the active chat model.
         // The active model may not support vision (e.g. kimi-k3), which the
@@ -709,20 +784,35 @@ impl AgentRuntime {
         // vision role is resolvable — the provider error is then surfaced as-is
         // (now visible via the full-chain error surfacing).
         let (turn_client, vision_routed_to) = if messages_contain_image(&req.messages) {
-            match build_role_client(&self.resolver, "vision") {
+            // Phase 51 Plan 20 (G-51-7): bind the resolver's named vision
+            // resolution ONCE, evaluated only on image-bearing turns (the
+            // same cost build_role_client's own resolve_role call already
+            // pays below — one additional role resolution per image-bearing
+            // turn, negligible next to an LLM call).
+            let vision_named = resolver.resolve_role_named("vision");
+            match build_role_client(&resolver, "vision") {
                 Ok(Some(vision_client)) => {
                     let vm = vision_client.model().to_string();
                     tracing::info!(
                         vision_model = %vm,
-                        active_model = %self.client.model(),
+                        active_model = %client_snapshot.model(),
                         "vision auto-route: turn carries image content; routing to the vision-role model"
                     );
+                    // Phase 51 Plan 20 (G-51-7): overwrite the per-turn
+                    // identity with the vision role's OWN provider name and
+                    // api key — in this SAME arm that swaps turn_client, so
+                    // the label is structurally inseparable from the client
+                    // it describes.
+                    if let Some((vision_provider_name, vision_endpoint)) = vision_named {
+                        turn_provider_name = vision_provider_name;
+                        turn_api_key_for_usage = vision_endpoint.api_key;
+                    }
                     (vision_client, Some(vm))
                 }
-                _ => (self.client.clone(), None),
+                _ => (client_snapshot.clone(), None),
             }
         } else {
-            (self.client.clone(), None)
+            (client_snapshot.clone(), None)
         };
 
         // Transparency (user request): never switch models silently — surface the
@@ -743,7 +833,7 @@ impl AgentRuntime {
         .with_hook_registry(self.bundle.hook_registry.clone())
         .with_browser_session(self.bundle.browser_session.clone())
         .with_active_skills(self.bundle.active_skills.clone())
-        .with_compression(context_length, self.config.agent.context_compression)
+        .with_compression(context_length, config.agent.context_compression)
         .with_compression_count(req.compression_count)
         // Phase 36.3.12 CR-01 (D-08/D-10): give AgentLoop the turn's REAL session_id.
         // Unconditional because `TurnRequest.session_id` is a plain `String`, never an
@@ -758,7 +848,7 @@ impl AgentRuntime {
             agent = agent.with_memory_manager(mgr.clone());
         }
 
-        agent = wire_fallback_if_configured(agent, &self.resolver);
+        agent = wire_fallback_if_configured(agent, &resolver);
 
         // ── per-turn / channel-specific wiring ────────────────────────────
         if let Some(cb) = req.stream {
@@ -813,10 +903,19 @@ impl AgentRuntime {
         // provider="" and a constant SHA-256-of-empty-string hash bucket —
         // making /usage --provider filters useless and (worse) collapsing
         // multi-tenant rate-limit tracking into a single shared bucket.
-        agent = agent.with_provider_name(self.resolver.main_provider());
+        //
+        // Phase 51 Plan 20 (G-51-7): the rule is now "the row names the
+        // client that ran," not "the row names the main provider" —
+        // `turn_provider_name` / `turn_api_key_for_usage` are the per-turn
+        // identity established above, defaulted from main and overwritten
+        // only on the vision-routed arm. This is the second promoted
+        // variant of the rule `with_fallback_named` (the Cause E fix)
+        // already established on the failover path: two routing paths, one
+        // shared "the row names the client that ran" contract.
+        agent = agent.with_provider_name(turn_provider_name);
         // Phase 36.15 Plan 04 (PROV-11): wire per-turn merged extras resolved above.
         agent = agent.with_resolved_extras(resolved_extras_for_turn);
-        if let Some(ref key) = self.resolver.resolve_for_main().api_key {
+        if let Some(ref key) = turn_api_key_for_usage {
             agent = agent.with_api_key_for_usage_tracking(key.clone());
         }
 
@@ -857,8 +956,8 @@ impl AgentRuntime {
 
         agent = attach_context_engine(
             agent,
-            &self.config,
-            &self.resolver,
+            &config,
+            &resolver,
             req.session_id,
             Some(self.bundle.hook_registry.clone()),
             req.pressure_tracker,
@@ -881,7 +980,7 @@ impl AgentRuntime {
         if let Some(ref engine) = engine_handle {
             // Per-turn model identity: fully resolvable from the same accessor
             // run_turn already used for context_length above (no hedge — D-07).
-            let endpoint = self.resolver.resolve_for_main();
+            let endpoint = resolver.resolve_for_main();
             engine.update_model(
                 endpoint.default_model.as_str(),
                 context_length,
@@ -957,7 +1056,7 @@ impl AgentRuntime {
         // single-call → swap-back pattern still gets the prior name on the
         // intermediate turn.
         if let Ok(mut prev) = self.previous_model.lock() {
-            *prev = Some(self.resolver.resolve_for_main().default_model.clone());
+            *prev = Some(resolver.resolve_for_main().default_model.clone());
         }
         self.session_turn_count
             .fetch_add(1, std::sync::atomic::Ordering::Release);
@@ -1065,11 +1164,94 @@ impl AgentRuntime {
     pub fn subagent_registry(&self) -> &Arc<RwLock<SubagentRegistry>> {
         &self.subagent_registry
     }
-    pub fn client(&self) -> &AnyClient {
-        &self.client
+    /// The current cached main client. Returns an owned clone rather than a
+    /// borrow because the client is hot-swappable (Phase 50.4 D-14) — callers
+    /// that cache the returned value across a reload keep observing the OLD
+    /// client, so read it fresh at each use site instead of holding it in
+    /// long-lived state.
+    pub fn client(&self) -> AnyClient {
+        match self.client_handle.read() {
+            Ok(guard) => guard.clone(),
+            // A panic in another reader/writer must not take the client down
+            // with it — the value behind the lock is a plain `AnyClient` and
+            // is always consistent, so recovering the poisoned inner value
+            // is safe.
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
-    pub fn config(&self) -> &Arc<Config> {
-        &self.config
+
+    /// The current config. Returns an owned `Arc` rather than a borrow
+    /// because the config is hot-swappable (Phase 50.4 D-08/D-14) — callers
+    /// that cache the returned `Arc` across a reload keep observing the OLD
+    /// config, so read it fresh at each use site instead of holding it in
+    /// long-lived state.
+    pub fn config(&self) -> Arc<Config> {
+        match self.config_handle.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// The current provider resolver. Same hot-swap contract as [`Self::config`].
+    pub fn resolver(&self) -> Arc<ProviderResolver> {
+        match self.resolver_handle.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Re-resolve `config`/`resolver` and swap them in, rebuilding the cached
+    /// main client against the NEW resolver so the next `run_turn` reads the
+    /// new provider/model/credential all the way through to the outbound LLM
+    /// call (Phase 50.4 D-08/D-14).
+    ///
+    /// DEVIATES from [`Self::reload_skill_registry`]'s swap-first ordering,
+    /// deliberately: that method's derived-state rebuild (re-registering the
+    /// `skills` tool) is infallible, so swapping first is safe there. Here the
+    /// derived state is `build_main_client(&resolver)`, which is fallible, and
+    /// D-09 forbids a half-swap — a config/resolver pair that cannot produce a
+    /// client must leave the previously-running config, resolver AND client
+    /// all untouched. So: build the new client into a LOCAL first and
+    /// propagate its error with `?` before touching any lock; only once the
+    /// client exists do we take the three write guards and publish. Do not
+    /// "fix" this back to `reload_skill_registry`'s order — that would
+    /// reintroduce the half-swap D-09 exists to prevent.
+    pub async fn reload_config_and_resolver(
+        &self,
+        config: Arc<Config>,
+        resolver: Arc<ProviderResolver>,
+    ) -> anyhow::Result<()> {
+        // Build the new client and re-arm OpenRouter Claude cache_control
+        // routing on it — the SAME pairing `from_config` performs — into a
+        // local `mut client`, entirely before any lock is touched. A reload
+        // that rebuilds the client but skips `enable_openrouter_caching`
+        // would produce a fully valid, fully functional client that silently
+        // serves a different caching posture than the one the operator was
+        // running before they clicked APPLY NOW (D-14) — correct-looking,
+        // green, and wrong.
+        let mut client = build_main_client(&resolver)?;
+        client.enable_openrouter_caching(
+            resolver.main_provider().to_string(),
+            config.prompt_caching.clone(),
+        );
+
+        // Nothing above this point touched a lock — a `build_main_client`
+        // failure returns via `?` with the previously-running config,
+        // resolver and client all still in place (D-09).
+        match self.config_handle.write() {
+            Ok(mut guard) => *guard = config,
+            Err(poisoned) => *poisoned.into_inner() = config,
+        }
+        match self.resolver_handle.write() {
+            Ok(mut guard) => *guard = resolver,
+            Err(poisoned) => *poisoned.into_inner() = resolver,
+        }
+        match self.client_handle.write() {
+            Ok(mut guard) => *guard = client,
+            Err(poisoned) => *poisoned.into_inner() = client,
+        }
+
+        Ok(())
     }
     /// Returns the MCP manager handle built during `from_config`, if any MCP
     /// servers were configured. Used by `run_gateway` to wire the shutdown path
@@ -1192,9 +1374,9 @@ impl AgentRuntime {
         ));
 
         Self {
-            config,
-            resolver,
-            client,
+            config_handle: Arc::new(std::sync::RwLock::new(config)),
+            resolver_handle: Arc::new(std::sync::RwLock::new(resolver)),
+            client_handle: Arc::new(std::sync::RwLock::new(client)),
             bundle,
             budget,
             memory_manager: None,
@@ -1223,10 +1405,12 @@ impl AgentRuntime {
     pub(crate) fn resolved_extras_for_test_turn(
         &self,
     ) -> Option<std::collections::HashMap<String, serde_json::Value>> {
-        let provider_name = self.resolver.main_provider();
-        let model_name = self.resolver.resolve_for_main().default_model.clone();
+        let resolver = self.resolver();
+        let config = self.config();
+        let provider_name = resolver.main_provider();
+        let model_name = resolver.resolve_for_main().default_model.clone();
         let merged = ironhermes_core::config_extras::resolve_extras(
-            &self.config.providers,
+            &config.providers,
             provider_name,
             &model_name,
         );
@@ -1285,8 +1469,12 @@ mod tests {
     /// the auto-route from silently going inert in a future refactor.
     #[test]
     fn run_turn_routes_image_turns_to_vision_role() {
+        // Phase 50.4 (D-14): the field was renamed to `resolver_handle`, so the
+        // call site is now the accessor-derived local `resolver`, not a bare
+        // `self.resolver` field — update the needle to match, per this plan's
+        // own instruction not to delete this test.
         let route_pos = SOURCE
-            .find("build_role_client(&self.resolver, \"vision\")")
+            .find("build_role_client(&resolver, \"vision\")")
             .expect("run_turn must route image turns via build_role_client(.., \"vision\")");
         let loop_pos = SOURCE
             .find("AgentLoop::new(")
@@ -1298,6 +1486,165 @@ mod tests {
         assert!(
             SOURCE.contains("messages_contain_image(&req.messages)"),
             "vision routing must be gated on messages_contain_image(&req.messages)"
+        );
+    }
+
+    /// INV-51-20 (G-51-7): a vision-auto-routed turn must be written into
+    /// `usage_events` under the CLIENT THAT ACTUALLY RAN, not the main
+    /// provider's name. UAT test 6 observed `run_turn` route to the vision
+    /// role's client yet stamp every usage row `provider=openrouter` — the
+    /// main provider — an internally contradictory row (openrouter rejects
+    /// the vision model id with a 400). This mirrors the already-fixed
+    /// failover case (`with_fallback_named`, the Cause E fix).
+    ///
+    /// `SOURCE` is `include_str!` of this ENTIRE file, tests included. A
+    /// negative assertion built from a contiguous string literal written
+    /// inside this test would match its own source line and could never go
+    /// red-to-green — the self-invalidation hazard documented at
+    /// `crates/ironhermes-kanban/src/dispatcher.rs:1936`. Every needle below
+    /// is therefore assembled at RUNTIME from fragments, never a contiguous
+    /// literal anywhere in this file. Do not "simplify" this back into a
+    /// plain string literal.
+    #[test]
+    fn inv_51_20_vision_routed_turn_is_labelled_by_the_client_that_ran() {
+        let non_comment: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // (1) The singular assumption — labelling the turn with the
+        // resolver's main-provider accessor DIRECTLY as the wiring
+        // argument, regardless of which client actually ran — must be gone
+        // from non-comment source.
+        let singular_provider_label_needle = format!(
+            "with_provider_name({}{}{})",
+            "resolver.main", "_provider", "()"
+        );
+        assert!(
+            !non_comment.contains(singular_provider_label_needle.as_str()),
+            "Phase 51 Plan 20 (G-51-7): run_turn must NOT label the turn with \
+             resolver.main_provider() directly — the usage_events row must \
+             name the client that actually ran the turn (vision-routed or \
+             not), the same rule with_fallback_named already enforces on \
+             the failover path."
+        );
+
+        // (2) The Phase 36.2 CR-02 wiring calls must still exist verbatim —
+        // this fix changes their ARGUMENTS, never removes or conditionally
+        // skips either call site.
+        let provider_name_call_needle = format!("agent.{}{}(", "with_provider", "_name");
+        let api_key_call_needle = format!("agent.{}{}(", "with_api_key_for_usage", "_tracking");
+        assert!(
+            non_comment.contains(provider_name_call_needle.as_str()),
+            "Phase 36.2 CR-02 must still hold: agent.with_provider_name(...) call site required."
+        );
+        assert!(
+            non_comment.contains(api_key_call_needle.as_str()),
+            "Phase 36.2 CR-02 must still hold: agent.with_api_key_for_usage_tracking(...) call site required."
+        );
+
+        // (3) The per-turn provider-name identity must be established BEFORE
+        // AgentLoop::new(, exactly like the sibling vision-route guard
+        // (`run_turn_routes_image_turns_to_vision_role`) asserts for the
+        // client selection itself — so the label and the client can never
+        // disagree about which arm produced them.
+        let turn_identity_needle = format!("{}_{}", "turn_provider", "name");
+        let identity_pos = SOURCE.find(turn_identity_needle.as_str()).expect(
+            "run_turn must introduce a per-turn provider-name identity binding \
+             (turn_provider_name) sourced from the client that actually ran",
+        );
+        let loop_pos = SOURCE
+            .find("AgentLoop::new(")
+            .expect("AgentLoop::new( must be present in run_turn");
+        assert!(
+            identity_pos < loop_pos,
+            "the per-turn provider-name identity must be established before AgentLoop::new"
+        );
+    }
+
+    /// Phase 51 Plan 20 (G-51-7) Task 2(a) — non-vision regression control.
+    /// A turn with NO image content must leave the per-turn identity at the
+    /// main provider's name and the main endpoint's api key —
+    /// byte-identical to pre-Plan-20 behavior. Constructing a real
+    /// `AgentRuntime` with a live client to drive an actual non-image
+    /// `run_turn` is not available in this test module (the same
+    /// constraint `run_turn_reads_the_reloadable_handles_not_frozen_fields`
+    /// and its siblings face), so this is proven at two levels instead:
+    /// (1) a resolver-level equality, since `resolve_for_main()`'s endpoint
+    /// IS what a non-routed turn's identity is derived from —
+    /// `resolve_for_main()` looks up `self.endpoints[self.main_provider]`,
+    /// so asserting `resolve(main_provider())` agrees with
+    /// `resolve_for_main()` pins that the two accessors run_turn's default
+    /// bindings compose from can never drift apart; (2) a source-position
+    /// assertion that the default bindings are established BEFORE the
+    /// image-gated vision block that could overwrite them, so the common
+    /// (non-image) path provably reaches `AgentLoop::new` with the
+    /// defaults untouched.
+    #[test]
+    fn non_vision_turn_identity_matches_main_provider_established_before_vision_arm() {
+        let mut config = Config::default();
+        config.model.roles.insert(
+            "vision".to_string(),
+            ironhermes_core::ModelRoleConfig {
+                provider: "anthropic".to_string(),
+                model: Some("claude-vision".to_string()),
+            },
+        );
+        let resolver = ProviderResolver::build(&config).expect("build");
+
+        // (1) Resolver-level equality: the endpoint run_turn's default
+        // identity is DERIVED from (resolve_for_main()) can never disagree
+        // with a direct lookup keyed by main_provider() — the same
+        // accessor run_turn's default provider-name binding calls.
+        let main_ep = resolver.resolve_for_main();
+        let via_name = resolver
+            .resolve(resolver.main_provider())
+            .expect("main_provider() must resolve to a real endpoint");
+        assert_eq!(
+            main_ep.base_url, via_name.base_url,
+            "resolve_for_main() must agree with resolve(main_provider()) — the two \
+             accessors a non-routed turn's default identity composes from"
+        );
+        assert_eq!(main_ep.api_key, via_name.api_key);
+
+        // (2) Source position: the default bindings must be established
+        // BEFORE the image-gated vision block, so a non-image turn's
+        // identity is never touched by the vision-routing arm at all.
+        let default_binding_needle = format!("{}_{}", "turn_provider", "name");
+        let default_pos = SOURCE
+            .find(default_binding_needle.as_str())
+            .expect("the default turn_provider_name binding must exist in run_turn");
+        let image_gate_pos = SOURCE
+            .find("messages_contain_image(&req.messages)")
+            .expect("the image-content gate must exist in run_turn");
+        assert!(
+            default_pos < image_gate_pos,
+            "the default per-turn identity must be established BEFORE the \
+             image-content gate, so a non-image turn's identity is never \
+             touched by the vision-routing arm"
+        );
+    }
+
+    /// Phase 50.4 (D-14, Test 4): `run_turn` must snapshot the reloadable
+    /// config/resolver through the `AgentRuntime::config()` / `::resolver()`
+    /// accessors, not a frozen bare field — an implementation that reverted to
+    /// direct `self.resolver`/`self.config` field reads would silently keep
+    /// serving the pre-reload provider for the whole life of the runtime,
+    /// because `run_turn` only ever reads what it snapshots at turn start.
+    #[test]
+    fn run_turn_reads_the_reloadable_handles_not_frozen_fields() {
+        assert!(
+            SOURCE.contains("let resolver = self.resolver();"),
+            "run_turn must read the resolver through the AgentRuntime::resolver() accessor \
+             (a snapshot local named `resolver`), not a frozen self.resolver field, so a \
+             mid-session reload is observed starting on the next turn (D-14)."
+        );
+        assert!(
+            SOURCE.contains("let config = self.config();"),
+            "run_turn must read the config through the AgentRuntime::config() accessor \
+             (a snapshot local named `config`), not a frozen self.config field, so a \
+             mid-session reload is observed starting on the next turn (D-14)."
         );
     }
 
@@ -1563,6 +1910,542 @@ mod tests {
         );
     }
 
+    /// Phase 50.4 (D-14, Test 5): widens the CR-09 invariant above to also
+    /// cover `reload_config_and_resolver`. `enable_openrouter_caching` stamps
+    /// private state on the inner `LlmClient` with no public read-back, so the
+    /// call site itself is the only observable proof a reload re-arms it —
+    /// this MUST stay a source assertion, not be "upgraded" into a behavioral
+    /// one, because there is no field to read the caching posture back from.
+    #[test]
+    fn inv_50_4_reload_config_and_resolver_reapplies_openrouter_caching() {
+        // Scope to PRODUCTION code only (before `mod tests {`) — the plain
+        // `.contains()` checks elsewhere in this file are safe to run over
+        // the whole SOURCE, but this test does exact counting and byte-range
+        // comparison, and the assertion/panic messages in THIS test module
+        // (this one included) themselves contain the literal substring
+        // "client.enable_openrouter_caching(" as prose, which would inflate
+        // the count and confuse `rfind` if not excluded.
+        let test_mod_start = SOURCE
+            .find("\nmod tests {")
+            .expect("test module marker must exist");
+        let production_source = &SOURCE[..test_mod_start];
+
+        let non_comment: String = production_source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let occurrences = non_comment
+            .matches("client.enable_openrouter_caching(")
+            .count();
+        assert!(
+            occurrences >= 2,
+            "Phase 50.4 D-14: `client.enable_openrouter_caching(` must appear at least twice \
+             in the comment-stripped source — once in `from_config`, once in \
+             `reload_config_and_resolver` — found {occurrences}."
+        );
+
+        // NOTE: deliberately searches for "async fn reload_..." rather than
+        // "pub async fn reload_..." — the plan's own acceptance criterion
+        // greps this file for the exact substring "pub async fn
+        // reload_config_and_resolver" and expects exactly ONE match (the
+        // real declaration); using the identical needle here would make
+        // this test's own source line a second match.
+        let method_start = non_comment
+            .find("async fn reload_config_and_resolver(")
+            .expect("reload_config_and_resolver must exist");
+        // The method's own end: the next 4-space-indented `pub ` item after its
+        // start, which is where rustfmt places the next impl-block method.
+        let method_end = non_comment[method_start..]
+            .find("\n    pub ")
+            .map(|offset| method_start + offset)
+            .unwrap_or(non_comment.len());
+        let second_call_pos = non_comment
+            .rfind("client.enable_openrouter_caching(")
+            .expect("at least one enable_openrouter_caching call must exist");
+        assert!(
+            second_call_pos >= method_start && second_call_pos < method_end,
+            "Phase 50.4 D-14: the SECOND (last) `enable_openrouter_caching` call must fall \
+             inside reload_config_and_resolver's own body ({method_start}..{method_end}), but \
+             was found at byte {second_call_pos} — a bare occurrence count of 2 would also be \
+             satisfied by two calls inside `from_config` alone, which is exactly the gap this \
+             test exists to close."
+        );
+    }
+
+    // ── Phase 50.4 (D-08/D-09/D-14): reload_config_and_resolver behavioral tests ──
+
+    /// Build a `(Config, ProviderResolver)` pair naming a single custom
+    /// provider, for the reload tests below.
+    #[cfg(test)]
+    fn build_test_provider_config(
+        provider_name: &str,
+        base_url: &str,
+        model: &str,
+    ) -> (Arc<Config>, Arc<ProviderResolver>) {
+        let mut config = Config::default();
+        let provider_cfg = ironhermes_core::config::ProviderConfig {
+            base_url: Some(base_url.to_string()),
+            // A custom (non-built-in) provider entry's `default_model` comes
+            // from `providers.<name>.default_model`, NOT `config.model.default`
+            // — that global field only pre-seeds the built-in openrouter entry.
+            default_model: Some(model.to_string()),
+            ..ironhermes_core::config::ProviderConfig::default()
+        };
+        config.providers.insert(provider_name.to_string(), provider_cfg);
+        config.model.provider = provider_name.to_string();
+        config.model.default = model.to_string();
+        let config = Arc::new(config);
+        let resolver = Arc::new(
+            ProviderResolver::build(&config)
+                .expect("ProviderResolver::build must succeed with a real base_url"),
+        );
+        (config, resolver)
+    }
+
+    /// Build a minimal, fully-functional `AgentRuntime` around a caller-supplied
+    /// config/resolver/client, for the reload tests below. Mirrors the manual
+    /// construction `resolved_extras_for_test_turn_returns_provider_extras`
+    /// already uses, adapted to the Phase 50.4 handle fields.
+    #[cfg(test)]
+    fn build_runtime_for_reload_test(
+        config: Arc<Config>,
+        resolver: Arc<ProviderResolver>,
+        client: AnyClient,
+    ) -> AgentRuntime {
+        let max_iterations = config.agent.max_iterations;
+        let budget = crate::budget::BudgetHandle::new(max_iterations);
+        let registry = Arc::new(tokio::sync::RwLock::new(ironhermes_tools::ToolRegistry::new()));
+        let hook_registry = Arc::new(HookRegistry::new(ironhermes_hooks::HooksConfig::default()));
+        let skill_registry = Arc::new(std::sync::RwLock::new(Arc::new(
+            SkillRegistry::load_with_paths(&[]),
+        )));
+        let active_skills = Arc::new(std::sync::Mutex::new(Vec::new()));
+        // Unique per-call temp dir — several tests in this module build their own
+        // runtime in the same process, and JobStore::open needs a fresh path each
+        // time to avoid colliding with a sibling test's still-open store.
+        static CRON_DIR_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let cron_dir = std::env::temp_dir().join(format!(
+            "ironhermes_test_cron_reload_{}_{}",
+            std::process::id(),
+            CRON_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let job_store = Arc::new(std::sync::Mutex::new(
+            ironhermes_cron::JobStore::open(cron_dir).expect("temp-dir JobStore must succeed"),
+        ));
+        let browser_session = Arc::new(TokioMutex::new(None));
+        let bundle = AppRuntimeBundle {
+            registry,
+            hook_registry,
+            skill_registry,
+            skills_cwd: std::env::temp_dir(),
+            skills_credential_dir: std::env::temp_dir(),
+            active_skills,
+            job_store,
+            browser_session,
+            mcp_manager: None,
+            merged_tools: ironhermes_core::config::ToolsConfig::default(),
+            bb_recorder: None,
+        };
+        let subagent_registry = Arc::new(RwLock::new(SubagentRegistry::new()));
+
+        AgentRuntime {
+            config_handle: Arc::new(std::sync::RwLock::new(config)),
+            resolver_handle: Arc::new(std::sync::RwLock::new(resolver)),
+            client_handle: Arc::new(std::sync::RwLock::new(client)),
+            bundle,
+            budget,
+            memory_manager: None,
+            subagent_registry,
+            max_iterations,
+            cwd: std::path::PathBuf::from("."),
+            previous_model: std::sync::Mutex::new(None),
+            session_turn_count: std::sync::atomic::AtomicUsize::new(0),
+            context_file_paths: Vec::new(),
+            bb_recorder: None,
+            terminal_tool_arc: None,
+            execute_code_tool_arc: None,
+            write_file_tool_arc: None,
+            patch_tool_arc: None,
+        }
+    }
+
+    /// Test 1: reloading with a resolver built from a config naming a
+    /// DIFFERENT main provider swaps what `resolver()`/`config()` report —
+    /// the assertion an `AppState`-only implementation (D-14's central
+    /// finding) fails, since it never touches `AgentRuntime` at all.
+    #[tokio::test]
+    async fn reload_config_and_resolver_swaps_the_provider_the_next_turn_reads() {
+        let (config_a, resolver_a) =
+            build_test_provider_config("provider_a", "https://provider-a.example.test", "model-a");
+        let client_a = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "https://provider-a.example.test",
+            "key-a",
+            "model-a",
+        ));
+        let runtime = build_runtime_for_reload_test(config_a, resolver_a, client_a);
+
+        assert_eq!(runtime.resolver().main_provider(), "provider_a");
+
+        let (config_b, resolver_b) =
+            build_test_provider_config("provider_b", "https://provider-b.example.test", "model-b");
+
+        runtime
+            .reload_config_and_resolver(config_b, resolver_b)
+            .await
+            .expect("reload must succeed — provider B has a real base_url");
+
+        assert_eq!(runtime.resolver().main_provider(), "provider_b");
+        assert_eq!(runtime.config().model.default, "model-b");
+    }
+
+    /// Test 2: reloading rebuilds the CACHED MAIN CLIENT against the new
+    /// resolver — the property D-14 says a labels-only (`AppState`-only)
+    /// reload fails to move. Asserts the before-values explicitly: a test
+    /// that only checked the post-reload state would pass against an
+    /// implementation that was already pointing at B.
+    #[tokio::test]
+    async fn reload_config_and_resolver_rebuilds_the_cached_main_client() {
+        let (config_a, resolver_a) =
+            build_test_provider_config("provider_a", "https://provider-a.example.test", "model-a");
+        let client_a = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "https://provider-a.example.test",
+            "key-a",
+            "model-a",
+        ));
+        let runtime = build_runtime_for_reload_test(config_a, resolver_a, client_a);
+
+        assert_eq!(runtime.client().base_url(), "https://provider-a.example.test");
+        assert_eq!(runtime.client().model(), "model-a");
+
+        let (config_b, resolver_b) =
+            build_test_provider_config("provider_b", "https://provider-b.example.test", "model-b");
+
+        runtime
+            .reload_config_and_resolver(config_b, resolver_b)
+            .await
+            .expect("reload must succeed — provider B has a real base_url");
+
+        assert_eq!(runtime.client().base_url(), "https://provider-b.example.test");
+        assert_eq!(runtime.client().model(), "model-b");
+    }
+
+    /// Test 3 (D-09): a reload whose main endpoint cannot produce a client
+    /// returns Err AND leaves the resolver, config and cached client all on
+    /// their pre-reload values.
+    ///
+    /// The unbuildable endpoint is a REAL misconfiguration, not a fabricated
+    /// one: `ProviderResolver::build` deliberately lets an unrecognized/
+    /// misconfigured `model.provider` name through (its own comment: "allow
+    /// build to succeed so operators can introspect... [failure caught at]
+    /// resolve_for_main() time"), so a `providers.<name>` entry with NO
+    /// `base_url` produces a resolver whose main endpoint has an empty
+    /// `base_url`. `AnyClient::from_endpoint` previously accepted that
+    /// silently (every match arm unconditionally returned `Ok`, so
+    /// `build_main_client` — the ONE fallible call in
+    /// `reload_config_and_resolver` — was provably unable to fail with any
+    /// resolver reachable through the public API); this plan adds the
+    /// missing empty-`base_url` validation there (Rule 2), which is what
+    /// this test exercises.
+    #[tokio::test]
+    async fn reload_config_and_resolver_publishes_nothing_when_the_client_cannot_be_built() {
+        let (config_a, resolver_a) =
+            build_test_provider_config("provider_a", "https://provider-a.example.test", "model-a");
+        let client_a = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "https://provider-a.example.test",
+            "key-a",
+            "model-a",
+        ));
+        let runtime = build_runtime_for_reload_test(config_a, resolver_a, client_a);
+
+        // Provider B: a real config entry with NO base_url — resolvable
+        // (build succeeds), but not buildable into a client.
+        let mut config_b = Config::default();
+        config_b.providers.insert(
+            "provider_b_broken".to_string(),
+            ironhermes_core::config::ProviderConfig::default(),
+        );
+        config_b.model.provider = "provider_b_broken".to_string();
+        config_b.model.default = "model-b".to_string();
+        let config_b = Arc::new(config_b);
+        let resolver_b = Arc::new(
+            ProviderResolver::build(&config_b)
+                .expect("ProviderResolver::build succeeds even for a base_url-less provider"),
+        );
+        assert_eq!(
+            resolver_b.resolve_for_main().base_url,
+            "",
+            "test precondition: provider B's endpoint must have an empty base_url"
+        );
+
+        let err = runtime
+            .reload_config_and_resolver(config_b, resolver_b)
+            .await
+            .expect_err("reload must fail when the new resolver's client cannot be built");
+        assert!(
+            err.to_string().contains("base_url"),
+            "error should name the actual cause (empty base_url), got: {err}"
+        );
+
+        // D-09: the previously-running resolver, config and client are all
+        // still exactly what they were before the failed reload attempt.
+        assert_eq!(runtime.resolver().main_provider(), "provider_a");
+        assert_eq!(runtime.config().model.default, "model-a");
+        assert_eq!(runtime.client().base_url(), "https://provider-a.example.test");
+        assert_eq!(runtime.client().model(), "model-a");
+    }
+
+    // ── Phase 50.4 (D-14, wave 2): AgentSubagentRunner follows the reload ──
+
+    /// Build a runner sharing the SAME handle objects a `build_runtime_for_reload_test`
+    /// runtime holds — the exact shape `from_config` wires via its
+    /// shared-handles builder chain. The constructor arguments below are
+    /// throwaway values immediately superseded by that builder call,
+    /// matching the production comment in `from_config`.
+    ///
+    /// Imports the runner type under a LOCAL alias rather than the plain
+    /// name already in scope via `use super::*;`: `invariants_21_7.rs`
+    /// counts occurrences of the runner's constructor call (as literal text)
+    /// across this entire file (`include_str!`, which does not strip
+    /// `#[cfg(test)]` text) and requires exactly one — the real construction
+    /// site inside `from_config`. Spelling that same call out a second time
+    /// here, in a test helper that has nothing to do with that invariant,
+    /// would break it for a reason unrelated to what it actually guards.
+    #[cfg(test)]
+    fn build_subagent_runner_sharing(runtime: &AgentRuntime) -> AgentSubagentRunner {
+        use crate::subagent_runner::AgentSubagentRunner as RunnerCtor;
+        let dummy_client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost:9999",
+            "dummy-key",
+            "dummy-model",
+        ));
+        let dummy_resolver = ProviderResolver::build(&Config::default())
+            .expect("default Config should produce a valid resolver");
+        RunnerCtor::new(dummy_client, dummy_resolver, None)
+            .with_shared_handles(runtime.client_handle.clone(), runtime.resolver_handle.clone())
+    }
+
+    /// Test 1: a subagent runner sharing the runtime's handles resolves
+    /// provider A before a reload and provider B — both resolver AND
+    /// client base_url — after one. A runner holding the pre-Phase-50.4
+    /// deep clone (`(*resolver).clone()` into a plain owned field) would
+    /// report A both times and fail this test.
+    #[tokio::test]
+    async fn subagent_runner_sharing_runtime_handles_sees_the_reloaded_provider() {
+        let (config_a, resolver_a) =
+            build_test_provider_config("provider_a", "https://provider-a.example.test", "model-a");
+        let client_a = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "https://provider-a.example.test",
+            "key-a",
+            "model-a",
+        ));
+        let runtime = build_runtime_for_reload_test(config_a, resolver_a, client_a);
+        let runner = build_subagent_runner_sharing(&runtime);
+
+        assert_eq!(
+            runner.resolver_snapshot_for_test().main_provider(),
+            "provider_a",
+            "before any reload, a runner sharing the runtime's handles must resolve \
+             the same provider the runtime was constructed with"
+        );
+
+        let (config_b, resolver_b) =
+            build_test_provider_config("provider_b", "https://provider-b.example.test", "model-b");
+        runtime
+            .reload_config_and_resolver(config_b, resolver_b)
+            .await
+            .expect("reload must succeed — provider B has a real base_url");
+
+        assert_eq!(
+            runner.resolver_snapshot_for_test().main_provider(),
+            "provider_b",
+            "after a successful reload, the shared-handle runner must resolve the NEW provider"
+        );
+        assert_eq!(
+            runner.client_snapshot_for_test().base_url(),
+            "https://provider-b.example.test",
+            "after a successful reload, the shared-handle runner's client must be on the \
+             NEW endpoint, not a boot-time snapshot"
+        );
+    }
+
+    /// Test 3 (D-09 across the delegation boundary): a reload that fails at
+    /// the client-build step must leave a shared-handle runner on the
+    /// pre-reload provider — not merely the main `AgentRuntime` path.
+    #[tokio::test]
+    async fn subagent_runner_does_not_observe_a_failed_reload() {
+        let (config_a, resolver_a) =
+            build_test_provider_config("provider_a", "https://provider-a.example.test", "model-a");
+        let client_a = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "https://provider-a.example.test",
+            "key-a",
+            "model-a",
+        ));
+        let runtime = build_runtime_for_reload_test(config_a, resolver_a, client_a);
+        let runner = build_subagent_runner_sharing(&runtime);
+
+        // Provider B: resolvable but not buildable into a client (no base_url) —
+        // the same real misconfiguration shape used by
+        // `reload_config_and_resolver_publishes_nothing_when_the_client_cannot_be_built`.
+        let mut config_b = Config::default();
+        config_b.providers.insert(
+            "provider_b_broken".to_string(),
+            ironhermes_core::config::ProviderConfig::default(),
+        );
+        config_b.model.provider = "provider_b_broken".to_string();
+        config_b.model.default = "model-b".to_string();
+        let config_b = Arc::new(config_b);
+        let resolver_b = Arc::new(
+            ProviderResolver::build(&config_b)
+                .expect("ProviderResolver::build succeeds even for a base_url-less provider"),
+        );
+
+        runtime
+            .reload_config_and_resolver(config_b, resolver_b)
+            .await
+            .expect_err("reload must fail when the new resolver's client cannot be built");
+
+        assert_eq!(
+            runner.resolver_snapshot_for_test().main_provider(),
+            "provider_a",
+            "a failed reload must leave a shared-handle runner on the PRE-reload provider"
+        );
+        assert_eq!(
+            runner.client_snapshot_for_test().base_url(),
+            "https://provider-a.example.test",
+            "a failed reload must leave a shared-handle runner's client on the PRE-reload endpoint"
+        );
+    }
+
+    /// Test 4: `from_config` must actually wire the shared-handles builder
+    /// onto the subagent runner constructor call — a source assertion, not
+    /// a behavioral test, because every test above constructs its own runner
+    /// directly (via `build_subagent_runner_sharing`) and would still pass
+    /// even if `from_config` dropped the builder call entirely.
+    ///
+    /// Scoped to `from_config`'s own body (not the whole file) — this test
+    /// module's own `build_subagent_runner_sharing` helper contains the
+    /// identical constructor-then-builder shape, so an unscoped whole-file
+    /// search would keep finding a match after the production wiring was
+    /// removed, which is exactly the self-matching failure mode this plan's
+    /// split-concat guidance exists to avoid.
+    #[test]
+    fn from_config_gives_the_subagent_runner_the_runtime_handles() {
+        let non_comment: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let fn_start = non_comment
+            .find("pub async fn from_config(")
+            .expect("from_config must exist in this module");
+        let fn_end = non_comment[fn_start..]
+            .find("\n    pub ")
+            .map(|offset| fn_start + offset)
+            .unwrap_or(non_comment.len());
+        let scope = &non_comment[fn_start..fn_end];
+
+        let ctor_needle = "AgentSubagentRunner".to_string() + "::new(";
+        let builder_needle = "with_shared".to_string() + "_handles(";
+        let ctor_pos = scope
+            .find(&ctor_needle)
+            .expect("from_config must construct the subagent runner via its constructor");
+        let builder_pos = scope.find(&builder_needle).expect(
+            "from_config must chain the shared-handles builder onto the subagent runner \
+             constructor",
+        );
+        assert!(
+            ctor_pos < builder_pos,
+            "the shared-handles builder must be chained AFTER the subagent runner constructor \
+             call inside from_config — it replaces the values the constructor wrapped, not \
+             the other way around"
+        );
+    }
+
+    // ── Phase 50.4 (D-14, wave 2): vision/summarization tool handles follow the reload ──
+
+    /// Test 4: `from_config` must pass its OWN resolver handle into the
+    /// factory input's `resolver_handle` field — the line that makes Task 2's
+    /// wiring load-bearing rather than theoretical. Without it, every unit
+    /// test in Task 2 still passes while production silently takes the
+    /// derive-a-fresh-handle fallback and neither tool handle ever observes
+    /// a reload.
+    ///
+    /// Scoped to `from_config`'s own body for the same self-matching reason
+    /// as `from_config_gives_the_subagent_runner_the_runtime_handles` above.
+    #[test]
+    fn from_config_passes_its_resolver_handle_to_the_factory() {
+        let non_comment: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let fn_start = non_comment
+            .find("pub async fn from_config(")
+            .expect("from_config must exist in this module");
+        let fn_end = non_comment[fn_start..]
+            .find("\n    pub ")
+            .map(|offset| fn_start + offset)
+            .unwrap_or(non_comment.len());
+        let scope = &non_comment[fn_start..fn_end];
+
+        let field_needle = "resolver_handle".to_string() + ": Some(";
+        assert!(
+            scope.contains(&field_needle),
+            "from_config must set AppRuntimeFactoryInput.resolver_handle to Some(..) from its \
+             own resolver handle — a missing or None value degrades to the derive-a-fresh-handle \
+             fallback with no compile error and no test failure elsewhere"
+        );
+    }
+
+    // ── Phase 50.4 (D-14, wave 2), Task 3: cross-crate construction-time capture audit ──
+    //
+    // See `.planning/phases/50.4-web-ui-memory-edit-and-providers-models-list-load/
+    // 50.4-08-SUMMARY.md` for the full enumeration (method, per-class counts, every
+    // CAPTURED site named by file/symbol/severity/disposition). This test is the
+    // mechanical backstop for the two wiring lines Tasks 1 and 2 depend on — it turns
+    // the audit from a point-in-time SUMMARY paragraph into something a future refactor
+    // trips over.
+
+    /// Combines the two individual wiring assertions above into the single
+    /// audit-backstop test the plan names explicitly. Deliberately redundant
+    /// with `from_config_gives_the_subagent_runner_the_runtime_handles` and
+    /// `from_config_passes_its_resolver_handle_to_the_factory` — this one
+    /// exists as the audit's own named regression net, not a replacement for
+    /// either.
+    #[test]
+    fn from_config_passes_shared_handles_to_every_construction_time_consumer() {
+        let non_comment: String = SOURCE
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let fn_start = non_comment
+            .find("pub async fn from_config(")
+            .expect("from_config must exist in this module");
+        let fn_end = non_comment[fn_start..]
+            .find("\n    pub ")
+            .map(|offset| fn_start + offset)
+            .unwrap_or(non_comment.len());
+        let scope = &non_comment[fn_start..fn_end];
+
+        let builder_needle = "with_shared".to_string() + "_handles(";
+        let field_needle = "resolver_handle".to_string() + ": Some(";
+        assert!(
+            scope.contains(&builder_needle),
+            "from_config must chain the shared-handles builder onto the subagent runner \
+             constructor — dropping this line silently returns delegated child agents to \
+             serving a boot-time snapshot"
+        );
+        assert!(
+            scope.contains(&field_needle),
+            "from_config must set AppRuntimeFactoryInput.resolver_handle to Some(..) — \
+             dropping this line silently returns the vision/web-extract tool handles to the \
+             factory's derive-a-fresh-handle fallback"
+        );
+    }
+
     /// INV-36.2-CR-04: Phase 36.2 code-review CR-04 regression net.
     /// `run_turn` MUST chain the Plan 08 cache-break advisory builders so
     /// the model-swap and context-file-edit triggers can actually fire in
@@ -1741,9 +2624,9 @@ mod tests {
         ));
 
         let runtime = AgentRuntime {
-            config,
-            resolver,
-            client,
+            config_handle: std::sync::Arc::new(std::sync::RwLock::new(config)),
+            resolver_handle: std::sync::Arc::new(std::sync::RwLock::new(resolver)),
+            client_handle: std::sync::Arc::new(std::sync::RwLock::new(client)),
             bundle,
             budget,
             memory_manager: None,
@@ -1769,6 +2652,481 @@ mod tests {
             map.get("num_ctx"),
             Some(&serde_json::json!(4096u32)),
             "num_ctx=4096 set in provider config must appear in resolved extras"
+        );
+    }
+
+    // ── Phase 50.4 Plan 07 (D-15 Side B): compaction follows the reload ────
+    //
+    // D-14's reloadable handles make compaction follow the new model only
+    // TRANSITIVELY; the operator ruled that insufficient. These tests pin
+    // the window explicitly: the compaction trigger verdict must flip
+    // between the pre- and post-reload windows on ONE identical message
+    // vector, the captured ContextStats must carry the window it was given,
+    // the pressure signal must move with it, and run_turn must be pinned by
+    // source assertion to derive the window from the reloadable resolver
+    // accessor and feed the SAME binding to both consumers.
+    //
+    // No test here asserts on the resolved model id or provider name as its
+    // primary claim — D-15 states that shape reproduces the D-14 failure
+    // mode one level down.
+
+    /// Variant of `build_test_provider_config` that also sets an explicit
+    /// `config.model.context_length` override. Per `provider.rs`'s (pre-50.5)
+    /// D-06 precedence, `config_context_length` (sourced from this field) won
+    /// over model metadata and the default, so two configs differing ONLY
+    /// in this field resolve to genuinely different windows — the lever
+    /// these tests need without a populated model registry or network call.
+    /// This test exercises ONLY the global-pin tier; the per-model-config
+    /// tier is exercised separately by
+    /// `build_test_provider_config_with_per_model_window` below, and the
+    /// model-metadata tier is NOT covered by either helper.
+    #[cfg(test)]
+    fn build_test_provider_config_with_window(
+        provider_name: &str,
+        base_url: &str,
+        model: &str,
+        context_length: usize,
+    ) -> (Arc<Config>, Arc<ProviderResolver>) {
+        let mut config = Config::default();
+        let provider_cfg = ironhermes_core::config::ProviderConfig {
+            base_url: Some(base_url.to_string()),
+            default_model: Some(model.to_string()),
+            ..ironhermes_core::config::ProviderConfig::default()
+        };
+        config.providers.insert(provider_name.to_string(), provider_cfg);
+        config.model.provider = provider_name.to_string();
+        config.model.default = model.to_string();
+        config.model.context_length = Some(context_length);
+        let config = Arc::new(config);
+        let resolver = Arc::new(
+            ProviderResolver::build(&config)
+                .expect("ProviderResolver::build must succeed with a real base_url"),
+        );
+        (config, resolver)
+    }
+
+    /// Phase 50.5 Plan 03 (VALIDATION Wave 0 gap 2): variant of
+    /// `build_test_provider_config_with_window` that ALSO inserts a
+    /// per-(provider, model) `ProviderModelConfig.context_length` override —
+    /// a DELIBERATELY CONFLICTING pair with `config.model.context_length`
+    /// (the global pin). A resolver that still honoured the pre-50.5 D-06
+    /// order (pin wins) would return `global_pin` here and fail the
+    /// compaction-budget assertion in
+    /// `per_model_window_drives_the_compaction_budget`; only a resolver that
+    /// implements Phase 50.5 D-02's inverted tier order (per-model config
+    /// beats the pin) returns `per_model_window`. This helper still does not
+    /// exercise the model-metadata tier — only the per-model-config-vs-pin
+    /// conflict.
+    #[cfg(test)]
+    fn build_test_provider_config_with_per_model_window(
+        provider_name: &str,
+        base_url: &str,
+        model: &str,
+        per_model_window: usize,
+        global_pin: usize,
+    ) -> (Arc<Config>, Arc<ProviderResolver>) {
+        use ironhermes_core::config_extras::ProviderModelConfig;
+
+        let mut config = Config::default();
+        let mut models = std::collections::HashMap::new();
+        models.insert(
+            model.to_string(),
+            ProviderModelConfig {
+                context_length: Some(per_model_window),
+                ..Default::default()
+            },
+        );
+        let provider_cfg = ironhermes_core::config::ProviderConfig {
+            base_url: Some(base_url.to_string()),
+            default_model: Some(model.to_string()),
+            models,
+            ..ironhermes_core::config::ProviderConfig::default()
+        };
+        config.providers.insert(provider_name.to_string(), provider_cfg);
+        config.model.provider = provider_name.to_string();
+        config.model.default = model.to_string();
+        config.model.context_length = Some(global_pin);
+        let config = Arc::new(config);
+        let resolver = Arc::new(
+            ProviderResolver::build(&config)
+                .expect("ProviderResolver::build must succeed with a real base_url"),
+        );
+        (config, resolver)
+    }
+
+    /// Records every `ContextStats` `compress` receives and every
+    /// `context_length` `check_pressure` receives, rather than merely
+    /// counting calls (`agent_loop.rs`'s existing `RecordingEngine` counts
+    /// but discards the stats it's given — insufficient here, since Test 2
+    /// needs the captured `context_length` and `protect_last_tokens`).
+    #[cfg(test)]
+    struct WindowRecordingEngine {
+        engine_threshold: f32,
+        captured_compress_stats: Arc<std::sync::Mutex<Vec<crate::context_engine::ContextStats>>>,
+        captured_pressure_windows: Arc<std::sync::Mutex<Vec<usize>>>,
+    }
+
+    #[cfg(test)]
+    #[async_trait::async_trait]
+    impl crate::context_engine::ContextEngine for WindowRecordingEngine {
+        async fn compress(
+            &self,
+            _messages: &mut Vec<ChatMessage>,
+            stats: crate::context_engine::ContextStats,
+        ) -> Result<crate::context_engine::CompressionOutcome, crate::context_engine::ContextError>
+        {
+            self.captured_compress_stats.lock().unwrap().push(stats);
+            Ok(crate::context_engine::CompressionOutcome {
+                compressed: true,
+                ..Default::default()
+            })
+        }
+        fn threshold(&self) -> f32 {
+            self.engine_threshold
+        }
+        fn mode(&self) -> crate::context_engine::CompressionMode {
+            crate::context_engine::CompressionMode::Hard
+        }
+        async fn check_pressure(&self, stats: &crate::context_engine::ContextStats) -> bool {
+            self.captured_pressure_windows
+                .lock()
+                .unwrap()
+                .push(stats.context_length);
+            false
+        }
+    }
+
+    /// A single fixed message vector reused by both directions of Test 2 —
+    /// one big user message built from a repeating readable phrase, sized to
+    /// straddle `engine_threshold * window_a` and `engine_threshold *
+    /// window_b` for the small/large windows those tests use. Kept cheap
+    /// (tens of KB, not megabytes) since both windows are deliberately
+    /// small test values, not the 128k/1M example from the Task 3 checkpoint.
+    #[cfg(test)]
+    fn straddling_message_vector(char_len: usize) -> Vec<ChatMessage> {
+        let text: String = "the quick brown fox jumps over the lazy dog "
+            .chars()
+            .cycle()
+            .take(char_len)
+            .collect();
+        vec![ChatMessage {
+            role: ironhermes_core::Role::User,
+            content: Some(ironhermes_core::MessageContent::Text(text)),
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+            is_recall_context: false,
+        }]
+    }
+
+    /// Bare `AgentLoop` for the compaction-window tests — mirrors
+    /// `agent_wiring.rs`'s own `bare_agent()` test helper.
+    #[cfg(test)]
+    fn bare_agent_for_window_test() -> AgentLoop {
+        let client = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://localhost:0".to_string(),
+            "test".to_string(),
+            "test-model",
+        ));
+        AgentLoop::new(
+            client,
+            Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new())),
+            4,
+        )
+    }
+
+    /// Test 1: the exact expression `run_turn` evaluates to obtain its
+    /// `context_length` binding — NOT the model-id assertion D-15 rejects.
+    #[tokio::test]
+    async fn reload_moves_the_resolved_compaction_window() {
+        let (config_a, resolver_a) = build_test_provider_config_with_window(
+            "provider_a",
+            "https://provider-a.example.test",
+            "model-a",
+            2_000,
+        );
+        let client_a = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "https://provider-a.example.test",
+            "key-a",
+            "model-a",
+        ));
+        let runtime = build_runtime_for_reload_test(config_a, resolver_a, client_a);
+        assert_eq!(runtime.resolver().resolve_for_main().context_length(), 2_000);
+
+        let (config_b, resolver_b) = build_test_provider_config_with_window(
+            "provider_b",
+            "https://provider-b.example.test",
+            "model-b",
+            200_000,
+        );
+        runtime
+            .reload_config_and_resolver(config_b, resolver_b)
+            .await
+            .expect("reload must succeed — provider B has a real base_url");
+        assert_eq!(runtime.resolver().resolve_for_main().context_length(), 200_000);
+    }
+
+    /// Test 2: the differential. Drives the REAL compaction path
+    /// (`pre_chat_compress`, extracted for exactly this purpose) twice with
+    /// a fresh `AgentLoop` each time, once per window, on ONE identical
+    /// message vector. An implementation where the window does not follow
+    /// the reload produces the same verdict twice and fails this test.
+    #[tokio::test]
+    async fn post_reload_window_flips_the_compaction_trigger() {
+        let engine_threshold: f32 = 0.5;
+        let (_config_a, resolver_a) = build_test_provider_config_with_window(
+            "provider_a",
+            "https://provider-a.example.test",
+            "model-a",
+            2_000,
+        );
+        let (_config_b, resolver_b) = build_test_provider_config_with_window(
+            "provider_b",
+            "https://provider-b.example.test",
+            "model-b",
+            200_000,
+        );
+        let window_a = resolver_a.resolve_for_main().context_length();
+        let window_b = resolver_b.resolve_for_main().context_length();
+        assert_eq!(window_a, 2_000);
+        assert_eq!(window_b, 200_000);
+
+        // Fixed message vector, built ONCE and reused unmodified (bar cloning
+        // for each of the two pre_chat_compress calls, which may drain/mutate
+        // its argument) for both directions of the differential.
+        let messages = straddling_message_vector(40_000);
+        let estimated = crate::context_compressor::estimate_messages_tokens(&messages);
+
+        // Explicit precondition: the differential is meaningless if the two
+        // windows agree, so a sizing drift must fail loudly here rather than
+        // let the test below pass vacuously.
+        assert!(
+            (estimated as f32) > engine_threshold * window_a as f32,
+            "message vector ({estimated} est. tokens) must exceed the pre-reload trigger \
+             ({} tokens = {engine_threshold} * {window_a}) or Test 2 cannot distinguish a \
+             working fix from a broken one",
+            engine_threshold * window_a as f32,
+        );
+        assert!(
+            (estimated as f32) < engine_threshold * window_b as f32,
+            "message vector ({estimated} est. tokens) must stay below the post-reload trigger \
+             ({} tokens = {engine_threshold} * {window_b}) or Test 2 cannot distinguish a \
+             working fix from a broken one",
+            engine_threshold * window_b as f32,
+        );
+
+        // Pre-reload window: compression must fire.
+        let stats_a = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let engine_a = Arc::new(WindowRecordingEngine {
+            engine_threshold,
+            captured_compress_stats: stats_a.clone(),
+            captured_pressure_windows: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let mut agent_a = bare_agent_for_window_test().with_context_engine(engine_a, window_a);
+        let mut messages_a = messages.clone();
+        agent_a.pre_chat_compress(&mut messages_a).await;
+        let captured_a = stats_a.lock().unwrap().clone();
+        assert_eq!(
+            captured_a.len(),
+            1,
+            "compression must fire exactly once against the pre-reload (smaller) window for \
+             this message vector — an implementation that does not follow the reload would \
+             either fire twice (matching Test 2's post-reload run too) or zero times"
+        );
+        assert_eq!(
+            captured_a[0].context_length, window_a,
+            "the captured ContextStats.context_length must equal the window it was given"
+        );
+        assert_eq!(
+            captured_a[0].protect_last_tokens,
+            20_000usize.min(window_a / 4),
+            "protect_last_tokens must follow the same window (20_000.min(window / 4))"
+        );
+
+        // Post-reload window: compression must NOT fire for the SAME vector.
+        let stats_b = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let engine_b = Arc::new(WindowRecordingEngine {
+            engine_threshold,
+            captured_compress_stats: stats_b.clone(),
+            captured_pressure_windows: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+        let mut agent_b = bare_agent_for_window_test().with_context_engine(engine_b, window_b);
+        let mut messages_b = messages.clone();
+        agent_b.pre_chat_compress(&mut messages_b).await;
+        assert_eq!(
+            stats_b.lock().unwrap().len(),
+            0,
+            "compression must NOT fire against the post-reload (larger) window for the \
+             IDENTICAL message vector — a verdict of 1 here means the window did not move \
+             with the reload (D-15's central regression)"
+        );
+    }
+
+    /// Phase 50.5 Plan 03 (VALIDATION Wave 0 gap 2): proves the phase's
+    /// central claim — "the window follows the model" — at the compaction
+    /// READ (`agent_runtime.rs`'s per-turn
+    /// `resolver.resolve_for_main().context_length()` binding, unchanged by
+    /// this phase), not only at the `ResolvedEndpoint` unit level. The config
+    /// carries a per-model window (1,048,576) and a DELIBERATELY CONFLICTING
+    /// global pin (256,000); a resolver that still honoured the pre-50.5
+    /// order would drive the compaction budget from the pin and fail this
+    /// test.
+    #[tokio::test]
+    async fn per_model_window_drives_the_compaction_budget() {
+        let engine_threshold: f32 = 0.5;
+        let (_config, resolver) = build_test_provider_config_with_per_model_window(
+            "provider_c",
+            "https://provider-c.example.test",
+            "model-c",
+            1_048_576,
+            256_000,
+        );
+        let window = resolver.resolve_for_main().context_length();
+        assert_eq!(
+            window, 1_048_576,
+            "a per-model config entry (1,048,576) must win over a conflicting global pin \
+             (256,000) — Phase 50.5 D-02"
+        );
+
+        let messages = straddling_message_vector(40_000);
+        let captured_pressure_windows = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let engine = Arc::new(WindowRecordingEngine {
+            engine_threshold,
+            captured_compress_stats: Arc::new(std::sync::Mutex::new(Vec::new())),
+            captured_pressure_windows: captured_pressure_windows.clone(),
+        });
+        let mut agent = bare_agent_for_window_test().with_context_engine(engine, window);
+        let mut messages = messages.clone();
+        agent.pre_chat_compress(&mut messages).await;
+
+        // Literal expected value — NOT re-derived via `resolve_for_main()` a
+        // second time, which would let a broken resolver agree with itself.
+        assert_eq!(
+            captured_pressure_windows.lock().unwrap().first().copied(),
+            Some(1_048_576),
+            "the value reaching `check_pressure` (the compaction budget) must be the \
+             per-model window, not the conflicting global pin"
+        );
+    }
+
+    /// Test 3: the third D-15-named observable, the one that does not go
+    /// through `ContextStats` at all.
+    #[tokio::test]
+    async fn post_reload_window_moves_the_pressure_signal() {
+        let engine_threshold: f32 = 0.5;
+        let (_config_a, resolver_a) = build_test_provider_config_with_window(
+            "provider_a",
+            "https://provider-a.example.test",
+            "model-a",
+            2_000,
+        );
+        let (_config_b, resolver_b) = build_test_provider_config_with_window(
+            "provider_b",
+            "https://provider-b.example.test",
+            "model-b",
+            200_000,
+        );
+        let window_a = resolver_a.resolve_for_main().context_length();
+        let window_b = resolver_b.resolve_for_main().context_length();
+
+        // Same estimated_tokens value fed against both windows; PressureTracker
+        // is per-session, so two DISTINCT session ids give each call a fresh
+        // SessionState — isolating the comparison to the window math alone
+        // rather than any cross-call cooldown/above_threshold carryover.
+        let estimated_tokens = 900usize; // 900 / 2_000 = 0.45 -> 0.45/0.5 = 90% of threshold (crosses 85%)
+        let tracker = crate::pressure_warning::PressureTracker::new();
+        let fired_a = tracker
+            .check_and_maybe_emit(
+                "session-pre-reload",
+                engine_threshold,
+                estimated_tokens,
+                window_a,
+                "soft",
+                None,
+            )
+            .await;
+        let fired_b = tracker
+            .check_and_maybe_emit(
+                "session-post-reload",
+                engine_threshold,
+                estimated_tokens,
+                window_b,
+                "soft",
+                None,
+            )
+            .await;
+        assert_ne!(
+            fired_a, fired_b,
+            "PressureTracker::check_and_maybe_emit must return a DIFFERENT verdict for the \
+             pre- and post-reload windows given identical estimated_tokens ({estimated_tokens}) \
+             and engine_threshold ({engine_threshold}) — window_a={window_a} window_b={window_b}"
+        );
+        assert!(fired_a, "the pre-reload (smaller) window must cross the 85% pressure trigger");
+        assert!(!fired_b, "the post-reload (larger) window must NOT cross the 85% pressure trigger");
+    }
+
+    /// Test 4: source assertion pinning `run_turn`'s wiring so a future
+    /// refactor cannot re-freeze the compaction window at construction.
+    /// `SOURCE` (`include_str!("agent_runtime.rs")`) includes this very test
+    /// module, so every needle below is built by concatenating two
+    /// fragments — the same technique `iron_hermes_ui`'s `mod.rs` test
+    /// module uses for its negative assertion — so the needle cannot appear
+    /// contiguously in this file's own test source and therefore cannot
+    /// satisfy itself.
+    #[test]
+    fn run_turn_derives_the_compaction_window_from_the_reloadable_resolver() {
+        let binding_needle = [
+            "let context_length = resolver.resolve_for_ma",
+            "in().context_length();",
+        ]
+        .concat();
+        let binding_pos = SOURCE.find(&binding_needle).expect(
+            "run_turn's context_length binding must be assigned from \
+             resolver.resolve_for_main() — where `resolver` is the reloadable accessor \
+             local (`let resolver = self.resolver();`), not a bare self.resolver field read",
+        );
+
+        let with_compression_needle = [
+            ".with_compression(context_len",
+            "gth, config.agent.context_compression)",
+        ]
+        .concat();
+        let with_compression_pos = SOURCE.find(&with_compression_needle).expect(
+            ".with_compression( must be called with the context_length binding as its \
+             first argument",
+        );
+
+        let attach_engine_needle = [
+            "req.pressure_tracker,\n            context_len",
+            "gth,\n            self.memory_manager.clone(),",
+        ]
+        .concat();
+        let attach_engine_pos = SOURCE.find(&attach_engine_needle).expect(
+            "attach_context_engine( must be called with the SAME context_length binding, \
+             positioned as the argument right before memory_manager",
+        );
+
+        assert!(
+            binding_pos < with_compression_pos,
+            "the context_length binding must be assigned before .with_compression( reads it"
+        );
+        assert!(
+            binding_pos < attach_engine_pos,
+            "the context_length binding must be assigned before attach_context_engine( reads it"
+        );
+
+        // Confirm the single-binding premise itself: exactly ONE occurrence
+        // of the full binding pattern must exist in this file. Reuses
+        // `binding_needle` itself (rather than a shorter marker) for the
+        // count — the shorter prefix "let context_length =" appears
+        // literally inside `binding_needle`'s own first fragment above, so
+        // counting on that prefix would self-match this very test.
+        let occurrences = SOURCE.matches(&binding_needle).count();
+        assert_eq!(
+            occurrences, 1,
+            "exactly one occurrence of the context_length binding pattern (see binding_needle \
+             above) must exist in this file; found {occurrences} — Test 4's premise is that \
+             ONE binding feeds both consumers"
         );
     }
 }

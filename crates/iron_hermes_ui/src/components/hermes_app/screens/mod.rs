@@ -19,6 +19,11 @@
 
 pub mod agents;
 pub mod agents_diff;
+// Phase 50.4 Plan 01 (D-08/D-11/D-14): shared "APPLY CONFIG NOW" banner —
+// supersedes the old per-screen "Restart required" banner. Providers is the
+// first mount point; Models and the profile drawer get their own mounts in
+// later plans of this phase.
+pub mod apply_config_banner;
 // Phase 50.1 Plan 01 (D-08/D-09): bot roster section mounted by
 // `ScreenAgents`, above the pre-existing subagent-turn grid.
 pub mod bot_roster;
@@ -34,6 +39,10 @@ pub mod artifacts;
 pub mod chat;
 pub mod gateway;
 pub mod memory;
+// Phase 50.4 Plan 03 (D-06/D-07): the capped, open-on-click model popup —
+// `ModelPickerField` — mounted by `models.rs` here and by Plan 05's
+// Providers/profile-drawer mounts.
+pub mod model_picker;
 pub mod models;
 pub mod office;
 pub mod providers;

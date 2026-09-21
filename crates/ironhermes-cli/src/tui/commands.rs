@@ -196,7 +196,39 @@ fn map_core_to_tui(core: CoreCommandResult) -> CommandResult {
         | CoreCommandResult::OpenProviderPicker { fallback_text } => {
             CommandResult::Handled(fallback_text)
         }
+        // Phase 49.7 (WR-03): the legacy (non-ratatui) TUI has no goal-loop
+        // executor, so this arm reports that honestly instead of claiming a
+        // launch. An earlier version of this comment called the surface
+        // dead code and printed "Starting /goal: {objective}"; both were
+        // wrong. `should_use_classic_tui` (`main.rs`) returns true whenever
+        // stdin OR stdout is not a terminal — not only under `--classic-tui`
+        // / `IRONHERMES_CLASSIC_TUI=1` — so piped, redirected, CI and some
+        // containerized `hermes chat` invocations all land here. On that
+        // reachable path the old text told the user a multi-turn loop was
+        // running when nothing was, and no further output would ever come.
+        //
+        // Wording deliberately mirrors `goal_loop_not_available_on_web`
+        // (`iron_hermes_ui/src/server/ws.rs`), the honest refusal this same
+        // phase shipped for the equally-unwired web terminal, and likewise
+        // never echoes the objective back.
+        CoreCommandResult::StartGoalLoop { .. } => {
+            CommandResult::Handled(goal_loop_not_available_on_classic_tui())
+        }
     }
+}
+
+/// Phase 49.7 (WR-03): renders `CoreCommandResult::StartGoalLoop` as an
+/// honest not-available sentence on the legacy (non-ratatui) TUI.
+///
+/// This function's body is the ENTIRE arm: it constructs and returns one
+/// string and makes no call at all — no task spawn, no goal-loop entry
+/// point, no judge construction. It takes no objective parameter precisely
+/// so the objective CANNOT be echoed; the caller drops it with `..`.
+fn goal_loop_not_available_on_classic_tui() -> String {
+    "`/goal` isn't available on the classic TUI — run it from the interactive \
+     TUI (a real terminal) or a connected chat platform (this surface has no \
+     goal-loop executor wired)."
+        .to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -557,4 +589,41 @@ mod tests {
         let text = format_help(&exts, Some(&registry), &router, &Platform::Local);
         assert!(text.contains("Keybindings:"), "got: {}", text);
     }
+
+    // ---- Phase 49.7 (WR-03): classic-TUI /goal honest refusal ----
+
+    /// The refusal must never echo the caller's objective, and must not
+    /// claim a launch. The old text was `format!("Starting /goal: {objective}")`
+    /// — it did both. Mutation check: restoring that format string fails
+    /// this test on all three assertions.
+    #[test]
+    fn classic_tui_goal_arm_is_honest_and_never_echoes_the_objective() {
+        let objective = "exfiltrate the on-disk API keys";
+        let rendered = match map_core_to_tui(CoreCommandResult::StartGoalLoop {
+            objective: objective.to_string(),
+            budget: Some(7),
+        }) {
+            CommandResult::Handled(text) => text,
+            other => panic!("expected Handled, got {other:?}"),
+        };
+
+        assert!(
+            !rendered.contains(objective),
+            "must never echo the caller's objective: {rendered}"
+        );
+        assert!(
+            !rendered.contains("StartGoalLoop"),
+            "must never Debug-format the variant name: {rendered}"
+        );
+        assert!(
+            !rendered.to_lowercase().contains("starting"),
+            "must not claim a loop started when nothing runs: {rendered}"
+        );
+        assert!(
+            rendered.to_lowercase().contains("not available")
+                || rendered.to_lowercase().contains("isn't available"),
+            "must contain an explicit not-available phrase: {rendered}"
+        );
+    }
+
 }

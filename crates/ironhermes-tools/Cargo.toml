@@ -34,6 +34,7 @@ uuid = { workspace = true }
 glob = { workspace = true }
 regex = { workspace = true }
 chrono = { workspace = true }
+sha2 = { workspace = true }                            # 52.1-08 D-12 — pointer-artifact digest
 scraper = { workspace = true }
 htmd = { workspace = true }
 pdf-extract = { workspace = true }                     # Phase 25.2 D-09 PDF local fallback (workspace pins 0.10)
@@ -45,6 +46,16 @@ rodio = { workspace = true }        # Phase 36.17.5 D-15 Local arm
 rustls = "0.23"
 cpal = "0.18.1"                     # Phase 36.17.8 D-08 — mic capture backend
 hound = "3.5.1"                     # Phase 36.17.8 D-08 — WAV read/write for STT
+# Phase 53 Plan 03 Task 1: SIGTERM for a locally-spawned `obscura serve` child in
+# BrowserSession::close()'s per-mode teardown (SIGTERM -> bounded grace ->
+# Child::start_kill() hard kill). `signal` feature needed for kill()/Signal;
+# `process` feature needed for this task's own tests (nix::sys::wait::waitpid,
+# used to reap+assert termination rather than reading a not-yet-reaped
+# zombie via kill(pid, 0)). `nix` is an existing workspace dependency
+# (Cargo.toml:149, pulled in transitively via ironhermes-exec today) — not a
+# new third-party package. Mirrors crates/ironhermes-kanban/Cargo.toml:31,
+# plus the `process` feature this crate's own tests additionally need.
+nix = { workspace = true, features = ["signal", "process"] }
 [dev-dependencies]
 # Phase 21.7 Plan 08 Task 8-03: tracing-test with `no-env-filter` so
 # `#[traced_test]` captures logs from any target (not just the test

@@ -1,0 +1,36 @@
+{
+  "room": {
+    "id": "standup",
+    "name": "standup",
+    "members": ["alpha", "beta"],
+    "group": null,
+    "needs_you": false,
+    "preview": "kickoff",
+    "preview_at_ms": 1757000000000,
+    "created_at_ms": 1756900000000,
+    "updated_at_ms": 1757000000000
+  },
+  "messages": [
+    {
+      "from": "Operator",
+      "text": "morning, what's the status?",
+      "at_ms": 1756900010000,
+      "round": 1,
+      "status": "Replied"
+    },
+    {
+      "from": { "Member": "alpha" },
+      "text": "on track, no blockers",
+      "at_ms": 1756900020000,
+      "round": 1,
+      "status": "Passed"
+    },
+    {
+      "from": { "Member": "beta" },
+      "text": "",
+      "at_ms": 1756900030000,
+      "round": 1,
+      "status": { "Failed": { "reason": "timeout after 180s" } }
+    }
+  ]
+}

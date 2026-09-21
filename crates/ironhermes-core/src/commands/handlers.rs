@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::commands::context::{BlueprintSaveRequest, CommandContext, CronJobSpec};
+use crate::commands::context::{BlueprintSaveRequest, CommandContext, CronJobSpec, RawJobSpec};
 use crate::commands::typo::suggest_typo;
 use crate::commands::{CommandDef, CommandResult, CommandRouter};
 
@@ -71,6 +71,8 @@ pub fn dispatch(
         "cron" => cmd_cron(args, ctx),
         "blueprint" => cmd_blueprint(args, ctx), // Phase 49.5 Plan 05 — /blueprint slash command dispatch.
         "kanban" => cmd_kanban(args, ctx), // Phase 36.3.7.0 Plan 02 (BUG-36.3.7-02) — /kanban slash command dispatch.
+        "loop" => cmd_loop(args, ctx), // Phase 49.7 Plan 01 (D-01/D-06/D-07) — /loop slash command dispatch.
+        "goal" => cmd_goal(args, ctx), // Phase 49.7 Plan 05 (D-02/D-06/D-08) — /goal slash command dispatch.
 
         // -------------------------------------------------------------------
         // Toolset slash command (Phase 25 Plan 04 — D-06 session-only)
@@ -1186,6 +1188,400 @@ fn cmd_cron(args: &[&str], ctx: &CommandContext) -> CommandResult {
 }
 
 // =============================================================================
+// /loop slash command — Phase 49.7 Plan 01 (D-01/D-06/D-07)
+// =============================================================================
+//
+// `/loop <cadence> <prompt>` creates a RECURRING cron job through the same
+// `CronJobWriter` seam `/blueprint run` uses, but bypassing the blueprint
+// catalog entirely (`create_raw_job` instead of `create_job_from_blueprint`).
+// `list`/`stop` are reserved literal first tokens (D-06) — checked
+// unconditionally before any cadence parse — and return a placeholder error
+// until Plan 04 wires them.
+
+/// The three accepted cadence forms, named literally so a rejected cadence
+/// tells the user exactly what IS accepted without opening the source.
+const LOOP_USAGE_ERROR: &str = "/loop <every 30m | 30m | cron expr> <prompt> [--budget N] \
+     [--tools a,b]: cadence not recognised. Accepted forms: \"every 30m\", \"30m\", \
+     \"0 9 * * 1\". Use /cron for one-shot scheduling.";
+
+/// True when a `create_raw_job` error string originates from
+/// `parse_schedule` itself (ironhermes-cron's real cadence validator) rather
+/// than from the injection scan, the one-shot-schedule refusal, or a store
+/// I/O failure. `ironhermes-core` cannot depend on `ironhermes-cron` (the
+/// same circular-dep constraint `CronJobWriter`'s own doc comment names), so
+/// `cmd_loop`'s cadence-candidate retry classifies the writer's returned
+/// error string instead of calling the real parser a second time — the
+/// three literal context prefixes below are `ironhermes-cron/src/parser.rs`
+/// rule 1, rule 2, and rule 4's `anyhow::Context` messages, respectively.
+fn is_schedule_parse_error(message: &str) -> bool {
+    message.contains("invalid interval in")
+        || message.contains("invalid cron expression:")
+        || message.contains("unrecognised schedule:")
+}
+
+/// Three-branch cadence extraction, tried in this order so every recurring
+/// form `parse_schedule` accepts is covered, not just the `every`
+/// shorthand (D-06 / cross-AI review finding). Each candidate pairs a
+/// cadence string with the remaining prompt tokens.
+///
+/// 1. Literal `every` — `args[0..2]` joined is the cadence verbatim
+///    (`parse_schedule` rule 1).
+/// 2. Raw cron expression — the longest leading run (capped at 6) of tokens
+///    whose every character is a digit or cron punctuation
+///    (`* - , / ?`); a 6-token run is tried before its 5-token prefix so a
+///    6-field cron expression is preferred over splitting it early.
+/// 3. Bare duration — `format!("every {}", args[0])`, always the final
+///    fallback candidate. This normalisation is why `/loop 30m ...` is
+///    recurring rather than falling into `parse_schedule` rule 4's
+///    bare-duration-to-`Once` branch.
+///
+/// A candidate is skipped (never tried) when its remaining prompt tokens
+/// would be empty — a job needs a prompt.
+fn loop_cadence_candidates<'a>(args: &'a [&'a str]) -> Vec<(String, &'a [&'a str])> {
+    let mut candidates = Vec::new();
+    if args.is_empty() {
+        return candidates;
+    }
+
+    // Branch 1: literal "every".
+    if args[0] == "every"
+        && let Some(duration) = args.get(1)
+    {
+        candidates.push((format!("every {}", duration), &args[2..]));
+    }
+
+    // Branch 2: raw cron expression.
+    fn is_cron_token(tok: &str) -> bool {
+        !tok.is_empty()
+            && tok
+                .chars()
+                .all(|c| c.is_ascii_digit() || matches!(c, '*' | '-' | ',' | '/' | '?'))
+    }
+    let mut cron_run_len = 0usize;
+    for tok in args.iter().take(6) {
+        if is_cron_token(tok) {
+            cron_run_len += 1;
+        } else {
+            break;
+        }
+    }
+    if cron_run_len == 6 && args.len() > 6 {
+        candidates.push((args[..6].join(" "), &args[6..]));
+    }
+    if cron_run_len >= 5 && args.len() > 5 {
+        candidates.push((args[..5].join(" "), &args[5..]));
+    }
+
+    // Branch 3: bare duration — always the final fallback.
+    candidates.push((format!("every {}", args[0]), &args[1..]));
+
+    candidates
+}
+
+/// The two flags `/loop` recognises. Both take exactly one value,
+/// consumed positionally after the flag token. **D-01a: this parser
+/// recognises no profile-selecting flag of any kind, now or ever** — there
+/// is no code path here that reads a profile name from arguments, from the
+/// environment, or from config.
+#[derive(Debug, Default)]
+struct LoopFlags {
+    budget: Option<u32>,
+    tools: Option<Vec<String>>,
+}
+
+/// Scan `args` for the two recognised `/loop` flags (`--budget <u32>`,
+/// `--tools <a,b,...>`), removing each flag token and its value from the
+/// returned prompt tokens. Every other double-hyphen token is a usage error
+/// naming the two that are accepted — never a silently-ignored token. A
+/// flag with no following value, a non-numeric or zero `--budget`, are all
+/// usage errors.
+fn parse_loop_flags<'a>(args: &'a [&'a str]) -> Result<(LoopFlags, Vec<&'a str>), String> {
+    let mut flags = LoopFlags::default();
+    let mut rest = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        match args[i] {
+            "--budget" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| "/loop --budget requires a value".to_string())?;
+                let n: u32 = value
+                    .parse()
+                    .map_err(|_| format!("/loop --budget {value:?}: must be a positive whole number"))?;
+                if n == 0 {
+                    return Err("/loop --budget must be greater than zero".to_string());
+                }
+                flags.budget = Some(n);
+                i += 2;
+            }
+            "--tools" => {
+                let value = args.get(i + 1).ok_or_else(|| {
+                    "/loop --tools requires a comma-separated value".to_string()
+                })?;
+                flags.tools = Some(value.split(',').map(str::to_string).collect());
+                i += 2;
+            }
+            other if other.starts_with("--") => {
+                return Err(format!(
+                    "/loop: unrecognised flag {other:?} — accepted flags are --budget and --tools"
+                ));
+            }
+            other => {
+                rest.push(other);
+                i += 1;
+            }
+        }
+    }
+    Ok((flags, rest))
+}
+
+/// `/loop <cadence> <prompt> [--budget N] [--tools a,b]` — see module doc
+/// above. Dispatches the `list`/`stop` verbs (Plan 04) and otherwise creates
+/// a job.
+///
+/// SECURITY (Phase 49.7, WR-02): creation on any non-`Local` platform
+/// requires `security.remote_loop_enabled` (default `false`). See the gate in
+/// the body for why this is its own flag rather than a reuse of
+/// `remote_blueprint_run_enabled`.
+/// Phase 49.7 Plan 04 (D-10): the filter is `JobOrigin.chat_id`, so a cron
+/// job created in the web UI that delivers to the same chat also appears
+/// in `/loop list` and is stoppable from it. This is a consequence of
+/// refusing to add a discriminator field to `CronJob` (D-10, consistent
+/// with 49.6 D-01) and is accepted, not an oversight.
+///
+/// Residual, inherited and out of scope: a job written to a non-homed
+/// profile's store via the web UI's `schedules_api.rs:732-740` path is
+/// never ticked, because `run_tick_loop` only ever opens
+/// `get_hermes_home()/cron`. `/loop` cannot produce such a job — D-01
+/// routes it through `JobStore::new()` by construction and D-01a forbids a
+/// profile argument — so this is context for a future reader, not a
+/// defect this command introduces.
+fn cmd_loop(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    // Reserved literal first tokens — checked FIRST, unconditionally,
+    // before any cadence parse (D-06). Phase 49.7 Plan 04 (D-09/D-10):
+    // both verbs are chat-scoped via ctx.chat_id -> the CronJobWriter
+    // seam's list_jobs_for_chat/stop_job_for_chat; the access check itself
+    // lives in that impl, not here.
+    match args.first().copied() {
+        Some("list") => return cmd_loop_list(ctx),
+        Some("stop") => return cmd_loop_stop(args, ctx),
+        _ => {}
+    }
+
+    // Phase 49.7 (WR-02): the remote-origin authorization gate for job
+    // CREATION. Placed here — after the reserved-verb dispatch, before every
+    // other statement on the creation path — so it is the single point that
+    // admits or refuses a gateway-originated `/loop`, with no earlier return
+    // that could skip it. `Platform::Local` (CLI/TUI) proceeds ungated.
+    // A `Config::load()` failure is treated as refusal, never as permission.
+    //
+    // The flag is `remote_loop_enabled`, NOT `remote_blueprint_run_enabled`:
+    // `/blueprint run` fills named slots in an operator-installed template,
+    // while `/loop` takes a free-text prompt with a caller-chosen toolset and
+    // budget. Authorizing the narrow capability must not silently authorize
+    // the wider one. `list`/`stop` above stay ungated — they are chat-scoped
+    // by `JobOrigin.chat_id` (D-10) and grant nothing this gate withholds.
+    if ctx.platform != crate::types::Platform::Local {
+        let allowed = crate::Config::load()
+            .map(|c| c.security.remote_loop_enabled)
+            .unwrap_or(false);
+        if !allowed {
+            return CommandResult::Error(format!(
+                "/loop is disabled on the {:?} platform — an operator must set \
+                 security.remote_loop_enabled: true in config.yaml to allow remote \
+                 chat to create recurring jobs (CLI/TUI are unaffected by this flag, \
+                 and /loop list and /loop stop remain available).",
+                ctx.platform
+            ));
+        }
+    }
+
+    if args.is_empty() {
+        return CommandResult::Error(LOOP_USAGE_ERROR.to_string());
+    }
+
+    let (flags, prompt_and_cadence) = match parse_loop_flags(args) {
+        Ok(v) => v,
+        Err(e) => return CommandResult::Error(e),
+    };
+    if prompt_and_cadence.is_empty() {
+        return CommandResult::Error(LOOP_USAGE_ERROR.to_string());
+    }
+
+    let writer = match &ctx.cron_job_writer {
+        Some(w) => w.clone(),
+        None => {
+            return CommandResult::Output("/loop: cron job writer not configured.".to_string());
+        }
+    };
+
+    let origin_platform = Some(ctx.platform.to_string());
+    let origin_chat_id = ctx.chat_id.clone();
+    let origin_thread_id = ctx.thread_id.clone();
+
+    for (cadence, prompt_tokens) in loop_cadence_candidates(&prompt_and_cadence) {
+        if prompt_tokens.is_empty() {
+            continue;
+        }
+        let prompt = prompt_tokens.join(" ");
+        let spec = RawJobSpec {
+            prompt,
+            cadence: cadence.clone(),
+            budget: flags.budget,
+            tools: flags.tools.clone(),
+            origin_platform: origin_platform.clone(),
+            origin_chat_id: origin_chat_id.clone(),
+            origin_thread_id: origin_thread_id.clone(),
+        };
+        match writer.create_raw_job(spec) {
+            Ok(job_id) => {
+                return CommandResult::Output(format!(
+                    "Created loop {} — schedule: {}.",
+                    job_id, cadence
+                ));
+            }
+            Err(e) if is_schedule_parse_error(&e) => continue,
+            Err(e) => return CommandResult::Error(e),
+        }
+    }
+
+    // Every candidate above failed as a cadence: only now offer a typo
+    // suggestion against the two reserved verbs (Task 2, D-06). Order
+    // matters — the exact literal check ran first, cadence parsing has
+    // now also failed, so a legitimate cadence that happens to be
+    // near-miss distance from "list"/"stop" is never hijacked.
+    if let Some(first) = prompt_and_cadence.first()
+        && let Some(suffix) = suggest_typo(first, &["list", "stop"])
+    {
+        return CommandResult::Error(format!("{} {}", LOOP_USAGE_ERROR, suffix));
+    }
+
+    CommandResult::Error(LOOP_USAGE_ERROR.to_string())
+}
+
+/// `/loop list` — Phase 49.7 Plan 04 (D-10). Chat-scoped: refuses when
+/// `ctx.chat_id` is `None` rather than falling back to an unfiltered
+/// listing, because `list_jobs_for_chat` has nothing to filter on without
+/// it (T-49.7-04-03).
+fn cmd_loop_list(ctx: &CommandContext) -> CommandResult {
+    let chat_id = match &ctx.chat_id {
+        Some(id) => id.clone(),
+        None => {
+            return CommandResult::Error(
+                "/loop list needs a chat origin — run it from a chat, not the CLI.".to_string(),
+            );
+        }
+    };
+    let writer = match &ctx.cron_job_writer {
+        Some(w) => w.clone(),
+        None => {
+            return CommandResult::Output("/loop: cron job writer not configured.".to_string());
+        }
+    };
+    match writer.list_jobs_for_chat(&chat_id) {
+        Ok(text) => CommandResult::Output(text),
+        Err(e) => CommandResult::Error(e),
+    }
+}
+
+/// `/loop stop <id>` — Phase 49.7 Plan 04 (D-09/D-10). Forwards the seam's
+/// `Err` string verbatim — do NOT re-word it, because Task 1 deliberately
+/// made the unknown-id and wrong-chat messages identical (T-49.7-04-02)
+/// and a handler-side rewrite could reintroduce the distinction.
+fn cmd_loop_stop(args: &[&str], ctx: &CommandContext) -> CommandResult {
+    let id_or_name = match args.get(1) {
+        Some(s) => *s,
+        None => return CommandResult::Error("/loop stop <id>: missing id".to_string()),
+    };
+    let chat_id = match &ctx.chat_id {
+        Some(id) => id.clone(),
+        None => {
+            return CommandResult::Error(
+                "/loop stop needs a chat origin — run it from a chat, not the CLI.".to_string(),
+            );
+        }
+    };
+    let writer = match &ctx.cron_job_writer {
+        Some(w) => w.clone(),
+        None => {
+            return CommandResult::Output("/loop: cron job writer not configured.".to_string());
+        }
+    };
+    match writer.stop_job_for_chat(&chat_id, id_or_name) {
+        Ok(text) => CommandResult::Output(text),
+        Err(e) => CommandResult::Error(e),
+    }
+}
+
+// =============================================================================
+// /goal slash command — Phase 49.7 Plan 05 (D-02/D-06/D-08)
+// =============================================================================
+
+const GOAL_USAGE_ERROR: &str = "/goal <text> [--budget N]";
+
+/// Parses the `--budget N` flag out of `/goal`'s args, mirroring
+/// `parse_loop_flags`'s rules exactly: one value, positional anywhere in
+/// the token stream, removed from the returned text; a missing value,
+/// non-numeric value, or zero is a usage error. Returns `(budget,
+/// remaining objective tokens)`.
+fn parse_goal_flags<'a>(args: &'a [&'a str]) -> Result<(Option<u32>, Vec<&'a str>), String> {
+    let mut budget = None;
+    let mut rest = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        match args[i] {
+            "--budget" => {
+                let value = args
+                    .get(i + 1)
+                    .ok_or_else(|| "/goal --budget requires a value".to_string())?;
+                let n: u32 = value.parse().map_err(|_| {
+                    format!("/goal --budget {value:?}: must be a positive whole number")
+                })?;
+                if n == 0 {
+                    return Err("/goal --budget must be greater than zero".to_string());
+                }
+                budget = Some(n);
+                i += 2;
+            }
+            other if other.starts_with("--") => {
+                return Err(format!(
+                    "/goal: unrecognised flag {other:?} — the only accepted flag is --budget"
+                ));
+            }
+            other => {
+                rest.push(other);
+                i += 1;
+            }
+        }
+    }
+    Ok((budget, rest))
+}
+
+/// `/goal <text> [--budget N]` — Phase 49.7 Plan 05 (D-02/D-06/D-08).
+///
+/// Constructs `CommandResult::StartGoalLoop` and returns immediately.
+/// `cmd_goal` performs no I/O and no async work — see that variant's doc
+/// comment (`commands/mod.rs`) for why the actual loop must run OUTSIDE
+/// `dispatch()`; every surface that receives this variant builds its own
+/// executor (Plan 05 Task 3).
+fn cmd_goal(args: &[&str], _ctx: &CommandContext) -> CommandResult {
+    if args.is_empty() {
+        return CommandResult::Error(GOAL_USAGE_ERROR.to_string());
+    }
+    let (budget, objective_tokens) = match parse_goal_flags(args) {
+        Ok(v) => v,
+        Err(e) => return CommandResult::Error(e),
+    };
+    if objective_tokens.is_empty() {
+        return CommandResult::Error(GOAL_USAGE_ERROR.to_string());
+    }
+    CommandResult::StartGoalLoop {
+        objective: objective_tokens.join(" "),
+        budget,
+    }
+}
+
+// =============================================================================
 // /blueprint slash command — Phase 49.5 Plan 05
 // =============================================================================
 //
@@ -1911,7 +2307,10 @@ fn cmd_models(args: &[&str], _ctx: &CommandContext) -> CommandResult {
 /// the Dioxus web server, which polls its websocket handler inside a
 /// per-connection `LocalSet` where `block_in_place` panics.
 fn cmd_models_refresh() -> CommandResult {
-    let result = crate::async_bridge::block_on_sync(crate::models_cache::fetch_all());
+    // A refresh must not become unrunnable because the config failed to
+    // parse — fall back to defaults (no configured providers to probe).
+    let config = crate::config::Config::load().unwrap_or_default();
+    let result = crate::async_bridge::block_on_sync(crate::models_cache::fetch_all(&config));
     let (entries, fetch_result) = result;
 
     let mut lines = Vec::new();
@@ -1934,8 +2333,45 @@ fn cmd_models_refresh() -> CommandResult {
         }
     }
 
-    // Save to disk
-    let cache = crate::models_cache::ModelsCache { entries };
+    // Phase 50.5 (D-08): one line per probed provider — model count or
+    // error — plus a drift line per configured id absent from that
+    // provider's served list (D-11). Never turns the command into an Error.
+    for probe in &fetch_result.provider_probes {
+        match (probe.model_count, &probe.error) {
+            (Some(n), _) => lines.push(format!("  {}: {} models received", probe.provider, n)),
+            (None, Some(e)) => lines.push(format!("  {}: failed - {}", probe.provider, e)),
+            (None, None) => {}
+        }
+        for drifted in &probe.drifted_ids {
+            lines.push(format!(
+                "  {}: config names \"{}\" but the endpoint serves {} other ids",
+                probe.provider,
+                drifted,
+                probe.model_count.unwrap_or(0)
+            ));
+        }
+    }
+
+    // Phase 50.5 (D-08's named trap): every source failing AND nothing fresh
+    // to merge skips the save entirely — this makes "a refresh never
+    // shrinks the cache" structural rather than incidental.
+    let every_source_failed = fetch_result.models_dev_count.is_none()
+        && fetch_result.openrouter_count.is_none()
+        && fetch_result
+            .provider_probes
+            .iter()
+            .all(|p| p.model_count.is_none());
+    if every_source_failed && entries.is_empty() {
+        lines.push(
+            "Fetch failed: all sources returned errors. Cache left unchanged.".to_string(),
+        );
+        return CommandResult::Output(lines.join("\n"));
+    }
+
+    // Load-merge-save (D-08's named trap): a whole-file overwrite here would
+    // erase a harvest another surface (e.g. the web UI) already wrote.
+    let mut cache = crate::models_cache::ModelsCache::load();
+    cache.merge_entries(entries);
     match cache.save() {
         Ok(()) => lines.push(format!(
             "Fetch complete. {} entries saved to cache.",
@@ -1966,7 +2402,7 @@ fn cmd_models_info_with_cache(
     cache: crate::models_cache::ModelsCache,
 ) -> CommandResult {
     let mut registry = crate::model_metadata::ModelRegistry::new();
-    registry.merge_cache(cache.into_metadata_map());
+    registry.merge_partial_cache(cache.into_partial_metadata_map());
 
     match registry.lookup(model) {
         Some(metadata) => {
@@ -3752,6 +4188,21 @@ mod cmd_blueprint_tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok("recorded-job-id".to_string())
         }
+
+        fn create_raw_job(&self, _spec: RawJobSpec) -> Result<String, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok("recorded-raw-job-id".to_string())
+        }
+
+        fn list_jobs_for_chat(&self, _chat_id: &str) -> Result<String, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok("recorded-listing".to_string())
+        }
+
+        fn stop_job_for_chat(&self, _chat_id: &str, _id_or_name: &str) -> Result<String, String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok("recorded-stop".to_string())
+        }
     }
 
     fn local_ctx() -> CommandContext {
@@ -4042,5 +4493,583 @@ mod cmd_blueprint_tests {
             panic!("expected Error, got {result:?}");
         };
         assert!(text.contains("save"), "error must suggest 'save': {text}");
+    }
+}
+
+// =============================================================================
+// Phase 49.7 Plan 04 Task 2: /loop list and /loop stop handler tests
+// =============================================================================
+
+#[cfg(test)]
+mod cmd_loop_tests {
+    use super::*;
+    use crate::commands::context::CronJobWriter;
+    use crate::commands::registry::build_registry;
+    use std::sync::{Arc, Mutex};
+
+    /// Process-wide lock for the WR-02 gate tests below, which mutate
+    /// `IRONHERMES_HOME`. Module-local, mirroring the sibling test module's
+    /// `env_lock` pattern.
+    fn loop_env_lock() -> &'static std::sync::Mutex<()> {
+        use std::sync::OnceLock;
+        static LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// Runs `body` with `IRONHERMES_HOME` pointed at a fresh temp dir whose
+    /// `config.yaml` is exactly `yaml` (or absent when `yaml` is `None`).
+    fn with_home_config<T>(yaml: Option<&str>, body: impl FnOnce() -> T) -> T {
+        let _guard = loop_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        if let Some(y) = yaml {
+            std::fs::write(tmp.path().join("config.yaml"), y).expect("write config.yaml");
+        }
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", tmp.path());
+        }
+        let out = body();
+        unsafe {
+            std::env::remove_var("IRONHERMES_HOME");
+        }
+        out
+    }
+
+    /// Recording fake `CronJobWriter` that logs every call as
+    /// `(method, args)` — mirrors `handlers_cron.rs`'s `FakeCronJobReader`
+    /// shape. Asserting CALL ARGUMENTS (not just call counts) is the point:
+    /// passing the wrong chat id must fail the test even though a call
+    /// happened.
+    struct RecordingChatWriter {
+        calls: Mutex<Vec<(String, String)>>,
+    }
+
+    impl RecordingChatWriter {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn log(&self) -> Vec<(String, String)> {
+            self.calls.lock().expect("mutex poisoned").clone()
+        }
+    }
+
+    impl CronJobWriter for RecordingChatWriter {
+        fn create_job_from_blueprint(&self, spec: CronJobSpec) -> Result<String, String> {
+            self.calls
+                .lock()
+                .expect("mutex poisoned")
+                .push(("create_from_blueprint".to_string(), spec.blueprint_key));
+            Ok("recorded-job-id".to_string())
+        }
+
+        fn create_raw_job(&self, spec: RawJobSpec) -> Result<String, String> {
+            self.calls
+                .lock()
+                .expect("mutex poisoned")
+                .push(("create_raw".to_string(), spec.cadence.clone()));
+            Ok("recorded-raw-job-id".to_string())
+        }
+
+        fn list_jobs_for_chat(&self, chat_id: &str) -> Result<String, String> {
+            self.calls
+                .lock()
+                .expect("mutex poisoned")
+                .push(("list".to_string(), chat_id.to_string()));
+            Ok("recorded-listing".to_string())
+        }
+
+        fn stop_job_for_chat(&self, chat_id: &str, id_or_name: &str) -> Result<String, String> {
+            self.calls
+                .lock()
+                .expect("mutex poisoned")
+                .push(("stop".to_string(), format!("{chat_id}|{id_or_name}")));
+            Ok("recorded-stop".to_string())
+        }
+    }
+
+    fn ctx_with_chat(chat_id: Option<&str>, writer: Arc<RecordingChatWriter>) -> CommandContext {
+        let mut ctx = CommandContext::new(crate::types::Platform::Telegram, "test-session".to_string())
+            .with_cron_job_writer(writer as Arc<dyn CronJobWriter>);
+        ctx.chat_id = chat_id.map(|s| s.to_string());
+        ctx
+    }
+
+    /// Same as `ctx_with_chat` but on `Platform::Local`. Phase 49.7 (WR-02)
+    /// added a remote-origin authorization gate to `/loop` CREATION, so a
+    /// test whose subject is parsing/dispatch rather than authorization must
+    /// run on the ungated local surface — otherwise it silently becomes a
+    /// second, accidental test of the gate. Chat scoping is orthogonal to
+    /// platform: `chat_id` is set here exactly as it is above.
+    fn local_ctx_with_chat(chat_id: Option<&str>, writer: Arc<RecordingChatWriter>) -> CommandContext {
+        let mut ctx = CommandContext::new(crate::types::Platform::Local, "test-session".to_string())
+            .with_cron_job_writer(writer as Arc<dyn CronJobWriter>);
+        ctx.chat_id = chat_id.map(|s| s.to_string());
+        ctx
+    }
+
+    /// Behavior bullet 1: `/loop list` from `chat_id: Some("c1")` calls
+    /// `list_jobs_for_chat` exactly once with `"c1"`.
+    #[test]
+    fn loop_list_with_chat_id_calls_list_jobs_for_chat_with_that_id() {
+        let writer = Arc::new(RecordingChatWriter::new());
+        let ctx = ctx_with_chat(Some("c1"), writer.clone());
+        let result = cmd_loop(&["list"], &ctx);
+        assert!(matches!(result, CommandResult::Output(_)), "expected Output, got {result:?}");
+        assert_eq!(
+            writer.log(),
+            vec![("list".to_string(), "c1".to_string())],
+            "list_jobs_for_chat must be called exactly once with the context's chat id"
+        );
+    }
+
+    /// Behavior bullet 2: `/loop list` from `chat_id: None` is an Error
+    /// naming the chat-origin reason, and the trait is never called.
+    #[test]
+    fn loop_list_with_no_chat_id_errors_without_calling_the_writer() {
+        let writer = Arc::new(RecordingChatWriter::new());
+        let ctx = ctx_with_chat(None, writer.clone());
+        let result = cmd_loop(&["list"], &ctx);
+        let CommandResult::Error(text) = &result else {
+            panic!("expected Error, got {result:?}");
+        };
+        assert!(text.contains("chat"), "error must explain the chat-origin requirement: {text}");
+        assert!(writer.log().is_empty(), "no trait call must be made: {:?}", writer.log());
+    }
+
+    /// Behavior bullet 3: `/loop stop j-123` from `chat_id: Some("c1")`
+    /// calls `stop_job_for_chat` exactly once with `("c1", "j-123")`.
+    #[test]
+    fn loop_stop_with_chat_id_calls_stop_job_for_chat_with_chat_and_id() {
+        let writer = Arc::new(RecordingChatWriter::new());
+        let ctx = ctx_with_chat(Some("c1"), writer.clone());
+        let result = cmd_loop(&["stop", "j-123"], &ctx);
+        assert!(matches!(result, CommandResult::Output(_)), "expected Output, got {result:?}");
+        assert_eq!(
+            writer.log(),
+            vec![("stop".to_string(), "c1|j-123".to_string())],
+            "stop_job_for_chat must be called exactly once with (chat_id, id)"
+        );
+    }
+
+    /// Behavior bullet 4: `/loop stop` with no id is a usage Error, and the
+    /// trait is never called.
+    #[test]
+    fn loop_stop_with_no_id_errors_without_calling_the_writer() {
+        let writer = Arc::new(RecordingChatWriter::new());
+        let ctx = ctx_with_chat(Some("c1"), writer.clone());
+        let result = cmd_loop(&["stop"], &ctx);
+        assert!(matches!(result, CommandResult::Error(_)), "expected Error, got {result:?}");
+        assert!(writer.log().is_empty(), "no trait call must be made: {:?}", writer.log());
+    }
+
+    /// Behavior bullet 5: with no `cron_job_writer` wired, both `/loop
+    /// list` and `/loop stop` return the "cron job writer not configured."
+    /// `Output`, matching `cmd_blueprint_run`'s shape.
+    #[test]
+    fn loop_list_and_stop_with_no_writer_report_not_configured() {
+        let mut ctx = CommandContext::new(crate::types::Platform::Telegram, "test-session".to_string());
+        ctx.chat_id = Some("c1".to_string()); // isolate the writer-absent condition
+        for args in [vec!["list"], vec!["stop", "j-123"]] {
+            let result = cmd_loop(&args, &ctx);
+            match result {
+                CommandResult::Output(text) => {
+                    assert!(text.contains("not configured"), "got: {text}")
+                }
+                other => panic!("expected Output (not a panic) for {args:?}, got {other:?}"),
+            }
+        }
+    }
+
+    /// Behavior bullet 6: `/loop lst` (a near-miss verb, not a valid
+    /// cadence) surfaces a typo suggestion naming `list`, and a real
+    /// cadence near "lst" in token-count only (`/loop 30m do a thing`)
+    /// does not.
+    #[test]
+    fn loop_near_miss_verb_suggests_list_but_a_real_cadence_does_not() {
+        let writer = Arc::new(RecordingChatWriter::new());
+        // Local: this test's subject is typo-suggestion vs. cadence parsing,
+        // not the WR-02 remote-authorization gate (which has its own tests).
+        let ctx = local_ctx_with_chat(Some("c1"), writer.clone());
+
+        let typo_result = cmd_loop(&["lst"], &ctx);
+        let CommandResult::Error(text) = &typo_result else {
+            panic!("expected Error, got {typo_result:?}");
+        };
+        assert!(text.contains("list"), "error must suggest 'list': {text}");
+
+        let cadence_result = cmd_loop(&["30m", "do", "a", "thing"], &ctx);
+        assert!(
+            matches!(cadence_result, CommandResult::Output(_)),
+            "a real cadence must still create a job: {cadence_result:?}"
+        );
+        let CommandResult::Output(cadence_text) = cadence_result else {
+            unreachable!("matched above");
+        };
+        assert!(
+            !cadence_text.contains("list"),
+            "a real cadence's success output must not mention 'list': {cadence_text}"
+        );
+    }
+
+    /// Behavior bullet 7: `/help` output contains one line each for
+    /// `loop`, `loop list` and `loop stop`.
+    #[test]
+    fn help_lists_loop_loop_list_and_loop_stop() {
+        let registry = build_registry();
+        for name in ["loop", "loop list", "loop stop"] {
+            assert!(
+                registry.iter().any(|c| c.name == name),
+                "registry must contain a CommandDef named {name:?}"
+            );
+        }
+    }
+
+    // ---- Phase 49.7 (WR-02): remote-origin authorization gate ----
+
+    /// The gate's core refusal: creation from a gateway platform with no
+    /// flag set is an Error that NAMES the config key, and — the part that
+    /// matters — the writer is never reached. A refusal that still called
+    /// the writer would be no gate at all.
+    #[test]
+    fn loop_create_on_a_remote_platform_is_refused_when_the_flag_is_false() {
+        let writer = Arc::new(RecordingChatWriter::new());
+        let ctx = ctx_with_chat(Some("c1"), writer.clone());
+        let result = with_home_config(None, || cmd_loop(&["30m", "do", "a", "thing"], &ctx));
+        let CommandResult::Error(text) = &result else {
+            panic!("expected Error, got {result:?}");
+        };
+        assert!(
+            text.contains("remote_loop_enabled"),
+            "error must name the config flag: {text}"
+        );
+        assert!(
+            writer.log().is_empty(),
+            "writer must never be called on a refused create: {:?}",
+            writer.log()
+        );
+    }
+
+    /// Setting the flag true admits the same request — proving the refusal
+    /// above is the gate talking and not some unrelated parse failure.
+    #[test]
+    fn loop_create_on_a_remote_platform_is_allowed_when_the_flag_is_true() {
+        let writer = Arc::new(RecordingChatWriter::new());
+        let ctx = ctx_with_chat(Some("c1"), writer.clone());
+        let result = with_home_config(Some("security:\n  remote_loop_enabled: true\n"), || {
+            cmd_loop(&["30m", "do", "a", "thing"], &ctx)
+        });
+        assert!(matches!(result, CommandResult::Output(_)), "expected Output, got {result:?}");
+        assert_eq!(
+            writer.log(),
+            vec![("create_raw".to_string(), "every 30m".to_string())],
+            "create_raw_job must be called exactly once once the flag is open"
+        );
+    }
+
+    /// The independence pin: `remote_blueprint_run_enabled: true` must NOT
+    /// unlock `/loop`. `/blueprint run` fills slots in an operator-installed
+    /// template; `/loop` takes a free-text prompt with a caller-chosen
+    /// toolset. Reusing the narrow flag for the wide capability is the exact
+    /// silent-scope-extension this gate exists to avoid.
+    #[test]
+    fn loop_create_is_still_refused_when_only_the_blueprint_flag_is_true() {
+        let writer = Arc::new(RecordingChatWriter::new());
+        let ctx = ctx_with_chat(Some("c1"), writer.clone());
+        let result = with_home_config(
+            Some("security:\n  remote_blueprint_run_enabled: true\n"),
+            || cmd_loop(&["30m", "do", "a", "thing"], &ctx),
+        );
+        let CommandResult::Error(text) = &result else {
+            panic!("expected Error, got {result:?}");
+        };
+        assert!(
+            text.contains("remote_loop_enabled"),
+            "error must name /loop's own flag, not the blueprint one: {text}"
+        );
+        assert!(
+            writer.log().is_empty(),
+            "writer must never be called: {:?}",
+            writer.log()
+        );
+    }
+
+    /// `Platform::Local` (CLI/TUI) is ungated — no env isolation needed,
+    /// because the gate is skipped before any `Config::load()` happens, so
+    /// whatever config.yaml exists on the host machine is irrelevant.
+    #[test]
+    fn loop_create_on_local_platform_is_allowed_regardless_of_the_flag() {
+        let writer = Arc::new(RecordingChatWriter::new());
+        let ctx = local_ctx_with_chat(Some("c1"), writer.clone());
+        let result = cmd_loop(&["30m", "do", "a", "thing"], &ctx);
+        assert!(matches!(result, CommandResult::Output(_)), "expected Output, got {result:?}");
+        assert_eq!(
+            writer.log(),
+            vec![("create_raw".to_string(), "every 30m".to_string())],
+            "local creation must reach the writer with the gate closed"
+        );
+    }
+
+    /// Fail-closed pin: an UNREADABLE config is a refusal, never a permit.
+    /// `with_home_config(None, ...)` does not exercise this — an absent
+    /// config.yaml makes `Config::load()` succeed with defaults, so the
+    /// `unwrap_or` branch is never reached and a fail-OPEN default survives
+    /// that test. Malformed YAML is what actually makes `load()` return
+    /// `Err`. Verified by mutation: flipping `.unwrap_or(false)` to
+    /// `.unwrap_or(true)` leaves every other gate test green and fails only
+    /// this one.
+    #[test]
+    fn loop_create_is_refused_when_the_config_cannot_be_read() {
+        let writer = Arc::new(RecordingChatWriter::new());
+        let ctx = ctx_with_chat(Some("c1"), writer.clone());
+        let result = with_home_config(Some("security: [this is not a mapping\n"), || {
+            cmd_loop(&["30m", "do", "a", "thing"], &ctx)
+        });
+        let CommandResult::Error(text) = &result else {
+            panic!("a config that cannot be parsed must refuse, got {result:?}");
+        };
+        assert!(
+            text.contains("remote_loop_enabled"),
+            "error must name the config flag: {text}"
+        );
+        assert!(
+            writer.log().is_empty(),
+            "writer must never be called when the config is unreadable: {:?}",
+            writer.log()
+        );
+    }
+
+    /// Scope pin: the gate covers CREATION only. `list`/`stop` are already
+    /// chat-scoped by `JobOrigin.chat_id` (D-10) — they can only ever see
+    /// and stop the asking chat's own jobs — so they stay available on a
+    /// remote platform with the flag closed. If a future edit hoists the
+    /// gate above the reserved-verb dispatch, this test goes red.
+    #[test]
+    fn loop_list_and_stop_stay_ungated_on_a_remote_platform() {
+        let writer = Arc::new(RecordingChatWriter::new());
+        let ctx = ctx_with_chat(Some("c1"), writer.clone());
+        let (list_result, stop_result) = with_home_config(None, || {
+            (cmd_loop(&["list"], &ctx), cmd_loop(&["stop", "j-123"], &ctx))
+        });
+        assert!(
+            matches!(list_result, CommandResult::Output(_)),
+            "/loop list must stay available: {list_result:?}"
+        );
+        assert!(
+            matches!(stop_result, CommandResult::Output(_)),
+            "/loop stop must stay available: {stop_result:?}"
+        );
+        assert_eq!(
+            writer.log(),
+            vec![
+                ("list".to_string(), "c1".to_string()),
+                ("stop".to_string(), "c1|j-123".to_string()),
+            ],
+            "both management verbs must reach the chat-scoped seam"
+        );
+    }
+
+}
+
+// =============================================================================
+// Phase 49.7 Plan 01 Task 3: D-01a source-pin
+// =============================================================================
+
+#[cfg(test)]
+mod cmd_loop_source_pin_tests {
+    /// D-01a: `/loop` takes no profile-selecting argument and must never
+    /// grow one. Slices `cmd_loop`'s own source region (from `fn cmd_loop`
+    /// to the next top-level `fn `), strips comment lines so a prose
+    /// comment can never satisfy or violate the assertion, and asserts zero
+    /// occurrences of the profile flag token. Makes the same assertion
+    /// against the `/loop` `args_hint` string in `registry.rs`, since a
+    /// flag that never reaches `cmd_loop`'s parser but is still advertised
+    /// in the usage hint would be an equally real regression.
+    #[test]
+    fn loop_takes_no_profile_flag() {
+        let handlers_src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/commands/handlers.rs"
+        ))
+        .expect("read handlers.rs");
+
+        let start = handlers_src
+            .find("fn cmd_loop(")
+            .expect("cmd_loop must exist in handlers.rs");
+        let after_start = &handlers_src[start..];
+        // The next top-level `fn ` after `cmd_loop`'s own signature (skip
+        // past it first so we don't just re-find `fn cmd_loop(` itself).
+        let body_start = after_start.find('\n').unwrap_or(0);
+        let next_fn_offset = after_start[body_start..]
+            .find("\nfn ")
+            .expect("a following top-level fn must exist");
+        let cmd_loop_region = &after_start[..body_start + next_fn_offset];
+
+        let stripped: String = cmd_loop_region
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert_eq!(
+            stripped.matches("--profile").count(),
+            0,
+            "D-01a: cmd_loop must never parse a --profile flag; found it in: {stripped}"
+        );
+        assert_eq!(
+            stripped.matches("profile").count(),
+            0,
+            "D-01a: cmd_loop must never reference 'profile' at all (arguments, env, or \
+             config) — a broader net than just the flag spelling"
+        );
+
+        let registry_src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/commands/registry.rs"
+        ))
+        .expect("read registry.rs");
+        let registry_stripped: String = registry_src
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let loop_entry_start = registry_stripped
+            .find("CommandDef::new(\"loop\",")
+            .expect("the /loop CommandDef must exist in registry.rs");
+        let loop_entry_end = registry_stripped[loop_entry_start..]
+            .find(".platform(Universal),")
+            .map(|end| loop_entry_start + end)
+            .expect("the /loop CommandDef must end with .platform(Universal)");
+        let loop_entry = &registry_stripped[loop_entry_start..loop_entry_end];
+        assert_eq!(
+            loop_entry.matches("profile").count(),
+            0,
+            "D-01a: the /loop args_hint must never advertise a --profile flag: {loop_entry}"
+        );
+    }
+}
+
+// =============================================================================
+// /goal command tests — Phase 49.7 Plan 05 (D-02/D-06/D-08)
+// =============================================================================
+
+#[cfg(test)]
+mod cmd_goal_tests {
+    use super::*;
+
+    fn test_ctx() -> CommandContext {
+        CommandContext::new(crate::types::Platform::Telegram, "test-session".to_string())
+    }
+
+    /// Behavior bullet 1: `/goal ship the docs update` returns
+    /// `StartGoalLoop` with the objective and `budget: None`.
+    #[test]
+    fn goal_with_text_only_returns_start_goal_loop_with_no_budget() {
+        let ctx = test_ctx();
+        let result = cmd_goal(&["ship", "the", "docs", "update"], &ctx);
+        match result {
+            CommandResult::StartGoalLoop { objective, budget } => {
+                assert_eq!(objective, "ship the docs update");
+                assert_eq!(budget, None);
+            }
+            other => panic!("expected StartGoalLoop, got {other:?}"),
+        }
+    }
+
+    /// Behavior bullet 2: `--budget 5` is parsed out and removed from the
+    /// objective text.
+    #[test]
+    fn goal_with_budget_flag_returns_start_goal_loop_with_budget_and_stripped_text() {
+        let ctx = test_ctx();
+        let result = cmd_goal(
+            &["ship", "the", "docs", "update", "--budget", "5"],
+            &ctx,
+        );
+        match result {
+            CommandResult::StartGoalLoop { objective, budget } => {
+                assert_eq!(objective, "ship the docs update");
+                assert_eq!(budget, Some(5));
+            }
+            other => panic!("expected StartGoalLoop, got {other:?}"),
+        }
+    }
+
+    /// Behavior bullet 3: `/goal` with no text is a usage Error, not a
+    /// variant with an empty objective.
+    #[test]
+    fn goal_with_no_args_returns_usage_error() {
+        let ctx = test_ctx();
+        let result = cmd_goal(&[], &ctx);
+        assert!(
+            matches!(result, CommandResult::Error(_)),
+            "expected Error, got {result:?}"
+        );
+    }
+
+    /// Behavior bullet 4: `--budget 0` and a non-numeric `--budget` value
+    /// are both usage Errors.
+    #[test]
+    fn goal_with_zero_or_non_numeric_budget_returns_usage_error() {
+        let ctx = test_ctx();
+        let zero = cmd_goal(&["x", "--budget", "0"], &ctx);
+        assert!(
+            matches!(zero, CommandResult::Error(_)),
+            "expected Error for --budget 0, got {zero:?}"
+        );
+        let non_numeric = cmd_goal(&["x", "--budget", "abc"], &ctx);
+        assert!(
+            matches!(non_numeric, CommandResult::Error(_)),
+            "expected Error for --budget abc, got {non_numeric:?}"
+        );
+    }
+
+    /// Behavior bullet 5: the `/goal` `CommandDef` resolves on
+    /// `Platform::Local` and on a gateway messaging platform, and does not
+    /// resolve on `Platform::ApiServer`.
+    #[test]
+    fn goal_command_def_resolves_on_local_and_gateway_not_apiserver() {
+        let registry = crate::commands::registry::build_registry();
+        let goal_def = registry
+            .iter()
+            .find(|c| c.name == "goal")
+            .expect("/goal must be registered");
+        assert!(goal_def.platform_filter.is_available_on(&crate::types::Platform::Local));
+        assert!(goal_def.platform_filter.is_available_on(&crate::types::Platform::Telegram));
+        assert!(!goal_def.platform_filter.is_available_on(&crate::types::Platform::ApiServer));
+    }
+
+    /// Behavior bullet 6: `cmd_goal` performs no I/O and no async work — it
+    /// only constructs the variant and returns. Proven structurally: the
+    /// function's own source contains no `.await`, no filesystem/network
+    /// call, and no `tokio::spawn`.
+    #[test]
+    fn cmd_goal_source_performs_no_io_or_async_work() {
+        let src = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/commands/handlers.rs"
+        ))
+        .expect("read handlers.rs");
+        let stripped: String = src
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let start = stripped
+            .find("fn cmd_goal(")
+            .expect("cmd_goal must exist in handlers.rs");
+        // The function body ends at the next top-level function
+        // (`fn cmd_blueprint(`) — cmd_goal is the last function before the
+        // /blueprint section. Comment lines (including the `// ===`
+        // section marker) are already stripped out above, so the search
+        // target must be a real code line.
+        let end = stripped[start..]
+            .find("fn cmd_blueprint(")
+            .map(|rel| start + rel)
+            .expect("cmd_goal must be followed by fn cmd_blueprint(");
+        let body = &stripped[start..end];
+        assert_eq!(body.matches(".await").count(), 0, "cmd_goal must do no async work: {body}");
+        assert_eq!(body.matches("tokio::spawn").count(), 0, "cmd_goal must spawn nothing: {body}");
+        assert_eq!(body.matches("std::fs::").count(), 0, "cmd_goal must do no filesystem I/O: {body}");
     }
 }

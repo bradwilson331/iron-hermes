@@ -169,6 +169,8 @@ Override the config flag at runtime via `IRONHERMES_KANBAN_DISPATCH_IN_GATEWAY=0
 
 Running `hermes kanban daemon` as a separate process is **deprecated**; use the gateway. If you truly cannot run the gateway (headless host policy forbids long-lived services, etc.) a `--force` escape hatch keeps the old standalone daemon alive for one release cycle, but running both a gateway-embedded dispatcher AND a standalone daemon against the same `kanban.db` causes claim races and is not supported.
 
+**`hermes kanban dispatch` cannot host a vault credential endpoint.** This one-shot verb runs a single tick and exits — including before the workers it just spawned have finished starting. Under `vault.enabled: true`, only a dispatcher that OUTLIVES its workers can safely host the per-profile credential endpoint they connect to: the gateway-embedded dispatcher above, and `hermes kanban daemon --force`. A vault-backed task dispatched with `hermes kanban dispatch` is refused rather than attempted — it ends `blocked` with a `dispatch gate: ` reason naming the constraint, before any worker is spawned and before any credential is minted. Non-vault-backed tasks (a profile with a plaintext `.env`) on the same board dispatch normally either way.
+
 ### Idempotent create (for automation / webhooks)
 
 ```bash

@@ -491,10 +491,11 @@ mod tests {
             "IRONHERMES_HOME",
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
-        std::fs::create_dir_all(
-            crate::server::profile_api::profile_dir_for("zig").join("workspace"),
-        )
-        .expect("mkdir workspace");
+        // Phase 51 Plan 14 (T13): scaffolds a profile the dispatch gate will
+        // `Allow` — a bare workspace/ dir is refused by
+        // decide_spawn_credential -> evaluate_profile_dispatch_at since
+        // `799fd62b8`. See `profile_fixture`'s module doc.
+        crate::server::profile_fixture::scaffold_dispatchable_profile("zig");
         // Config::load() reads <IRONHERMES_HOME>/config.yaml fresh from disk
         // (never a test-injected Config value) — write the write-gate-open
         // record this #[server] fn's own check_profile_write_gate call
@@ -531,10 +532,11 @@ mod tests {
             "IRONHERMES_HOME",
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
-        std::fs::create_dir_all(
-            crate::server::profile_api::profile_dir_for("zig").join("workspace"),
-        )
-        .expect("mkdir workspace");
+        // Phase 51 Plan 14 (T13): scaffolds a profile the dispatch gate will
+        // `Allow` — a bare workspace/ dir is refused by
+        // decide_spawn_credential -> evaluate_profile_dispatch_at since
+        // `799fd62b8`. See `profile_fixture`'s module doc.
+        crate::server::profile_fixture::scaffold_dispatchable_profile("zig");
         std::fs::write(
             dir.path().join("config.yaml"),
             "security:\n  web_config_write_enabled: true\n",
@@ -569,10 +571,11 @@ mod tests {
             "IRONHERMES_HOME",
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
-        std::fs::create_dir_all(
-            crate::server::profile_api::profile_dir_for("zig").join("workspace"),
-        )
-        .expect("mkdir workspace");
+        // Phase 51 Plan 14 (T13): scaffolds a profile the dispatch gate will
+        // `Allow` — a bare workspace/ dir is refused by
+        // decide_spawn_credential -> evaluate_profile_dispatch_at since
+        // `799fd62b8`. See `profile_fixture`'s module doc.
+        crate::server::profile_fixture::scaffold_dispatchable_profile("zig");
         std::fs::write(
             dir.path().join("config.yaml"),
             "security:\n  web_config_write_enabled: true\n",
@@ -612,16 +615,28 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-        let observed = registry_for_poll.list_all().await;
+        // Scope every registry assertion below to THIS test's own turn.
+        // `handoff_turn_registry()` is a process-global singleton (it falls
+        // back to a `static OnceLock` in `cli_handoff.rs`), so every other
+        // test in this binary that dispatches a turn also shows up in
+        // `list_all()`. Asserting on the GLOBAL length silently required
+        // this test to be the only turn-registering test in a 1800+ test
+        // binary — an invariant no new test can be expected to preserve.
+        let expected_session =
+            crate::server::cli_handoff::handoff_turn_session_id("zig", Some("Bot Chat"));
+
+        let observed: Vec<_> = registry_for_poll
+            .list_all()
+            .await
+            .into_iter()
+            .filter(|turn| turn.session_id == expected_session)
+            .collect();
         assert_eq!(
             observed.len(),
             1,
             "the mentioned bot's turn must still be registered after the caller's future was dropped"
         );
-        assert_eq!(
-            observed[0].session_id,
-            crate::server::cli_handoff::handoff_turn_session_id("zig", Some("Bot Chat"))
-        );
+        assert_eq!(observed[0].session_id, expected_session);
 
         match crate::server::handoff_steering::begin_turn_or_queue("zig", "second send") {
             Ok(crate::server::handoff_steering::BeginOrQueue::Queued { .. }) => {}
@@ -634,7 +649,14 @@ mod tests {
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            if registry_for_poll.list_all().await.is_empty() {
+            // Same scoping as above: wait for THIS test's turn to drain, not
+            // for the shared global registry to empty.
+            let still_registered = registry_for_poll
+                .list_all()
+                .await
+                .into_iter()
+                .any(|turn| turn.session_id == expected_session);
+            if !still_registered {
                 break;
             }
             assert!(

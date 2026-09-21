@@ -1109,8 +1109,24 @@ pre.code .v  { color: var(--text); }
   gap: 16px;
   padding: 10px 0;
   border-bottom: 1px dashed var(--border-faint);
+  /* Phase 50.4 Plan 04 (D-01): positioning context for .mem-row-actions'
+     hover-reveal EDIT/DELETE pair below — does not affect layout since no
+     other child in this rule is positioned. */
+  position: relative;
 }
 .mem-entry:last-child { border-bottom: none; }
+/* Phase 50.4 Plan 04 (D-01): EDIT/DELETE pair, hidden until row hover
+   (Spacing Scale "xs" budget: 4px gap between the two icons). */
+.mem-row-actions {
+  position: absolute;
+  right: 0;
+  top: 10px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+.mem-entry:hover .mem-row-actions { opacity: 1; }
 .mem-ts {
   font-size: 10px;
   color: var(--gray);
@@ -1192,6 +1208,54 @@ pre.code .v  { color: var(--text); }
   outline: none;
 }
 .field-input:focus { border-color: var(--teal-dim); }
+
+/* Phase 50.4 Plan 03 (D-06/D-07): ModelPickerField — the capped,
+   open-on-click model popup that replaces the native <input list> +
+   <datalist> render target. Mounted on three surfaces: the Models screen's
+   seven cascades, the Providers default-model field, and the profile-drawer
+   picker.
+   .model-popup-wrap owns the positioning context itself (position: relative)
+   rather than relying on a host's layout — .field-row (Providers' host) is
+   `display: grid` with no `position` declared anywhere between it and the
+   page root, so an absolutely positioned popup without this wrapper would
+   resolve against an arbitrary ancestor or the viewport (the same render
+   fault class as commit 81fc177a6, which passed every build gate and
+   rendered blank). */
+.model-popup-wrap {
+  position: relative;
+  width: 100%;
+}
+.model-popup {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 20;
+  margin-top: 4px;
+  background: rgba(22, 27, 34, 0.65);
+  border: 1px solid var(--border-faint);
+  border-radius: 8px;
+  max-height: 240px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+.model-popup-row {
+  padding: 8px 12px;
+  font-size: 12px;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+  border-left: 2px solid transparent;
+}
+.model-popup-row:hover { background: rgba(28, 33, 41, 0.85); }
+.model-popup-row.is-active { border-left-color: var(--teal); background: rgba(57,197,207,0.06); }
+.model-popup-note {
+  padding: 8px 12px;
+  font-size: 10px;
+  color: var(--gray);
+}
 
 /* Tiny stat card */
 .stat-card {

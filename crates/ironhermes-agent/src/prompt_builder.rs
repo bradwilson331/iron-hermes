@@ -10,7 +10,7 @@ use tracing::debug;
 use crate::context_loader::{CONTEXT_CANDIDATES, find_git_root, strip_yaml_frontmatter};
 use crate::memory::MemoryManager;
 
-const DEFAULT_AGENT_IDENTITY: &str = r#"You are IronHermes, an AI assistant created by Nous Research. You are helpful, harmless, and honest.
+const DEFAULT_AGENT_IDENTITY: &str = r#"You are IronHermes, an AI assistant created by Wilson Tech. You are helpful, harmless, and honest.
 
 You have access to tools that let you interact with the user's computer and the internet. Use them when needed to accomplish tasks.
 
@@ -977,7 +977,7 @@ mod tests {
         let builder = PromptBuilder::new("test-model", "cli");
         let output = builder.build();
         assert!(output.contains("IronHermes"));
-        assert!(output.contains("Nous Research"));
+        assert!(output.contains("Wilson Tech"));
     }
 
     // -------------------------------------------------------------------------

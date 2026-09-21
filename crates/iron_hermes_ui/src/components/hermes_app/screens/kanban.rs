@@ -125,6 +125,25 @@ pub fn ScreenKanban(is_active: bool) -> Element {
     // Drawer open state — Plan 03 wires this end-to-end.
     let mut open_drawer_task_id: Signal<Option<String>> = use_signal(|| None);
 
+    // Phase 52.1 Plan 07 (D-13): the artifacts gallery's kanban backlink
+    // deep-link — see `PendingKanbanTaskCtx`'s own doc comment (state.rs)
+    // for the full contract. Mirrors `schedules.rs`'s
+    // `ScheduleNamePrefillCtx`-consuming effect exactly: read into a local,
+    // act ONLY on the populated branch, clear the pending signal INSIDE
+    // that same branch. The clearing write re-triggers this effect once
+    // more with an already-`None` value, which is a no-op — the
+    // conditional guard is what prevents a read-plus-unconditional-write
+    // self-retrigger loop (the documented cause of a one-screen freeze in
+    // this app, previously hit on the Agents screen).
+    let mut pending_kanban_task_ctx = use_context::<crate::state::PendingKanbanTaskCtx>().0;
+    use_effect(move || {
+        let pending = pending_kanban_task_ctx.read().clone();
+        if let Some(task_id) = pending {
+            open_drawer_task_id.set(Some(task_id));
+            pending_kanban_task_ctx.set(None);
+        }
+    });
+
     // WS connection state indicator.
     let mut ws_state: Signal<WsState> = use_signal(|| WsState::Connecting);
 

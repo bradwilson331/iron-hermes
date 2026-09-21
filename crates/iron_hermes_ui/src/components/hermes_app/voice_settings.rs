@@ -54,6 +54,15 @@ pub struct AutoTtsCtx(pub Signal<bool>);
 #[derive(Clone, Copy, PartialEq)]
 pub struct BargeInModeCtx(pub Signal<String>);
 
+/// Debug session `avatar-not-hearing-voice`: flips true exactly once, after
+/// the HermesApp root's config fetch resolves and seeds `BargeInModeCtx` with
+/// the real `config.voice.barge_in_mode` value. Read REACTIVELY (`.read()`,
+/// not `.peek()`) by voice_mode.rs's mode-gate effect so that effect defers
+/// its (spawn-exactly-once) branch decision instead of deciding on
+/// `BargeInModeCtx`'s hardcoded literal default before the seed lands.
+#[derive(Clone, Copy, PartialEq)]
+pub struct BargeInModeLoadedCtx(pub Signal<bool>);
+
 /// Phase 36.17.12 Plan 01: Realtime-degraded flag — true when `open_mic` was
 /// selected but the realtime session failed to start (D-07 fallback). Plan 03
 /// sets this from the voice mode screen; this panel reads it to show the

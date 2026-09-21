@@ -2329,4 +2329,37 @@ mod tests {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
+
+    // =========================================================================
+    // Phase 53 (Plan 03 Task 3, D-06): the wizard-exit doctor check
+    // =========================================================================
+
+    /// This file's own `run_doctor_check` (private, wizard-exit, D-03) is a
+    /// separate lib-safe reimplementation of `doctor.rs`'s function of the
+    /// same name — see its doc comment — not a call into it, and it takes
+    /// no `browser` parameter at all. Pin that its source stays free of any
+    /// browser-related call, so a future edit cannot accidentally wire one
+    /// in and make the wizard exit pay for a browser spawn.
+    #[test]
+    fn the_setup_wizard_call_site_does_not_probe() {
+        let source = include_str!("setup.rs");
+        let needle = format!("{}{}", "fn run_doctor_check() -> Result", "<()> {");
+        let start = source
+            .find(&needle)
+            .expect("run_doctor_check must exist in this file");
+        let after_start = &source[start..];
+        let end_marker = "\n}\n";
+        let end = after_start
+            .find(end_marker)
+            .expect("run_doctor_check must have a closing brace at column 0")
+            + end_marker.len();
+        let body = &after_start[..end];
+        for needle in ["browser", "Browser", "ironhermes_tools", "diagnose"] {
+            assert!(
+                !body.contains(needle),
+                "setup.rs's wizard-exit run_doctor_check must never perform browser work; \
+                 found '{needle}' in its body:\n{body}"
+            );
+        }
+    }
 }

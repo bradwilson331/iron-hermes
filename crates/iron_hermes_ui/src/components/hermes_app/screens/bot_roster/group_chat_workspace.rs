@@ -102,17 +102,18 @@ use crate::components::hermes_app::screens::bot_roster::group_settings::GroupSet
 use crate::components::hermes_app::screens::bot_roster::mention_handoff::{
     MentionHandoffBlock, MentionHandoffEntry,
 };
+use crate::components::hermes_app::screens::bot_roster::new_conversation_confirm::NewConversationConfirm;
 use crate::components::hermes_app::widgets::bot_face::{seeded_color_for, BotFace};
 use crate::protocol::{
     BotMeta, BotRosterEntry, DispatchGroupRoundRequest, GroupChatSettings, GroupRoomMessage,
     GroupRoomSpeaker, GroupRoomTranscript, MemberTurnStatus, MentionHandoffRequest,
-    MentionHandoffState,
+    MentionHandoffState, TeamPattern, TeamRowKind, WorkerOutcomeKind,
 };
 use crate::server::group_chat_api::dispatch_group_round;
 use crate::server::group_settings_api::load_group_chat_settings;
 use crate::server::mention_handoff_api::{dispatch_mention_handoff, resolve_roster_mentions_client};
 use dioxus::prelude::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Phase 50.2 Plan 01: current wall-clock time in milliseconds.
 /// `web_time::SystemTime` mirrors `bot_roster/card.rs`'s own `now_ms` —
@@ -196,6 +197,101 @@ pub(crate) fn round_band_is_settled(band: &RoundBand) -> bool {
         }
     }
     saw_member
+}
+
+/// Phase 52 Plan 09 (D-02/D-17, UI-SPEC Surface Contract 6): the room
+/// overflow menu's entries, in their final top-to-bottom order — the menu
+/// reads least- to most-consequential, and `New conversation`'s
+/// reversibility sits between editing membership and permanent deletion.
+/// A pure helper so the ordering is directly unit-testable without a
+/// render harness, and the render side loops over it rather than
+/// restating the order a second time.
+///
+/// `pattern` is accepted (a call site passes the room's actual
+/// `GroupRoom.pattern`) but never branches this list — D-17 requires
+/// `New conversation` present in EVERY room, peer and team alike, the
+/// single explicit exception to peer rooms keeping 50.2's behaviour, so
+/// there is no room-shape input this list could ever gate on.
+#[allow(dead_code)] // see now_ms's doc note above (legacy-shell reachability)
+pub(crate) fn overflow_menu_entries(_pattern: Option<&TeamPattern>) -> [&'static str; 3] {
+    ["Edit members", "New conversation", "Delete room"]
+}
+
+/// Phase 52 Plan 09 (D-15, UI-SPEC Surface Contract 5): the needs-you
+/// advisory sentence — the room's persisted `needs_you_reason`, when and
+/// only when `needs_you` is raised. The client composes NOTHING of its
+/// own: the four sentences (cycle exhaustion, leader-contract failure,
+/// worker failure, unprocessed queue) are server-side consts persisted by
+/// the drive that raised the flag (`group_team_api.rs`'s own
+/// `*_NEEDS_YOU_COPY` consts), so the copy has exactly one source. A
+/// raised flag with no reason (a pre-Phase-52 record, or any future
+/// `set_room_needs_you_impl` caller that omits one) yields the badge and
+/// no advisory row, rather than rendering an empty row — never
+/// `None` -> `Some("")`.
+///
+/// **Roster-row `title` withdrawn (Round 1 codex MEDIUM).** The reason
+/// lives ONLY here, on the opened room — `GroupRoomSummary`
+/// (`protocol.rs`) deliberately carries no reason field (Plan 03), and
+/// the roster badge lives in `group_row.rs`, a different component in a
+/// file this plan does not modify. Do not "restore" a roster-row tooltip
+/// for this string; that would require widening `GroupRoomSummary`
+/// against Plan 03's own recorded reasoning and would put a per-room
+/// advisory string into a payload fetched on every roster paint.
+///
+/// **Never persisted as a transcript row.**
+/// [`crate::server::group_chat_api::conversation_start_index`] treats the
+/// LAST `GroupRoomSpeaker::System` row as the conversation boundary, so
+/// writing this advisory as a System row would silently truncate every
+/// room's replay on every failed drive. This fn returns a render-time
+/// string only; no code path here ever constructs a
+/// `GroupRoomSpeaker::System` message.
+///
+/// The helper's output depends only on `needs_you`/the reason — never on
+/// `room.pattern` — so it renders identically for a peer room and a team
+/// room, the D-15 hard lock (UI-SPEC §5). It also has no loading state of
+/// its own: it is derived from already-persisted room state that arrived
+/// with the transcript alongside the badge itself.
+#[allow(dead_code)] // see now_ms's doc note above (legacy-shell reachability)
+pub(crate) fn needs_you_advisory_text(needs_you: bool, reason: Option<&str>) -> Option<String> {
+    if !needs_you {
+        return None;
+    }
+    reason.map(|r| r.to_string())
+}
+
+/// Phase 52 Plan 09 (Round 1 codex HIGH): the outcome-kind discriminant
+/// [`dispatch_result_refreshes_room_state`] branches on — mirrors
+/// `submit_room_send`'s own three match arms
+/// (`GroupRoundDispatch::Ran`/`::Queued`/the dispatch's `Err` arm) without
+/// requiring a real `Result<GroupRoundDispatch, ServerFnError>` value
+/// (`ServerFnError` has no meaningful `PartialEq`/test-constructor), so
+/// the branch decision stays directly unit-testable without a render
+/// harness or a fabricated server round trip.
+#[allow(dead_code)] // see now_ms's doc note above (legacy-shell reachability)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RoomDispatchOutcomeKind {
+    Ran,
+    Queued,
+    Err,
+}
+
+/// Phase 52 Plan 09 (D-15, Round 1 codex HIGH): whether a dispatch outcome
+/// should bump `refresh_tick`. ALL THREE arms return `true` — a completed
+/// drive (`Ran`) and a queued send (`Queued`) already did before this
+/// plan; a FAILED dispatch (`Err`) now must too. A leader-contract failure
+/// persists `needs_you`, its reason and any partial rows server-side, and
+/// `submit_room_send`'s `Err` arm used to set only `dispatch_error` —
+/// leaving every one of them invisible until an unrelated reload, hiding
+/// the advisory this whole plan exists to surface on exactly the path it
+/// serves (Round 1 codex HIGH, verified at
+/// `group_chat_workspace.rs:389-401`).
+#[allow(dead_code)] // see now_ms's doc note above (legacy-shell reachability)
+pub(crate) fn dispatch_result_refreshes_room_state(outcome: RoomDispatchOutcomeKind) -> bool {
+    match outcome {
+        RoomDispatchOutcomeKind::Ran => true,
+        RoomDispatchOutcomeKind::Queued => true,
+        RoomDispatchOutcomeKind::Err => true,
+    }
 }
 
 /// Phase 50.2 Plan 06: the room workspace's one client-observable dispatch
@@ -293,6 +389,85 @@ pub(crate) fn queued_for_next_round_notice(depth: u32) -> String {
     } else {
         format!(
             "Message queued — it will go into the room on the next round ({depth} messages waiting)."
+        )
+    }
+}
+
+/// Phase 52 Plan 08 (D-14, Round 1 codex HIGH): mirrors
+/// `group_team_api::resolve_cycle_budget`'s room-then-app-wide precedence
+/// EXACTLY — duplicated locally rather than called directly, because that
+/// fn lives in the `#[cfg(feature = "server")]` `group_team_api` module
+/// (`server/mod.rs:274`) and this component also compiles for the wasm
+/// client target with only the default `web` feature enabled (same
+/// reasoning [`round_band_is_settled`]'s own doc comment already applies
+/// to avoiding `group_chat_api::score_round`). A `#[cfg(feature =
+/// "server")]` test asserts the two cannot drift — the `--all-features`
+/// gate this crate's own verify commands always run under.
+#[allow(dead_code)] // see now_ms's doc note above (legacy-shell reachability)
+fn resolve_cycle_budget(room_max_cycles: Option<u32>, settings_max_cycles: u32) -> u32 {
+    room_max_cycles
+        .unwrap_or(settings_max_cycles)
+        .clamp(crate::protocol::TEAM_CYCLE_MIN, crate::protocol::TEAM_CYCLE_MAX)
+}
+
+/// Phase 52 Plan 08 (D-08/D-17, UI-SPEC Surface Contract 4): the header
+/// chip's in-flight text. `None` whenever no drive is dispatching, for
+/// both room kinds. A team room (`is_team_room`) gets the amended template
+/// below; a peer room keeps the pre-Phase-52 rounds text byte-for-byte
+/// (D-17) — this fn's `else` branch is that exact string, unchanged.
+///
+/// **Amendment to UI-SPEC Copywriting Contract line 159 (Round 1 codex
+/// HIGH).** The contract's literal template is `Working — cycle
+/// {n}/{max_cycles}`, but nothing in this crate can supply `{n}`:
+/// `run_team_drive` is one blocking await, `transcript_resource` only
+/// refetches once the dispatch resolves (module doc, [`RoomDispatchState`]),
+/// and this file's own peer-room chip already renders `Round …/{max}` with
+/// a comment explaining exactly this gap. Rendering a numeric current-cycle
+/// would be the registered-but-fictional failure class D-01 exists to
+/// prevent, moved from the schema into the UI. The ellipsis numerator is
+/// used instead — the contracted noun, the contracted denominator and the
+/// contracted pulse are all retained; only the unsuppliable numerator
+/// changes.
+#[allow(dead_code)] // see now_ms's doc note above (legacy-shell reachability)
+fn in_flight_chip_text(
+    is_team_room: bool,
+    is_dispatching: bool,
+    cycle_budget: u32,
+    settings_max_rounds: u32,
+) -> Option<String> {
+    if !is_dispatching {
+        return None;
+    }
+    Some(if is_team_room {
+        format!("Working — cycle …/{cycle_budget}")
+    } else {
+        format!("Round …/{settings_max_rounds}")
+    })
+}
+
+/// Phase 52 Plan 08 (D-15): the composer's SEND-disable predicate — pure,
+/// and taking no advisory-state input of any kind, so the invariant "no
+/// dispatch gate keyed on a failed drive" is a fact about this fn's own
+/// signature, not just its current body. The only input is whether the
+/// draft is non-empty.
+#[allow(dead_code)] // see now_ms's doc note above (legacy-shell reachability)
+fn composer_send_disabled(can_send: bool) -> bool {
+    !can_send
+}
+
+/// Phase 52 Plan 08 (Copywriting Contract: `Queued for next cycle`): the
+/// SAME notice as [`queued_for_next_round_notice`], room-kind aware —
+/// `round` in a peer room, `cycle` in a team room. Reuses the same
+/// singular/plural template rather than restating it, so the two can never
+/// diverge in wording.
+#[allow(dead_code)] // see now_ms's doc note above (legacy-shell reachability)
+pub(crate) fn queued_notice_for_room(depth: u32, is_team_room: bool) -> String {
+    let noun = if is_team_room { "cycle" } else { "round" };
+    if depth == 1 {
+        format!("Message queued — it will go into the room on the next {noun}.")
+    } else {
+        format!(
+            "Message queued — it will go into the room on the next {noun} ({depth} messages waiting)."
         )
     }
 }
@@ -397,7 +572,18 @@ fn submit_room_send(
                 let cur = *refresh_tick.read();
                 refresh_tick.set(cur + 1);
             }
-            Err(e) => dispatch_error.set(Some(format!("{e}"))),
+            // Phase 52 Plan 09 (Round 1 codex HIGH): a FAILED dispatch now
+            // bumps `refresh_tick` too — the error text explains the
+            // immediate failure, and the refresh surfaces the persisted
+            // `needs_you`/reason/partial rows a leader-contract failure
+            // already wrote server-side before this drive ever returned.
+            Err(e) => {
+                dispatch_error.set(Some(format!("{e}")));
+                if dispatch_result_refreshes_room_state(RoomDispatchOutcomeKind::Err) {
+                    let cur = *refresh_tick.read();
+                    refresh_tick.set(cur + 1);
+                }
+            }
         }
         let remaining_in_flight = in_flight_dispatches.read().saturating_sub(1);
         in_flight_dispatches.set(remaining_in_flight);
@@ -430,6 +616,18 @@ fn speaker_display_name(speaker: &GroupRoomSpeaker) -> String {
 /// reasoning blocks from it).
 #[allow(dead_code)] // see now_ms's doc note above (legacy-shell reachability)
 fn message_display_text(msg: &GroupRoomMessage, sender_name: &str) -> String {
+    // Phase 52 Plan 08 (D-10/D-11, UI-SPEC Copywriting Contract): a
+    // `Blocked` worker outcome is persisted with `MemberTurnStatus::Replied`
+    // (`worker_outcome_row`'s own doc comment — the worker's self-reported
+    // summary lives in `msg.text`, not in a `Failed { reason }` variant), so
+    // the match below on `msg.status` alone can never distinguish it from
+    // an ordinary reply. This early return is the SAME visible-body-text
+    // path the `Failed` arm below already takes — wired here rather than
+    // duplicated, so blocked can never silently drop to a bare unlabeled
+    // reply.
+    if let Some(TeamRowKind::WorkerResult { outcome: WorkerOutcomeKind::Blocked }) = &msg.team_row {
+        return blocked_marker_label(sender_name, &msg.text);
+    }
     match &msg.status {
         MemberTurnStatus::Passed => "(pass)".to_string(),
         MemberTurnStatus::Failed { reason } => failure_marker_label(sender_name, reason),
@@ -526,6 +724,239 @@ fn room_member_names_label(members: &[String], max_shown: usize) -> String {
     label
 }
 
+// -------------------------------------------------------------------
+// Phase 52 Plan 08 (D-10/D-11): GREEN phase (Task 1). The delegation row,
+// the worker-result fold, and their supporting pure fns. Kept together, in
+// this order, so the grouping pass and its two readers (the fold summary
+// accessor, the worker status/body-text helpers) read as one unit.
+// -------------------------------------------------------------------
+
+/// Phase 52 Plan 08 (D-10): a message's `team_row` — a small accessor kept
+/// as its own fn only so [`group_transcript_rows`] and every render-site
+/// reader share one read path rather than each spelling
+/// `msg.team_row.as_ref()` themselves.
+#[allow(dead_code)] // see now_ms's doc note above (legacy-shell reachability)
+fn team_row_kind_of(msg: &GroupRoomMessage) -> Option<&TeamRowKind> {
+    msg.team_row.as_ref()
+}
+
+/// Phase 52 Plan 08 (D-10/D-11, Round 1 codex HIGH): the delegation row's
+/// SERVER-COMPOSED fold summary, read from the `TeamRowKind::Delegation`
+/// payload and rendered verbatim — never recounted client-side.
+/// `GroupRoomMessage` has exactly one text field (`protocol.rs`'s own doc
+/// comment) and the delegation row's own body already occupies it, so the
+/// fold summary has nowhere else to live; a client-side recount would also
+/// silently diverge from `group_team_api::fold_summary_text` the moment a
+/// row is trimmed out of the window. `None` for every other row kind.
+#[allow(dead_code)] // see now_ms's doc note above (legacy-shell reachability)
+fn delegation_fold_summary_of(msg: &GroupRoomMessage) -> Option<&str> {
+    match team_row_kind_of(msg) {
+        Some(TeamRowKind::Delegation { fold_summary }) => Some(fold_summary.as_str()),
+        _ => None,
+    }
+}
+
+/// Phase 52 Plan 08 (D-10/D-11): one transcript row after the delegation-
+/// grouping pass. `children` is non-empty only for a `TeamRowKind::
+/// Delegation` row (its worker sub-rows); every other row kind — including
+/// every row a peer room ever produces (D-17) — carries an empty
+/// `children`, so a flat pre-Phase-52 transcript renders through the exact
+/// same one-row-per-message shape unchanged.
+#[allow(dead_code)] // see now_ms's doc note above (legacy-shell reachability)
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct GroupedTranscriptRow {
+    pub(crate) message: GroupRoomMessage,
+    pub(crate) children: Vec<GroupRoomMessage>,
+}
+
+/// Phase 52 Plan 08 (D-10/D-11, Round 1 codex MEDIUM): a pure pre-render
+/// pass folding each `TeamRowKind::WorkerResult` row into the children of
+/// the NEAREST preceding `TeamRowKind::Delegation` row — mirrors
+/// [`group_messages_into_rounds`]'s own shape (a pure fn with its own
+/// tests, called once before the render loop rather than branching inside
+/// it). It must not re-derive the delegation row's text or fold summary —
+/// the server composed both; this fn only regroups what it is handed.
+///
+/// **Bounded at three boundaries (Round 1 codex suggestion).** "Nearest
+/// preceding delegation row" alone would let a malformed, truncated or
+/// reordered transcript attach a worker row to a delegation it has nothing
+/// to do with — including one from a previous conversation. The open
+/// delegation resets to `None` when the scan crosses an Operator row, a
+/// `TeamRowKind::Synthesis` row, or a `GroupRoomSpeaker::System` row (D-02's
+/// conversation marker). A worker row with no open delegation (none seen
+/// yet, or past a boundary) renders at top level rather than being dropped
+/// or panicking — `history_limit` can truncate a transcript mid-delegation,
+/// so this is a reachable state, not defensive padding.
+#[allow(dead_code)] // see now_ms's doc note above (legacy-shell reachability)
+pub(crate) fn group_transcript_rows(messages: &[GroupRoomMessage]) -> Vec<GroupedTranscriptRow> {
+    let mut rows: Vec<GroupedTranscriptRow> = Vec::new();
+    let mut open_delegation: Option<usize> = None;
+    for msg in messages {
+        let is_boundary = matches!(msg.from, GroupRoomSpeaker::Operator | GroupRoomSpeaker::System)
+            || matches!(team_row_kind_of(msg), Some(TeamRowKind::Synthesis));
+        if is_boundary {
+            open_delegation = None;
+        }
+        match team_row_kind_of(msg) {
+            Some(TeamRowKind::Delegation { .. }) => {
+                rows.push(GroupedTranscriptRow { message: msg.clone(), children: Vec::new() });
+                open_delegation = Some(rows.len() - 1);
+            }
+            Some(TeamRowKind::WorkerResult { .. }) => match open_delegation {
+                Some(idx) => rows[idx].children.push(msg.clone()),
+                None => rows.push(GroupedTranscriptRow { message: msg.clone(), children: Vec::new() }),
+            },
+            _ => rows.push(GroupedTranscriptRow { message: msg.clone(), children: Vec::new() }),
+        }
+    }
+    rows
+}
+
+/// Phase 52 Plan 08 (D-10): a worker sub-row's `data-status` attribute,
+/// keyed on the SERVER-CLASSIFIED [`WorkerOutcomeKind`] rather than
+/// `MemberTurnStatus` — a `Blocked` row is persisted with
+/// `MemberTurnStatus::Replied` (`worker_outcome_row`'s own doc comment in
+/// `group_team_api.rs`), so [`message_status_attr`] alone can never
+/// distinguish it from an ordinary reply. `Completed` emits no attribute —
+/// a worker that produced a usable result is not degraded data and must
+/// not be dimmed (UI-SPEC Color table). `Failed` reuses the existing
+/// `"failed"` value (Pitfall 4 / D-05: infra failure and unparseable
+/// output share ONE "didn't produce usable output" shape). `Blocked` emits
+/// the new `"blocked"` value Plan 07's CSS keys the amber border on.
+#[allow(dead_code)] // see now_ms's doc note above (legacy-shell reachability)
+fn worker_status_attr(outcome: &WorkerOutcomeKind) -> Option<&'static str> {
+    match outcome {
+        WorkerOutcomeKind::Completed => None,
+        WorkerOutcomeKind::Failed => Some("failed"),
+        WorkerOutcomeKind::Blocked => Some("blocked"),
+    }
+}
+
+/// Phase 52 Plan 08 (D-10/D-11, UI-SPEC Copywriting Contract): mirrors
+/// [`failure_marker_label`]'s shape for a `Blocked` worker outcome — `msg`
+/// is the worker's OWN self-reported reason it couldn't complete the task
+/// (`worker_outcome_row` persists a blocked row's `result.summary` as
+/// plain body text, never wrapped further server-side), surfaced here
+/// verbatim, never hover-only.
+#[allow(dead_code)] // see now_ms's doc note above (legacy-shell reachability)
+fn blocked_marker_label(worker_name: &str, reason: &str) -> String {
+    format!("{worker_name} reported it couldn't complete this task: {reason}")
+}
+
+/// Phase 52 Plan 08 (D-10/D-11): whether a worker outcome's reason must
+/// reach the row's VISIBLE body text rather than staying hover-only — true
+/// for `Failed` and `Blocked`, false for `Completed` (a usable result is
+/// not degraded data, so it has no "reason" to surface). Directly tested
+/// so a future change that special-cases `Blocked` back out of the
+/// `Failed`-established visible-body-text path is caught without needing a
+/// live drive to notice.
+#[allow(dead_code)] // see now_ms's doc note above (legacy-shell reachability)
+fn worker_outcome_reason_is_visible_body_text(outcome: &WorkerOutcomeKind) -> bool {
+    !matches!(outcome, WorkerOutcomeKind::Completed)
+}
+
+/// Phase 52 Plan 08 (D-10/D-11): renders ONE `.kn-room-message` row — the
+/// existing single-message markup (Phase 50.2 Plans 06/11/17), factored
+/// into its own fn so the delegation row, an ordinary top-level row and a
+/// worker sub-row inside `.kn-room-worker-fold` all render through the
+/// SAME markup rather than a second, divergent copy (Round 1 codex HIGH:
+/// no client-side re-derivation of anything the server already composed).
+/// A plain fn, not a `#[component]` — it uses no hooks and is called like
+/// any other Rust fn from inside the transcript `for` loop below, never
+/// mounted via `ComponentName { .. }` syntax.
+#[allow(dead_code)] // see now_ms's doc note above (legacy-shell reachability)
+fn transcript_message_row(
+    msg: &GroupRoomMessage,
+    meta_map: &BTreeMap<String, BotMeta>,
+    now: i64,
+    dom_key: String,
+) -> Element {
+    let GroupRoomMessage { from, at_ms, status, .. } = msg;
+    let sender_name = speaker_display_name(from);
+    let display_text = message_display_text(msg, &sender_name);
+    let is_pass_equivalent = message_is_pass_equivalent(msg)
+        || matches!(
+            &msg.team_row,
+            Some(TeamRowKind::WorkerResult { outcome: WorkerOutcomeKind::Blocked })
+        );
+    let status_attr = match &msg.team_row {
+        Some(TeamRowKind::WorkerResult { outcome }) => worker_status_attr(outcome),
+        _ => message_status_attr(msg),
+    };
+    // Phase 52 Plan 08: the SAME visible-body-text/hover-marker split Plan
+    // 06/11 established for a failed peer turn now also covers a blocked
+    // worker sub-row — never hover-only (D-10/D-11 must-have).
+    let marker_label: Option<String> = if let Some(TeamRowKind::WorkerResult { outcome }) = &msg.team_row {
+        if worker_outcome_reason_is_visible_body_text(outcome) {
+            match outcome {
+                WorkerOutcomeKind::Blocked => Some(blocked_marker_label(&sender_name, &msg.text)),
+                _ => match status {
+                    MemberTurnStatus::Failed { reason } => Some(failure_marker_label(&sender_name, reason)),
+                    _ => None,
+                },
+            }
+        } else {
+            None
+        }
+    } else {
+        match status {
+            MemberTurnStatus::Failed { reason } => Some(failure_marker_label(&sender_name, reason)),
+            _ => None,
+        }
+    };
+    let member_avatar = match from {
+        GroupRoomSpeaker::Member(name) => meta_map.get(name).and_then(|m| m.avatar.clone()),
+        _ => None,
+    };
+    let border_style = if is_pass_equivalent {
+        String::new()
+    } else if let GroupRoomSpeaker::Member(name) = from {
+        let token = identity_border_token(
+            member_avatar.as_ref().and_then(|a| a.color.as_deref()),
+            name,
+        );
+        format!("border-left-color: var({token});")
+    } else {
+        String::new()
+    };
+    rsx! {
+        div {
+            key: "{dom_key}",
+            class: "kn-room-message",
+            "data-status": status_attr,
+            style: "{border_style}",
+            div { class: "kn-room-message-head",
+                if let GroupRoomSpeaker::Member(name) = from {
+                    BotFace {
+                        name: name.clone(),
+                        size: 20u32,
+                        shape: member_avatar.as_ref().and_then(|a| a.shape.clone()),
+                        color_token: member_avatar.as_ref().and_then(|a| a.color.clone()),
+                        image_id: member_avatar.as_ref().and_then(|a| a.image_id.clone()),
+                    }
+                }
+                span {
+                    style: "font-size: var(--fs-11); font-weight: 700;",
+                    "{sender_name}"
+                }
+                span {
+                    style: "font-size: var(--fs-11); color: var(--fg-dim);",
+                    "{format_relative_timestamp(*at_ms, now)}"
+                }
+                if let Some(label) = &marker_label {
+                    span {
+                        class: "kn-room-failure-marker",
+                        "aria-hidden": "true",
+                        title: "{label}",
+                        "ⓘ"
+                    }
+                }
+            }
+            div { "{display_text}" }
+        }
+    }
+}
+
 /// Phase 50.2 Plan 01: the room workspace. `room_id` is expected to be
 /// mounted with `key: "{room_id}"` at the call site (`bot_roster.rs`) so a
 /// drill-in to a DIFFERENT room fully remounts this component with fresh
@@ -553,13 +984,21 @@ pub fn GroupChatWorkspace(
         async move { crate::server::group_chat_api::load_group_room(room_id).await }
     });
 
+    // Phase 52 Plan 08: bumped by `GroupSettingsDrawer`'s `on_saved`
+    // callback (added by Plan 07, wired here) so a save made from THIS
+    // room's own gear icon refreshes `settings_resource` instead of
+    // leaving the header chip's denominator stale until the next
+    // unrelated remount.
+    let mut settings_tick: Signal<u32> = use_signal(|| 0u32);
     // Phase 50.2 Plan 06 (D-21 integration): the persisted settings record,
     // read only for its `max_rounds` — the round divider's `Round {n} of
     // {max}` label. Falls back to `GroupChatSettings::default().max_rounds`
     // while loading or on a load error, matching the driver's own
     // corrupted-record fallback (never a bare hardcoded `3`).
-    let settings_resource =
-        use_resource(move || async move { load_group_chat_settings().await });
+    let settings_resource = use_resource(move || {
+        let _settings_tick = settings_tick();
+        async move { load_group_chat_settings().await }
+    });
 
     let mut draft: Signal<String> = use_signal(String::new);
     // Phase 50.2 Plan 18 (G-50.2-2c): an outstanding-dispatch COUNTER, not a
@@ -589,6 +1028,10 @@ pub fn GroupChatWorkspace(
     // open flag — a plain `use_signal`, never a context provider, same
     // ownership placement as `delete_confirm_open` above.
     let mut edit_members_open: Signal<bool> = use_signal(|| false);
+    // Phase 52 Plan 09 (D-02): the `New conversation` confirm's own open
+    // flag — same ownership placement as `delete_confirm_open`/
+    // `edit_members_open` above, never a context provider.
+    let mut new_conversation_open: Signal<bool> = use_signal(|| false);
 
     // Phase 50.2 Plan 07 (D-20): client-side, session-transient handoff
     // blocks for bots mentioned in this room who are NOT room members —
@@ -597,6 +1040,18 @@ pub fn GroupChatWorkspace(
     // no handoff-block kind). Owned here, never a context provider, same
     // ownership placement as every other Signal this component holds.
     let room_mention_entries: Signal<Vec<MentionHandoffEntry>> = use_signal(Vec::new);
+    // Phase 52 Plan 08 (D-10, Round 1 codex MEDIUM): the fold-toggle
+    // expansion state for EVERY delegation row in this transcript — ONE
+    // parent-level signal, never a per-row `use_signal` (the transcript
+    // loop iterates a variable-length band list, so a per-row hook would
+    // register a changing number of hooks between renders, the
+    // unconditional-hook rule this crate has already shipped two
+    // regressions against). Keyed by a delegation row's position in the
+    // flattened, grouped row sequence — a `history_limit` trim can shift
+    // that position, so an expanded fold can appear to move after a trim;
+    // an accepted cost for a purely presentational toggle with no
+    // persisted key.
+    let mut expanded_delegations: Signal<BTreeSet<usize>> = use_signal(BTreeSet::new);
 
     // ---- Derived values (read BEFORE rsx!, clippy.toml discipline). ----
     let is_loading = transcript_resource().is_none();
@@ -609,6 +1064,24 @@ pub fn GroupChatWorkspace(
         Some(Ok(s)) => s.max_rounds,
         _ => GroupChatSettings::default().max_rounds,
     };
+    // Phase 52 Plan 08 (D-14): the app-wide cycle budget, mirroring
+    // `settings_max_rounds`'s own loading/error fallback — never a bare
+    // hardcoded literal.
+    let settings_max_cycles: u32 = match settings_resource() {
+        Some(Ok(s)) => s.max_cycles,
+        _ => GroupChatSettings::default().max_cycles,
+    };
+    // Phase 52 Plan 08 (D-17): this room's kind, read once — governs the
+    // header chip's wording and the queued-notice noun. `false` while the
+    // transcript is still loading, matching the header's own "existing
+    // idle chrome" contract (E4) for that window.
+    let is_team_room: bool = transcript.as_ref().map(|t| t.room.pattern.is_some()).unwrap_or(false);
+    // Phase 52 Plan 09 (D-15): the advisory row's text, computed BEFORE
+    // `rsx!` per this crate's signal-borrow discipline — `None` renders
+    // nothing (no badge state, or a raised flag with no persisted reason).
+    let needs_you_advisory: Option<String> = transcript
+        .as_ref()
+        .and_then(|t| needs_you_advisory_text(t.room.needs_you, t.room.needs_you_reason.as_deref()));
     // Phase 50.2 Plan 07 (D-20): this room's current membership, for
     // `mention_targets_for_room`'s member-exclusion filter at both
     // `submit_room_send` call sites below.
@@ -650,6 +1123,29 @@ pub fn GroupChatWorkspace(
     // the round that ends a drive can ever score `spoke == 0` — an earlier
     // band would have stopped the drive there instead).
     let last_band_settled = bands.last().map(round_band_is_settled).unwrap_or(false);
+    // Phase 52 Plan 08 (D-10/D-11): the delegation-grouping pass, applied
+    // PER BAND rather than once over the whole transcript — a delegation,
+    // its worker results and its synthesis all share one `round`/cycle
+    // number (`group_team_api.rs`'s `worker_outcome_row`/`run_team_drive`),
+    // so a delegation's children never span a band boundary in practice,
+    // and this keeps the existing round-divider machinery (`bands`,
+    // `last_band_settled`) untouched.
+    let grouped_bands: Vec<Vec<GroupedTranscriptRow>> = bands
+        .iter()
+        .map(|band| group_transcript_rows(&band.messages))
+        .collect();
+    // Phase 52 Plan 08 (D-10): each band's own `(row_i)` turned into the
+    // GLOBAL position `expanded_delegations` is keyed on — two different
+    // bands' `row_i == 0` would otherwise collide.
+    let band_row_offsets: Vec<usize> = {
+        let mut offsets = Vec::with_capacity(grouped_bands.len());
+        let mut running = 0usize;
+        for rows in &grouped_bands {
+            offsets.push(running);
+            running += rows.len();
+        }
+        offsets
+    };
 
     rsx! {
         div { class: "kn-room-workspace",
@@ -706,16 +1202,26 @@ pub fn GroupChatWorkspace(
                         "data-kind": "members",
                         "{t.room.members.len()}/6"
                     }
-                    // Round chip — conditional, dispatching only (UI-SPEC
-                    // Component Inventory §6). No per-round streaming
-                    // exists to name a specific round mid-drive (see module
-                    // doc), so the chip states the bound rather than
-                    // fabricating a false-precision round count.
-                    if dispatch_state.is_dispatching() {
+                    // Round/cycle chip — conditional, dispatching only
+                    // (UI-SPEC Component Inventory §6, Surface Contract 4).
+                    // `in_flight_chip_text` is the single place the D-17
+                    // room-kind split and the Round 1 codex HIGH ellipsis-
+                    // numerator amendment both live — see that fn's own
+                    // doc comment. `data-live="true"` is the attribute
+                    // Plan 07's CSS keys the 2.4s opacity pulse on; it is
+                    // only ever present alongside chip text, so it never
+                    // needs its own separate condition.
+                    if let Some(chip_text) = in_flight_chip_text(
+                        is_team_room,
+                        dispatch_state.is_dispatching(),
+                        resolve_cycle_budget(t.room.max_cycles, settings_max_cycles),
+                        settings_max_rounds,
+                    ) {
                         span {
                             class: "kn-chip",
                             "data-kind": "round",
-                            "Round …/{settings_max_rounds}"
+                            "data-live": "true",
+                            "{chip_text}"
                         }
                     }
                     // Needs-you badge — conditional, absent (not dimmed)
@@ -755,28 +1261,71 @@ pub fn GroupChatWorkspace(
                     }
                     if *overflow_open.read() {
                         div { class: "kn-profile-menu", role: "menu",
-                            button {
-                                class: "kn-profile-menu-item",
-                                role: "menuitem",
-                                onclick: move |_| {
-                                    overflow_open.set(false);
-                                    edit_members_open.set(true);
-                                },
-                                "Edit members"
-                            }
-                            button {
-                                class: "kn-profile-menu-item",
-                                role: "menuitem",
-                                style: "color: var(--danger);",
-                                onclick: move |_| {
-                                    overflow_open.set(false);
-                                    delete_confirm_open.set(true);
-                                },
-                                "Delete room"
+                            // Phase 52 Plan 09 (D-02/D-17, UI-SPEC Surface
+                            // Contract 6): rendered FROM
+                            // `overflow_menu_entries` rather than restating
+                            // its order a second time — `New conversation`
+                            // lands between `Edit members` and `Delete
+                            // room`, present in every room regardless of
+                            // `pattern`.
+                            for entry in overflow_menu_entries(transcript.as_ref().and_then(|t| t.room.pattern.as_ref())) {
+                                {
+                                    match entry {
+                                        "Edit members" => rsx! {
+                                            button {
+                                                key: "{entry}",
+                                                class: "kn-profile-menu-item",
+                                                role: "menuitem",
+                                                onclick: move |_| {
+                                                    overflow_open.set(false);
+                                                    edit_members_open.set(true);
+                                                },
+                                                "Edit members"
+                                            }
+                                        },
+                                        "New conversation" => rsx! {
+                                            button {
+                                                key: "{entry}",
+                                                class: "kn-profile-menu-item",
+                                                role: "menuitem",
+                                                onclick: move |_| {
+                                                    overflow_open.set(false);
+                                                    new_conversation_open.set(true);
+                                                },
+                                                "New conversation"
+                                            }
+                                        },
+                                        _ => rsx! {
+                                            button {
+                                                key: "{entry}",
+                                                class: "kn-profile-menu-item",
+                                                role: "menuitem",
+                                                style: "color: var(--danger);",
+                                                onclick: move |_| {
+                                                    overflow_open.set(false);
+                                                    delete_confirm_open.set(true);
+                                                },
+                                                "Delete room"
+                                            }
+                                        },
+                                    }
+                                }
                             }
                         }
                     }
                 }
+            }
+            // Phase 52 Plan 09 (D-15, UI-SPEC Surface Contract 5): the
+            // advisory row — a single-line row directly beneath the
+            // header's needs-you badge, reusing the SAME
+            // `.kn-modal-hint--info` treatment the composer's queued
+            // notice already uses (no new CSS asset). `.kn-room-workspace`
+            // is `flex-direction: column`, so this sibling of
+            // `.kn-room-header` renders as its own full-width row beneath
+            // it without touching the header's own row layout. Renders
+            // nothing when there is nothing to advise.
+            if let Some(advisory) = &needs_you_advisory {
+                div { class: "kn-modal-hint--info", "{advisory}" }
             }
             div { class: "kn-room-transcript",
                 if is_loading {
@@ -805,80 +1354,56 @@ pub fn GroupChatWorkspace(
                                         class: "kn-room-round-divider",
                                         "{divider_label}"
                                     }
-                                    for (msg_i , msg) in band.messages.iter().enumerate() {
+                                    for (row_i , row) in grouped_bands[band_i].iter().enumerate() {
                                         {
-                                            let GroupRoomMessage { from, at_ms, status, .. } = msg;
-                                            // Phase 50.2 Plan 11 (G-2): sender_name is now computed
-                                            // BEFORE display_text so the reason can flow through it.
-                                            let sender_name = speaker_display_name(from);
-                                            let display_text = message_display_text(msg, &sender_name);
-                                            let is_pass_equivalent = message_is_pass_equivalent(msg);
-                                            let status_attr = message_status_attr(msg);
-                                            let failure_reason = match status {
-                                                MemberTurnStatus::Failed { reason } => Some(reason.clone()),
-                                                _ => None,
-                                            };
-                                            let member_avatar = match from {
-                                                GroupRoomSpeaker::Member(name) => meta_map.get(name).and_then(|m| m.avatar.clone()),
-                                                _ => None,
-                                            };
-                                            let border_style = if is_pass_equivalent {
-                                                String::new()
-                                            } else if let GroupRoomSpeaker::Member(name) = from {
-                                                let token = identity_border_token(
-                                                    member_avatar.as_ref().and_then(|a| a.color.as_deref()),
-                                                    name,
-                                                );
-                                                format!("border-left-color: var({token});")
-                                            } else {
-                                                String::new()
-                                            };
+                                            // Phase 52 Plan 08 (D-10/D-11): a delegation row's
+                                            // children render via the SAME transcript_message_row
+                                            // markup, indented inside .kn-room-worker-fold, only
+                                            // while this row's GLOBAL position is expanded.
+                                            let global_row_i = band_row_offsets[band_i] + row_i;
+                                            let fold_summary = delegation_fold_summary_of(&row.message);
+                                            let is_expanded = expanded_delegations.read().contains(&global_row_i);
                                             rsx! {
-                                                div {
-                                                    key: "msg-{band_i}-{msg_i}",
-                                                    class: "kn-room-message",
-                                                    // Phase 50.2 Plan 11 (G-2): data-status now comes from
-                                                    // message_status_attr, which distinguishes Failed from
-                                                    // Passed — the previous shared "pass" value is exactly
-                                                    // what made a failed row indistinguishable from a real
-                                                    // pass (50.2-UAT-EVIDENCE.md §4 F-2).
-                                                    "data-status": status_attr,
-                                                    style: "{border_style}",
-                                                    div { class: "kn-room-message-head",
-                                                        if let GroupRoomSpeaker::Member(name) = from {
-                                                            BotFace {
-                                                                name: name.clone(),
-                                                                size: 20u32,
-                                                                shape: member_avatar.as_ref().and_then(|a| a.shape.clone()),
-                                                                color_token: member_avatar.as_ref().and_then(|a| a.color.clone()),
-                                                                image_id: member_avatar.as_ref().and_then(|a| a.image_id.clone()),
+                                                {transcript_message_row(&row.message, &meta_map, now, format!("msg-{band_i}-{row_i}"))}
+                                                if let Some(summary) = fold_summary {
+                                                    // Phase 52 Plan 08 (D-10, UI-SPEC Surface
+                                                    // Contract 3): the SAME button+signal toggle
+                                                    // idiom the "⋯" overflow menu already uses in
+                                                    // this file — never `<details>`/`<summary>`.
+                                                    // Collapsed by default; its visible text is the
+                                                    // server-composed fold summary, never a
+                                                    // client-side recount.
+                                                    button {
+                                                        key: "fold-{band_i}-{row_i}",
+                                                        class: "kn-action-btn",
+                                                        "aria-label": "Toggle worker results",
+                                                        "aria-expanded": if is_expanded { "true" } else { "false" },
+                                                        onclick: move |_| {
+                                                            let mut set = expanded_delegations.read().clone();
+                                                            if set.contains(&global_row_i) {
+                                                                set.remove(&global_row_i);
+                                                            } else {
+                                                                set.insert(global_row_i);
                                                             }
-                                                        }
-                                                        span {
-                                                            style: "font-size: var(--fs-11); font-weight: 700;",
-                                                            "{sender_name}"
-                                                        }
-                                                        span {
-                                                            style: "font-size: var(--fs-11); color: var(--fg-dim);",
-                                                            "{format_relative_timestamp(*at_ms, now)}"
-                                                        }
-                                                        // Phase 50.2 Plan 11 (G-2): the reason is now visible
-                                                        // BODY text (message_display_text), which assistive
-                                                        // tech already reads via the row's own text node — so
-                                                        // this marker is aria-hidden rather than aria-label'd,
-                                                        // to avoid a screen reader announcing the same
-                                                        // sentence twice. `title` stays for the hover
-                                                        // affordance.
-                                                        if let Some(reason) = &failure_reason {
-                                                            span {
-                                                                class: "kn-room-failure-marker",
-                                                                "aria-hidden": "true",
-                                                                title: "{failure_marker_label(&sender_name, reason)}",
-                                                                "ⓘ"
+                                                            expanded_delegations.set(set);
+                                                        },
+                                                        {format!("{} {summary}", if is_expanded { "▾" } else { "▸" })}
+                                                    }
+                                                    if is_expanded {
+                                                        // Phase 52 Plan 08 (D-10): worker sub-rows are
+                                                        // excluded from PROMPT replay by the backend
+                                                        // (`group_team_api::is_replayable_team_row`) —
+                                                        // a backend/prompt-builder concern, not a
+                                                        // rendering one. This client renders whatever
+                                                        // `row.children` the store returned, with NO
+                                                        // filter of its own; do not add a second,
+                                                        // divergent filter here.
+                                                        div { class: "kn-room-worker-fold",
+                                                            for (child_i , child) in row.children.iter().enumerate() {
+                                                                {transcript_message_row(child, &meta_map, now, format!("worker-{band_i}-{row_i}-{child_i}"))}
                                                             }
                                                         }
                                                     }
-                                                    div { "{display_text}" }
                                                 }
                                             }
                                         }
@@ -912,7 +1437,7 @@ pub fn GroupChatWorkspace(
             // dispatch-error row above. Reuses `kn-modal-hint--info` (no new
             // CSS asset — plan 50.2-17 owns `bots.css` this round).
             if let Some(depth) = queued_notice_val {
-                div { class: "kn-modal-hint--info", "{queued_for_next_round_notice(depth)}" }
+                div { class: "kn-modal-hint--info", "{queued_notice_for_room(depth, is_team_room)}" }
             }
             div { class: "kn-room-composer",
                 input {
@@ -944,7 +1469,7 @@ pub fn GroupChatWorkspace(
                 }
                 button {
                     class: "kn-action-btn",
-                    disabled: !can_send,
+                    disabled: composer_send_disabled(can_send),
                     onclick: {
                         let room_id_for_send = room_id.clone();
                         let roster_names_for_send = roster_names.clone();
@@ -972,7 +1497,18 @@ pub fn GroupChatWorkspace(
         // shell" placement `DeleteBotConfirm` uses in the profile drawer.
         // `GroupSettingsDrawer` itself renders nothing while
         // `settings_open` is false (D-10 mount-unconditionally idiom).
-        GroupSettingsDrawer { open: settings_open }
+        GroupSettingsDrawer {
+            open: settings_open,
+            // Phase 52 Plan 08: closes Plan 07's Round 1 codex MEDIUM gap —
+            // a save made from THIS room's own gear icon now bumps
+            // `settings_tick`, which `settings_resource` reads, instead of
+            // leaving the header chip's cycle-budget denominator stale
+            // until an unrelated remount.
+            on_saved: move |_| {
+                let cur = *settings_tick.read();
+                settings_tick.set(cur + 1);
+            },
+        }
         // Phase 50.2 Plan 06: conditionally mounted (not always-mounted-
         // render-nothing) — same idiom `bot_roster.rs`'s own
         // `CreateRoomModal` mount already uses, since a target room name
@@ -1008,9 +1544,35 @@ pub fn GroupChatWorkspace(
                     room_name: t.room.name.clone(),
                     current_members: t.room.members.clone(),
                     roster_entries: roster_entries.clone(),
+                    pattern: t.room.pattern.clone(),
+                    roles: t.room.roles.clone(),
+                    max_cycles: t.room.max_cycles,
+                    leader_prompt_override: t.room.leader_prompt_override.clone(),
+                    worker_prompt_override: t.room.worker_prompt_override.clone(),
                     on_close: move |_| edit_members_open.set(false),
                     on_saved: move |_| {
                         edit_members_open.set(false);
+                        let mut tick = refresh_tick;
+                        let cur = *tick.read();
+                        tick.set(cur + 1);
+                    },
+                }
+            }
+        }
+        // Phase 52 Plan 09 (D-02): conditionally mounted, same idiom
+        // `DeleteRoomConfirm`/`EditMembersModal` above already use — a
+        // target room name is only available once the transcript has
+        // resolved. `on_reset` bumps `refresh_tick`, the same reload
+        // `EditMembersModal`'s own `on_saved` already triggers, so the
+        // appended System marker row is visible without a page reload.
+        if *new_conversation_open.read() {
+            if let Some(t) = &transcript {
+                NewConversationConfirm {
+                    room_id: room_id.clone(),
+                    room_name: t.room.name.clone(),
+                    on_dismiss: move |_| new_conversation_open.set(false),
+                    on_reset: move |_| {
+                        new_conversation_open.set(false);
                         let mut tick = refresh_tick;
                         let cur = *tick.read();
                         tick.set(cur + 1);
@@ -1036,11 +1598,47 @@ mod room_transcript_tests {
             at_ms: 0,
             round,
             status,
+            team_row: None,
         }
     }
 
     fn member_msg(round: u32, name: &str, status: MemberTurnStatus, text: &str) -> GroupRoomMessage {
         msg(round, GroupRoomSpeaker::Member(name.to_string()), status, text)
+    }
+
+    // Phase 52 Plan 08 (D-10/D-11): team-row constructors, mirroring `msg`/
+    // `member_msg`'s own shape.
+
+    fn operator_msg(round: u32, text: &str) -> GroupRoomMessage {
+        msg(round, GroupRoomSpeaker::Operator, MemberTurnStatus::Replied, text)
+    }
+
+    fn system_marker_msg(round: u32) -> GroupRoomMessage {
+        msg(round, GroupRoomSpeaker::System, MemberTurnStatus::Replied, "")
+    }
+
+    fn delegation_msg(round: u32, leader: &str, fold_summary: &str, text: &str) -> GroupRoomMessage {
+        let mut m = member_msg(round, leader, MemberTurnStatus::Replied, text);
+        m.team_row = Some(TeamRowKind::Delegation { fold_summary: fold_summary.to_string() });
+        m
+    }
+
+    fn worker_result_msg(
+        round: u32,
+        worker: &str,
+        outcome: WorkerOutcomeKind,
+        status: MemberTurnStatus,
+        text: &str,
+    ) -> GroupRoomMessage {
+        let mut m = member_msg(round, worker, status, text);
+        m.team_row = Some(TeamRowKind::WorkerResult { outcome });
+        m
+    }
+
+    fn synthesis_msg(round: u32, leader: &str, text: &str) -> GroupRoomMessage {
+        let mut m = member_msg(round, leader, MemberTurnStatus::Replied, text);
+        m.team_row = Some(TeamRowKind::Synthesis);
+        m
     }
 
     // -------------------------------------------------------------------
@@ -1489,5 +2087,398 @@ mod room_transcript_tests {
             notice,
             "Message queued — it will go into the room on the next round (3 messages waiting)."
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 52 Plan 08, Task 1 (D-10/D-11): group_transcript_rows
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn group_transcript_rows_groups_worker_sub_rows_under_their_delegation_row() {
+        let messages = vec![
+            operator_msg(1, "kick it off"),
+            delegation_msg(1, "leader", "3 workers — 2 completed, 1 failed", "Delegating 3 tasks: ..."),
+            worker_result_msg(1, "alpha", WorkerOutcomeKind::Completed, MemberTurnStatus::Replied, "done"),
+            worker_result_msg(1, "beta", WorkerOutcomeKind::Completed, MemberTurnStatus::Replied, "done"),
+            worker_result_msg(
+                1,
+                "gamma",
+                WorkerOutcomeKind::Failed,
+                MemberTurnStatus::Failed { reason: "dispatch-failed".to_string() },
+                "",
+            ),
+            synthesis_msg(1, "leader", "final answer"),
+        ];
+        let rows = group_transcript_rows(&messages);
+        assert_eq!(rows.len(), 3, "operator, delegation, synthesis — three top-level rows");
+        assert_eq!(rows[0].message.from, GroupRoomSpeaker::Operator);
+        assert!(rows[0].children.is_empty());
+        assert!(delegation_fold_summary_of(&rows[1].message).is_some());
+        assert_eq!(rows[1].children.len(), 3);
+        assert!(matches!(rows[2].message.team_row, Some(TeamRowKind::Synthesis)));
+        assert!(rows[2].children.is_empty());
+    }
+
+    #[test]
+    fn group_transcript_rows_leaves_a_peer_room_transcript_flat() {
+        let messages = vec![
+            member_msg(1, "a", MemberTurnStatus::Replied, "hi"),
+            member_msg(1, "b", MemberTurnStatus::Passed, "(pass)"),
+            member_msg(2, "a", MemberTurnStatus::Replied, "hi2"),
+        ];
+        let rows = group_transcript_rows(&messages);
+        assert_eq!(rows.len(), messages.len());
+        for (row, original) in rows.iter().zip(messages.iter()) {
+            assert_eq!(&row.message, original);
+            assert!(row.children.is_empty());
+        }
+    }
+
+    #[test]
+    fn group_transcript_rows_handles_worker_rows_with_no_preceding_delegation_row() {
+        let messages = vec![worker_result_msg(
+            1,
+            "alpha",
+            WorkerOutcomeKind::Completed,
+            MemberTurnStatus::Replied,
+            "done",
+        )];
+        let rows = group_transcript_rows(&messages);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].children.is_empty());
+        assert_eq!(rows[0].message.from, GroupRoomSpeaker::Member("alpha".to_string()));
+    }
+
+    #[test]
+    fn group_transcript_rows_stops_grouping_at_an_operator_row() {
+        let messages = vec![
+            delegation_msg(1, "leader", "1 worker — 1 completed", "Delegating 1 task: ..."),
+            operator_msg(2, "follow up"),
+            worker_result_msg(2, "alpha", WorkerOutcomeKind::Completed, MemberTurnStatus::Replied, "done"),
+        ];
+        let rows = group_transcript_rows(&messages);
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].children.is_empty(), "the operator row closed the delegation before any worker row arrived");
+        assert!(rows[2].children.is_empty());
+        assert_eq!(rows[2].message.from, GroupRoomSpeaker::Member("alpha".to_string()));
+    }
+
+    #[test]
+    fn group_transcript_rows_stops_grouping_at_a_synthesis_row() {
+        let messages = vec![
+            delegation_msg(1, "leader", "1 worker — 1 completed", "Delegating 1 task: ..."),
+            synthesis_msg(1, "leader", "final"),
+            worker_result_msg(2, "alpha", WorkerOutcomeKind::Completed, MemberTurnStatus::Replied, "done"),
+        ];
+        let rows = group_transcript_rows(&messages);
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].children.is_empty());
+        assert!(rows[2].children.is_empty());
+    }
+
+    #[test]
+    fn group_transcript_rows_stops_grouping_at_a_conversation_marker_row() {
+        let messages = vec![
+            delegation_msg(1, "leader", "1 worker — 1 completed", "Delegating 1 task: ..."),
+            system_marker_msg(2),
+            worker_result_msg(2, "alpha", WorkerOutcomeKind::Completed, MemberTurnStatus::Replied, "done"),
+        ];
+        let rows = group_transcript_rows(&messages);
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].children.is_empty());
+        assert!(rows[2].children.is_empty());
+    }
+
+    #[test]
+    fn all_five_worker_sub_rows_render_with_no_truncation() {
+        let mut messages = vec![delegation_msg(1, "leader", "5 workers — 5 completed", "Delegating 5 tasks: ...")];
+        for i in 0..5 {
+            messages.push(worker_result_msg(
+                1,
+                &format!("worker{i}"),
+                WorkerOutcomeKind::Completed,
+                MemberTurnStatus::Replied,
+                "done",
+            ));
+        }
+        let rows = group_transcript_rows(&messages);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].children.len(), 5, "no pagination, no show-more — all 5 render");
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 52 Plan 08, Task 1 (D-10/D-11): delegation_fold_summary_of
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn delegation_fold_summary_of_reads_the_server_composed_payload() {
+        let d = delegation_msg(1, "leader", "2 workers — 1 completed, 1 failed", "Delegating 2 tasks: ...");
+        assert_eq!(delegation_fold_summary_of(&d), Some("2 workers — 1 completed, 1 failed"));
+
+        let w = worker_result_msg(1, "alpha", WorkerOutcomeKind::Completed, MemberTurnStatus::Replied, "done");
+        assert_eq!(delegation_fold_summary_of(&w), None);
+
+        let plain = member_msg(1, "a", MemberTurnStatus::Replied, "hi");
+        assert_eq!(delegation_fold_summary_of(&plain), None);
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 52 Plan 08, Task 1 (D-10): worker_status_attr / blocked_marker_label
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn worker_status_attr_maps_completed_failed_and_blocked_to_distinct_values() {
+        assert_eq!(worker_status_attr(&WorkerOutcomeKind::Completed), None);
+        assert_eq!(worker_status_attr(&WorkerOutcomeKind::Failed), Some("failed"));
+        assert_eq!(worker_status_attr(&WorkerOutcomeKind::Blocked), Some("blocked"));
+        assert_ne!(
+            worker_status_attr(&WorkerOutcomeKind::Failed),
+            worker_status_attr(&WorkerOutcomeKind::Blocked)
+        );
+    }
+
+    #[test]
+    fn blocked_marker_label_carries_the_reason_as_visible_body_text() {
+        let label = blocked_marker_label("scout", "needs the API key rotated");
+        assert!(label.contains("scout"));
+        assert!(label.contains("needs the API key rotated"));
+
+        assert!(worker_outcome_reason_is_visible_body_text(&WorkerOutcomeKind::Blocked));
+        assert_eq!(
+            worker_outcome_reason_is_visible_body_text(&WorkerOutcomeKind::Blocked),
+            worker_outcome_reason_is_visible_body_text(&WorkerOutcomeKind::Failed)
+        );
+        assert!(!worker_outcome_reason_is_visible_body_text(&WorkerOutcomeKind::Completed));
+
+        let blocked_row = worker_result_msg(
+            1,
+            "scout",
+            WorkerOutcomeKind::Blocked,
+            MemberTurnStatus::Replied,
+            "needs the API key rotated",
+        );
+        assert_eq!(
+            message_display_text(&blocked_row, "scout"),
+            label,
+            "the visible body text is the SAME label the hover marker would carry — never hover-only"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 52 Plan 08, Task 3 (D-08/D-14/D-17): in_flight_chip_text / resolve_cycle_budget
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn in_flight_chip_text_reads_cycles_in_a_team_room_and_rounds_in_a_peer_room() {
+        assert_eq!(in_flight_chip_text(true, true, 3, 5), Some("Working — cycle …/3".to_string()));
+        assert_eq!(in_flight_chip_text(false, true, 3, 5), Some("Round …/5".to_string()));
+    }
+
+    #[test]
+    fn in_flight_chip_text_is_absent_when_no_drive_is_dispatching() {
+        assert_eq!(in_flight_chip_text(true, false, 3, 5), None);
+        assert_eq!(in_flight_chip_text(false, false, 3, 5), None);
+    }
+
+    #[test]
+    fn in_flight_chip_text_carries_no_numeric_current_cycle() {
+        let text = in_flight_chip_text(true, true, 3, 5).unwrap();
+        // Exactly one contiguous digit run (the denominator) — a
+        // regression that reintroduces a fabricated `{n}` numerator would
+        // add a SECOND digit run and fail this count.
+        let digit_runs = text.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).count();
+        assert_eq!(digit_runs, 1, "exactly one integer (the denominator) may appear: {text}");
+    }
+
+    #[test]
+    fn in_flight_chip_denominator_matches_the_resolved_cycle_budget() {
+        assert_eq!(resolve_cycle_budget(Some(3), 1), 3, "a room override wins over the app-wide default");
+        assert_eq!(resolve_cycle_budget(None, 1), 1, "absent a room override, the app-wide default applies");
+    }
+
+    // Phase 52 Plan 08 (Round 1 codex HIGH): asserted against the REAL
+    // server-side resolver so the two implementations cannot silently
+    // drift apart. `#[cfg(feature = "server")]` — this crate's own verify
+    // commands always run `--all-features`, so this test is always live
+    // there; it is compiled out of a default-feature (`web`-only) test
+    // build, where `group_team_api` (`server/mod.rs:274`) does not exist.
+    #[cfg(feature = "server")]
+    #[test]
+    fn resolve_cycle_budget_matches_the_server_resolver() {
+        use crate::protocol::{GroupRoom, MemberRole};
+        use std::collections::BTreeMap;
+
+        fn bare_room(max_cycles: Option<u32>) -> GroupRoom {
+            GroupRoom {
+                id: "r1".to_string(),
+                name: "room".to_string(),
+                members: vec!["a".to_string(), "b".to_string()],
+                group: None,
+                needs_you: false,
+                needs_you_reason: None,
+                preview: None,
+                preview_at_ms: None,
+                created_at_ms: 0,
+                updated_at_ms: 0,
+                pattern: None,
+                roles: BTreeMap::<String, MemberRole>::new(),
+                max_cycles,
+                leader_prompt_override: None,
+                worker_prompt_override: None,
+                conversation_epoch: 1,
+            }
+        }
+
+        let settings = GroupChatSettings::default();
+        for room_max in [Some(3u32), None, Some(99u32)] {
+            let room = bare_room(room_max);
+            let server_result = crate::server::group_team_api::resolve_cycle_budget(&room, &settings);
+            let client_result = resolve_cycle_budget(room_max, settings.max_cycles);
+            assert_eq!(
+                client_result, server_result,
+                "client and server cycle-budget resolution must never drift apart (room_max={room_max:?})"
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 52 Plan 08, Task 3 (D-15): composer_send_disabled
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn composer_is_never_disabled() {
+        // D-15: needs_you raised has zero bearing here — the predicate's
+        // only input is whether the draft is sendable, by construction.
+        assert!(!composer_send_disabled(true));
+        assert!(composer_send_disabled(false));
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 52 Plan 08, Task 3 (Copywriting Contract): queued_notice_for_room
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn the_queued_notice_says_cycle_in_a_team_room_and_round_in_a_peer_room() {
+        assert_eq!(
+            queued_notice_for_room(1, true),
+            "Message queued — it will go into the room on the next cycle."
+        );
+        assert_eq!(queued_notice_for_room(1, false), queued_for_next_round_notice(1));
+        assert_eq!(
+            queued_notice_for_room(3, true),
+            "Message queued — it will go into the room on the next cycle (3 messages waiting)."
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 52 Plan 09, Task 2 (D-02/D-17): overflow_menu_entries
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn overflow_menu_order_is_edit_members_then_new_conversation_then_delete_room() {
+        assert_eq!(
+            overflow_menu_entries(None),
+            ["Edit members", "New conversation", "Delete room"]
+        );
+    }
+
+    #[test]
+    fn the_overflow_menu_offers_new_conversation_in_a_peer_room() {
+        assert!(overflow_menu_entries(None).contains(&"New conversation"));
+    }
+
+    #[test]
+    fn the_overflow_menu_offers_new_conversation_in_a_team_room() {
+        assert!(overflow_menu_entries(Some(&TeamPattern::OrchestratorWorkers))
+            .contains(&"New conversation"));
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 52 Plan 09, Task 3 (D-15): needs_you_advisory_text
+    // -------------------------------------------------------------------
+
+    // `GroupRoom` is used only by this test module (`bare_room_for_advisory`
+    // below) — a local import here, not a file-level one, mirroring
+    // `resolve_cycle_budget_matches_the_server_resolver`'s own local
+    // `use crate::protocol::{GroupRoom, MemberRole};` precedent above.
+    use crate::protocol::GroupRoom;
+
+    fn bare_room_for_advisory(
+        pattern: Option<TeamPattern>,
+        needs_you: bool,
+        reason: Option<&str>,
+    ) -> GroupRoom {
+        GroupRoom {
+            id: "r1".to_string(),
+            name: "room".to_string(),
+            members: vec!["a".to_string(), "b".to_string()],
+            group: None,
+            needs_you,
+            needs_you_reason: reason.map(|r| r.to_string()),
+            preview: None,
+            preview_at_ms: None,
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            pattern,
+            roles: std::collections::BTreeMap::new(),
+            max_cycles: None,
+            leader_prompt_override: None,
+            worker_prompt_override: None,
+            conversation_epoch: 1,
+        }
+    }
+
+    #[test]
+    fn needs_you_advisory_text_is_none_when_the_flag_is_clear() {
+        assert_eq!(needs_you_advisory_text(false, Some("some reason")), None);
+        assert_eq!(needs_you_advisory_text(false, None), None);
+    }
+
+    #[test]
+    fn needs_you_advisory_text_is_the_persisted_reason_when_the_flag_is_raised() {
+        assert_eq!(
+            needs_you_advisory_text(true, Some("Send another message to try again.")),
+            Some("Send another message to try again.".to_string())
+        );
+    }
+
+    #[test]
+    fn needs_you_advisory_text_is_none_when_the_flag_is_raised_with_no_reason() {
+        // A pre-Phase-52 record: the badge still renders (`t.room.needs_you`
+        // alone), but there is nothing to say — never `Some("")`.
+        assert_eq!(needs_you_advisory_text(true, None), None);
+    }
+
+    #[test]
+    fn needs_you_advisory_renders_identically_for_a_peer_room_and_a_team_room() {
+        let reason = "The leader couldn't produce a valid task breakdown after a retry. Send another message to try again.";
+        let peer_room = bare_room_for_advisory(None, true, Some(reason));
+        let team_room = bare_room_for_advisory(Some(TeamPattern::OrchestratorWorkers), true, Some(reason));
+        assert_eq!(
+            needs_you_advisory_text(peer_room.needs_you, peer_room.needs_you_reason.as_deref()),
+            needs_you_advisory_text(team_room.needs_you, team_room.needs_you_reason.as_deref())
+        );
+    }
+
+    #[test]
+    fn exactly_one_advisory_is_produced() {
+        // `needs_you` is a single flag with a single reason — the helper's
+        // return type (`Option<String>`) is itself the proof there is no
+        // multi-advisory stacking case to render.
+        assert_eq!(
+            needs_you_advisory_text(true, Some("only one reason")),
+            Some("only one reason".to_string())
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 52 Plan 09, Task 3 (Round 1 codex HIGH): dispatch_result_refreshes_room_state
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn a_failed_dispatch_still_refreshes_persisted_room_state() {
+        assert!(dispatch_result_refreshes_room_state(RoomDispatchOutcomeKind::Ran));
+        assert!(dispatch_result_refreshes_room_state(RoomDispatchOutcomeKind::Queued));
+        assert!(dispatch_result_refreshes_room_state(RoomDispatchOutcomeKind::Err));
     }
 }

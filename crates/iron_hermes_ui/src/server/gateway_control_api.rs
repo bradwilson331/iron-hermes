@@ -545,6 +545,16 @@ fn build_start_argv(validated_profile: Option<&str>) -> Vec<String> {
 /// precedent function). This ordering is the security guarantee (module doc
 /// / T-48.2-13-02): the web server's own environment holds provider API
 /// keys, and this is what stops them reaching a child the browser asked for.
+///
+/// **Phase 51 Plan 16 (WR-06, discovered third consumer):** `BOT_HANDOFF_SAFE_SYSTEM_VARS`
+/// no longer carries `IRONHERMES_WORKER_BIN` / `IRONHERMES_ROOT_HOME` (both moved to
+/// explicit emission — see `cli_handoff.rs`'s module doc). This function shared that
+/// same allowlist purely for the genuinely-ambient entries, so it gains the same
+/// explicit emission here to avoid silently losing recursive forward-compat for a
+/// spawned gateway that itself later dispatches kanban workers (the gateway hosts
+/// the kanban scheduler — a worktree-pinned `IRONHERMES_WORKER_BIN` or an
+/// already-stashed `IRONHERMES_ROOT_HOME` on the parent UI-server process must still
+/// reach it).
 #[cfg(not(target_arch = "wasm32"))]
 fn build_start_env(home: &std::path::Path) -> std::collections::BTreeMap<String, String> {
     let mut env = std::collections::BTreeMap::new();
@@ -556,6 +566,16 @@ fn build_start_env(home: &std::path::Path) -> std::collections::BTreeMap<String,
     env.insert(
         "IRONHERMES_HOME".to_string(),
         home.to_string_lossy().into_owned(),
+    );
+    env.insert(
+        "IRONHERMES_WORKER_BIN".to_string(),
+        ironhermes_kanban::resolve_worker_bin(),
+    );
+    env.insert(
+        "IRONHERMES_ROOT_HOME".to_string(),
+        ironhermes_core::get_root_hermes_home()
+            .to_string_lossy()
+            .into_owned(),
     );
     env
 }
@@ -864,6 +884,7 @@ mod tests {
             web_config_write_enabled: write,
             web_process_control_enabled: control,
             remote_blueprint_run_enabled: false,
+            remote_loop_enabled: false,
         }
     }
 

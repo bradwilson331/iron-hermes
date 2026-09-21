@@ -43,8 +43,40 @@
 //! `group_chat_workspace.rs::submit_room_send`'s own shape) — the borrow is
 //! dropped via `.clone()` immediately, never held across the `spawn`ed
 //! `.await`.
+//!
+//! Phase 52 Plan 07 (D-13/D-14): `MAX CYCLES` and `MAX WORKERS PER
+//! DELEGATION` — the app-wide half of the two new cost levers `max_rounds`/
+//! `max_messages` cannot express for a team room (both go inert there).
+//! Both fields already live on `GroupChatSettings` (Plan 02), so they ride
+//! the SAME `draft`/`saved_settings` signals every other field here already
+//! uses — no new signal is declared for them. Bounds are mirrored from
+//! `protocol::TEAM_CYCLE_MIN`/`TEAM_CYCLE_MAX`/`TEAM_WORKERS_MIN`/
+//! `TEAM_WORKERS_MAX`, the SAME consts `clamp_group_settings` (Plan 04) and
+//! `TeamPatternFields::parse_cycles_input` (Plan 06) reference — never a
+//! restated literal, so the client mirror cannot drift from the server
+//! clamp on either side.
+//!
+//! **`on_saved` (Round 1 codex MEDIUM).** `GroupSettingsDrawer` gains an
+//! OPTIONAL `on_saved: Option<EventHandler<()>>` prop (`#[props(default)]`,
+//! so the existing `group_chat_workspace.rs` mount — `GroupSettingsDrawer {
+//! open: settings_open }`, no other props — keeps compiling unchanged this
+//! wave). It fires once a successful save round-trips, never on a
+//! client-rejected or server-failed save. Plan 08 (wave 6, sole owner of
+//! `group_chat_workspace.rs` in its wave) wires the handler to a tick that
+//! `settings_resource` reads, so a saved cycle budget stops requiring an
+//! unrelated reload before the header reflects it.
+//!
+//! **No editable per-member turn timeout.** `BOT_HANDOFF_TIMEOUT_SECONDS`
+//! stays a fixed `cli_handoff.rs` const, explicitly not part of this
+//! record — this drawer adds no input, field or draft signal for it. The
+//! pre-existing informational hint at the bottom of the tunables section
+//! (`Each member's turn is capped at 180s (fixed).`, shipped in 50.2) is
+//! untouched: the prohibition is on a CONTROL, not on explaining a fixed
+//! one.
 
-use crate::protocol::GroupChatSettings;
+use crate::protocol::{
+    GroupChatSettings, TEAM_CYCLE_MAX, TEAM_CYCLE_MIN, TEAM_WORKERS_MAX, TEAM_WORKERS_MIN,
+};
 use crate::server::group_settings_api::{load_group_chat_settings, save_group_chat_settings};
 use dioxus::prelude::*;
 
@@ -85,7 +117,35 @@ pub(crate) fn group_settings_field_errors(s: &GroupChatSettings) -> Vec<(&'stati
     if s.min_members > s.max_members {
         errors.push(("member_bounds", "MIN must not exceed MAX".to_string()));
     }
+    if s.max_cycles < TEAM_CYCLE_MIN || s.max_cycles > TEAM_CYCLE_MAX {
+        errors.push((
+            "max_cycles",
+            format!("must be between {TEAM_CYCLE_MIN} and {TEAM_CYCLE_MAX}"),
+        ));
+    }
+    if s.max_workers_per_delegation < TEAM_WORKERS_MIN
+        || s.max_workers_per_delegation > TEAM_WORKERS_MAX
+    {
+        errors.push((
+            "max_workers_per_delegation",
+            format!("must be between {TEAM_WORKERS_MIN} and {TEAM_WORKERS_MAX}"),
+        ));
+    }
     errors
+}
+
+/// Phase 52 Plan 07 (Round 1 codex MEDIUM): whether a completed save
+/// attempt should notify the parent through `on_saved`. Pure and
+/// unit-testable without a render harness, matching this module's existing
+/// discipline — `on_save_click`'s spawned save below delegates to this so
+/// the decision, not just its call site, is covered. `true` only for a
+/// confirmed server-side success; a client-rejected save (validation
+/// failed before `save_group_chat_settings` was ever called) and a
+/// server-failed save both never reach this function with an `Ok`, so both
+/// already yield zero notifications by construction.
+#[allow(dead_code)] // see group_settings module's own reachability note above
+pub(crate) fn should_notify_on_saved<T, E>(outcome: &Result<T, E>) -> bool {
+    outcome.is_ok()
 }
 
 /// Phase 50.2 Plan 05: the Group Chat Settings drawer. Mounted
@@ -100,7 +160,16 @@ pub(crate) fn group_settings_field_errors(s: &GroupChatSettings) -> Vec<(&'stati
 /// phase's own `group_chat_workspace.rs` precedent.
 #[allow(dead_code)]
 #[component]
-pub fn GroupSettingsDrawer(open: Signal<bool>) -> Element {
+pub fn GroupSettingsDrawer(
+    open: Signal<bool>,
+    /// Phase 52 Plan 07 (Round 1 codex MEDIUM): fired once, after a
+    /// successful save only. `#[props(default)]` so the existing
+    /// `group_chat_workspace.rs` mount (`GroupSettingsDrawer { open:
+    /// settings_open }`) keeps compiling unchanged this wave — Plan 08
+    /// wires this to `settings_resource`'s refresh tick.
+    #[props(default)]
+    on_saved: Option<EventHandler<()>>,
+) -> Element {
     // ALL hooks register unconditionally on every render (Pattern E —
     // mirrors ProfileDetailDrawer's own early-return-after-hooks shape).
     let refresh_tick: Signal<u32> = use_signal(|| 0);
@@ -160,6 +229,8 @@ pub fn GroupSettingsDrawer(open: Signal<bool>) -> Element {
     let min_members_error = field_error("min_members");
     let max_members_error = field_error("max_members");
     let member_bounds_error = field_error("member_bounds");
+    let max_cycles_error = field_error("max_cycles");
+    let max_workers_per_delegation_error = field_error("max_workers_per_delegation");
 
     let is_dirty = saved_val
         .as_ref()
@@ -190,7 +261,11 @@ pub fn GroupSettingsDrawer(open: Signal<bool>) -> Element {
         let mut just_saved_sig = just_saved;
         let mut draft_sig = draft;
         spawn(async move {
-            match save_group_chat_settings(to_save).await {
+            let outcome = save_group_chat_settings(to_save).await;
+            // Round 1 codex MEDIUM: the parent is notified exactly once,
+            // and only for a confirmed server-side success.
+            let notify = should_notify_on_saved(&outcome);
+            match outcome {
                 Ok(saved) => {
                     // Fresh `.set()` calls only, acquired after the await
                     // resolves — never a write-lock guard held across it.
@@ -205,6 +280,11 @@ pub fn GroupSettingsDrawer(open: Signal<bool>) -> Element {
                     // operator typed.
                     saving_sig.set(false);
                     save_error_sig.set(Some(format!("{e}")));
+                }
+            }
+            if notify {
+                if let Some(handler) = on_saved {
+                    handler.call(());
                 }
             }
         });
@@ -324,6 +404,44 @@ pub fn GroupSettingsDrawer(open: Signal<bool>) -> Element {
                             div { class: "kn-modal-error", "{err}" }
                         }
                         if let Some(err) = member_bounds_error {
+                            div { class: "kn-modal-error", "{err}" }
+                        }
+                    }
+                    div { class: "kn-settings-field",
+                        label { class: "kn-modal-label", "MAX CYCLES" }
+                        input {
+                            class: "kn-modal-input",
+                            r#type: "number",
+                            value: "{draft_val.max_cycles}",
+                            oninput: move |evt| {
+                                draft.write().max_cycles = evt.value().parse().unwrap_or(0);
+                                just_saved.set(false);
+                            },
+                        }
+                        div {
+                            class: "kn-modal-hint--info",
+                            "Upstream default: 1. How many decompose → delegate → synthesize cycles a team drive may run before stopping."
+                        }
+                        if let Some(err) = max_cycles_error {
+                            div { class: "kn-modal-error", "{err}" }
+                        }
+                    }
+                    div { class: "kn-settings-field",
+                        label { class: "kn-modal-label", "MAX WORKERS PER DELEGATION" }
+                        input {
+                            class: "kn-modal-input",
+                            r#type: "number",
+                            value: "{draft_val.max_workers_per_delegation}",
+                            oninput: move |evt| {
+                                draft.write().max_workers_per_delegation = evt.value().parse().unwrap_or(0);
+                                just_saved.set(false);
+                            },
+                        }
+                        div {
+                            class: "kn-modal-hint--info",
+                            "Caps how many workers one delegation may fan out to. Defaults to the room ceiling, so it changes nothing until it is turned down."
+                        }
+                        if let Some(err) = max_workers_per_delegation_error {
                             div { class: "kn-modal-error", "{err}" }
                         }
                     }
@@ -493,5 +611,130 @@ mod group_settings_field_errors_tests {
                 "client/server validators disagree for {case:?}"
             );
         }
+    }
+
+    /// `<behavior>`: 0 and 6 both fail client-side validation for MAX
+    /// CYCLES; 1 (`TEAM_CYCLE_MIN`) and 5 (`TEAM_CYCLE_MAX`) both pass.
+    #[test]
+    fn group_settings_rejects_an_out_of_range_max_cycles_before_submit() {
+        let named = |n: u32| {
+            let s = GroupChatSettings {
+                max_cycles: n,
+                ..GroupChatSettings::default()
+            };
+            group_settings_field_errors(&s)
+                .iter()
+                .any(|(f, _)| *f == "max_cycles")
+        };
+        assert!(named(0), "0 must be rejected");
+        assert!(named(6), "6 must be rejected");
+        assert!(!named(1), "1 (TEAM_CYCLE_MIN) must pass");
+        assert!(!named(5), "5 (TEAM_CYCLE_MAX) must pass");
+    }
+
+    /// `<behavior>`: same shape for MAX WORKERS PER DELEGATION.
+    #[test]
+    fn group_settings_rejects_an_out_of_range_max_workers_per_delegation_before_submit() {
+        let named = |n: u32| {
+            let s = GroupChatSettings {
+                max_workers_per_delegation: n,
+                ..GroupChatSettings::default()
+            };
+            group_settings_field_errors(&s)
+                .iter()
+                .any(|(f, _)| *f == "max_workers_per_delegation")
+        };
+        assert!(named(0), "0 must be rejected");
+        assert!(named(6), "6 must be rejected");
+        assert!(!named(1), "1 (TEAM_WORKERS_MIN) must pass");
+        assert!(!named(5), "5 (TEAM_WORKERS_MAX) must pass");
+    }
+
+    /// `<behavior>`: the client's accepted range for each field is
+    /// expressed as `protocol::TEAM_CYCLE_MIN`/`TEAM_CYCLE_MAX`/
+    /// `TEAM_WORKERS_MIN`/`TEAM_WORKERS_MAX` themselves — asserted against
+    /// the consts directly, at and just outside every boundary, so this
+    /// test fails the moment the client mirror and the shared bound source
+    /// disagree, rather than pinning today's literal values.
+    #[test]
+    fn group_settings_client_bounds_match_the_shared_protocol_consts() {
+        for n in [
+            TEAM_CYCLE_MIN.saturating_sub(1),
+            TEAM_CYCLE_MIN,
+            TEAM_CYCLE_MAX,
+            TEAM_CYCLE_MAX + 1,
+        ] {
+            let s = GroupChatSettings {
+                max_cycles: n,
+                ..GroupChatSettings::default()
+            };
+            let expected_valid = (TEAM_CYCLE_MIN..=TEAM_CYCLE_MAX).contains(&n);
+            let actual_valid = !group_settings_field_errors(&s)
+                .iter()
+                .any(|(f, _)| *f == "max_cycles");
+            assert_eq!(actual_valid, expected_valid, "max_cycles={n}");
+        }
+        for n in [
+            TEAM_WORKERS_MIN.saturating_sub(1),
+            TEAM_WORKERS_MIN,
+            TEAM_WORKERS_MAX,
+            TEAM_WORKERS_MAX + 1,
+        ] {
+            let s = GroupChatSettings {
+                max_workers_per_delegation: n,
+                ..GroupChatSettings::default()
+            };
+            let expected_valid = (TEAM_WORKERS_MIN..=TEAM_WORKERS_MAX).contains(&n);
+            let actual_valid = !group_settings_field_errors(&s)
+                .iter()
+                .any(|(f, _)| *f == "max_workers_per_delegation");
+            assert_eq!(actual_valid, expected_valid, "max_workers_per_delegation={n}");
+        }
+    }
+
+    /// `<behavior>`: seeding the draft from a loaded settings record (the
+    /// `use_effect` seed assignment's own shape, `draft.set(loaded)`) and
+    /// reading it back yields the same two values — a plain struct
+    /// round-trip, since both fields already live on `GroupChatSettings`
+    /// itself rather than a separate draft-only signal.
+    #[test]
+    fn group_settings_draft_round_trips_max_cycles_and_max_workers() {
+        let loaded = GroupChatSettings {
+            max_cycles: 4,
+            max_workers_per_delegation: 3,
+            ..GroupChatSettings::default()
+        };
+        let draft = loaded.clone();
+        assert_eq!(draft.max_cycles, 4);
+        assert_eq!(draft.max_workers_per_delegation, 3);
+    }
+
+    /// `<behavior>`: a prohibition on an EDITABLE per-member turn timeout
+    /// must not delete the existing, useful, already-shipped explanation of
+    /// the fixed one.
+    #[test]
+    fn group_settings_keeps_the_existing_fixed_turn_cap_hint() {
+        let source = include_str!("group_settings.rs");
+        assert!(source.contains("Each member's turn is capped at 180s (fixed)."));
+    }
+}
+
+#[cfg(test)]
+mod should_notify_on_saved_tests {
+    use super::*;
+
+    /// `<behavior>`: the save handler invokes `on_saved` exactly once on
+    /// success and zero times on a failed save. (A client-rejected save
+    /// never calls `save_group_chat_settings` at all — see
+    /// `on_save_click`'s early return above — so it never produces an
+    /// outcome for this function to see in the first place, and therefore
+    /// already never notifies either.)
+    #[test]
+    fn group_settings_notifies_its_parent_after_a_successful_save() {
+        let ok: Result<GroupChatSettings, String> = Ok(GroupChatSettings::default());
+        assert!(should_notify_on_saved(&ok));
+
+        let err: Result<GroupChatSettings, String> = Err("save failed".to_string());
+        assert!(!should_notify_on_saved(&err));
     }
 }

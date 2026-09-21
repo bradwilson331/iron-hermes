@@ -8,11 +8,21 @@
 //! All tests build a tempdir `profiles/` root and call
 //! `evaluate_profile_dispatch_at` directly — none of them touch
 //! `$IRONHERMES_HOME` or the operator's real profiles.
+//!
+//! Phase 51 (D-14): the direct-predicate tests below point at
+//! `evaluate_profile_dispatch_dotenv_at` — the sync, `.env`-only core — rather
+//! than the vault-aware `evaluate_profile_dispatch_at`, since none of these
+//! cases involve the vault; this keeps every assertion here unedited and a real
+//! regression rather than a rewrite. `gate_is_idempotent_second_pass_blocks_nothing`
+//! exercises the production sweep (`refuse_undispatchable_ready_tasks`), which is
+//! now `async`. `evaluate_profile_dispatch_dotenv_at` is imported straight from
+//! `ironhermes_core::dispatch_gate` rather than through the CLI's re-export
+//! module — that module deliberately never mentions the `.env`-only entry
+//! point's name at all (Task 3's `no_production_path_calls_the_dotenv_only_gate`).
 
-use ironhermes_cli::kanban::dispatch_gate::{
-    DispatchDecision, evaluate_profile_dispatch_at, refuse_undispatchable_ready_tasks,
-};
+use ironhermes_cli::kanban::dispatch_gate::{DispatchDecision, refuse_undispatchable_ready_tasks};
 use ironhermes_core::config::{Config, ProviderConfig};
+use ironhermes_core::dispatch_gate::evaluate_profile_dispatch_dotenv_at;
 use ironhermes_kanban::store::CreateTaskOptions;
 use ironhermes_kanban::KanbanStore;
 use std::fs;
@@ -67,7 +77,7 @@ fn bdev01_shape_is_refused_keys_for_other_providers_present() {
                OLLAMA_API_KEY=sk-fixture-ollama-c2e015\n";
     write_profile(tmp.path(), "bdev01", &config, Some(env));
 
-    let decision = evaluate_profile_dispatch_at(tmp.path(), "bdev01");
+    let decision = evaluate_profile_dispatch_dotenv_at(tmp.path(), "bdev01");
     match &decision {
         DispatchDecision::Refuse { reason } => {
             assert!(
@@ -91,6 +101,9 @@ fn bdev01_shape_is_refused_keys_for_other_providers_present() {
             }
         }
         DispatchDecision::Allow => panic!("bdev01-shaped profile must be Refused, got Allow"),
+        // The sync `.env`-only core (Phase 51 D-14) never produces this variant —
+        // only the vault-aware entry point does, and this test never calls it.
+        _ => unreachable!("evaluate_profile_dispatch_dotenv_at never returns AllowFromVault"),
     }
 }
 
@@ -115,7 +128,7 @@ fn keyless_provider_is_allowed() {
     );
     write_profile(tmp.path(), "llama-user", &config, Some(""));
 
-    let decision = evaluate_profile_dispatch_at(tmp.path(), "llama-user");
+    let decision = evaluate_profile_dispatch_dotenv_at(tmp.path(), "llama-user");
     assert_eq!(
         decision,
         DispatchDecision::Allow,
@@ -131,7 +144,7 @@ fn keyless_provider_is_allowed() {
 fn missing_profile_dir_is_refused() {
     let tmp = tempfile::tempdir().expect("tempdir");
     // Deliberately never created.
-    let decision = evaluate_profile_dispatch_at(tmp.path(), "never-created");
+    let decision = evaluate_profile_dispatch_dotenv_at(tmp.path(), "never-created");
     assert!(
         matches!(decision, DispatchDecision::Refuse { .. }),
         "missing profile dir must be Refused, got {decision:?}"
@@ -145,7 +158,7 @@ fn unparseable_config_yaml_is_refused() {
     fs::create_dir_all(&dir).expect("mkdir");
     fs::write(dir.join("config.yaml"), "not: [valid: yaml: at: all\n").expect("write bad yaml");
 
-    let decision = evaluate_profile_dispatch_at(tmp.path(), "badyaml");
+    let decision = evaluate_profile_dispatch_dotenv_at(tmp.path(), "badyaml");
     assert!(
         matches!(decision, DispatchDecision::Refuse { .. }),
         "unparseable config.yaml must be Refused (not a panic), got {decision:?}"
@@ -173,7 +186,7 @@ fn malformed_env_is_refused() {
         Some("this line has no equals sign at all\n"),
     );
 
-    let decision = evaluate_profile_dispatch_at(tmp.path(), "badenv");
+    let decision = evaluate_profile_dispatch_dotenv_at(tmp.path(), "badenv");
     assert!(
         matches!(decision, DispatchDecision::Refuse { .. }),
         "malformed .env must be Refused, got {decision:?}"
@@ -215,7 +228,7 @@ fn refuse_reason_never_leaks_the_env_line_content() {
         Some(&format!("GOOD_KEY=fine\nBAD_KEY='{SENTINEL}\n")),
     );
 
-    let decision = evaluate_profile_dispatch_at(tmp.path(), "leakyenv");
+    let decision = evaluate_profile_dispatch_dotenv_at(tmp.path(), "leakyenv");
     let DispatchDecision::Refuse { reason } = decision else {
         panic!("malformed .env must be Refused, got {decision:?}");
     };
@@ -243,7 +256,7 @@ fn empty_model_provider_is_refused() {
     config.model.provider = String::new();
     write_profile(tmp.path(), "noprovider", &config, None);
 
-    let decision = evaluate_profile_dispatch_at(tmp.path(), "noprovider");
+    let decision = evaluate_profile_dispatch_dotenv_at(tmp.path(), "noprovider");
     assert!(
         matches!(decision, DispatchDecision::Refuse { .. }),
         "an empty model.provider must be Refused, got {decision:?}"
@@ -260,7 +273,7 @@ fn unknown_provider_is_refused_without_panic() {
     // The point of this test is that calling evaluate_profile_dispatch_at
     // does not panic (resolve_for_main() would panic on an unknown main
     // provider) — reaching this assertion at all is part of the proof.
-    let decision = evaluate_profile_dispatch_at(tmp.path(), "unknownprov");
+    let decision = evaluate_profile_dispatch_dotenv_at(tmp.path(), "unknownprov");
     assert!(
         matches!(decision, DispatchDecision::Refuse { .. }),
         "an unknown provider must be Refused without panicking, got {decision:?}"
@@ -273,7 +286,7 @@ fn traversal_assignee_is_refused_before_join() {
     // No profile directory is ever created for this — if the traversal
     // string reached a path join and somehow found a real directory outside
     // the tempdir, that would be the vulnerability this test guards against.
-    let decision = evaluate_profile_dispatch_at(tmp.path(), "../../etc");
+    let decision = evaluate_profile_dispatch_dotenv_at(tmp.path(), "../../etc");
     match decision {
         DispatchDecision::Refuse { reason } => {
             assert!(
@@ -282,13 +295,14 @@ fn traversal_assignee_is_refused_before_join() {
             );
         }
         DispatchDecision::Allow => panic!("traversal assignee must never be Allowed"),
+        _ => unreachable!("evaluate_profile_dispatch_dotenv_at never returns AllowFromVault"),
     }
 }
 
 #[test]
 fn uppercase_assignee_is_refused() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let decision = evaluate_profile_dispatch_at(tmp.path(), "BadProfile");
+    let decision = evaluate_profile_dispatch_dotenv_at(tmp.path(), "BadProfile");
     match decision {
         DispatchDecision::Refuse { reason } => {
             assert!(
@@ -297,6 +311,7 @@ fn uppercase_assignee_is_refused() {
             );
         }
         DispatchDecision::Allow => panic!("uppercase assignee must never be Allowed"),
+        _ => unreachable!("evaluate_profile_dispatch_dotenv_at never returns AllowFromVault"),
     }
 }
 
@@ -337,8 +352,8 @@ impl Drop for ScopedEnv {
 /// `refuse_undispatchable_ready_tasks` only ever selects `status='ready'`
 /// tasks, so once `block_task` flips a row to `blocked` a second pass finds
 /// nothing to do.
-#[test]
-fn gate_is_idempotent_second_pass_blocks_nothing() {
+#[tokio::test]
+async fn gate_is_idempotent_second_pass_blocks_nothing() {
     let home = tempfile::tempdir().expect("tempdir home");
     let _guard = ScopedEnv::set("IRONHERMES_HOME", home.path());
 
@@ -366,7 +381,7 @@ fn gate_is_idempotent_second_pass_blocks_nothing() {
         .expect("create_task");
     assert_eq!(task.status, "ready", "a freshly created task must start ready");
 
-    let first_pass = refuse_undispatchable_ready_tasks(&mut store);
+    let first_pass = refuse_undispatchable_ready_tasks(&mut store).await;
     assert_eq!(
         first_pass.len(),
         1,
@@ -383,7 +398,7 @@ fn gate_is_idempotent_second_pass_blocks_nothing() {
     let blocked_task = store.get_task(&task.id).expect("get_task after first pass");
     assert_eq!(blocked_task.status, "blocked");
 
-    let second_pass = refuse_undispatchable_ready_tasks(&mut store);
+    let second_pass = refuse_undispatchable_ready_tasks(&mut store).await;
     assert!(
         second_pass.is_empty(),
         "second pass over an already-blocked task must block nothing, got {second_pass:?}"

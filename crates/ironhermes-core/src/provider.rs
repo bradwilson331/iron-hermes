@@ -48,6 +48,15 @@ pub struct ResolvedEndpoint {
     pub fallback_providers: Vec<String>,
     pub model_metadata: Option<ModelMetadata>, // Phase 21.3 D-14
     pub config_context_length: Option<usize>,  // Phase 21.3 D-06
+    /// Phase 50.5 (D-01): sparse per-(provider, model) context-window
+    /// override, resolved from `providers.<p>.models.<m>.context_length` for
+    /// THIS endpoint's `default_model`. `None` when no such entry exists —
+    /// the normal case (D-01's steady state is zero entries). Populated by
+    /// `ProviderResolver::build_with_env_scope`'s per-endpoint loop for the
+    /// provider's own default model, and re-derived by `resolve_role` for a
+    /// role's overridden model (D-05) so a role never inherits the provider
+    /// default's window.
+    pub provider_model_context_length: Option<usize>,
     /// The provider's configured model-override keys (`ProviderConfig.models`,
     /// sparse) unioned with `default_model`, deduped (D-10, Phase 36.6.3).
     /// Populated by `ProviderResolver::build` after overlay + custom-provider
@@ -56,21 +65,108 @@ pub struct ResolvedEndpoint {
     pub models: Vec<String>,
 }
 
+/// Phase 50.5 (D-01, D-02): which tier produced a resolved endpoint's context
+/// window. Always derived from the same evaluation as the numeric value
+/// itself ([`ResolvedEndpoint::context_length_with_source`]), so the two can
+/// never disagree about which tier won.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextLengthSource {
+    /// `providers.<p>.models.<m>.context_length` (D-01) — a sparse,
+    /// operator-authored per-(provider, model) override. Most specific;
+    /// outranks everything else.
+    PerModelConfig,
+    /// `model_metadata.context_length` — the model registry's cache or
+    /// static-table entry for this endpoint's `default_model`.
+    Metadata,
+    /// `config.model.context_length` — the global pin. Phase 21.3 D-06 put
+    /// this at tier 1 (the operator's config value took priority over every
+    /// other source); Phase 50.5 D-02 demotes it to a floor for models no
+    /// more specific tier knows about.
+    GlobalPin,
+    /// `DEFAULT_CONTEXT_LENGTH` (128,000) — nothing else resolved (D-04's
+    /// kept cliff, plus its unknown-model warning at the metadata layer).
+    Fallback,
+}
+
+/// Phase 50.5 (T-50.5-01): reject an implausible context-length candidate
+/// before it can drive the compaction budget or its ratio arithmetic.
+///
+/// `0` would reach the compaction ratio as a zero denominator
+/// (`agent_loop.rs`'s pressure check, T-50.5-03); anything above
+/// [`crate::constants::MAX_PLAUSIBLE_CONTEXT_LENGTH`] is almost certainly a
+/// harvested/cached value gone wrong (e.g. a misbehaving provider probe or a
+/// corrupted disk cache reporting `usize::MAX`). A rejected candidate is
+/// never clamped to the ceiling — the caller falls THROUGH to the next tier.
+fn plausible_context_length(candidate: usize) -> Option<usize> {
+    if candidate == 0 || candidate > crate::constants::MAX_PLAUSIBLE_CONTEXT_LENGTH {
+        tracing::warn!(
+            candidate,
+            ceiling = crate::constants::MAX_PLAUSIBLE_CONTEXT_LENGTH,
+            "rejected implausible context-length candidate; falling through to next tier"
+        );
+        return None;
+    }
+    Some(candidate)
+}
+
 impl ResolvedEndpoint {
-    /// Returns the context_length with D-06 precedence:
-    /// 1. User config.yaml context_length (if set) — always wins
-    /// 2. Model metadata context_length (from cache or static table)
-    /// 3. DEFAULT_CONTEXT_LENGTH (128K) as last resort
-    pub fn context_length(&self) -> usize {
-        // D-06: user config always wins
-        if let Some(config_len) = self.config_context_length {
-            return config_len;
+    /// Phase 50.5 (D-02): the single tier evaluation for a resolved
+    /// endpoint's context window. [`Self::context_length`] and
+    /// [`Self::context_length_source`] are thin wrappers over this — there is
+    /// exactly ONE place the four tiers are ordered, so main and role
+    /// endpoints alike (see `ProviderResolver::resolve_role`) can never see a
+    /// different order.
+    ///
+    /// Resolution order (DELIBERATELY INVERTS Phase 21.3 D-06, which put the
+    /// global pin at tier 1 — the operator's config value took priority over
+    /// every other source):
+    /// 1. [`ContextLengthSource::PerModelConfig`] — `provider_model_context_length`,
+    ///    sourced from `providers.<p>.models.<m>.context_length` (D-01).
+    /// 2. [`ContextLengthSource::Metadata`] — `model_metadata.context_length`
+    ///    (cache, which outranks the static table by `ModelRegistry::lookup`'s
+    ///    own order).
+    /// 3. [`ContextLengthSource::GlobalPin`] — `config_context_length`, the
+    ///    operator's `model.context_length` pin. Now a FLOOR for models no
+    ///    per-model source or metadata knows about, not a universal override.
+    /// 4. [`ContextLengthSource::Fallback`] — `DEFAULT_CONTEXT_LENGTH`
+    ///    (128,000, D-04's kept cliff).
+    ///
+    /// Each of the first three candidates passes through
+    /// [`plausible_context_length`] (T-50.5-01); a rejected candidate falls
+    /// THROUGH to the next tier rather than being clamped or returned.
+    pub fn context_length_with_source(&self) -> (usize, ContextLengthSource) {
+        if let Some(candidate) = self.provider_model_context_length
+            && let Some(value) = plausible_context_length(candidate)
+        {
+            return (value, ContextLengthSource::PerModelConfig);
         }
-        // Then model metadata (cache > static, handled by ModelRegistry lookup order)
-        self.model_metadata
-            .as_ref()
-            .map(|m| m.context_length)
-            .unwrap_or(DEFAULT_CONTEXT_LENGTH)
+        if let Some(candidate) = self.model_metadata.as_ref().map(|m| m.context_length)
+            && let Some(value) = plausible_context_length(candidate)
+        {
+            return (value, ContextLengthSource::Metadata);
+        }
+        if let Some(candidate) = self.config_context_length
+            && let Some(value) = plausible_context_length(candidate)
+        {
+            return (value, ContextLengthSource::GlobalPin);
+        }
+        (DEFAULT_CONTEXT_LENGTH, ContextLengthSource::Fallback)
+    }
+
+    /// The resolved context window. `self.context_length_with_source().0` —
+    /// see that method for the tier order. Signature is unchanged from
+    /// pre-Phase-50.5 (`&self -> usize`, not async, not `Result`, D-04
+    /// forbids introducing fallibility or a network call here), so every
+    /// existing caller (`agent_runtime.rs`'s per-turn compaction read,
+    /// `api.rs`'s `get_config_summary`) is unaffected by the tier reorder.
+    pub fn context_length(&self) -> usize {
+        self.context_length_with_source().0
+    }
+
+    /// Which tier produced [`Self::context_length`]'s value. See
+    /// [`Self::context_length_with_source`] for the tier order.
+    pub fn context_length_source(&self) -> ContextLengthSource {
+        self.context_length_with_source().1
     }
 }
 
@@ -84,6 +180,10 @@ impl fmt::Debug for ResolvedEndpoint {
             .field("fallback_providers", &self.fallback_providers)
             .field("model_metadata", &self.model_metadata)
             .field("config_context_length", &self.config_context_length)
+            .field(
+                "provider_model_context_length",
+                &self.provider_model_context_length,
+            )
             .field("models", &self.models)
             .finish()
     }
@@ -226,6 +326,47 @@ fn resolve_env_or_override(
 // ProviderResolver (D-01, D-02, D-03)
 // =============================================================================
 
+/// Phase 51 UAT F-04 fix, commit 2 (narrowed by T17/WR-08, Phase 51-13): set by
+/// `worker_bootstrap::bootstrap_worker_credential` (`ironhermes-cli`) when the socket
+/// bootstrap successfully installed this process's provider credential
+/// (`BootstrapOutcome::Installed`). Holds the bootstrapped provider's NAME, not just a
+/// boolean — `apply_vault_fallback` reads it to skip exactly that one provider's
+/// endpoint, not the whole resolver. See that method's own doc comment for the full
+/// rationale.
+///
+/// A `OnceLock`, not a resettable cell: a worker bootstraps exactly ONE provider, once,
+/// at process start (`bootstrap_worker_credential` resolves only `config.model.provider`),
+/// so "first call wins, no unset" matches production exactly — there is no legitimate
+/// second bootstrap in the same process to make room for.
+static WORKER_BOOTSTRAPPED_PROVIDER: OnceLock<String> = OnceLock::new();
+
+/// Mark this process as having bootstrapped `provider`'s credential over the Phase 51
+/// vault socket. Idempotent — a second call (even naming a different provider) is a
+/// no-op, matching production: a worker bootstraps exactly one provider, once. There is
+/// deliberately no public "unset" — a process that has bootstrapped stays marked for its
+/// whole life (a worker process is short-lived and single-purpose; it never needs to
+/// "un-bootstrap").
+pub fn mark_worker_bootstrapped_over_socket(provider: &str) {
+    let _ = WORKER_BOOTSTRAPPED_PROVIDER.set(provider.to_string());
+}
+
+/// Whether this process has bootstrapped ANY credential over the socket. Kept as a
+/// boolean-shaped reader for callers that only need that fact, not which provider — see
+/// [`worker_bootstrapped_provider`] for the per-provider name `apply_vault_fallback`
+/// actually consults.
+pub fn worker_bootstrapped_over_socket() -> bool {
+    WORKER_BOOTSTRAPPED_PROVIDER.get().is_some()
+}
+
+/// The provider name this process bootstrapped over the socket, if any (see
+/// [`mark_worker_bootstrapped_over_socket`]). Read by
+/// [`ProviderResolver::apply_vault_fallback`] to skip exactly that provider's endpoint —
+/// and only that one — inside its per-endpoint loop, so a socket-installed credential is
+/// never overwritten while every OTHER endpoint still resolves from the vault normally.
+pub fn worker_bootstrapped_provider() -> Option<&'static str> {
+    WORKER_BOOTSTRAPPED_PROVIDER.get().map(String::as_str)
+}
+
 /// Builds and holds a lookup table of resolved provider endpoints.
 ///
 /// Constructed once at startup from `Config` + environment variables.
@@ -244,6 +385,26 @@ pub struct ProviderResolver {
     /// Resolved auxiliary endpoint (D-05/D-06, Phase 26).
     /// `None` when no `auxiliary:` block is configured — callers fall through to main.
     auxiliary_endpoint: Option<ResolvedEndpoint>,
+    /// Phase 51 Plan 20 (G-51-7): the auxiliary block's own provider NAME, kept
+    /// alongside `auxiliary_endpoint` because level 2 of the role cascade
+    /// clones an endpoint and — before this plan — discarded the name that
+    /// clone came from, leaving `resolve_role_named` with no name to report
+    /// for an auxiliary-block fallback. `Some` on exactly the branch where
+    /// `auxiliary_endpoint` is `Some`, so a level-2 hit can never produce an
+    /// unnamed endpoint.
+    auxiliary_provider_name: Option<String>,
+    /// Phase 50.5 (D-01/D-05): provider name -> model id -> per-model context
+    /// window, mirroring `providers.<p>.models.<m>.context_length` for every
+    /// configured provider (not just the main one). Populated in
+    /// `build_with_env_scope` from the same `config.providers` pass that
+    /// builds the per-endpoint loop. `resolve_role` re-derives
+    /// `provider_model_context_length` for a role's overridden model from
+    /// this map — the per-endpoint loop (Task 1) only ever sees the
+    /// provider's own default model. A provider with no per-model windows
+    /// contributes no entry; `resolve_role` treats a missing provider key and
+    /// a missing model key inside a present provider entry identically (both
+    /// resolve to `None`, falling through to metadata/pin/default).
+    per_model_context_lengths: HashMap<String, HashMap<String, usize>>,
 }
 
 impl ProviderResolver {
@@ -337,7 +498,7 @@ impl ProviderResolver {
     ) -> Result<Self> {
         let mut endpoints: HashMap<String, ResolvedEndpoint> = HashMap::new();
         let mut model_registry = ModelRegistry::new();
-        model_registry.merge_cache(disk_cache.into_metadata_map());
+        model_registry.merge_partial_cache(disk_cache.into_partial_metadata_map());
         let config_context_length = config.model.context_length;
 
         // --- 1. Pre-populate three built-in providers with defaults ---
@@ -351,6 +512,7 @@ impl ProviderResolver {
                 fallback_providers: vec![],
                 model_metadata: None,
                 config_context_length: None,
+                provider_model_context_length: None,
                 models: vec![], // D-10: populated below (step 6) after overlay resolves default_model
             },
         );
@@ -364,6 +526,7 @@ impl ProviderResolver {
                 fallback_providers: vec![],
                 model_metadata: None,
                 config_context_length: None,
+                provider_model_context_length: None,
                 models: vec![], // D-10: populated below (step 6) after overlay resolves default_model
             },
         );
@@ -377,6 +540,7 @@ impl ProviderResolver {
                 fallback_providers: vec![],
                 model_metadata: None,
                 config_context_length: None,
+                provider_model_context_length: None,
                 models: vec![], // D-10: populated below (step 6) after overlay resolves default_model
             },
         );
@@ -401,6 +565,7 @@ impl ProviderResolver {
                     fallback_providers: vec![],
                     model_metadata: None,
                     config_context_length: None,
+                    provider_model_context_length: None,
                     models: vec![], // D-10: populated below (step 6) after overlay resolves default_model
                 });
             if let Some(ref url) = prov_cfg.base_url {
@@ -459,6 +624,7 @@ impl ProviderResolver {
                     fallback_providers: vec![],
                     model_metadata: None,
                     config_context_length: None,
+                    provider_model_context_length: None,
                     models: vec![], // D-10: populated below (step 6) after overlay resolves default_model
                 },
             );
@@ -577,10 +743,25 @@ impl ProviderResolver {
             }
         }
 
-        // --- 6. Populate model_metadata, config_context_length, and models (Phase 21.3 / D-10) ---
+        // --- 6. Populate model_metadata, config_context_length, provider_model_context_length,
+        // and models (Phase 21.3 / D-10, Phase 50.5 D-01/D-05) ---
         for (name, endpoint) in endpoints.iter_mut() {
             endpoint.model_metadata = model_registry.lookup(&endpoint.default_model).cloned();
             endpoint.config_context_length = config_context_length;
+
+            // Phase 50.5 (D-01/D-05): bind this provider's config entry ONCE —
+            // reused below both for the per-model context-length lookup and
+            // for `model_keys` (previously two separate `.get()` calls on the
+            // same map).
+            let provider_cfg = config.providers.get(name.as_str());
+
+            // Phase 50.5 (D-01): the per-model context-length escape hatch for
+            // THIS endpoint's own default_model. `resolve_role` re-derives
+            // `provider_model_context_length` for a role's overridden model
+            // (D-05) — this loop only ever knows the provider's own default.
+            endpoint.provider_model_context_length = provider_cfg
+                .and_then(|p| p.models.get(&endpoint.default_model))
+                .and_then(|m| m.context_length);
 
             // Phase 36.6.3 D-10: the per-provider configured-model list — union of
             // the provider's configured override keys (ProviderConfig.models, a
@@ -589,9 +770,7 @@ impl ProviderResolver {
             // each literal construction site above so it always reflects the
             // resolved default_model, never a pre-overlay snapshot. Stable order:
             // override keys (sorted) then default_model if not already present.
-            let mut model_keys: Vec<String> = config
-                .providers
-                .get(name.as_str())
+            let mut model_keys: Vec<String> = provider_cfg
                 .map(|p| p.models.keys().cloned().collect())
                 .unwrap_or_default();
             model_keys.sort();
@@ -604,10 +783,39 @@ impl ProviderResolver {
         // --- 7. Store roles ---
         let roles = config.model.roles.clone();
 
+        // --- 7b. Phase 50.5 (D-01/D-05): per-provider per-model context-length
+        // map, used by `resolve_role` to re-derive a role's overridden-model
+        // window (the per-endpoint loop above only stamps the provider's own
+        // default model). Built directly from `config.providers` rather than
+        // from `endpoints` — a provider can carry per-model windows for
+        // models it never uses as its own default.
+        let mut per_model_context_lengths: HashMap<String, HashMap<String, usize>> =
+            HashMap::new();
+        for (provider_name, prov_cfg) in &config.providers {
+            let windows: HashMap<String, usize> = prov_cfg
+                .models
+                .iter()
+                .filter_map(|(model_id, model_cfg)| {
+                    model_cfg.context_length.map(|w| (model_id.clone(), w))
+                })
+                .collect();
+            if !windows.is_empty() {
+                per_model_context_lengths.insert(provider_name.clone(), windows);
+            }
+        }
+
         // --- 8. Build auxiliary endpoint (D-05/D-06/D-10, Phase 26) ---
         // If config.auxiliary is set, resolve the named provider and apply the auxiliary model.
         // Fail fast if auxiliary.provider references an unknown name (D-10 / Pitfall 3).
-        let auxiliary_endpoint: Option<ResolvedEndpoint> = if config.auxiliary.is_set() {
+        //
+        // Phase 51 Plan 20 (G-51-7): `auxiliary_provider_name` is built in lockstep with
+        // `auxiliary_endpoint` — `Some` on exactly the branch that produces `Some(aux_ep)` —
+        // so `resolve_role_named`'s level-2 arm always has a name to pair with the endpoint
+        // clone it returns.
+        let (auxiliary_endpoint, auxiliary_provider_name): (
+            Option<ResolvedEndpoint>,
+            Option<String>,
+        ) = if config.auxiliary.is_set() {
             let aux_provider_name = &config.auxiliary.provider;
             let base = endpoints.get(aux_provider_name.as_str()).ok_or_else(|| {
                 anyhow!(
@@ -619,9 +827,9 @@ impl ProviderResolver {
             if !config.auxiliary.model.is_empty() {
                 aux_ep.default_model = config.auxiliary.model.clone();
             }
-            Some(aux_ep)
+            (Some(aux_ep), Some(aux_provider_name.clone()))
         } else {
-            None
+            (None, None)
         };
 
         Ok(Self {
@@ -630,6 +838,8 @@ impl ProviderResolver {
             main_provider: main.clone(),
             model_registry,
             auxiliary_endpoint,
+            auxiliary_provider_name,
+            per_model_context_lengths,
         })
     }
 
@@ -648,42 +858,104 @@ impl ProviderResolver {
         })
     }
 
-    /// Resolve an auxiliary model role (D-05, D-07, PROV-06, Phase 26).
+    /// Resolve an auxiliary model role (D-05, D-07, PROV-06, Phase 26) AND the
+    /// provider name that endpoint came from — the single evaluation behind
+    /// both questions (Phase 51 Plan 20, G-51-7), so a caller can never get
+    /// the endpoint from one evaluation and the name from another.
     ///
     /// Three-level cascade (D-05):
     /// 1. If `config.model.roles[role]` is set → use that per-task override.
-    /// 2. Else if `config.auxiliary` is set → use the auxiliary block.
+    ///    The returned name is the role's OWN provider — the `main` sentinel
+    ///    resolved to the real main provider name, never the sentinel string
+    ///    itself.
+    /// 2. Else if `config.auxiliary` is set → use the auxiliary block. The
+    ///    returned name is `auxiliary_provider_name`, kept in lockstep with
+    ///    `auxiliary_endpoint` since both are built together in `build_with_env_scope`.
     /// 3. Else → return `None` (caller falls through to `resolve_for_main()`).
     ///
     /// When `role_cfg.provider == "main"` the main provider's endpoint is used
     /// with the role's optional model override.
-    pub fn resolve_role(&self, role: &str) -> Option<ResolvedEndpoint> {
+    ///
+    /// Phase 50.5 (D-05): the base endpoint's `model_metadata` and
+    /// `provider_model_context_length` were stamped in the build loop for the
+    /// PROVIDER's `default_model`. When a role overrides its model, both
+    /// fields are re-derived here for the overridden id — otherwise every
+    /// role that overrides its model would silently inherit the provider
+    /// default's window (a pre-existing defect for `model_metadata`, fixed in
+    /// the same place).
+    pub fn resolve_role_named(&self, role: &str) -> Option<(String, ResolvedEndpoint)> {
         // Level 1: per-task override from config.model.roles
         if let Some(role_cfg) = self.roles.get(role) {
-            let base_endpoint = if role_cfg.provider == "main" {
-                self.endpoints.get(&self.main_provider)?
+            // Resolve the "main" sentinel to the ACTUAL main provider name
+            // once, so both the endpoint lookup and the per-model-window
+            // lookup below key off the same string — a per-model entry for
+            // the main provider lives under its real name, never under the
+            // literal string "main".
+            let resolved_provider_name: &str = if role_cfg.provider == "main" {
+                self.main_provider.as_str()
             } else {
-                self.endpoints.get(&role_cfg.provider)?
+                role_cfg.provider.as_str()
             };
+            let base_endpoint = self.endpoints.get(resolved_provider_name)?;
             let mut ep = base_endpoint.clone();
             if let Some(ref model) = role_cfg.model {
                 ep.default_model = model.clone();
+                ep.model_metadata = self.model_registry.lookup(model).cloned();
+                ep.provider_model_context_length = self
+                    .per_model_context_lengths
+                    .get(resolved_provider_name)
+                    .and_then(|models| models.get(model))
+                    .copied();
             }
-            return Some(ep);
+            return Some((resolved_provider_name.to_string(), ep));
         }
 
         // Level 2: auxiliary block fallback (D-06: optional, may be None)
         if let Some(ref aux) = self.auxiliary_endpoint {
-            return Some(aux.clone());
+            // `auxiliary_provider_name` is `Some` on exactly this branch (both
+            // are built together in `build_with_env_scope`'s step 8) — the
+            // `unwrap_or_default` is defensive only, never exercised in
+            // practice.
+            let name = self.auxiliary_provider_name.clone().unwrap_or_default();
+            return Some((name, aux.clone()));
         }
 
         // Level 3: not configured — caller uses resolve_for_main()
         None
     }
 
+    /// Resolve an auxiliary model role (D-05, D-07, PROV-06, Phase 26).
+    ///
+    /// Endpoint-only projection over [`Self::resolve_role_named`] — kept for
+    /// the ~20 existing call sites that only need the endpoint. A caller that
+    /// also needs the provider name (e.g. to label a `usage_events` row) MUST
+    /// use [`Self::resolve_role_named`] rather than re-deriving the name from
+    /// config; that re-derivation is exactly the singular-provider assumption
+    /// G-51-7 (Phase 51 Plan 20) closed.
+    pub fn resolve_role(&self, role: &str) -> Option<ResolvedEndpoint> {
+        self.resolve_role_named(role).map(|(_, ep)| ep)
+    }
+
     /// Get the main provider name.
     pub fn main_provider(&self) -> &str {
         &self.main_provider
+    }
+
+    /// Phase 51 Plan 18 (G-51-5): the complete set of provider names this resolver can ever
+    /// resolve — built-ins plus `config.providers` plus `config.custom_providers`, exactly the
+    /// `endpoints` key set [`Self::build_with_env_scope`] populates. `config.model.roles`
+    /// entries reference these names rather than adding to them, so this list is, by
+    /// construction, everything a process built from this `Config` could ever dispatch to.
+    ///
+    /// Sorted (never raw `HashMap` iteration order) so callers get a stable, repeatable order
+    /// across calls. This is the ONE shared source both `worker_bootstrap`'s multi-provider
+    /// socket bootstrap and `profile_migrate`'s unreachable-leaf cross-check read, so neither
+    /// can drift from what this resolver actually holds — the same "one shared helper called by
+    /// both" shape 51-15 established for `provider_api_key_env_name`.
+    pub fn endpoint_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.endpoints.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     /// Get a reference to the model registry (Phase 21.3).
@@ -719,6 +991,19 @@ impl ProviderResolver {
         rows
     }
 
+    /// Phase 51 WR-08 (Task 2): whether ANY endpoint in this resolver still lacks
+    /// an `api_key` after the existing 4-priority chain has run. Used by
+    /// `ironhermes-cli::build_client`'s outer store-open guard to decide whether
+    /// there is anything left for the vault to fill — re-keyed away from the
+    /// bootstrap flag (which used to gate the WHOLE store open) because a worker
+    /// can legitimately need a SECOND vault-backed provider even after
+    /// bootstrapping a different one over the socket. `false` means opening the
+    /// vault store would be a pure no-op (every endpoint already has a key), so
+    /// skipping it is optimization only, not a correctness dependency.
+    pub fn has_keyless_endpoint(&self) -> bool {
+        self.endpoints.values().any(|e| e.api_key.is_none())
+    }
+
     /// Phase 46.8 D-02/D-07: consult the vault as resolution priority 5, ONLY after
     /// the existing 4-priority chain (api_key_env → deprecated literal → legacy env
     /// vars → deprecated model.api_key, all applied in [`Self::build_with_cache`])
@@ -747,13 +1032,48 @@ impl ProviderResolver {
     /// The `SecretString` → `String` conversion happens ONLY here, at the
     /// `ResolvedEndpoint.api_key: Option<String>` boundary — matching the existing
     /// redacting `Debug` impl on [`ResolvedEndpoint`].
+    ///
+    /// # Per-provider suppression after a socket bootstrap (Phase 51 UAT F-04 fix,
+    /// commit 2, narrowed by T17/WR-08 in Phase 51-13)
+    /// A process that bootstrapped a provider credential over the Phase 51 vault
+    /// socket (`worker_bootstrap::bootstrap_worker_credential` in `ironhermes-cli`
+    /// returning `BootstrapOutcome::Installed`, which calls
+    /// [`mark_worker_bootstrapped_over_socket`]) already has THAT provider's
+    /// credential and must never have it overwritten from the vault — but the
+    /// resolver commonly holds MANY endpoints (`roles.vision`,
+    /// `roles.kanban_judge`, a fallback model, ...), and a socket bootstrap
+    /// resolves exactly one of them. Every other endpoint has no relationship to
+    /// the bootstrap at all and must resolve normally.
+    ///
+    /// The bootstrapped provider's own endpoint is skipped with a `continue`
+    /// inside the loop below — the vault is never even consulted for it, matching
+    /// the existing priorities-1-4 skip's own never-consult-the-store behavior.
+    /// Every other endpoint runs the unmodified priorities-1-4-then-vault logic.
+    ///
+    /// This method previously (commit 2) returned `Ok(())` before this loop ran
+    /// at all whenever ANY provider had bootstrapped, on the premise that "the
+    /// process has no legitimate need to ever consult a vault again". That premise
+    /// was false — it silently left every sibling vault-backed provider keyless,
+    /// regressing `51-CONTEXT.md`'s explicit `apply_vault_fallback` must-not-regress
+    /// constraint (T17/WR-08). That early return has been removed entirely; do not
+    /// re-add a narrowed version of it — narrowing the loop body (below) is the
+    /// fix, not narrowing when the loop runs.
     pub async fn apply_vault_fallback(
         &mut self,
         store: &dyn ironhermes_vault::SecretStore,
     ) -> Result<()> {
         use secrecy::ExposeSecret;
 
+        let bootstrapped_provider = worker_bootstrapped_provider();
+
         for (name, endpoint) in self.endpoints.iter_mut() {
+            // Phase 51 T17/WR-08: this process already holds this ONE provider's
+            // credential from the socket bootstrap — never overwrite it, and
+            // never even consult the vault for it. Every other endpoint is
+            // unaffected by this check.
+            if bootstrapped_provider == Some(name.as_str()) {
+                continue;
+            }
             // Priorities 1-4 already won (D-07) — never override an existing key,
             // and never even consult the vault for this provider.
             if endpoint.api_key.is_some() {
@@ -846,6 +1166,34 @@ mod tests {
             "anthropic should exist"
         );
         assert!(resolver.resolve("openai").is_some(), "openai should exist");
+    }
+
+    /// Phase 51 Plan 18 (G-51-5): `endpoint_names()` returns the complete, SORTED set of
+    /// providers this resolver can resolve — the three built-ins plus every `config.providers`
+    /// entry, deterministic regardless of `HashMap` iteration order.
+    #[test]
+    fn test_endpoint_names_is_sorted_and_includes_builtins_and_custom_providers() {
+        let mut config = default_config();
+        config.providers.insert(
+            "zzzcustom".to_string(),
+            ProviderConfig {
+                api_key_env: Some("ZZZCUSTOM_API_KEY".to_string()),
+                ..Default::default()
+            },
+        );
+        let resolver = ProviderResolver::build_with_cache(&config, ModelsCache::default())
+            .expect("build should succeed");
+        let names = resolver.endpoint_names();
+        assert_eq!(
+            names,
+            vec![
+                "anthropic".to_string(),
+                "openai".to_string(),
+                "openrouter".to_string(),
+                "zzzcustom".to_string(),
+            ],
+            "must be sorted and include both built-ins and config.providers entries"
+        );
     }
 
     #[test]
@@ -983,6 +1331,182 @@ mod tests {
         assert!(resolver.resolve_role("nonexistent_role").is_none());
     }
 
+    // =========================================================================
+    // Phase 50.5 Plan 02 (D-05): role endpoint window follows the ROLE's model
+    // =========================================================================
+
+    fn metadata_cache_entry(context_length: usize) -> crate::models_cache::ModelsCacheEntry {
+        use crate::model_metadata::{ModelCapabilities, PartialModelMetadata};
+        crate::models_cache::ModelsCacheEntry {
+            metadata: PartialModelMetadata {
+                context_length: Some(context_length),
+                max_output_tokens: None,
+                tokenizer: Some("cl100k_base".to_string()),
+                capabilities: Some(ModelCapabilities::default()),
+            },
+            fetched_at: chrono::Utc::now(),
+        }
+    }
+
+    /// A role overriding its model to a smaller-window id, on a provider
+    /// whose OWN default model has a larger metadata window, resolves to the
+    /// role model's window — not the provider default's. Before this task the
+    /// same fixture returned the provider default's 1,000,000.
+    ///
+    /// Built via `build_with_cache` (not `build`, which reads the operator's
+    /// real `$IRONHERMES_HOME/models-cache.json`) so the fixture's metadata is
+    /// exactly what this test injects, per that constructor's own doc comment.
+    #[test]
+    fn role_endpoint_window_follows_the_role_model() {
+        let mut cache = ModelsCache::default();
+        cache
+            .entries
+            .insert("big-model".to_string(), metadata_cache_entry(1_000_000));
+        cache
+            .entries
+            .insert("small-model".to_string(), metadata_cache_entry(200_000));
+
+        let mut config = default_config();
+        config.providers.insert(
+            "p".to_string(),
+            ProviderConfig {
+                base_url: Some("https://p.example.test".to_string()),
+                default_model: Some("big-model".to_string()),
+                ..Default::default()
+            },
+        );
+        config.model.roles.insert(
+            "fast".to_string(),
+            ModelRoleConfig {
+                provider: "p".to_string(),
+                model: Some("small-model".to_string()),
+            },
+        );
+
+        let resolver = ProviderResolver::build_with_cache(&config, cache).expect("build");
+        let ep = resolver.resolve_role("fast").expect("fast role");
+        assert_eq!(ep.default_model, "small-model");
+        assert_eq!(
+            ep.context_length(),
+            200_000,
+            "role endpoint must carry the ROLE's model window, not the provider default's"
+        );
+    }
+
+    /// `providers.p.models["small-model"].context_length: 300_000` reaches a
+    /// role assigned `(p, small-model)` and resolves with source
+    /// `PerModelConfig` — the per-model tier beats the (unset) metadata here.
+    #[test]
+    fn role_endpoint_per_model_config_wins_for_the_role_model() {
+        use crate::config_extras::ProviderModelConfig;
+
+        let mut models = HashMap::new();
+        models.insert(
+            "small-model".to_string(),
+            ProviderModelConfig {
+                context_length: Some(300_000),
+                ..Default::default()
+            },
+        );
+        let mut config = default_config();
+        config.providers.insert(
+            "p".to_string(),
+            ProviderConfig {
+                base_url: Some("https://p.example.test".to_string()),
+                default_model: Some("big-model".to_string()),
+                models,
+                ..Default::default()
+            },
+        );
+        config.model.roles.insert(
+            "fast".to_string(),
+            ModelRoleConfig {
+                provider: "p".to_string(),
+                model: Some("small-model".to_string()),
+            },
+        );
+
+        let resolver =
+            ProviderResolver::build_with_cache(&config, ModelsCache::default()).expect("build");
+        let ep = resolver.resolve_role("fast").expect("fast role");
+        assert_eq!(ep.context_length(), 300_000);
+        assert_eq!(
+            ep.context_length_source(),
+            ContextLengthSource::PerModelConfig
+        );
+    }
+
+    /// `resolve_role` for a role with `provider: "main"` and a model override
+    /// resolves the per-model entry under the MAIN provider's actual name
+    /// ("openrouter" by default), not under the literal string "main".
+    #[test]
+    fn role_endpoint_main_sentinel_resolves_per_model_entry_under_main_provider_name() {
+        use crate::config_extras::ProviderModelConfig;
+
+        let mut models = HashMap::new();
+        models.insert(
+            "role-model".to_string(),
+            ProviderModelConfig {
+                context_length: Some(400_000),
+                ..Default::default()
+            },
+        );
+        let mut config = default_config();
+        config
+            .providers
+            .insert("openrouter".to_string(), ProviderConfig { models, ..Default::default() });
+        config.model.roles.insert(
+            "fast".to_string(),
+            ModelRoleConfig {
+                provider: "main".to_string(),
+                model: Some("role-model".to_string()),
+            },
+        );
+
+        let resolver =
+            ProviderResolver::build_with_cache(&config, ModelsCache::default()).expect("build");
+        let ep = resolver.resolve_role("fast").expect("fast role");
+        assert_eq!(
+            ep.context_length(),
+            400_000,
+            "the \"main\" sentinel must resolve the per-model entry under the main provider's \
+             real name, not the literal string \"main\""
+        );
+        assert_eq!(
+            ep.context_length_source(),
+            ContextLengthSource::PerModelConfig
+        );
+    }
+
+    /// A role with no model override still returns exactly what the base
+    /// endpoint returned — the no-override path is untouched by this task.
+    #[test]
+    fn role_endpoint_without_model_override_matches_base_endpoint_window() {
+        let mut cache = ModelsCache::default();
+        cache
+            .entries
+            .insert("big-model".to_string(), metadata_cache_entry(1_000_000));
+
+        let mut config = default_config();
+        config.providers.insert(
+            "p".to_string(),
+            ProviderConfig {
+                base_url: Some("https://p.example.test".to_string()),
+                default_model: Some("big-model".to_string()),
+                ..Default::default()
+            },
+        );
+        config.model.roles.insert(
+            "fast".to_string(),
+            ModelRoleConfig { provider: "p".to_string(), model: None },
+        );
+
+        let resolver = ProviderResolver::build_with_cache(&config, cache).expect("build");
+        let ep = resolver.resolve_role("fast").expect("fast role");
+        assert_eq!(ep.default_model, "big-model");
+        assert_eq!(ep.context_length(), 1_000_000);
+    }
+
     #[test]
     fn test_debug_redacts_api_key() {
         let ep = ResolvedEndpoint {
@@ -993,6 +1517,7 @@ mod tests {
             fallback_providers: vec![],
             model_metadata: None,
             config_context_length: None,
+            provider_model_context_length: None,
             models: vec![],
         };
         let debug_str = format!("{:?}", ep);
@@ -1047,6 +1572,7 @@ mod tests {
             fallback_providers: vec![],
             model_metadata: None,
             config_context_length: None,
+            provider_model_context_length: None,
             models: vec![],
         }
     }
@@ -1080,11 +1606,16 @@ mod tests {
         );
     }
 
+    /// Phase 50.5 (D-02): DELIBERATE INVERSION of the old
+    /// `test_user_config_context_length_overrides_metadata`, which asserted
+    /// the pre-50.5 Phase 21.3 D-06 contract — the same fixture (metadata
+    /// 200,000, pin 1,000,000) used to resolve to the pin's 1,000,000. It now
+    /// resolves to the metadata's 200,000: the global pin is demoted from
+    /// tier 1 to a floor for models no per-model source or metadata knows.
     #[test]
-    fn test_user_config_context_length_overrides_metadata() {
+    fn metadata_beats_the_global_pin() {
         use crate::model_metadata::{ModelCapabilities, ModelMetadata};
 
-        // D-06: config.yaml context_length > metadata context_length
         let ep = ResolvedEndpoint {
             model_metadata: Some(ModelMetadata {
                 context_length: 200_000,
@@ -1092,14 +1623,88 @@ mod tests {
                 tokenizer: "cl100k_base".to_string(),
                 capabilities: ModelCapabilities::default(),
             }),
-            config_context_length: Some(1_000_000), // User set 1M in config.yaml
+            config_context_length: Some(1_000_000), // Operator's global pin
             ..default_endpoint()
         };
         assert_eq!(
             ep.context_length(),
-            1_000_000,
-            "D-06: user config must override metadata"
+            200_000,
+            "D-02: metadata now outranks the global pin — the pin is a floor, not an override"
         );
+        assert_eq!(ep.context_length_source(), ContextLengthSource::Metadata);
+    }
+
+    /// Phase 50.5 (D-01): a per-model config entry outranks both metadata and
+    /// the global pin — the most specific tier wins.
+    #[test]
+    fn per_model_window_beats_metadata_and_pin() {
+        use crate::model_metadata::{ModelCapabilities, ModelMetadata};
+
+        let ep = ResolvedEndpoint {
+            provider_model_context_length: Some(300_000),
+            model_metadata: Some(ModelMetadata {
+                context_length: 200_000,
+                max_output_tokens: Some(64_000),
+                tokenizer: "cl100k_base".to_string(),
+                capabilities: ModelCapabilities::default(),
+            }),
+            config_context_length: Some(1_000_000),
+            ..default_endpoint()
+        };
+        assert_eq!(ep.context_length(), 300_000);
+        assert_eq!(
+            ep.context_length_source(),
+            ContextLengthSource::PerModelConfig
+        );
+    }
+
+    /// T-50.5-01: an implausible metadata value (here, `usize::MAX` — as a
+    /// corrupted disk cache or a hostile provider probe might report) is
+    /// rejected at its tier and falls THROUGH to the global pin, rather than
+    /// being clamped to the ceiling or returned as-is.
+    #[test]
+    fn implausible_context_length_falls_through_to_the_next_tier() {
+        use crate::model_metadata::{ModelCapabilities, ModelMetadata};
+
+        let ep = ResolvedEndpoint {
+            model_metadata: Some(ModelMetadata {
+                context_length: usize::MAX,
+                max_output_tokens: Some(64_000),
+                tokenizer: "cl100k_base".to_string(),
+                capabilities: ModelCapabilities::default(),
+            }),
+            config_context_length: Some(256_000),
+            ..default_endpoint()
+        };
+        assert_eq!(
+            ep.context_length(),
+            256_000,
+            "an implausible metadata value must be skipped, not clamped to the ceiling"
+        );
+        assert_eq!(ep.context_length_source(), ContextLengthSource::GlobalPin);
+    }
+
+    /// D-03: the operator's existing `model.context_length` pin still floors
+    /// a model absent from both a per-model config entry and the metadata
+    /// cache — no config migration required.
+    #[test]
+    fn operator_pin_still_floors_models_without_metadata() {
+        let ep = ResolvedEndpoint {
+            model_metadata: None,
+            config_context_length: Some(256_000),
+            ..default_endpoint()
+        };
+        assert_eq!(ep.context_length(), 256_000);
+        assert_eq!(ep.context_length_source(), ContextLengthSource::GlobalPin);
+    }
+
+    /// T-50.5-01: the plausibility guard's own boundary behavior, asserted
+    /// directly rather than only indirectly through a resolved endpoint.
+    #[test]
+    fn plausible_context_length_rejects_zero_and_oversized() {
+        assert_eq!(plausible_context_length(0), None);
+        assert_eq!(plausible_context_length(10_000_001), None);
+        assert_eq!(plausible_context_length(1_048_576), Some(1_048_576));
     }
 
     /// Pins the STATIC-table metadata by injecting an empty cache. `build()`
@@ -1143,7 +1748,7 @@ mod tests {
 
     #[test]
     fn provider_resolver_loads_disk_cache_at_build() {
-        use crate::model_metadata::{ModelCapabilities, ModelMetadata};
+        use crate::model_metadata::{ModelCapabilities, PartialModelMetadata};
         use crate::models_cache::{ModelsCache, ModelsCacheEntry};
         use chrono::Utc;
 
@@ -1154,11 +1759,11 @@ mod tests {
         cache.entries.insert(
             "test-cache-only-model".to_string(),
             ModelsCacheEntry {
-                metadata: ModelMetadata {
-                    context_length: 500_000,
+                metadata: PartialModelMetadata {
+                    context_length: Some(500_000),
                     max_output_tokens: Some(8_000),
-                    tokenizer: "cl100k_base".to_string(),
-                    capabilities: ModelCapabilities::default(),
+                    tokenizer: Some("cl100k_base".to_string()),
+                    capabilities: Some(ModelCapabilities::default()),
                 },
                 fetched_at: Utc::now(),
             },
@@ -1191,7 +1796,7 @@ mod tests {
 
     #[test]
     fn provider_resolver_cache_overrides_static_for_same_model() {
-        use crate::model_metadata::{ModelCapabilities, ModelMetadata};
+        use crate::model_metadata::{ModelCapabilities, PartialModelMetadata};
         use crate::models_cache::{ModelsCache, ModelsCacheEntry};
         use chrono::Utc;
 
@@ -1202,11 +1807,11 @@ mod tests {
         cache.entries.insert(
             "claude-sonnet-4".to_string(),
             ModelsCacheEntry {
-                metadata: ModelMetadata {
-                    context_length: 999_999,
+                metadata: PartialModelMetadata {
+                    context_length: Some(999_999),
                     max_output_tokens: Some(100_000),
-                    tokenizer: "cl100k_base".to_string(),
-                    capabilities: ModelCapabilities::default(),
+                    tokenizer: Some("cl100k_base".to_string()),
+                    capabilities: Some(ModelCapabilities::default()),
                 },
                 fetched_at: Utc::now(),
             },
@@ -1425,6 +2030,186 @@ mod tests {
             result.is_none(),
             "must return None when neither per-task nor auxiliary is configured"
         );
+    }
+
+    // =========================================================================
+    // Phase 51 Plan 20 (G-51-7): resolve_role_named — the single evaluation
+    // behind both the endpoint and the provider name, at all three cascade
+    // levels. This is the mechanical net behind the fix for a vision-routed
+    // turn being written into usage_events under the MAIN provider's name.
+    // =========================================================================
+
+    /// Level 1: a role configured with a provider distinct from `model.provider`
+    /// yields THAT role's own provider name, not the main provider's.
+    #[test]
+    fn resolve_role_named_returns_the_roles_own_provider_name() {
+        let mut config = default_config();
+        // Default main provider is "openrouter" — configure vision on a
+        // deliberately different provider.
+        config.model.roles.insert(
+            "vision".to_string(),
+            ModelRoleConfig {
+                provider: "anthropic".to_string(),
+                model: Some("claude-vision".to_string()),
+            },
+        );
+        let resolver = ProviderResolver::build(&config).expect("build");
+        let (name, ep) = resolver
+            .resolve_role_named("vision")
+            .expect("vision role must resolve");
+        assert_eq!(
+            name, "anthropic",
+            "must report the role's own provider name"
+        );
+        assert_eq!(ep.default_model, "claude-vision");
+    }
+
+    /// Level 1, `main` sentinel: the returned name is the REAL main provider,
+    /// never the literal sentinel string "main".
+    #[test]
+    fn resolve_role_named_resolves_the_main_sentinel_to_the_real_main_provider() {
+        let mut config = default_config();
+        config.model.roles.insert(
+            "vision".to_string(),
+            ModelRoleConfig {
+                provider: "main".to_string(),
+                model: Some("openai/gpt-4o-vision".to_string()),
+            },
+        );
+        let resolver = ProviderResolver::build(&config).expect("build");
+        let (name, _ep) = resolver
+            .resolve_role_named("vision")
+            .expect("vision role via main must resolve");
+        assert_eq!(
+            name,
+            resolver.main_provider(),
+            "the sentinel must resolve to the real main provider name"
+        );
+        assert_ne!(name, "main", "the literal sentinel must never be returned");
+    }
+
+    /// Level 2: no matching `model.roles` entry, but an `auxiliary:` block is
+    /// configured — the returned name is the auxiliary block's OWN provider,
+    /// not the main provider's and not empty.
+    #[test]
+    fn resolve_role_named_labels_the_auxiliary_block_fallback() {
+        let mut config = default_config();
+        // No per-task role for "compression".
+        config.auxiliary = AuxiliaryConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4o-mini".to_string(),
+        };
+        let resolver = ProviderResolver::build(&config).expect("build");
+        let (name, ep) = resolver
+            .resolve_role_named("compression")
+            .expect("compression must fall through to the auxiliary block");
+        assert_eq!(
+            name, "openai",
+            "must report the auxiliary block's own provider"
+        );
+        assert_ne!(name, resolver.main_provider());
+        assert!(!name.is_empty());
+        assert_eq!(ep.default_model, "gpt-4o-mini");
+    }
+
+    /// The mechanical form of the UAT-test-6 argument: for a config with a
+    /// distinct vision provider, the returned name differs from
+    /// `main_provider()` — a vision-routed turn's client could only have
+    /// been a genuinely different endpoint.
+    #[test]
+    fn resolve_role_named_cannot_substitute_the_main_provider() {
+        let mut config = default_config();
+        config.model.roles.insert(
+            "vision".to_string(),
+            ModelRoleConfig {
+                provider: "anthropic".to_string(),
+                model: Some("claude-vision".to_string()),
+            },
+        );
+        let resolver = ProviderResolver::build(&config).expect("build");
+        let (name, _ep) = resolver
+            .resolve_role_named("vision")
+            .expect("vision role must resolve");
+        assert_ne!(
+            name,
+            resolver.main_provider(),
+            "a distinctly-configured role must never report the main provider's name"
+        );
+    }
+
+    /// Pins the delegation: the endpoint half of `resolve_role_named` equals
+    /// `resolve_role`'s result at every cascade level, and both are `None`
+    /// together for the unconfigured case. A future edit cannot fork the two
+    /// evaluations without this test going red.
+    #[test]
+    fn resolve_role_named_and_resolve_role_never_disagree() {
+        // Level 1: per-task override.
+        let mut level1 = default_config();
+        level1.model.roles.insert(
+            "vision".to_string(),
+            ModelRoleConfig {
+                provider: "anthropic".to_string(),
+                model: Some("claude-vision".to_string()),
+            },
+        );
+
+        // Level 1 via the "main" sentinel.
+        let mut level1_main = default_config();
+        level1_main.model.roles.insert(
+            "vision".to_string(),
+            ModelRoleConfig {
+                provider: "main".to_string(),
+                model: Some("openai/gpt-4o-vision".to_string()),
+            },
+        );
+
+        // Level 2: auxiliary block fallback.
+        let mut level2 = default_config();
+        level2.auxiliary = AuxiliaryConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4o-mini".to_string(),
+        };
+
+        // Level 3: unconfigured — both must be None together.
+        let level3 = default_config();
+
+        for (label, config, role) in [
+            ("level1", level1, "vision"),
+            ("level1_main_sentinel", level1_main, "vision"),
+            ("level2_auxiliary", level2, "compression"),
+            ("level3_unconfigured", level3, "compression"),
+        ] {
+            let resolver = ProviderResolver::build(&config).expect("build");
+            let named = resolver.resolve_role_named(role);
+            let unnamed = resolver.resolve_role(role);
+            // `ResolvedEndpoint` derives neither `PartialEq` nor a plain
+            // `Debug` (its Debug impl redacts `api_key`, T-12-01), so the
+            // comparison is over the fields that discriminate a cascade
+            // level rather than a whole-struct equality.
+            match (named, unnamed) {
+                (Some((_, named_ep)), Some(unnamed_ep)) => {
+                    assert_eq!(
+                        named_ep.base_url, unnamed_ep.base_url,
+                        "[{label}] resolve_role_named's endpoint half must equal resolve_role's base_url"
+                    );
+                    assert_eq!(
+                        named_ep.default_model, unnamed_ep.default_model,
+                        "[{label}] resolve_role_named's endpoint half must equal resolve_role's default_model"
+                    );
+                    assert_eq!(
+                        named_ep.api_mode, unnamed_ep.api_mode,
+                        "[{label}] resolve_role_named's endpoint half must equal resolve_role's api_mode"
+                    );
+                }
+                (None, None) => {}
+                (Some(_), None) => panic!(
+                    "[{label}] resolve_role_named returned Some but resolve_role returned None"
+                ),
+                (None, Some(_)) => panic!(
+                    "[{label}] resolve_role_named returned None but resolve_role returned Some"
+                ),
+            }
+        }
     }
 
     // =========================================================================

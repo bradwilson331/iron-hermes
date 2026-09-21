@@ -2380,11 +2380,20 @@ impl GatewayRunner {
                 if kanban_config.dispatch_in_gateway && dispatch_in_gw_env {
                     let kanban_cancel = self.cancel.clone();
                     let interval_secs = kanban_config.dispatch_interval_seconds;
-                    let dispatcher_ctx =
-                        std::sync::Arc::new(ironhermes_kanban::DispatcherContext::new(
-                            kanban_store_arc.clone(),
-                            kanban_config.clone(),
-                        ));
+                    let mut dispatcher_ctx = ironhermes_kanban::DispatcherContext::new(
+                        kanban_store_arc.clone(),
+                        kanban_config.clone(),
+                    );
+                    // Phase 51 Plan 07 (D-07): supply the real, trajectory-backed
+                    // audit sink so an AllowFromVault dispatch can mint rather than
+                    // refuse for lack of a wired ledger. `open_vault_mint_audit_sink`
+                    // returns `None` (not a panic) on any I/O failure — a mint
+                    // simply refuses in that case, matching D-14's fail-closed
+                    // posture rather than silently disabling the vault path.
+                    if let Some(sink) = open_vault_mint_audit_sink() {
+                        dispatcher_ctx = dispatcher_ctx.with_token_audit(sink);
+                    }
+                    let dispatcher_ctx = std::sync::Arc::new(dispatcher_ctx);
                     join_set.spawn(async move {
                         ironhermes_kanban::run_dispatch_loop(dispatcher_ctx, kanban_cancel).await;
                     });
@@ -2752,6 +2761,46 @@ async fn fast_forward_backlog(
 // The cron tick task (above) now calls ironhermes_cron_runner::run_tick_loop.
 // The regression test execute_cron_job_no_longer_exists_in_gateway (below)
 // guards against any future re-introduction of these deleted symbols.
+
+/// Phase 51 Plan 07 (D-07): open the real, trajectory-backed audit sink for a
+/// vault-backed dispatch's mint ledger. NOT session-scoped (the dispatcher is
+/// not tied to any chat session) — lives at a fixed path under this process's
+/// own `$IRONHERMES_HOME/logs/kanban/vault-mint-ledger.jsonl`, mirroring the
+/// per-session `TrajectoryWriter::open` + `TrajectoryWriterHandleImpl::new`
+/// pattern `ironhermes-cli/src/main.rs` already uses twice for session-scoped
+/// writers. Returns `None` (never panics) on any I/O failure — a vault-backed
+/// dispatch then refuses to mint rather than minting un-audited (D-07's
+/// dispatcher-side refusal), the same fail-closed posture the per-session
+/// callers already apply to a failed trajectory open.
+fn open_vault_mint_audit_sink()
+-> Option<std::sync::Arc<dyn ironhermes_core::profile_credentials::ProfileTokenAudit>> {
+    let path = ironhermes_core::get_hermes_home()
+        .join("logs")
+        .join("kanban")
+        .join("vault-mint-ledger.jsonl");
+    match ironhermes_trajectory::TrajectoryWriter::open(&path) {
+        Ok(w) => {
+            let arc_writer = std::sync::Arc::new(std::sync::Mutex::new(w));
+            let writer_handle: std::sync::Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle> =
+                std::sync::Arc::new(ironhermes_trajectory::TrajectoryWriterHandleImpl::new(
+                    arc_writer,
+                ));
+            Some(std::sync::Arc::new(
+                ironhermes_core::profile_credentials::TrajectoryProfileTokenAudit::new(writer_handle),
+            ))
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %path.display(),
+                "Phase 51: failed to open vault-mint-ledger trajectory writer; \
+                 AllowFromVault dispatches will refuse to mint rather than \
+                 mint un-audited"
+            );
+            None
+        }
+    }
+}
 
 /// Resolve the bot token from config value or environment variable.
 /// Supports `${ENV_VAR}` syntax for indirection through environment.

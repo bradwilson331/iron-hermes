@@ -1887,6 +1887,7 @@ mod tests {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
+                remote_loop_enabled: false,
             },
             ..Default::default()
         };
@@ -2645,6 +2646,7 @@ mod tests {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
+                remote_loop_enabled: false,
             },
             ..Default::default()
         };
@@ -2854,6 +2856,7 @@ mod tests {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
+                remote_loop_enabled: false,
             },
             ..Default::default()
         };
@@ -2958,6 +2961,7 @@ mod tests {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
+                remote_loop_enabled: false,
             },
             ..Default::default()
         };
@@ -3010,6 +3014,7 @@ mod tests {
                 web_config_write_enabled: true,
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
+                remote_loop_enabled: false,
             },
             ..Default::default()
         };

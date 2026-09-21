@@ -382,8 +382,13 @@ async fn build_app_deps(cli: &crate::cli_args::Cli, yolo: bool) -> Result<AppDep
     let browser_session: std::sync::Arc<
         tokio::sync::Mutex<Option<ironhermes_tools::browser_session::BrowserSession>>,
     > = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    // Phase 50.4 (D-14, wave 2): AnyClientVisionHandle now takes a SharedResolver
+    // (a swappable Arc<RwLock<Arc<ProviderResolver>>>) rather than a plain
+    // Arc<ProviderResolver>. This CLI surface has no apply-now affordance, so it
+    // wraps its own resolver in a PRIVATE handle nobody else writes to — identical
+    // behaviour to before this field existed.
     let vision_handle = std::sync::Arc::new(AnyClientVisionHandle::new(std::sync::Arc::new(
-        resolver.clone(),
+        std::sync::RwLock::new(std::sync::Arc::new(resolver.clone())),
     )));
     registry.register_browser_tools_with_vision(
         browser_session.clone(),
@@ -1604,7 +1609,9 @@ mod tests {
             .expect("ProviderResolver::build with default Config must not fail in test context");
 
         let browser_session = Arc::new(tokio::sync::Mutex::new(None));
-        let vision_handle = Arc::new(AnyClientVisionHandle::new(Arc::new(resolver.clone())));
+        let vision_handle = Arc::new(AnyClientVisionHandle::new(Arc::new(std::sync::RwLock::new(
+            Arc::new(resolver.clone()),
+        ))));
 
         registry.register_browser_tools_with_vision(
             browser_session,

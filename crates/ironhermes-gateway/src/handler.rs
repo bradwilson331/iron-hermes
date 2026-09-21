@@ -1565,6 +1565,453 @@ impl GatewayMessageHandler {
                         })
                         .await?;
                     }
+                    // Phase 49.7 Plan 05 (D-02/D-06/D-08) Task 3: the real
+                    // executor. Build the judge FIRST, synchronously, before
+                    // spawning anything (T-49.7-05-03 — a construction
+                    // failure must never become a spawned task that fails
+                    // silently mid-loop). Then create ONE CancellationToken
+                    // for the whole loop (D-09: this is what lets the
+                    // existing `/stop` -> `cancel_session` interrupt a
+                    // running `/goal` with no goal-specific code), and build
+                    // the `GoalTurnRunner` closure from THIS surface's own
+                    // per-message construction pieces (PromptBuilder, session
+                    // read/write, approval gate, terminal/execute_code
+                    // intercepts, trajectory writer) — see the closure body
+                    // below and the SUMMARY for the documented field-by-field
+                    // comparison against `run_agent`'s own `TurnRequest`.
+                    CoreCommandResult::StartGoalLoop { objective, budget } => {
+                        let kanban_config: ironhermes_kanban::KanbanConfig =
+                            if self.config.kanban.is_null() {
+                                ironhermes_kanban::KanbanConfig::default()
+                            } else {
+                                serde_yaml::from_value(self.config.kanban.clone())
+                                    .unwrap_or_default()
+                            };
+                        let judge_fn = match ironhermes_agent::judge_builder::build_runtime_judge_fn(
+                            &kanban_config.judge_model,
+                            &self.config,
+                        ) {
+                            Ok(f) => f,
+                            Err(e) => {
+                                let msg = format!(
+                                    "Could not start /goal — judge model unavailable: {e:#}"
+                                );
+                                with_rate_limit_retry(|| {
+                                    adapter.send_message(&event.chat_id, &msg, None)
+                                })
+                                .await?;
+                                return Ok(());
+                            }
+                        };
+                        let Some(agent_runtime) = self.agent_runtime.clone() else {
+                            with_rate_limit_retry(|| {
+                                adapter.send_message(
+                                    &event.chat_id,
+                                    "AgentRuntime not configured; cannot start /goal.",
+                                    None,
+                                )
+                            })
+                            .await?;
+                            return Ok(());
+                        };
+
+                        // ONE CancellationToken for the whole goal loop (D-09).
+                        let loop_cancel = CancellationToken::new();
+
+                        // Build the approval gate + terminal/execute_code
+                        // intercepts ONCE, before spawning — identical
+                        // construction to `run_agent`'s (lines ~2164-2280),
+                        // reused verbatim because every goal-loop iteration
+                        // runs in the SAME session with the SAME approval
+                        // target, unlike a fresh per-message turn.
+                        let approval_target = approval_target_for(event);
+                        let (approval_gate_for_turn, _webhook_denial_log) =
+                            approval_gate_for_event(
+                                event,
+                                self.approval_coordinator.as_ref(),
+                                &approval_target,
+                            );
+                        let terminal_tool = agent_runtime.terminal_tool_arc();
+                        let execute_code_tool = agent_runtime.execute_code_tool_arc();
+                        let dcfg = self.config.dangerous_commands.clone();
+                        let audit_cfg = self.config.audit.clone();
+                        let yolo = self.config.autonomous.yolo;
+                        let is_remote_backend = self.config.terminal.backend == "ssh";
+                        let forward_env_nonempty = !self.config.terminal.forward_env.is_empty();
+                        let terminal_intercept: Option<
+                            ironhermes_tools::registry::InterceptHandler,
+                        > = {
+                            let gate = approval_gate_for_turn.clone();
+                            let dcfg = dcfg.clone();
+                            let audit_cfg = audit_cfg.clone();
+                            let tool = terminal_tool.clone();
+                            let chat_id = event.chat_id.clone();
+                            let sid = ctx_session_id.clone();
+                            Some(std::sync::Arc::new(move |args: serde_json::Value| {
+                                let cmd = args
+                                    .get("command")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let sid = sid.clone();
+                                let g = gate.clone();
+                                let guard =
+                                    ironhermes_hooks::DangerousCommandGuardrail::from_config(
+                                        &dcfg,
+                                    );
+                                let audit_log = ironhermes_core::AuditLog::load(audit_cfg.clone());
+                                let cid = chat_id.clone();
+                                let tool = tool.clone();
+                                Box::pin(async move {
+                                    let outcome = ironhermes_hooks::execute_gated_command(
+                                        "terminal",
+                                        &cmd,
+                                        &guard,
+                                        g.as_deref(),
+                                        &audit_log,
+                                        &sid,
+                                        "gateway",
+                                        &cid,
+                                        yolo,
+                                        is_remote_backend,
+                                        forward_env_nonempty,
+                                        || async move {
+                                            match tool {
+                                                Some(t) => t.execute(args).await,
+                                                None => Err(anyhow::anyhow!(
+                                                    "terminal tool not registered on this runtime"
+                                                )),
+                                            }
+                                        },
+                                    )
+                                    .await;
+                                    Ok(outcome.to_string())
+                                })
+                            }))
+                        };
+                        let execute_code_intercept: Option<
+                            ironhermes_tools::registry::InterceptHandler,
+                        > = {
+                            let gate = approval_gate_for_turn.clone();
+                            let dcfg = dcfg.clone();
+                            let audit_cfg = audit_cfg.clone();
+                            let tool = execute_code_tool.clone();
+                            let chat_id = event.chat_id.clone();
+                            let sid = ctx_session_id.clone();
+                            Some(std::sync::Arc::new(move |args: serde_json::Value| {
+                                let sid = sid.clone();
+                                let g = gate.clone();
+                                let guard =
+                                    ironhermes_hooks::DangerousCommandGuardrail::from_config(
+                                        &dcfg,
+                                    );
+                                let audit_log = ironhermes_core::AuditLog::load(audit_cfg.clone());
+                                let cid = chat_id.clone();
+                                let tool = tool.clone();
+                                Box::pin(async move {
+                                    let outcome = ironhermes_hooks::execute_gated_command(
+                                        "execute_code",
+                                        "",
+                                        &guard,
+                                        g.as_deref(),
+                                        &audit_log,
+                                        &sid,
+                                        "gateway",
+                                        &cid,
+                                        yolo,
+                                        false,
+                                        false,
+                                        || async move {
+                                            match tool {
+                                                Some(t) => t.execute(args).await,
+                                                None => Err(anyhow::anyhow!(
+                                                    "execute_code tool not registered on this \
+                                                     runtime"
+                                                )),
+                                            }
+                                        },
+                                    )
+                                    .await;
+                                    Ok(outcome.to_string())
+                                })
+                            }))
+                        };
+
+                        // Trajectory writer + state store handle, built once
+                        // (same per-session handles an ordinary turn gets).
+                        let trajectory_writer = {
+                            let mut store = self.session_store.write().await;
+                            store.get_or_create_trajectory_writer(&ctx_session_id)
+                        };
+                        let state_store_for_turn =
+                            self.session_store.read().await.state_store().clone();
+
+                        // Snapshot the remaining per-turn construction
+                        // pieces (skills/personality overlay, memory,
+                        // workspace, config) ONCE at launch — a goal loop's
+                        // iterations all belong to one session, so this
+                        // matches what a single ordinary turn already reads.
+                        let config = self.config.clone();
+                        let workspace = self.workspace.clone();
+                        let memory_manager = self.memory_manager.clone();
+                        let skill_registry_snapshot: Option<Arc<SkillRegistry>> =
+                            self.skill_registry.lock().ok().and_then(|g| g.clone());
+                        let skill_overlay_entries: Vec<(String, String)> = self
+                            .skill_overlays
+                            .lock()
+                            .ok()
+                            .and_then(|g| g.get(&session_key).cloned())
+                            .unwrap_or_default();
+                        let personality_overlay: Option<String> = self
+                            .active_personality_overlay
+                            .lock()
+                            .ok()
+                            .and_then(|g| g.get(&session_key).cloned());
+                        let cwd = std::env::current_dir().unwrap_or_default();
+                        let session_key_for_loop = session_key.clone();
+                        let session_store_for_loop = self.session_store.clone();
+                        let turn_registry_for_loop = self.turn_registry.clone();
+                        let ctx_session_id_for_loop = ctx_session_id.clone();
+
+                        // Cloned BEFORE the `move` closure below takes
+                        // ownership of `loop_cancel`/`ctx_session_id` — both
+                        // are still needed after the closure is built (to
+                        // spawn the loop task and its progress renderer).
+                        let loop_cancel_for_task = loop_cancel.clone();
+                        let ctx_session_id_for_task = ctx_session_id.clone();
+
+                        // The GoalTurnRunner closure — Task 1's six-point
+                        // Vec<String> contract: only the LAST element is
+                        // sent as this turn's new user message (element 0 on
+                        // turn 1 IS the objective, since the vector has
+                        // length 1 there). Prior elements are already in the
+                        // session (added via `add_message_to_session` below
+                        // each iteration), so nothing here joins or replays
+                        // the vector.
+                        let turn_runner: ironhermes_agent::goal_session_loop::GoalTurnRunner =
+                            Box::new(move |messages: Vec<String>| {
+                                let message_text = messages.last().cloned().unwrap_or_default();
+                                let agent_runtime = agent_runtime.clone();
+                                let session_store = session_store_for_loop.clone();
+                                let config = config.clone();
+                                let workspace = workspace.clone();
+                                let memory_manager = memory_manager.clone();
+                                let skill_registry_snapshot = skill_registry_snapshot.clone();
+                                let skill_overlay_entries = skill_overlay_entries.clone();
+                                let personality_overlay = personality_overlay.clone();
+                                let session_key = session_key_for_loop.clone();
+                                let cwd = cwd.clone();
+                                let turn_registry = turn_registry_for_loop.clone();
+                                let ctx_session_id = ctx_session_id_for_loop.clone();
+                                let loop_cancel = loop_cancel.clone();
+                                let approval_gate_for_turn = approval_gate_for_turn.clone();
+                                let terminal_intercept = terminal_intercept.clone();
+                                let execute_code_intercept = execute_code_intercept.clone();
+                                let trajectory_writer = trajectory_writer.clone();
+                                let state_store_for_turn = state_store_for_turn.clone();
+
+                                Box::pin(async move {
+                                    // Register-before-spawn: THIS iteration's
+                                    // TurnEntry, under the SURROUNDING
+                                    // session's real session_id (the same
+                                    // binding `/stop`'s cancel_session call
+                                    // above uses), RAII-deregistered so a
+                                    // turn that errors or is dropped
+                                    // mid-await never strands the entry.
+                                    let turn_id = TurnId::new_v4();
+                                    turn_registry
+                                        .register(TurnEntry {
+                                            turn_id,
+                                            session_id: ctx_session_id.clone(),
+                                            surface: Surface::Gateway,
+                                            started_at: std::time::Instant::now(),
+                                            cancel: loop_cancel.clone(),
+                                        })
+                                        .await;
+                                    struct DeregisterGuard {
+                                        registry: Arc<TurnRegistry>,
+                                        turn_id: TurnId,
+                                    }
+                                    impl Drop for DeregisterGuard {
+                                        fn drop(&mut self) {
+                                            let registry = self.registry.clone();
+                                            let id = self.turn_id;
+                                            tokio::spawn(async move {
+                                                registry.deregister(id).await;
+                                            });
+                                        }
+                                    }
+                                    let _guard = DeregisterGuard {
+                                        registry: turn_registry.clone(),
+                                        turn_id,
+                                    };
+
+                                    // Add the synthetic user message and
+                                    // snapshot the running session — mirrors
+                                    // run_agent's own session read/write.
+                                    let user_message = ChatMessage::user(&message_text);
+                                    let mut session_messages = {
+                                        let mut store = session_store.write().await;
+                                        let model = config.model.default.clone();
+                                        let source = session_key.platform.to_string();
+                                        let _ = store.get_or_create(
+                                            session_key.clone(),
+                                            &model,
+                                            &source,
+                                        );
+                                        store.add_message_to_session(&session_key, user_message);
+                                        store
+                                            .get(&session_key)
+                                            .map(|s| s.messages.clone())
+                                            .unwrap_or_default()
+                                    };
+
+                                    // System message — same PromptBuilder
+                                    // construction as run_agent's.
+                                    let mut prompt_builder = PromptBuilder::new(
+                                        &config.model.default,
+                                        session_key.platform.to_string(),
+                                    )
+                                    .with_provider(&config.model.provider)
+                                    .load_context(&cwd);
+                                    if let Some(ref ws) = workspace {
+                                        prompt_builder =
+                                            prompt_builder.with_workspace_root(&ws.root);
+                                    }
+                                    if let Some(ref mgr) = memory_manager {
+                                        prompt_builder.set_memory_manager(mgr.clone());
+                                    }
+                                    if let Some(ref registry) = skill_registry_snapshot {
+                                        prompt_builder.set_skill_registry(registry.clone());
+                                    }
+                                    prompt_builder.load_memory().await;
+                                    prompt_builder.load_skills();
+                                    for (name, body) in &skill_overlay_entries {
+                                        prompt_builder.activate_skill(name, body);
+                                    }
+                                    if let Some(ref overlay_text) = personality_overlay {
+                                        prompt_builder.set_overlay(overlay_text.clone());
+                                    }
+                                    prompt_builder.set_timezone(config.agent.timezone.clone());
+                                    let system_msg = prompt_builder.build_system_message();
+                                    let mut req_messages = vec![system_msg];
+                                    req_messages.append(&mut session_messages);
+
+                                    // Deviation (documented in SUMMARY): a
+                                    // bare `TurnRequest` struct literal IS used
+                                    // here (Task 2/3 acceptance escape
+                                    // hatch) because this call site has no
+                                    // access to `run_agent`'s own private
+                                    // per-message locals. The
+                                    // security-relevant fields
+                                    // (cancel_token, approval_gate,
+                                    // terminal_intercept,
+                                    // execute_code_intercept,
+                                    // trajectory_writer, state_store) are
+                                    // wired identically to `run_agent`'s;
+                                    // the UX-only fields (stream,
+                                    // tool_progress, tool_result,
+                                    // tts_wiring, messaging_wiring,
+                                    // pressure_tracker) are `None`/default —
+                                    // a goal-loop turn renders no live
+                                    // token stream and no TTS, but is
+                                    // otherwise gated exactly like an
+                                    // ordinary turn.
+                                    let request = TurnRequest {
+                                        messages: req_messages,
+                                        session_id: ctx_session_id.clone(),
+                                        cancel_token: Some(loop_cancel.clone()),
+                                        trajectory_writer: trajectory_writer.clone(),
+                                        state_store: Some(state_store_for_turn.clone()),
+                                        approval_gate: approval_gate_for_turn.clone(),
+                                        terminal_intercept: terminal_intercept.clone(),
+                                        execute_code_intercept: execute_code_intercept.clone(),
+                                        ..Default::default()
+                                    };
+
+                                    let result = agent_runtime.run_turn(request).await?;
+
+                                    if !result.appended.is_empty() {
+                                        let mut store = session_store.write().await;
+                                        if store.get(&session_key).is_some() {
+                                            store.add_messages_batch_to_session(
+                                                &session_key,
+                                                result.appended,
+                                            );
+                                        }
+                                    }
+
+                                    Ok(result.final_response.clone().unwrap_or_default())
+                                })
+                            });
+
+                        let max_turns = budget;
+                        let (progress_tx, mut progress_rx) =
+                            tokio::sync::mpsc::unbounded_channel();
+                        tokio::spawn(async move {
+                            let _ = ironhermes_agent::goal_session_loop::run_goal_session_loop(
+                                turn_runner,
+                                objective,
+                                ctx_session_id_for_task,
+                                max_turns,
+                                &judge_fn,
+                                loop_cancel_for_task,
+                                progress_tx,
+                            )
+                            .await;
+                        });
+                        let adapter_for_progress = adapter.clone();
+                        let chat_id_for_progress = event.chat_id.clone();
+                        tokio::spawn(async move {
+                            while let Some(ev) = progress_rx.recv().await {
+                                match ev {
+                                    ironhermes_agent::goal_session_loop::GoalProgress::TurnCompleted {
+                                        turn,
+                                        output,
+                                    } => {
+                                        let msg = format!("[/goal turn {turn}] {output}");
+                                        let _ = with_rate_limit_retry(|| {
+                                            adapter_for_progress.send_message(
+                                                &chat_id_for_progress,
+                                                &msg,
+                                                None,
+                                            )
+                                        })
+                                        .await;
+                                    }
+                                    ironhermes_agent::goal_session_loop::GoalProgress::Finished(
+                                        reason,
+                                    ) => {
+                                        let msg = match reason {
+                                            ironhermes_agent::goal_session_loop::GoalStopReason::JudgeMet { reason } => {
+                                                format!("/goal complete — judge: {reason}")
+                                            }
+                                            ironhermes_agent::goal_session_loop::GoalStopReason::BudgetExhausted => {
+                                                "/goal stopped — budget exhausted.".to_string()
+                                            }
+                                            ironhermes_agent::goal_session_loop::GoalStopReason::JudgeErrorStrikes { last_error } => {
+                                                format!(
+                                                    "/goal stopped — judge unavailable: {last_error}"
+                                                )
+                                            }
+                                            ironhermes_agent::goal_session_loop::GoalStopReason::Cancelled => {
+                                                "/goal stopped — cancelled.".to_string()
+                                            }
+                                        };
+                                        let _ = with_rate_limit_retry(|| {
+                                            adapter_for_progress.send_message(
+                                                &chat_id_for_progress,
+                                                &msg,
+                                                None,
+                                            )
+                                        })
+                                        .await;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        });
+                    }
                 }
             }
             ResolveResult::Ambiguous(candidates) => {

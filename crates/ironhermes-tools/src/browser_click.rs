@@ -12,16 +12,22 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::browser_session::{BrowserSession, find_chromium_binary};
+use crate::browser_session::{
+    BrowserSession, configured_browser_engine_available, configured_engine_prerequisite,
+};
 use crate::registry::{Prerequisite, Tool};
 
 pub struct BrowserClickTool {
     session: Arc<Mutex<Option<BrowserSession>>>,
+    config: Arc<ironhermes_core::config::Config>,
 }
 
 impl BrowserClickTool {
-    pub fn new(session: Arc<Mutex<Option<BrowserSession>>>) -> Self {
-        Self { session }
+    pub fn new(
+        session: Arc<Mutex<Option<BrowserSession>>>,
+        config: Arc<ironhermes_core::config::Config>,
+    ) -> Self {
+        Self { session, config }
     }
 }
 
@@ -73,19 +79,11 @@ impl Tool for BrowserClickTool {
     }
 
     fn is_available(&self) -> bool {
-        find_chromium_binary(None).is_some()
+        configured_browser_engine_available(&self.config.browser)
     }
 
     fn prerequisites(&self) -> Vec<Prerequisite> {
-        vec![Prerequisite {
-            kind: "binary_present".to_string(),
-            name: "chromium-or-chrome".to_string(),
-            description:
-                "Chromium or Google Chrome browser binary on PATH or at a standard install location"
-                    .to_string(),
-            required: true,
-            group: None,
-        }]
+        vec![configured_engine_prerequisite(&self.config.browser)]
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
@@ -184,16 +182,20 @@ mod tests {
         Arc::new(Mutex::new(None))
     }
 
+    fn dummy_config() -> Arc<ironhermes_core::config::Config> {
+        Arc::new(ironhermes_core::config::Config::default())
+    }
+
     #[test]
     fn name_and_toolset_match_d04() {
-        let t = BrowserClickTool::new(dummy_session());
+        let t = BrowserClickTool::new(dummy_session(), dummy_config());
         assert_eq!(t.name(), "browser_click");
         assert_eq!(t.toolset(), "browser");
     }
 
     #[tokio::test]
     async fn execute_rejects_missing_ref() {
-        let t = BrowserClickTool::new(dummy_session());
+        let t = BrowserClickTool::new(dummy_session(), dummy_config());
         let result = t.execute(json!({})).await;
         assert!(result.is_err());
         assert!(

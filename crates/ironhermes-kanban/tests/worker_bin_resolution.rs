@@ -8,8 +8,11 @@
 //!    returns the env value verbatim.
 //! 2. **fallback** — with `IRONHERMES_WORKER_BIN` unset, `resolve_worker_bin()`
 //!    returns `"ironhermes"` literal (pre-36.3.7.13 PATH-lookup behavior).
-//! 3. **safe_system_vars_membership** — `SAFE_SYSTEM_VARS` contains
-//!    `"IRONHERMES_WORKER_BIN"` (forward-carry enabled for recursive worker spawn).
+//! 3. **safe_system_vars_membership** — `SAFE_SYSTEM_VARS` does NOT contain
+//!    `"IRONHERMES_WORKER_BIN"` (Phase 51 Plan 16, WR-06: moved off the ambient
+//!    pass-through allowlist to explicit, computed emission in
+//!    `build_kanban_worker_env` — forward-carry for recursive worker spawn is
+//!    preserved via that explicit emission, not via list membership).
 //! 4. **forward_carry** — with `IRONHERMES_WORKER_BIN` set in the parent process
 //!    env, `build_kanban_worker_env` produces a child env that includes that entry.
 
@@ -121,15 +124,19 @@ fn fallback_to_ironhermes() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: SAFE_SYSTEM_VARS contains "IRONHERMES_WORKER_BIN" (F-02 SAFE_SYSTEM_VARS membership)
+// Test 3: SAFE_SYSTEM_VARS does NOT contain "IRONHERMES_WORKER_BIN" (Phase 51
+// Plan 16, WR-06: moved to explicit, computed emission — see
+// worker_spawn_vault_env.rs's worker_bin_no_longer_rides_the_ambient_allowlist)
 // ---------------------------------------------------------------------------
 #[test]
-fn safe_system_vars_contains_worker_bin() {
+fn safe_system_vars_does_not_contain_worker_bin() {
     let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
 
     assert!(
-        SAFE_SYSTEM_VARS.contains(&"IRONHERMES_WORKER_BIN"),
-        "SAFE_SYSTEM_VARS must contain \"IRONHERMES_WORKER_BIN\" for forward-carry in recursive worker spawn"
+        !SAFE_SYSTEM_VARS.contains(&"IRONHERMES_WORKER_BIN"),
+        "SAFE_SYSTEM_VARS must NOT contain \"IRONHERMES_WORKER_BIN\" — it now rides \
+         explicit, computed emission in build_kanban_worker_env instead of the \
+         ambient pass-through allowlist (Phase 51 Plan 16, WR-06)"
     );
 }
 
@@ -145,7 +152,7 @@ fn forward_carry_in_build_kanban_worker_env() {
 
     let task = make_task();
     let run = make_run();
-    let env: Vec<(String, String)> = build_kanban_worker_env(&task, &run, "workspace-1", "default");
+    let env: Vec<(String, String)> = build_kanban_worker_env(&task, &run, "workspace-1", "default", None);
 
     unsafe { std::env::remove_var("IRONHERMES_WORKER_BIN") };
 

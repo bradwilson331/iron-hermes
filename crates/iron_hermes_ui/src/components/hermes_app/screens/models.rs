@@ -137,6 +137,124 @@ pub fn compute_model_options(
     options
 }
 
+/// Phase 50.5 (D-14/D-15): group an integer's digits with `,` for the
+/// CONTEXT WINDOW placeholder — an explicit digit walk, not a formatting
+/// crate (this file's Artifacts note: `10_000_000` is well within `u32`
+/// range and needs no external dependency to render with separators).
+///
+/// `cfg_attr(not(wasm), allow(dead_code))`: web-live helper, see
+/// `compute_role_row_views`.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn format_thousands(n: u32) -> String {
+    let digits = n.to_string();
+    let bytes = digits.as_bytes();
+    let mut out = String::with_capacity(bytes.len() + bytes.len() / 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
+}
+
+/// Phase 50.5 (D-14/D-15, UI-SPEC Copywriting Contract): the CONTEXT WINDOW
+/// field's placeholder — states the resolved value and which tier produced
+/// it, so an empty field never leaves the operator guessing what "use
+/// resolved" currently means. `None` (the value has not resolved yet, e.g.
+/// mid-fetch) renders as an em dash with no provenance word, per UI-SPEC
+/// E2/E3's loading state. Consumes `provenance_word` from Plan 05 rather
+/// than duplicating its four words.
+///
+/// `cfg_attr(not(wasm), allow(dead_code))`: web-live helper, see
+/// `compute_role_row_views`.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn window_placeholder(
+    resolved: Option<u32>,
+    source: crate::server::api::ContextWindowSource,
+) -> String {
+    match resolved {
+        None => "resolved: —".to_string(),
+        Some(n) => format!(
+            "resolved: {} ({})",
+            format_thousands(n),
+            crate::server::api::provenance_word(source)
+        ),
+    }
+}
+
+/// Phase 50.5 (D-14/D-15, UI-SPEC Copywriting Contract): the CONTEXT WINDOW
+/// field's validation error string — verbatim, so both the client-side
+/// gate and the server's `validate_models_roles_payload` rejection (Plan 05)
+/// read as the same operator-facing message.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+const WINDOW_VALIDATION_ERROR: &str =
+    "Enter a whole number of tokens (e.g. 200000), or leave blank to use the resolved value.";
+
+/// Phase 50.5 (D-14/D-15): parse the CONTEXT WINDOW input. Blank (post-trim)
+/// means "clear the override, use the resolved value" — `Ok(None)`, never an
+/// error. Anything unparseable, `0`, or above the 10,000,000 ceiling Plan 05
+/// enforces server-side is rejected here too, so the operator gets an inline
+/// message before a round trip to the server.
+///
+/// `cfg_attr(not(wasm), allow(dead_code))`: web-live helper, see
+/// `compute_role_row_views`.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn parse_window_input(raw: &str) -> Result<Option<u32>, &'static str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    match trimmed.parse::<u32>() {
+        Ok(0) => Err(WINDOW_VALIDATION_ERROR),
+        Ok(n) if n > 10_000_000 => Err(WINDOW_VALIDATION_ERROR),
+        Ok(n) => Ok(Some(n)),
+        Err(_) => Err(WINDOW_VALIDATION_ERROR),
+    }
+}
+
+/// Phase 50.5 (D-11, UI-SPEC Copywriting Contract): decide whether a
+/// configured-model-id drift note should render, and if so, its two copy
+/// strings (`(body, title)`). Returns `None` whenever any suppression
+/// condition holds — `is_missing` (the `MISSING` pill already owns this
+/// row), `loading` (the served-id list is unresolved — UI-SPEC E4 loading),
+/// `fell_back` (a degraded catalog is not the provider's own list — UI-SPEC
+/// E4 error), an empty `served_ids` list, a blank `configured_id`, or
+/// `served_ids` already containing `configured_id` (no drift). `None` here
+/// is deliberately NOT an assertion that no drift exists — it only means
+/// this call site cannot currently prove one.
+///
+/// `cfg_attr(not(wasm), allow(dead_code))`: web-live helper, see
+/// `compute_role_row_views`.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+pub fn drift_note(
+    served_ids: &[String],
+    configured_id: &str,
+    provider: &str,
+    fell_back: bool,
+    loading: bool,
+    is_missing: bool,
+) -> Option<(String, String)> {
+    if is_missing || loading || fell_back {
+        return None;
+    }
+    let configured_id = configured_id.trim();
+    if configured_id.is_empty() || served_ids.is_empty() {
+        return None;
+    }
+    if served_ids.iter().any(|s| s == configured_id) {
+        return None;
+    }
+    let served_id = served_ids.first()?;
+    let body = format!("served as \"{served_id}\" by {provider} — your config names \"{configured_id}\"");
+    let title = format!(
+        "{provider} does not list \"{configured_id}\" in its model catalog, but it IS serving \
+         \"{served_id}\" — the assigned model still works. This is a naming mismatch, not a \
+         missing model."
+    );
+    Some((body, title))
+}
+
 /// Phase 46.9 Plan 15 (GAP-1): which config slot a `ProviderModelCascade`
 /// writes on ASSIGN. `Default` writes `config.model.default` + `.provider`;
 /// `Role` upserts one `config.model.roles` entry.
@@ -177,10 +295,15 @@ pub fn ScreenModels(is_active: bool) -> Element {
         crate::server::provider_config_api::get_provider_config().await
     });
 
-    // Phase 46.9 Plan 02 (D-10): restart-required banner — appears after a
-    // successful write this session, dismissible, reappears after the next
-    // write. Starts hidden (not shown on a plain read-only page load).
-    let mut restart_banner_visible = use_signal(|| false);
+    // Phase 50.4 Plan 01 follow-up (team-lead, 2026-09-08): the Phase 46.9
+    // Plan 02 dismissible "Restart required" banner + its `restart_banner_
+    // visible` signal are REMOVED here — D-11 states the shared
+    // `ApplyConfigBanner` supersedes it. This screen now reads/writes the
+    // same root-provided `ApplyConfigPendingCtx` flag Providers uses (see
+    // state.rs doc comment), so a Default-model save here — the ONLY
+    // control that changes the ACTIVE provider — can raise the identical
+    // APPLY NOW banner Providers raises after its own save.
+    let mut apply_config_pending = use_context::<crate::state::ApplyConfigPendingCtx>().0;
 
     // Phase 49.4 hotfix: `list_models()` returns the WHOLE model registry —
     // for a large provider (e.g. OpenRouter, 300+ models) that is hundreds of
@@ -258,6 +381,18 @@ pub fn ScreenModels(is_active: bool) -> Element {
         !d.is_empty() && !catalog_ids.iter().any(|c| c == &default_model_value)
     };
 
+    // Phase 50.5 (D-14/D-15): the default card's resolved window, provenance,
+    // and stored override — from Plan 05's snapshot fields, one shared
+    // evaluation with the topbar marker.
+    let default_resolved_window: Option<u32> =
+        roles_snapshot.as_ref().map(|s| s.default_resolved_context_length);
+    let default_resolved_source = roles_snapshot
+        .as_ref()
+        .map(|s| s.default_resolved_context_source)
+        .unwrap_or_default();
+    let default_window_override =
+        roles_snapshot.as_ref().and_then(|s| s.default_context_override);
+
     rsx! {
         section {
             class: "screen",
@@ -278,21 +413,12 @@ pub fn ScreenModels(is_active: bool) -> Element {
                 }
             }
 
-            // Phase 46.9 Plan 02 (D-10): restart-required banner, Providers/Models only.
-            if *restart_banner_visible.read() {
-                div {
-                    class: "panel",
-                    style: "border-color:var(--amber);flex-direction:row;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;",
-                    p {
-                        style: "color:var(--amber);font-size:12px;margin:0;flex:1;min-width:280px;",
-                        "Restart required — provider and model changes take effect after restart. Schedule changes apply immediately."
-                    }
-                    button {
-                        class: "btn btn--ghost btn--sm",
-                        onclick: move |_| restart_banner_visible.set(false),
-                        "DISMISS"
-                    }
-                }
+            // Phase 50.4 Plan 01 follow-up (D-11): the shared apply-config
+            // banner supersedes the old dismissible "Restart required"
+            // banner on this screen — same mount position, same trigger
+            // signal Providers uses.
+            crate::components::hermes_app::screens::apply_config_banner::ApplyConfigBanner {
+                visible: apply_config_pending,
             }
 
             if load_error {
@@ -343,8 +469,17 @@ pub fn ScreenModels(is_active: bool) -> Element {
                         provider_options: provider_names.clone(),
                         write_enabled,
                         allow_unset: false,
+                        resolved_window: default_resolved_window,
+                        resolved_source: default_resolved_source,
+                        initial_window: default_window_override,
+                        is_missing: default_is_missing,
                         on_saved: move |_| {
-                            restart_banner_visible.set(true);
+                            // Phase 50.4 Plan 01 follow-up: this is the ONLY
+                            // control that changes config.model.provider (the
+                            // ACTIVE provider) — raise the shared apply-config
+                            // banner so the operator has a path to make it
+                            // live without a restart.
+                            apply_config_pending.set(true);
                             // GAP-6: refresh by bumping the nonce so the roles
                             // resource re-runs — never a resource restart method.
                             let next = roles_refresh_nonce.peek().wrapping_add(1);
@@ -358,14 +493,29 @@ pub fn ScreenModels(is_active: bool) -> Element {
                     span { class: "count", "· {role_row_views.len()} configs" }
                 }
                 div { class: "grid wide",
-                    for view in role_row_views.iter() {
+                    // Phase 50.5 (D-14/D-15): `role_row_views` and `role_rows`
+                    // are both derived from `roles_snapshot.roles` in the same
+                    // fixed order (`compute_role_row_views` preserves input
+                    // order) — zip rather than re-deriving a lookup so each
+                    // row's resolved-window fields come from its own entry.
+                    for (view, role) in role_row_views.iter().zip(role_rows.iter()) {
                         RolePickerRow {
                             key: "{view.role_key}",
                             view: view.clone(),
                             provider_options: provider_names.clone(),
                             write_enabled,
+                            resolved_window: Some(role.resolved_context_length),
+                            resolved_source: role.resolved_context_source,
+                            initial_window: role.context_length,
                             on_saved: move |_| {
-                                restart_banner_visible.set(true);
+                                // Phase 50.4 Plan 01 follow-up: a role-model
+                                // save changes `config.model.roles`, which
+                                // D-08's config swap also republishes — raise
+                                // the same shared banner as the Default card
+                                // above rather than leaving role saves with
+                                // no apply-now affordance now that the old
+                                // restart banner is gone.
+                                apply_config_pending.set(true);
                                 let next = roles_refresh_nonce.peek().wrapping_add(1);
                                 roles_refresh_nonce.set(next);
                             },
@@ -504,25 +654,25 @@ fn ProviderModelCascade(
     provider_options: Vec<String>,
     write_enabled: bool,
     allow_unset: bool,
+    // Phase 50.5 (D-14/D-15): this row's resolved context window + which
+    // tier produced it (feeds the placeholder), the currently stored
+    // per-(provider, model) override (seeds the input), and whether the
+    // MISSING pill already owns this row (suppresses the D-11 drift note).
+    resolved_window: Option<u32>,
+    resolved_source: crate::server::api::ContextWindowSource,
+    initial_window: Option<u32>,
+    is_missing: bool,
     on_saved: EventHandler<()>,
 ) -> Element {
     let mut selected_provider = use_signal(|| initial_provider.clone());
-    let mut selected_model = use_signal(|| initial_model.clone());
+    let selected_model = use_signal(|| initial_model.clone());
     let mut saving = use_signal(|| false);
     let mut error_msg: Signal<Option<String>> = use_signal(|| None);
-    // Phase 49.4 hotfix: stable unique `<datalist>` id per cascade instance —
-    // the Models screen mounts one cascade per role (~7-8), and a native
-    // `<select>` of a large provider's full model list (300+ for OpenRouter)
-    // rendered that many times locked the single-threaded WASM client. The
-    // model picker below is a filterable input + capped datalist instead.
-    let list_id = use_hook(|| {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static CASCADE_SEQ: AtomicU64 = AtomicU64::new(0);
-        format!(
-            "cascade-models-{}",
-            CASCADE_SEQ.fetch_add(1, Ordering::Relaxed)
-        )
-    });
+    // Phase 50.5 (D-14): seeded from the STORED override, not the resolved
+    // value — an empty field means "use resolved," and pre-filling it with
+    // the resolved number would turn every row into an override the moment
+    // ASSIGN was pressed.
+    let mut window_input = use_signal(|| initial_window.map(|n| n.to_string()).unwrap_or_default());
 
     // GAP-1: the DEPENDENT model list — re-fetched whenever the provider
     // signal changes (read in the sync prefix so `use_resource` re-runs).
@@ -535,6 +685,7 @@ fn ProviderModelCascade(
     let model_val = selected_model.read().clone();
     let is_saving = *saving.read();
     let error_val = error_msg.read().clone();
+    let window_text = window_input.read().clone();
 
     let snapshot = match models_resource() {
         Some(Ok(s)) => Some(s),
@@ -548,22 +699,16 @@ fn ProviderModelCascade(
         Some(model_val.as_str())
     };
     let model_options = compute_model_options(snapshot.as_ref(), assigned_ref);
-    // Phase 49.4 hotfix: render at most a bounded window of `<option>`s into
-    // the datalist, filtered by whatever is currently typed, so a 300+-model
-    // provider never renders 300 nodes per cascade. The assigned value is
-    // always kept in the list (compute_model_options already prepends it when
-    // absent), and typing narrows toward any model id.
-    const MODEL_DATALIST_CAP: usize = 50;
-    let model_filter = model_val.trim().to_ascii_lowercase();
-    let datalist_options: Vec<String> = model_options
-        .iter()
-        .filter(|id| model_filter.is_empty() || id.to_ascii_lowercase().contains(&model_filter))
-        .take(MODEL_DATALIST_CAP)
-        .cloned()
-        .collect();
-    let model_total = model_options.len();
 
-    let can_save = write_enabled && !is_saving;
+    // Phase 50.5 (D-14/D-15): parse the window input, derive the placeholder,
+    // and compute the D-11 drift note — all owned locals read before `rsx!`.
+    let window_parsed = parse_window_input(&window_text);
+    let window_error: Option<&'static str> = window_parsed.as_ref().err().copied();
+    let window_placeholder_text = window_placeholder(resolved_window, resolved_source);
+    let served_ids: Vec<String> = snapshot.as_ref().map(|s| s.models.clone()).unwrap_or_default();
+    let note = drift_note(&served_ids, &model_val, &provider_val, fell_back, models_loading, is_missing);
+
+    let can_save = write_enabled && !is_saving && window_error.is_none();
     let gate_title = if !write_enabled {
         "Config writes are disabled"
     } else {
@@ -572,6 +717,17 @@ fn ProviderModelCascade(
 
     rsx! {
         div { style: "display:flex;flex-direction:column;gap:8px;width:100%;",
+            // Phase 50.5 (D-11): the drift note is the FIRST child — unclipped,
+            // wraps freely, sits adjacent to the control where the model is
+            // chosen. `is_missing` is enforced inside `drift_note` itself, so
+            // the two conditions never render together.
+            if let Some((body, title)) = note {
+                p {
+                    title: "{title}",
+                    style: "color:var(--gray);font-size:11px;margin:0 0 10px 0;",
+                    "{body}"
+                }
+            }
             div { style: "display:flex;gap:10px;align-items:center;flex-wrap:wrap;",
                 // PROVIDER select FIRST — its onchange drives the dependent model list.
                 select {
@@ -581,6 +737,21 @@ fn ProviderModelCascade(
                     onchange: move |evt| {
                         error_msg.set(None);
                         selected_provider.set(evt.value());
+                        // Phase 50.5 CR-01 fix: `providers.<p>.models.<m>.context_length`
+                        // is keyed on the (provider, model) PAIR — switching
+                        // the provider changes that key even when the model
+                        // id string stays the same, so the window text seeded
+                        // for the OLD pair no longer describes anything real.
+                        // Reset to blank (== "use resolved", D-14) rather than
+                        // guessing the new pair's stored override: the client
+                        // has no per-model override data for an
+                        // arbitrary/not-yet-selected model (`ProviderModelsSnapshot`
+                        // carries only served ids, not their overrides), so a
+                        // silent reseed would just be a different guess. A
+                        // blank field is visibly "no override" and the
+                        // placeholder's "resolved: N (tier)" text still shows
+                        // the pair's real resolved window.
+                        window_input.set(String::new());
                     },
                     if provider_val.trim().is_empty() {
                         option { value: "", selected: true, "— select a provider —" }
@@ -594,32 +765,44 @@ fn ProviderModelCascade(
                         }
                     }
                 }
-                // MODEL picker — a filterable input + capped datalist rather
-                // than a native <select> of the provider's entire model list.
-                // The datalist renders at most MODEL_DATALIST_CAP matches for
-                // the current text (see `datalist_options`), so a 300+-model
-                // provider can't lock the client; typing narrows to any id.
-                input {
-                    class: "voice-settings-select",
-                    list: "{list_id}",
-                    value: "{model_val}",
+                crate::components::hermes_app::screens::model_picker::ModelPickerField {
+                    value: selected_model,
+                    all_options: model_options.clone(),
+                    seeded: initial_model.clone(),
                     disabled: !write_enabled || is_saving || models_loading,
-                    title: "{gate_title}",
-                    placeholder: if allow_unset { "— uses default — (type to search)" } else { "type to search models…" },
-                    oninput: move |evt| {
-                        error_msg.set(None);
-                        selected_model.set(evt.value());
+                    title: gate_title.to_string(),
+                    placeholder: if allow_unset { "— uses default — (type to search)".to_string() } else { "type to search models…".to_string() },
+                    // Phase 50.5 CR-01 fix: a confirmed row pick is a new
+                    // (provider, model) pair — same rationale as the provider
+                    // `onchange` reset above, fired on the OTHER half of that
+                    // pair. Only the row `onclick` inside `ModelPickerField`
+                    // calls this (never `oninput`), so filtering-while-typing
+                    // does not clear the field out from under an operator who
+                    // has not actually changed models yet.
+                    on_change: move |_new_model: String| {
+                        window_input.set(String::new());
                     },
                 }
-                datalist { id: "{list_id}",
-                    for id in datalist_options.iter() {
-                        option { key: "{id}", value: "{id}" }
-                    }
+                // Phase 50.5 (D-14/D-15): CONTEXT WINDOW — styled to match the
+                // read-only `CTX` stat on `ModelCard` (font-size:10px;
+                // color:var(--teal);font-weight:700), not `.section-label`
+                // (whose `::before` dot bullet and `margin-bottom` are a
+                // section-heading affordance this inline row does not want).
+                // Never gated on `models_loading` (UI-SPEC E2): a slow catalog
+                // fetch must not block an override.
+                span {
+                    style: "font-size:10px;color:var(--gray);letter-spacing:0.06em;text-transform:uppercase;",
+                    "CONTEXT WINDOW"
                 }
-                if model_total > datalist_options.len() {
-                    span { style: "color:var(--gray);font-size:10px;white-space:nowrap;",
-                        "{datalist_options.len()}/{model_total} — type to filter"
-                    }
+                input {
+                    r#type: "number",
+                    min: "0",
+                    class: "voice-settings-select",
+                    style: "font-size:10px;color:var(--teal);font-weight:700;width:110px;",
+                    placeholder: "{window_placeholder_text}",
+                    value: "{window_text}",
+                    disabled: !write_enabled || is_saving,
+                    oninput: move |evt| window_input.set(evt.value()),
                 }
                 button {
                     class: "btn btn--sm",
@@ -630,7 +813,14 @@ fn ProviderModelCascade(
                         // no signal borrow across .await).
                         let provider_id = selected_provider.read().clone();
                         let model_raw = selected_model.read().clone();
+                        let window_raw = window_input.read().clone();
                         let kind_local = kind.clone();
+                        // Belt-and-braces: `can_save` already blocks this click
+                        // when the parse errors, so this is a defensive re-check,
+                        // not the primary gate.
+                        let Ok(window_parsed) = parse_window_input(&window_raw) else {
+                            return;
+                        };
                         saving.set(true);
                         error_msg.set(None);
                         spawn(async move {
@@ -644,11 +834,18 @@ fn ProviderModelCascade(
                             } else {
                                 Some(model_raw)
                             };
+                            // Phase 50.5 (D-14/D-15/D-16): always send
+                            // `apply_context_length: true` — this control
+                            // always reports its current state, which is what
+                            // makes a blank field mean "clear" rather than
+                            // "unchanged" (three-state semantics, api.rs).
                             let payload = match kind_local {
                                 CascadeKind::Default => crate::server::api::ModelsRolesWritePayload {
                                     default_model: model_opt,
                                     provider: provider_opt,
                                     roles: Vec::new(),
+                                    context_length: window_parsed,
+                                    apply_context_length: true,
                                 },
                                 CascadeKind::Role(role_key) => {
                                     crate::server::api::ModelsRolesWritePayload {
@@ -658,7 +855,11 @@ fn ProviderModelCascade(
                                             role_key,
                                             provider: provider_opt,
                                             model: model_opt,
+                                            context_length: window_parsed,
+                                            apply_context_length: true,
+                                            ..Default::default()
                                         }],
+                                        ..Default::default()
                                     }
                                 }
                             };
@@ -685,6 +886,12 @@ fn ProviderModelCascade(
             if let Some(err) = error_val {
                 p { style: "color:var(--red);font-size:11px;margin:0;", "{err}" }
             }
+            // Phase 50.5 (D-14/D-15): the CONTEXT WINDOW validation error —
+            // sibling of the save-failure paragraph above, identical style,
+            // no new error surface.
+            if let Some(err) = window_error {
+                p { style: "color:var(--red);font-size:11px;margin:0;", "{err}" }
+            }
         }
     }
 }
@@ -699,6 +906,9 @@ fn RolePickerRow(
     view: RoleRowView,
     provider_options: Vec<String>,
     write_enabled: bool,
+    resolved_window: Option<u32>,
+    resolved_source: crate::server::api::ContextWindowSource,
+    initial_window: Option<u32>,
     on_saved: EventHandler<()>,
 ) -> Element {
     rsx! {
@@ -729,6 +939,10 @@ fn RolePickerRow(
                     provider_options,
                     write_enabled,
                     allow_unset: true,
+                    resolved_window,
+                    resolved_source,
+                    initial_window,
+                    is_missing: view.is_missing,
                     on_saved,
                 }
             }
@@ -738,14 +952,18 @@ fn RolePickerRow(
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_model_options, compute_role_row_views};
-    use crate::server::api::{ModelRoleAssignment, ProviderModelsSnapshot};
+    use super::{
+        compute_model_options, compute_role_row_views, drift_note, format_thousands,
+        parse_window_input, window_placeholder,
+    };
+    use crate::server::api::{ContextWindowSource, ModelRoleAssignment, ProviderModelsSnapshot};
 
     fn role(key: &str, provider: Option<&str>, model: Option<&str>) -> ModelRoleAssignment {
         ModelRoleAssignment {
             role_key: key.to_string(),
             provider: provider.map(|p| p.to_string()),
             model: model.map(|m| m.to_string()),
+            ..Default::default()
         }
     }
 
@@ -845,6 +1063,103 @@ mod tests {
         assert!(
             compute_model_options(None, None).is_empty(),
             "no snapshot and no assignment yields no options"
+        );
+    }
+
+    /// Phase 50.5 Task 1: `format_thousands` literal examples from `<behavior>`.
+    #[test]
+    fn format_thousands_matches_the_spec_examples() {
+        assert_eq!(format_thousands(1_000_000), "1,000,000");
+        assert_eq!(format_thousands(128_000), "128,000");
+        assert_eq!(format_thousands(0), "0");
+        assert_eq!(format_thousands(999), "999");
+    }
+
+    /// Phase 50.5 Task 1: `window_placeholder`'s loading (no provenance word)
+    /// and resolved (provenance word per tier) cases, literal expectations.
+    #[test]
+    fn window_placeholder_states_resolved_and_provenance() {
+        assert_eq!(window_placeholder(None, ContextWindowSource::Metadata), "resolved: —");
+        assert_eq!(
+            window_placeholder(Some(1_000_000), ContextWindowSource::Metadata),
+            "resolved: 1,000,000 (cache)"
+        );
+        assert_eq!(
+            window_placeholder(Some(256_000), ContextWindowSource::GlobalPin),
+            "resolved: 256,000 (pin)"
+        );
+        assert_eq!(
+            window_placeholder(Some(128_000), ContextWindowSource::Fallback),
+            "resolved: 128,000 (default)"
+        );
+    }
+
+    /// Phase 50.5 Task 1: blank means clear (`Ok(None)`), a valid number
+    /// parses, and garbage / zero / above-ceiling all carry the Copywriting
+    /// Contract's validation string.
+    #[test]
+    fn parse_window_input_blank_means_clear() {
+        assert_eq!(parse_window_input(""), Ok(None));
+        assert_eq!(parse_window_input("   "), Ok(None));
+        assert_eq!(parse_window_input("200000"), Ok(Some(200_000)));
+
+        let expected_err =
+            "Enter a whole number of tokens (e.g. 200000), or leave blank to use the resolved value.";
+        assert_eq!(parse_window_input("abc"), Err(expected_err));
+        assert_eq!(parse_window_input("-5"), Err(expected_err));
+        assert_eq!(parse_window_input("0"), Err(expected_err));
+        assert_eq!(parse_window_input("10000001"), Err(expected_err));
+    }
+
+    /// Phase 50.5 Task 1 (D-11 VALIDATION Wave 0 gap): every guard branch in
+    /// `<behavior>` covered in one test body so a partial implementation
+    /// cannot pass.
+    #[test]
+    fn drift_note_fires_on_the_moonshot_case_only() {
+        let served = vec!["k3".to_string(), "k3-256k".to_string()];
+
+        // The moonshot-shaped case: configured id absent from served list.
+        let (body, title) = drift_note(&served, "kimi-k3", "moonshot", false, false, false)
+            .expect("a genuine drift must produce a note");
+        assert_eq!(
+            body,
+            "served as \"k3\" by moonshot — your config names \"kimi-k3\""
+        );
+        assert!(title.contains("This is a naming mismatch, not a missing model."));
+
+        // is_missing wins — the MISSING pill already owns this row.
+        assert_eq!(
+            drift_note(&served, "kimi-k3", "moonshot", false, false, true),
+            None,
+            "is_missing must suppress the drift note"
+        );
+
+        // loading — the served-id list is unresolved.
+        assert_eq!(
+            drift_note(&served, "kimi-k3", "moonshot", false, true, false),
+            None,
+            "loading must suppress the drift note"
+        );
+
+        // fell_back — a degraded catalog is not the provider's own list.
+        assert_eq!(
+            drift_note(&served, "kimi-k3", "moonshot", true, false, false),
+            None,
+            "fell_back must suppress the drift note"
+        );
+
+        // empty served list — nothing to compare against.
+        assert_eq!(
+            drift_note(&[], "kimi-k3", "moonshot", false, false, false),
+            None,
+            "an empty served list must suppress the drift note"
+        );
+
+        // configured id present in the served list — no drift.
+        assert_eq!(
+            drift_note(&served, "k3", "moonshot", false, false, false),
+            None,
+            "a configured id present in the served list is not drift"
         );
     }
 }

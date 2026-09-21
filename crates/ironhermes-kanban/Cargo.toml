@@ -32,8 +32,29 @@ nix = { workspace = true, features = ["signal"] }
 regex = { workspace = true }
 # Phase 36.3.7.9 Plan 05: notifier.toml subscribe_boards parser (D-03)
 toml = { workspace = true }
+# Phase 51 Plan 07 (D-11): WorkerVaultBootstrap carries the minted token as a
+# secrecy::SecretString, never a plain String — same pinned version as
+# ironhermes-vault/ironhermes-core/ironhermes-cli so the type unifies across crates.
+secrecy = { version = "0.10.3", features = ["serde"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }
 # Plan 01 Task 2: config.rs unit tests parse a YAML snippet.
 serde_yaml = { workspace = true }
+# Phase 51 Plan 07 (D-07): dispatcher.rs's `vault_mint_tests` module (gated on this
+# crate's own `rusty-vault` feature) drives a REAL vault directly to prove the
+# mint-then-ledger-then-spawn ordering, the no-sink refusal, and the Allow-vs-
+# AllowFromVault split — a stubbed mint would only prove the stub was honoured.
+# TEST-ONLY: ironhermes-kanban still has NO PRODUCTION dependency on ironhermes-vault
+# (see profile_token.rs's module doc in that crate and 51-06-SUMMARY.md's own record
+# of the same constraint) — this is a dev-dependency exception, disclosed as a
+# deviation in 51-07-SUMMARY.md.
+ironhermes-vault = { path = "../ironhermes-vault", features = ["rusty-vault"] }
+
+[features]
+# Phase 51 Plan 06: this crate has no [features] block before this line and depends on neither
+# ironhermes-vault nor ironhermes-trajectory (see profile_token.rs's module doc in
+# ironhermes-vault) — forwarding, not a direct dependency, so `--all-features` here actually
+# exercises DispatcherContext's real profile-credential-endpoint path via ironhermes-core's own
+# facade rather than silently compiling the feature-absent arm.
+rusty-vault = ["ironhermes-core/rusty-vault"]

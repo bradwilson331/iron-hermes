@@ -357,12 +357,14 @@ fn extra_model_switch_picks_per_model_override_d10() {
         "llama3.1:8b".to_string(),
         ProviderModelConfig {
             extra_request_options: model_8b_extras,
+            context_length: None,
         },
     );
     models.insert(
         "llama3.1:70b".to_string(),
         ProviderModelConfig {
             extra_request_options: model_70b_extras,
+            context_length: None,
         },
     );
 

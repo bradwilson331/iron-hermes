@@ -39,6 +39,7 @@
 /// if kanban_env("TASK").is_some() { /* in worker */ }
 ///
 /// // Resolves a task id with arg override:
+/// let args_task_id: Option<String> = None; // e.g. from a `--task-id` CLI flag
 /// let task_id = args_task_id.or_else(|| kanban_env("TASK"));
 /// ```
 pub fn kanban_env(suffix: &str) -> Option<String> {

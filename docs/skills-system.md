@@ -193,6 +193,8 @@ The `SkillRegistry` scans the following directories in priority order:
 
 First-path-wins: if the same skill name (case-insensitive) appears in multiple directories, only the first occurrence is loaded. This lets project-local skills override user-level skills.
 
+Root order also determines catalog rendering: by default only the first two roots render in full in the system prompt, and later roots collapse to a counted pointer. See [Root Tiering](#root-tiering).
+
 ### Scan Depth
 
 The registry scans at two levels:
@@ -250,6 +252,46 @@ For skills with hermes metadata, the following rules apply in order:
 The active toolset/tool snapshot is captured at session start from the merged tool configuration and does not change mid-session.
 
 **Example:** The `hexapod` skill declares `requires_toolsets: [robotics]`. If the `robotics` toolset is disabled, the skill does not appear in the catalog. When the user enables the `robotics` toolset and starts a new session, the skill appears.
+
+### Root Tiering
+
+Metadata rules decide *whether* a skill is eligible for the catalog. Root tiering then
+decides *how* an eligible skill is rendered, based on which search-path root it was
+loaded from.
+
+`SkillRegistry` optionally records `priority_roots` at construction: the first
+`config.skills.catalog_priority_root_count` entries of the search-path list it was built
+from, canonicalized. `filtered_catalog_text` renders a skill in full when its path is
+prefixed by one of those roots, and otherwise counts it toward a single trailing pointer
+line:
+
+```
+- {N} further skills are available from additional configured skill directories
+  (not listed above to keep this catalog small) — call the skills tool with action
+  "list" to see all of them, then action "activate" with the skill name to use one.
+```
+
+Matching is by **filesystem path prefix**, not by `SkillSource` trust tier. The two are
+orthogonal: trust (`Builtin` / `Official` / `Trusted` / `Community` / self-created)
+describes provenance of authorship, while tiering describes which directory a skill was
+scanned from. A `Builtin`-labelled skill in a tiered root is still tiered.
+
+Tiered skills stay in `self.skills` and remain reachable through `find()`, `list`, and
+`activate` — only the pre-rendered catalog string is affected.
+
+**Constructors.** `load_with_paths_tiered(search_paths, priority_root_count)` opts into
+tiering. The pre-existing `load()` / `load_with_paths()` leave `priority_roots` as
+`None`, in which case every skill counts as priority and rendering matches pre-tiering
+behavior exactly. `filtered_catalog_text`'s public signature is unchanged.
+
+**Why it exists.** The catalog is rebuilt into every turn's system prompt on both the
+text-chat and realtime-voice paths. With `~/.agents/skills/` at 1,039 skills the catalog
+measured 440,628 bytes per turn; tiering the shared root brought it to 14,511 bytes on
+the same machine. See the debug session
+[`.planning/debug/skill-catalog-bloats-prompt.md`](../.planning/debug/skill-catalog-bloats-prompt.md)
+for the measurement and the design decision, and
+[CONFIGURATION.md](CONFIGURATION.md#catalog-root-tiering-skillscatalog_priority_root_count)
+for the operator-facing knob.
 
 ---
 

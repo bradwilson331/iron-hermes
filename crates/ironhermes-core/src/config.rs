@@ -2990,6 +2990,24 @@ pub struct WebUiConfig {
     /// of labour the `password_hash` doc above describes — this struct only
     /// carries what's on disk in `config.yaml`.
     pub allowed_origins: Vec<String>,
+    /// Wall-clock ceiling, in seconds, for a single bot-subprocess handoff
+    /// (`iron_hermes_ui::server::cli_handoff::spawn_and_capture`) — the
+    /// hard-kill bound on one bot turn dispatched from the web UI, including
+    /// group-chat members and team-drive leaders and workers.
+    ///
+    /// `None` (the default) means unconfigured, exactly as an empty
+    /// `allowed_origins` does. Layering is resolved in
+    /// `iron_hermes_ui::server::cli_handoff::bot_handoff_timeout_seconds`,
+    /// the same division of labour the `allowed_origins` doc above
+    /// describes: this value wins when set, otherwise the
+    /// `IRONHERMES_BOT_HANDOFF_TIMEOUT_SECONDS` env var is read, otherwise
+    /// the built-in default applies. The resolved value is clamped to a
+    /// sane range so a typo can neither disable the ceiling nor make it
+    /// unusable.
+    ///
+    /// Sibling knob: [`SubagentConfig::child_timeout_seconds`], the
+    /// equivalent ceiling on the unrelated `delegate_task` child path.
+    pub bot_handoff_timeout_seconds: Option<u64>,
 }
 
 /// Phase 47.3 D-06/D-07: single-operator credential + session settings for
@@ -3038,10 +3056,31 @@ impl Default for WebUiAuthConfig {
 
 // =============================================================================
 // BrowserConfig (Phase 25.1 D-18)
+// Phase 53 (ADR-0005 D-01/D-03): second CDP backend (Obscura) config surface.
 // =============================================================================
 
+/// Phase 53 (ADR-0005 / 53-CONTEXT.md D-01): which CDP engine `BrowserSession::spawn`
+/// drives. `Chromium` is the default and is never auto-replaced — no code path may
+/// auto-select `Obscura` by autodiscovery, binary probing, or fallback when Chromium
+/// is missing. An operator opts into Obscura explicitly via `browser.backend: obscura`.
+///
+/// Serializes with `snake_case` — e.g. `chromium`, `obscura`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserBackend {
+    /// (default) Launch a local Chromium/Chrome process — the pre-53 behavior,
+    /// byte-identical for any config that does not set `backend` explicitly.
+    #[default]
+    Chromium,
+    /// (Phase 53, opt-in) Drive Obscura instead of Chromium — either a
+    /// locally-spawned `obscura serve` process or, once `cdp_url` is set
+    /// (Plan 02 Task 3), a remote endpoint this session does not own.
+    Obscura,
+}
+
 /// Phase 25.1 D-18: browser automation configuration.
-/// All fields `#[serde(default)]` for backward compat — pre-25.1 YAML configs parse cleanly.
+/// All fields `#[serde(default)]` for backward compat — pre-25.1 and pre-53 YAML
+/// configs parse cleanly.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BrowserConfig {
@@ -3063,6 +3102,35 @@ pub struct BrowserConfig {
     /// None = use $IRONHERMES_HOME/browser-profile (default — resolved at spawn time).
     /// Set explicitly to override (e.g., "/tmp/ephemeral-profile" for stateless browsing).
     pub user_data_dir: Option<String>,
+    /// Phase 53 (ADR-0005 / D-01): which CDP engine to drive. Default `Chromium` —
+    /// never auto-replaced by autodiscovery, probing, or a missing-Chromium fallback.
+    /// Set to `obscura` to opt into the second backend.
+    pub backend: BrowserBackend,
+    /// Phase 53 (ADR-0005 / D-03): explicit Obscura binary path. None = autodiscover
+    /// via `find_obscura_binary`'s `OBSCURA_PATH` env var → this config path → PATH
+    /// search walk. Only consulted when `backend` is `Obscura`.
+    pub obscura_path: Option<String>,
+    /// Phase 53 (ADR-0005 / D-01): a CDP websocket URL to connect to instead of
+    /// spawning a local process. Consulted ONLY when `backend` is `Obscura` — under
+    /// `backend: chromium` a present value is inert (one `tracing::warn` at session
+    /// start, D-02) and never swaps the engine or spawns anything.
+    pub cdp_url: Option<String>,
+    /// Phase 53 (ADR-0005 / D-03): pin the Obscura local-spawn listen port. None
+    /// (default) = an OS-assigned ephemeral port allocated fresh per spawn — the
+    /// safe default for concurrent per-profile runtimes. Only consulted on the
+    /// Obscura local-spawn path (i.e. `backend: obscura` and `cdp_url: None`).
+    pub obscura_port: Option<u16>,
+    /// Phase 53 (ADR-0005): pass `--stealth` to a locally-spawned `obscura serve`.
+    /// Default false. Only consulted on the Obscura local-spawn path.
+    pub obscura_stealth: bool,
+    /// Phase 53 (ADR-0005 / D-04): pass `--allow-private-network` to a
+    /// locally-spawned `obscura serve`, permitting it to reach loopback/RFC1918/
+    /// link-local addresses. Default false (deny), matching Obscura's own
+    /// deny-by-default SSRF guard. IronHermes implements no second allowlist here —
+    /// this is a straight flag passthrough. Only consulted on the Obscura
+    /// local-spawn path; the Chromium path's own `allowed_domains` guard is
+    /// untouched by this field.
+    pub obscura_allow_private_network: bool,
 }
 
 impl Default for BrowserConfig {
@@ -3075,6 +3143,12 @@ impl Default for BrowserConfig {
             chromium_path: None,
             timeout_seconds: 30,
             user_data_dir: None,
+            backend: BrowserBackend::default(),
+            obscura_path: None,
+            cdp_url: None,
+            obscura_port: None,
+            obscura_stealth: false,
+            obscura_allow_private_network: false,
         }
     }
 }
@@ -3371,6 +3445,28 @@ pub struct SecurityConfig {
     /// consults `web_config_write_enabled`. CLI and TUI (`Platform::Local`) are
     /// local trusted surfaces and are ungated regardless of this flag.
     pub remote_blueprint_run_enabled: bool,
+    /// Phase 49.7 (operator decision, closing code-review finding WR-02): a
+    /// FOURTH, independent opt-in that authorizes a remote gateway chat
+    /// surface (Telegram/Discord/Slack/etc., anything that is not
+    /// `Platform::Local`) to create recurring cron jobs via `/loop`.
+    /// Defaults `false` (closed).
+    ///
+    /// Deliberately separate from `remote_blueprint_run_enabled` rather than
+    /// reusing it. `/blueprint run` schedules a job from a curated, operator-
+    /// installed template with named slots; `/loop` schedules a job from a
+    /// FREE-TEXT prompt with a caller-chosen toolset and budget. The second
+    /// is a strictly wider capability, so an operator who authorized the
+    /// narrow one has not thereby consented to the broad one — reusing the
+    /// blueprint flag here would silently extend a control to a capability it
+    /// was never reviewed for, the exact pattern 49.5's review flagged and
+    /// `cmd_blueprint_save`'s doc warns about. CLI and TUI (`Platform::Local`)
+    /// are local trusted surfaces and are ungated regardless of this flag.
+    ///
+    /// Scope: creation only. `/loop list` and `/loop stop` stay ungated
+    /// because they are already chat-scoped by `JobOrigin.chat_id` (D-10) —
+    /// they can only see and stop jobs belonging to the asking chat, so they
+    /// grant no capability this flag would need to withhold.
+    pub remote_loop_enabled: bool,
 }
 // Phase 49.1 Plan 07 Task 4: the manual `impl Default for SecurityConfig` this
 // struct carried while `redact_secrets: true` was a field (a non-derivable
@@ -3551,6 +3647,34 @@ pub struct SkillsConfig {
     /// Set in `config.yaml` as `skills.defcon_level: 2` (integer 1–5).
     #[serde(default)]
     pub defcon_level: DefconLevel,
+    /// Number of leading search-path roots (in the order documented on this
+    /// struct: the 3 hardcoded defaults, then `extra_paths`) whose skills get
+    /// a full `- name: description` line in the rendered catalog
+    /// (`SkillRegistry::filtered_catalog_text`). Skills from any root beyond
+    /// this count collapse into ONE counted pointer line telling the model to
+    /// call the `skills` tool's `list` action, then `activate` by name — they
+    /// stay fully reachable, just not pre-paid into every system prompt.
+    ///
+    /// Defaults to `skills::DEFAULT_CATALOG_PRIORITY_ROOT_COUNT` (2):
+    /// `<cwd>/.ironhermes/skills/` and `<hermes_home>/skills/` — the
+    /// operator's curated set. The 3rd hardcoded default (`~/.agents/skills/`,
+    /// a shared cross-tool directory that can grow into the hundreds/
+    /// thousands on a shared machine) and anything in `extra_paths` are tiered
+    /// by default. This is NOT keyed on the `~/.agents/skills` name — it's a
+    /// position in the search-path list, so behavior stays correct if
+    /// `extra_paths` grows or the hardcoded defaults change (debug session:
+    /// skill-catalog-bloats-prompt, 2026-09-18).
+    ///
+    /// Set in `config.yaml` as `skills.catalog_priority_root_count: N`. Set to
+    /// a value `>=` the total number of search paths (e.g. `usize::MAX`) to
+    /// disable tiering entirely and render every skill in full.
+    #[serde(default = "default_catalog_priority_root_count")]
+    pub catalog_priority_root_count: usize,
+}
+
+/// See [`SkillsConfig::catalog_priority_root_count`].
+fn default_catalog_priority_root_count() -> usize {
+    crate::skills::DEFAULT_CATALOG_PRIORITY_ROOT_COUNT
 }
 
 impl Default for SkillsConfig {
@@ -3563,6 +3687,7 @@ impl Default for SkillsConfig {
             hub: HubConfig::default(),
             disabled: Vec::new(),
             defcon_level: DefconLevel::default(),
+            catalog_priority_root_count: default_catalog_priority_root_count(),
         }
     }
 }
@@ -4006,6 +4131,61 @@ browser:
             c.browser.allowed_schemes,
             vec!["http".to_string(), "https".to_string()]
         ); // default
+    }
+
+    // =========================================================================
+    // Phase 53 (ADR-0005 Plan 02 Task 2): BrowserConfig config-parity + second-
+    // backend field defaults
+    // =========================================================================
+
+    /// Config-parity proof (Plan 02 `must_haves`): a YAML literal naming only the
+    /// seven pre-53 `browser:` keys must still deserialize cleanly, round-trip the
+    /// seven original values unchanged, and default all six Phase 53 fields. This
+    /// literal is hand-written (not a serialization of today's struct), so it
+    /// actually exercises backward compatibility rather than testing itself.
+    #[test]
+    fn config_parity_a_pre53_browser_block_parses_with_every_new_field_defaulted() {
+        let yaml = r#"
+browser:
+  headed: true
+  no_sandbox: true
+  allowed_domains: ["example.com"]
+  allowed_schemes: ["https"]
+  chromium_path: "/opt/chromium/chrome"
+  timeout_seconds: 45
+  user_data_dir: "/custom/profile"
+"#;
+        let c: Config = serde_yaml::from_str(yaml).unwrap();
+        // The seven pre-53 values round-trip unchanged.
+        assert!(c.browser.headed);
+        assert!(c.browser.no_sandbox);
+        assert_eq!(c.browser.allowed_domains, vec!["example.com".to_string()]);
+        assert_eq!(c.browser.allowed_schemes, vec!["https".to_string()]);
+        assert_eq!(
+            c.browser.chromium_path.as_deref(),
+            Some("/opt/chromium/chrome")
+        );
+        assert_eq!(c.browser.timeout_seconds, 45);
+        assert_eq!(c.browser.user_data_dir.as_deref(), Some("/custom/profile"));
+        // All six Phase 53 fields default.
+        assert_eq!(c.browser.backend, BrowserBackend::Chromium);
+        assert_eq!(c.browser.obscura_path, None);
+        assert_eq!(c.browser.cdp_url, None);
+        assert_eq!(c.browser.obscura_port, None);
+        assert!(!c.browser.obscura_stealth);
+        assert!(!c.browser.obscura_allow_private_network);
+    }
+
+    /// D-18's pre-existing "empty block = full defaults" guarantee, re-pinned now
+    /// that six fields were added under it.
+    #[test]
+    fn an_empty_browser_block_still_parses() {
+        let yaml = r#"
+browser: {}
+"#;
+        let c: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(c.browser.headed, BrowserConfig::default().headed);
+        assert_eq!(c.browser.backend, BrowserBackend::Chromium);
     }
 
     // Phase 26.3 — UDD-01: BrowserConfig default has user_data_dir == None.
@@ -6276,6 +6456,39 @@ security:
         assert!(config.security.web_config_write_enabled);
     }
 
+    /// Phase 49.7 (WR-02): `remote_loop_enabled` defaults false — the fourth,
+    /// independent security flag.
+    #[test]
+    fn remote_loop_enabled_defaults_to_false() {
+        let default_sc = SecurityConfig::default();
+        assert!(
+            !default_sc.remote_loop_enabled,
+            "remote_loop_enabled default must be false"
+        );
+    }
+
+    /// Phase 49.7 (WR-02): default-closed must be proven, not asserted — a
+    /// config.yaml that omits the key entirely must still deserialize to
+    /// false. Critically, this also pins the flag as INDEPENDENT of
+    /// `remote_blueprint_run_enabled`: enabling the narrow blueprint-run
+    /// capability must never imply the broader free-text `/loop` one.
+    #[test]
+    fn remote_loop_enabled_absent_key_deserializes_false_even_with_blueprint_flag_true() {
+        let yaml = r#"
+security:
+  remote_blueprint_run_enabled: true
+"#;
+        let config: Config = serde_yaml::from_str(yaml).expect("parse");
+        assert!(
+            !config.security.remote_loop_enabled,
+            "missing remote_loop_enabled in YAML must fall back to false, even when \
+             remote_blueprint_run_enabled is explicitly true — /loop is a strictly \
+             wider capability (free-text prompt + caller-chosen tools) and must not \
+             inherit authorization from the narrower templated one"
+        );
+        assert!(config.security.remote_blueprint_run_enabled);
+    }
+
     /// Phase 49.1 Plan 07 Task 4 (D-06/D-09 backward-compat requirement):
     /// `SecurityConfig::redact_secrets` was removed as a dead config flag
     /// (nothing ever read it -- see `API-DATA-003`) but the key had shipped
@@ -6677,6 +6890,7 @@ display:
         let _ = WebUiConfig {
             auth: WebUiAuthConfig::default(),
             allowed_origins: Vec::new(),
+            bot_handoff_timeout_seconds: None,
         };
     }
 

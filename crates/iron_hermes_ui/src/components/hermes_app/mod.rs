@@ -124,6 +124,21 @@ pub fn HermesApp() -> Element {
     // see `ScheduleNamePrefillCtx`'s own doc comment (state.rs) for the
     // full contract.
     let schedule_name_prefill: Signal<Option<String>> = use_signal(|| None);
+    // Phase 52.1 Plan 07 (D-13): the artifacts gallery's two backlink
+    // deep-link seams — see `PendingKanbanTaskCtx`/`PendingRoomOpenCtx`'s
+    // own doc comments (state.rs) for the full contract. Declared
+    // unconditionally, same hook-sequence position class as
+    // `schedule_name_prefill` above.
+    let pending_kanban_task: Signal<Option<String>> = use_signal(|| None);
+    let pending_room_open: Signal<Option<String>> = use_signal(|| None);
+    // Phase 50.4 Plan 01 follow-up (team-lead, 2026-09-08): pending
+    // "apply config now" flag — hoisted out of a screen-local signal in
+    // `providers.rs` (see `ApplyConfigPendingCtx`'s doc comment in state.rs
+    // for the full rationale). Any config-affecting save (Providers' SAVE
+    // PROVIDER, the Models screen's Default-model cascade ASSIGN) flips
+    // this to true; `ApplyConfigBanner` (mounted on both screens) reads it
+    // and flips it back to false on a successful apply.
+    let apply_config_pending: Signal<bool> = use_signal(|| false);
     let mut hydrated = use_signal(|| false);
     // Phase 47.3 Plan 06 (D-17): starts authenticated — see AuthedContext's
     // doc comment above for why. Only the D-17 expiry redirect and /logout
@@ -224,6 +239,15 @@ pub fn HermesApp() -> Element {
     // declaring it in a child screen/component compiles clean and panics
     // every consumer at runtime (this file's own module doc / D-10).
     use_context_provider(|| crate::state::ScheduleNamePrefillCtx(schedule_name_prefill));
+    // Phase 52.1 Plan 07 (D-13): the ONE legal home for these two providers —
+    // same root-only rule as ScheduleNamePrefillCtx just above (a child
+    // provider compiles clean and panics every consumer at runtime).
+    use_context_provider(|| crate::state::PendingKanbanTaskCtx(pending_kanban_task));
+    use_context_provider(|| crate::state::PendingRoomOpenCtx(pending_room_open));
+    // Phase 50.4 Plan 01 follow-up: the ONE legal home for this provider —
+    // see ApplyConfigPendingCtx's doc comment (state.rs) and the
+    // ScheduleNamePrefillCtx comment just above for why root-only.
+    use_context_provider(|| crate::state::ApplyConfigPendingCtx(apply_config_pending));
 
     // Suppress unused-variable warnings on the wrapper read path — the
     // ThemeContext newtype constructor uses the `theme` signal by move,
@@ -366,18 +390,35 @@ pub fn HermesApp() -> Element {
     // context_length once `config_summary` resolves. No hardcoded default literal.
     let mut tokens = use_signal(|| (0u32, 0u32));
 
-    // Phase 46.9 Plan 03 (D-08/D-09): fetch the active model's real
-    // context_length ONCE on mount from the existing `get_config_summary`
-    // server fn. RESEARCH Open Question 1 (resolved): no web-UI mid-session
-    // model-switch affordance exists (`switch_model`/`set_model` grep for
-    // `iron_hermes_ui` returns nothing) and config writes require a restart
-    // (D-10), so the active model is frozen for the session — a single
-    // mount-time fetch is the correct source, not a new `ChatStreamEvent`
-    // field on every `ws.rs` Finished emit site.
-    let config_summary = use_server_future(crate::server::api::get_config_summary)?;
+    // Phase 46.9 Plan 03 (D-08/D-09), converted off use_server_future by
+    // Phase 50.4 Plan 07 (D-15 Side A): fetch the active model's real
+    // context_length from the existing `get_config_summary` server fn.
+    // The original mount-once justification no longer holds — Plans 01/03/05
+    // this phase add a mid-session model-switch affordance on three screens
+    // and Plan 01 removes the restart requirement, so the readout must
+    // refetch after an apply, not just once at mount.
+    //
+    // D-15's named trap: this must NOT be a call to `restart()` on a
+    // `use_server_future(...)?`. That form suspends and early-returns above
+    // ~30 later hooks (use_context_provider at what is now line 998 and the
+    // reads at 1115+), so a `restart()` call risks making those hooks
+    // conditional on a resource state and violating Rules of Hooks. Instead
+    // this is a `use_resource` driven by a root-provided tick, mirroring
+    // `active_profile_refresh` / `shared_profiles` eleven lines above: the
+    // tick is read with CALL SYNTAX in the SYNC PREFIX of the closure,
+    // outside the `async move` block — a read inside the async block would
+    // compile but silently never subscribe the resource to the tick.
+    let config_applied_tick: Signal<u32> = use_signal(|| 0);
+    use_context_provider(|| {
+        screens::apply_config_banner::ConfigAppliedCtx(config_applied_tick)
+    });
+    let config_summary = use_resource(move || {
+        let _tick = config_applied_tick();
+        async move { crate::server::api::get_config_summary().await }
+    });
     use_effect(move || {
         if let Some(Ok(summary)) = config_summary() {
-            tokens.with_mut(|t| t.1 = summary.context_length);
+            tokens.with_mut(|t| *t = reseed_token_window(*t, summary.context_length));
         }
     });
 
@@ -1043,10 +1084,47 @@ pub fn HermesApp() -> Element {
     // VoiceModeScreen), which caused a Dioxus "Could not find context BargeInModeCtx"
     // panic on every voice-mode entry — identical to the prior WakeWordPhraseCtx panic
     // fixed above. Initialized to the same defaults VoiceSettings used previously.
-    let barge_in_mode = use_signal(|| "push_to_interrupt".to_string());
+    let mut barge_in_mode = use_signal(|| "push_to_interrupt".to_string());
     let realtime_degraded = use_signal(|| false);
     use_context_provider(|| voice_settings::BargeInModeCtx(barge_in_mode));
     use_context_provider(|| voice_settings::RealtimeDegradedCtx(realtime_degraded));
+
+    // Debug session `avatar-not-hearing-voice`: seed BargeInModeCtx from
+    // config.voice.barge_in_mode at the root instead of leaving it stuck on the
+    // hardcoded literal above until the conditionally-mounted VoiceSettings panel
+    // (voice_settings.rs:500, gated behind settings_open — never true on a cold
+    // load) happens to seed it. Reuses `orb_config_resource` (already fetching
+    // `get_voice_config` for orb-appearance hydration above) — no extra request.
+    // VoiceSettings' own seed at voice_settings.rs:500 still runs when the panel
+    // mounts; it writes the same underlying context signal, so it is a harmless,
+    // idempotent re-set, not a second source of truth.
+    //
+    // barge_in_mode_loaded flips true exactly once this resource settles (Ok OR
+    // Err — a fetch failure must not block voice-mode entry forever, it just
+    // means the hardcoded default above stands). voice_mode.rs's mode-gate effect
+    // reads this REACTIVELY so it defers its one-time branch decision until the
+    // real value is in, rather than deciding on the still-default literal at
+    // first mount (see ROOT CAUSE section of the debug file for why that decision
+    // is otherwise permanent for the mount).
+    let mut barge_in_mode_loaded = use_signal(|| false);
+    use_effect(move || {
+        if *barge_in_mode_loaded.peek() {
+            return;
+        }
+        match orb_config_resource.read().as_ref() {
+            Some(Ok(snapshot)) => {
+                barge_in_mode.set(snapshot.barge_in_mode.clone());
+                barge_in_mode_loaded.set(true);
+            }
+            Some(Err(_)) => {
+                // Fetch failed — unblock the gate anyway so it isn't stuck
+                // deferring forever; it will use the hardcoded default.
+                barge_in_mode_loaded.set(true);
+            }
+            None => {} // still pending — try again on the next resolve.
+        }
+    });
+    use_context_provider(|| voice_settings::BargeInModeLoadedCtx(barge_in_mode_loaded));
 
     // Phase 39.3 Plan 05 (D-03/D-05a): approval-pending + in-flight contexts for the
     // realtime voice card (Plan 05). Hoisted to HermesApp root — MUST live here so
@@ -1127,10 +1205,19 @@ pub fn HermesApp() -> Element {
     // and for any unavailable value, the readout renders an em-dash — not an
     // empty string or a collapsed element — so no layout shift occurs when
     // real values land.
-    let (active_model, active_provider, server_uptime_secs) = match config_summary() {
-        Some(Ok(summary)) => (summary.model, summary.provider, summary.uptime_secs),
-        _ => ("\u{2014}".to_string(), "\u{2014}".to_string(), 0u64),
-    };
+    // Phase 50.5 (D-12): reuse this SAME match arm structure for the
+    // provenance marker rather than a second `config_summary()` read, so the
+    // marker and the model id can never come from different fetches.
+    let (active_model, active_provider, server_uptime_secs, active_context_source) =
+        match config_summary() {
+            Some(Ok(summary)) => (
+                summary.model,
+                summary.provider,
+                summary.uptime_secs,
+                Some(summary.context_length_source),
+            ),
+            _ => ("\u{2014}".to_string(), "\u{2014}".to_string(), 0u64, None),
+        };
 
     // Phase 46.9 Plan 10 (GAP-2/D-07): client-side 1Hz uptime ticker, seeded
     // once from the mount-time `server_uptime_secs` value above so the web
@@ -1186,6 +1273,7 @@ pub fn HermesApp() -> Element {
                     model: active_model,
                     provider: active_provider,
                     uptime_secs: ticking_uptime_secs,
+                    context_source: active_context_source,
                 }
             }
             screen_router::ScreenRouter {}
@@ -1209,6 +1297,22 @@ pub fn HermesApp() -> Element {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 50.4 Plan 07 (D-15 Side A) — token-window re-seed helper.
+// ---------------------------------------------------------------------------
+//
+// Pure re-seed for the `tokens: Signal<(u32, u32)>` denominator/numerator
+// pair. D-15 is explicit that moving the ceiling (`t.1`) without also
+// re-clamping the numerator (`t.0`) is not a fix — a stale numerator above a
+// SHRUNKEN new ceiling would under-report on the next render before the
+// Finished-frame clamp (`t.0 = total_tokens.min(t.1)`, elsewhere in this
+// file) gets a chance to run again. This is the only place that arithmetic
+// lives, so it is tested directly rather than only through source
+// assertions.
+pub(crate) fn reseed_token_window(prev: (u32, u32), new_window: u32) -> (u32, u32) {
+    (prev.0.min(new_window), new_window)
 }
 
 // ---------------------------------------------------------------------------
@@ -1272,6 +1376,16 @@ mod tests {
     const API_RS: &str = include_str!("../../server/api.rs");
     const HUD_CHROME_RS: &str = include_str!("hud_chrome.rs");
     const UI_PREFS_RS: &str = include_str!("../../ui_prefs.rs");
+
+    // Phase 50.4 Plan 01 follow-up (team-lead, 2026-09-08) — ApplyConfigPendingCtx
+    // hoisting regression sources. Same VirtualDom-free rationale as above:
+    // `Signal<T>` is component-scoped, so "does the shared context survive a
+    // screen switch" is proven structurally (a root-provided context, not a
+    // screen-local `use_signal`, cannot be cleared by unmounting the screen
+    // that reads it) rather than by driving an actual navigation.
+    const STATE_RS: &str = include_str!("../../state.rs");
+    const PROVIDERS_RS: &str = include_str!("screens/providers.rs");
+    const MODELS_RS: &str = include_str!("screens/models.rs");
 
     #[test]
     fn dispatch_slash_helper_exists() {
@@ -1417,6 +1531,217 @@ mod tests {
         assert!(
             API_RS.contains("GAP-26.2.1-09-R3"),
             "GAP-26.2.1-09-R3: api.rs must cite the gap ID in the filter's explanatory comment",
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 50.4 Plan 01 follow-up (team-lead, 2026-09-08) — hoisting the
+    // apply-config-pending flag out of a screen-local signal into a
+    // root-provided context.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn apply_config_pending_ctx_is_defined_in_state_rs() {
+        assert!(
+            STATE_RS.contains("pub struct ApplyConfigPendingCtx(pub Signal<bool>)"),
+            "ApplyConfigPendingCtx newtype must be defined in state.rs alongside the other \
+             *Ctx disambiguation newtypes",
+        );
+    }
+
+    #[test]
+    fn apply_config_pending_ctx_is_provided_at_the_hermes_app_root() {
+        // The ONE legal home for this provider — declaring it in a child
+        // screen/component compiles clean and panics every consumer at
+        // runtime (Dioxus context-panic rule / MEMORY.md).
+        assert!(
+            MOD_RS.contains(
+                "use_context_provider(|| crate::state::ApplyConfigPendingCtx(apply_config_pending))"
+            ),
+            "ApplyConfigPendingCtx must be provided via use_context_provider in HermesApp's own body",
+        );
+    }
+
+    #[test]
+    fn providers_and_models_consume_the_shared_context_not_a_local_signal() {
+        // The regression this closes: a screen-LOCAL `use_signal` for banner
+        // visibility (`apply_banner_visible` on Providers, `restart_banner_
+        // visible` on Models) cleared itself on navigating away from the
+        // screen and back even though the config change it was flagging was
+        // still unapplied. Neither screen may reintroduce a local signal for
+        // this purpose — both must read/write the SAME root-provided context.
+        assert!(
+            !PROVIDERS_RS.contains("apply_banner_visible"),
+            "providers.rs must NOT reintroduce its old screen-local apply-banner signal",
+        );
+        assert!(
+            PROVIDERS_RS.contains("use_context::<crate::state::ApplyConfigPendingCtx>().0"),
+            "providers.rs must consume ApplyConfigPendingCtx via use_context, not a local use_signal",
+        );
+        assert!(
+            !MODELS_RS.contains("restart_banner_visible"),
+            "models.rs must NOT retain the Phase 46.9 restart-required banner signal — D-11 supersedes it",
+        );
+        assert!(
+            MODELS_RS.contains("use_context::<crate::state::ApplyConfigPendingCtx>().0"),
+            "models.rs must consume the SAME ApplyConfigPendingCtx providers.rs consumes",
+        );
+    }
+
+    #[test]
+    fn models_default_card_save_raises_the_shared_apply_banner() {
+        // The exact bug reported over four live UAT attempts: changing the
+        // ACTIVE provider (Models screen's Default-model cascade,
+        // CascadeKind::Default) surfaced no APPLY NOW affordance anywhere.
+        // Assert the Default card's on_saved sets the shared flag — scoped
+        // to the Default card's own block, not merely present somewhere in
+        // the file (the six role rows have their own, separate on_saved).
+        let default_card_idx = MODELS_RS
+            .find("kind: CascadeKind::Default,")
+            .expect("Default-model card must still construct ProviderModelCascade with CascadeKind::Default");
+        let role_section_idx = MODELS_RS
+            .find("· {role_row_views.len()} configs")
+            .expect("Role Assignments section-label count span must still exist, right after the Default card block");
+        assert!(
+            default_card_idx < role_section_idx,
+            "Default-model card markup must precede the Role Assignments section",
+        );
+        let default_card_block = &MODELS_RS[default_card_idx..role_section_idx];
+        assert!(
+            default_card_block.contains("apply_config_pending.set(true)"),
+            "the Default-model card's on_saved must set apply_config_pending — this is the ONLY \
+             control that changes config.model.provider (the active provider)",
+        );
+    }
+
+    #[test]
+    fn models_screen_mounts_apply_config_banner_and_drops_the_old_restart_banner() {
+        assert!(
+            MODELS_RS.contains("apply_config_banner::ApplyConfigBanner"),
+            "ScreenModels must mount the shared ApplyConfigBanner (D-11) in place of the removed \
+             restart-required banner",
+        );
+        assert!(
+            !MODELS_RS.contains(
+                "Restart required — provider and model changes take effect after restart"
+            ),
+            "the old dismissible restart-required banner copy must be fully removed from models.rs",
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 50.4 Plan 07 (D-15) — topbar readout refetch after apply-now.
+    // -----------------------------------------------------------------
+    //
+    // Tests 1-3 exercise `reseed_token_window` directly: it is the one
+    // piece of real logic this task adds, in the grow, shrink and
+    // first-seed directions. Tests 4-6 are source assertions pinning
+    // wiring properties (whether a closure reads a signal in its sync
+    // prefix, whether the app root binds a suspended future) that only a
+    // rendered VirtualDom could observe directly — this crate deliberately
+    // has none (see this module's own doc comment above). Every needle
+    // below is built by concatenating two fragments so it cannot appear
+    // contiguously in this file's own source and therefore cannot satisfy
+    // itself through the `MOD_RS = include_str!("mod.rs")` self-match.
+
+    #[test]
+    fn reseed_token_window_raises_the_ceiling_and_leaves_a_smaller_numerator() {
+        // D-15's named under-report case: the ceiling must rise so the NEXT
+        // Finished frame clamps against 1M rather than silently flooring
+        // real usage at the old 128k ceiling.
+        assert_eq!(
+            super::reseed_token_window((100_000, 128_000), 1_000_000),
+            (100_000, 1_000_000)
+        );
+    }
+
+    #[test]
+    fn reseed_token_window_clamps_a_numerator_above_a_shrunken_ceiling() {
+        // Switching down must not leave the signal holding a numerator
+        // above its own denominator.
+        assert_eq!(
+            super::reseed_token_window((500_000, 1_000_000), 128_000),
+            (128_000, 128_000)
+        );
+    }
+
+    #[test]
+    fn reseed_token_window_is_a_noop_on_the_first_seed() {
+        // Preserves the existing mount-time behavior: denominator starts at
+        // 0 and is overwritten wholesale on first resolve.
+        assert_eq!(super::reseed_token_window((0, 0), 128_000), (0, 128_000));
+    }
+
+    #[test]
+    fn config_summary_resource_is_refreshable_not_suspended() {
+        // Proves the get_config_summary resource is built with
+        // use_resource (not a suspended use_server_future) and reads the
+        // applied-tick signal with call syntax in the closure's sync
+        // prefix — the read that actually subscribes the resource to the
+        // tick. A read placed inside the async block compiles fine but
+        // silently never subscribes, so this pins the SHAPE, not merely
+        // the presence, of the conversion.
+        let resource_needle = ["use_res", "ource(move ||"].concat();
+        assert!(
+            MOD_RS.contains(&resource_needle),
+            "get_config_summary must be fetched via use_resource(move || ...), not a suspended \
+             server-future form",
+        );
+        let tick_read_needle = ["let _tick = config_applied", "_tick();"].concat();
+        assert!(
+            MOD_RS.contains(&tick_read_needle),
+            "the config_applied_tick signal must be read with call syntax in the sync prefix of the \
+             use_resource closure, outside the async move block, or the resource never re-subscribes",
+        );
+        let ctx_provide_needle = [
+            "use_context_provider(|| {\n        screens::apply_config_ban",
+            "ner::ConfigAppliedCtx(config_applied_tick)\n    })",
+        ]
+        .concat();
+        assert!(
+            MOD_RS.contains(&ctx_provide_needle),
+            "ConfigAppliedCtx must be provided at the HermesApp root, matching every other *Ctx in \
+             this file (Dioxus context-panic rule)",
+        );
+    }
+
+    #[test]
+    fn token_reseed_effect_routes_through_the_pure_helper() {
+        // The link that makes the reseed_token_window unit tests above mean
+        // something about live behavior rather than about an orphan
+        // function: the effect that consumes the resolved ConfigSummary
+        // must call the helper, not assign `t.1` directly (which would
+        // reintroduce the stale-numerator-on-shrink bug D-15 names).
+        let effect_needle = [
+            "tokens.with_mut(|t| *t = reseed_token_win",
+            "dow(*t, summary.context_length));",
+        ]
+        .concat();
+        assert!(
+            MOD_RS.contains(&effect_needle),
+            "the config_summary seeding effect must route through reseed_token_window, not assign \
+             t.1 = summary.context_length directly",
+        );
+    }
+
+    #[test]
+    fn app_root_declares_no_suspended_server_future_and_no_resource_restart() {
+        // The two halves of D-15's named trap: the app root must contain
+        // neither a suspended server-future form nor a resource-restart
+        // call. Split so the needles cannot self-match this very test
+        // module (which the include_str!'d MOD_RS also contains).
+        let suspended_future_needle = ["use_serv", "er_future(crate::server::api::get_config_summary)"].concat();
+        assert!(
+            !MOD_RS.contains(&suspended_future_needle),
+            "D-15: the app root must not bind get_config_summary via a suspended, question-mark-\
+             propagated server-future resource — that form early-returns above ~30 later hooks \
+             in this component",
+        );
+        let restart_needle = [".resta", "rt()"].concat();
+        assert!(
+            !MOD_RS.contains(&restart_needle),
+            "D-15: the app root must not call restart() on any resource — that is the exact crash \
+             pattern this task exists to avoid (see the project memory on the resource-restart trap)",
         );
     }
 }

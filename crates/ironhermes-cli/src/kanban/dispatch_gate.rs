@@ -36,6 +36,11 @@ use ironhermes_kanban::store::ListFilters;
 // and once into the bin (which only calls the sweep below). The bin's copy
 // sees the seat re-export as unused. This suppresses that duplication
 // artifact, not real dead code.
+// Phase 51 (D-14): deliberately does NOT re-export `evaluate_profile_dispatch_dotenv_at`
+// — Task 3's source invariant (`no_production_path_calls_the_dotenv_only_gate`)
+// asserts this file never mentions the `.env`-only entry point's name at all.
+// `tests/dispatch_profile_gate.rs`'s direct-predicate cases import that seat
+// straight from `ironhermes_core::dispatch_gate` instead.
 #[allow(unused_imports)]
 pub use ironhermes_core::dispatch_gate::{
     DISPATCH_GATE_REASON_PREFIX, DispatchDecision, evaluate_profile_dispatch,
@@ -53,7 +58,13 @@ pub use ironhermes_core::dispatch_gate::{
 /// Naturally idempotent: it only ever selects `status='ready'` tasks, so a
 /// second pass over an already-blocked task selects nothing and appends no
 /// second event.
-pub fn refuse_undispatchable_ready_tasks(store: &mut KanbanStore) -> Vec<(String, String)> {
+///
+/// Phase 51 (D-14): `async` — `evaluate_profile_dispatch`'s vault branch awaits
+/// `ProfileSecretStore`. The per-assignee memoization loop below was an
+/// `.or_insert_with` closure, which cannot `.await`; restructured into an
+/// explicit check-then-await-then-insert, preserving the exact
+/// one-evaluation-per-assignee property.
+pub async fn refuse_undispatchable_ready_tasks(store: &mut KanbanStore) -> Vec<(String, String)> {
     let mut cache: HashMap<String, DispatchDecision> = HashMap::new();
     let mut blocked = Vec::new();
 
@@ -69,10 +80,14 @@ pub fn refuse_undispatchable_ready_tasks(store: &mut KanbanStore) -> Vec<(String
     };
 
     for task in tasks {
-        let decision = cache
-            .entry(task.assignee.clone())
-            .or_insert_with(|| evaluate_profile_dispatch(&task.assignee))
-            .clone();
+        let decision = match cache.get(&task.assignee) {
+            Some(cached) => cached.clone(),
+            None => {
+                let evaluated = evaluate_profile_dispatch(&task.assignee).await;
+                cache.insert(task.assignee.clone(), evaluated.clone());
+                evaluated
+            }
+        };
 
         if let DispatchDecision::Refuse { reason } = decision {
             let gate_reason = format!("{DISPATCH_GATE_REASON_PREFIX}{reason}");

@@ -831,6 +831,36 @@
     border-left-color: var(--danger);
 }
 
+/* Phase 52 Plan 07 (D-05, UI-SPEC Color): a worker explicitly reporting it
+   couldn't proceed is data the leader must still acknowledge, but is a
+   semantically different cause than an infrastructure or parse failure
+   (the `failed` rule above) — modeled 1:1 on that rule, only
+   `border-left-color` differs, to `var(--warn)` (amber, this app's
+   existing "notable, not destructive" hue) so a scan down the transcript
+   can tell the two apart without reading a word. */
+.kn-room-message[data-status="blocked"] {
+    opacity: 0.6;
+    color: var(--fg-dim);
+    border-left-color: var(--warn);
+}
+
+/* Phase 52 Plan 07 (D-10, UI-SPEC Surface Contracts §3): the expanded
+   worker-result fold — the only genuinely new layout rule this phase's
+   transcript work needs. `padding-left: var(--sp-4)` (16px) is UI-SPEC's
+   chosen worker-sub-row indent; the row gap is `var(--sp-1)` (4px,
+   `tokens.css:48`), the smallest existing token, rather than a raw length.
+   The originally-specified literal 2px gap is withdrawn (Round 1 codex
+   LOW): it directly contradicted this plan's own "introduce no new spacing
+   value" prohibition, no 2px token exists, and the sibling
+   `.kn-room-message-head` rule below already uses a named token
+   (`gap: var(--sp-2)`) for the same kind of row-internal gap. */
+.kn-room-worker-fold {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-1);
+    padding-left: var(--sp-4);
+}
+
 .kn-room-message-head {
     display: flex;
     flex-direction: row;
@@ -986,6 +1016,49 @@
    chip's own `--fg-dim` tone. */
 .kn-chip[data-kind="round"] {
     color: var(--fg-dim);
+}
+
+/* Phase 52 Plan 07 (UI-SPEC Surface Contracts §4, the highest-value
+   contract): a slow opacity pulse on the round/cycle chip while a drive is
+   live. The documented worst case runs up to 900s per cycle, and a
+   perfectly static chip for up to 15 minutes reads as frozen rather than
+   busy. Pure CSS, no new signal — this animates only, it never claims
+   phase-level (decompose/delegate/synthesize) progress the transport
+   cannot supply, exactly the "registered but fictional" trap D-01 was
+   written to prevent, moved from the schema into the UI. Disabled under
+   `prefers-reduced-motion`, matching standard practice for a decorative
+   loop. */
+.kn-chip[data-kind="round"][data-live="true"] {
+    animation: kn-round-chip-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes kn-round-chip-pulse {
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.6;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .kn-chip[data-kind="round"][data-live="true"] {
+        animation: none;
+    }
+}
+
+/* Phase 52 Plan 07 (D-09, UI-SPEC Color): `var(--brand)` (molten orange) —
+   this app's existing "notable classification" hue
+   (`.kn-chip[data-kind="status"][data-status="ready"]` already uses it
+   this way in `kanban.css`) — distinct from identity-cyan
+   (`var(--accent-primary)`, reserved for "who," never reused here for
+   "what kind of room") and from the status colors (`--warn`/`--danger`/
+   `--success`). Same geometry as `.kn-chip[data-kind="round"]` above; only
+   the color differs. */
+.kn-chip[data-kind="pattern"] {
+    color: var(--brand);
 }
 
 /* Accent — matches `.kn-chip[data-kind="assignee"]`'s existing accent

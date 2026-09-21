@@ -232,7 +232,7 @@ fn build_kanban_worker_env_emits_hermes_kanban_db() {
     let task = fake_task("t_xpro01", "alice");
     let run = fake_run("r_xpro01", "t_xpro01", "host:1:uuid");
 
-    let env = build_kanban_worker_env(&task, &run, "/tmp/ws_xpro", "my-board");
+    let env = build_kanban_worker_env(&task, &run, "/tmp/ws_xpro", "my-board", None);
 
     let db_entry = env
         .iter()

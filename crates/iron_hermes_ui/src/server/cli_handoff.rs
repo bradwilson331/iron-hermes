@@ -43,14 +43,31 @@
 //! plan's own [`dispatch_bot_message`] does, without re-deriving any of the
 //! isolation logic above.
 //!
-//! **Allowlist duplication is deliberate.** [`BOT_HANDOFF_SAFE_SYSTEM_VARS`]
-//! is a copy of `ironhermes_kanban::worker_spawn::SAFE_SYSTEM_VARS`'s eight
-//! entries, not an import across the crate fence — `ironhermes-kanban` is a
-//! crate this UI server already depends on, but importing a kanban-private
-//! constant here would couple this path's security allowlist to a crate
-//! whose own module doc scopes it to kanban worker spawn specifically. Both
-//! copies are security-relevant and MUST change together if the allowlist
-//! ever changes.
+//! **Allowlist sharing (Phase 51 Plan 10 — retires the prior "duplication is
+//! deliberate" stance).** [`BOT_HANDOFF_SAFE_SYSTEM_VARS`] is now a re-export
+//! of `ironhermes_kanban::SAFE_SYSTEM_VARS` — the "importing would couple to
+//! a kanban-private constant" rationale this doc used to state was false:
+//! the constant is `pub` at the kanban crate root, and this UI server already
+//! depends on `ironhermes-kanban` in its native target table. One definition,
+//! three consumers now (this module, `gateway_control_api.rs`, and every
+//! kanban worker spawn) — drift is structurally impossible.
+//!
+//! **Superseded (Phase 51 Plan 16, WR-06).** The shared list no longer carries
+//! `IRONHERMES_WORKER_BIN` or `IRONHERMES_ROOT_HOME` — a value that steers
+//! which binary is exec'd or which vault data dir is opened is the same
+//! category as a credential, and does not belong on a list meant for
+//! genuinely ambient system vars. [`build_bot_handoff_env`] emits both
+//! explicitly, computed by this process itself via
+//! `ironhermes_kanban::resolve_worker_bin()` and
+//! `ironhermes_core::get_root_hermes_home()` — the SAME two functions
+//! `ironhermes_kanban::worker_spawn::build_kanban_worker_env` calls for its own
+//! explicit emission of these two variables. This module no longer "picks up"
+//! either for free from the shared list; both spawn surfaces now compute and
+//! emit their own value. `ironhermes-kanban`'s own ambient-leak regression
+//! test (`worker_spawn_vault_env.rs`) covers [`BOT_HANDOFF_SAFE_SYSTEM_VARS`]'s
+//! remaining, genuinely-ambient membership, which is why this plan writes no
+//! second copy of that assertion — only a dedicated test for the two
+//! explicitly-emitted variables below.
 //!
 //! **Never used as the profile boundary (D-07).** The in-process subagent
 //! delegation tool (`ironhermes_tools`'s in-process "delegate task" helper)
@@ -73,12 +90,14 @@ use std::path::PathBuf;
 #[cfg(feature = "server")]
 use std::process::Stdio;
 
-/// Phase 50.1 Plan 03 (D-05): the eight-entry safe-system-vars allowlist for
-/// the bot handoff path — a deliberate duplication of
-/// `ironhermes_kanban::worker_spawn::SAFE_SYSTEM_VARS` (see module doc). The
-/// worker-binary override variable (`IRONHERMES_WORKER_BIN`) rides this
-/// allowlist so a recursive spawn (bot handoff -> further subprocess) would
-/// carry the override forward, mirroring kanban's own forward-compat note.
+/// Phase 51 Plan 10: re-export of `ironhermes_kanban::SAFE_SYSTEM_VARS` — the
+/// bot handoff path's safe-system-vars allowlist under its existing name (see
+/// module doc). Retired the eight-entry hand-copy this constant used to be.
+///
+/// **Phase 51 Plan 16 (WR-06):** no longer carries `IRONHERMES_WORKER_BIN` or
+/// `IRONHERMES_ROOT_HOME` — both are emitted explicitly by
+/// [`build_bot_handoff_env`] instead. See the module doc's "Superseded"
+/// paragraph.
 // 49.4-02 fix (folded todo 2026-08-28): widened from `feature = "server"` to
 // `not(target_arch = "wasm32")` — this is a pure `&str` const with no `tokio`
 // dependency, and `gateway_control_api.rs`'s own native-only helper (which
@@ -86,24 +105,82 @@ use std::process::Stdio;
 // --workspace` (no `server` feature requested for this non-default-member
 // crate in that invocation).
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) const BOT_HANDOFF_SAFE_SYSTEM_VARS: &[&str] = &[
-    "PATH",
-    "HOME",
-    "USER",
-    "LANG",
-    "TERM",
-    "RUST_LOG",
-    "IRONHERMES_HOME",
-    "IRONHERMES_WORKER_BIN",
-];
+pub(crate) use ironhermes_kanban::SAFE_SYSTEM_VARS as BOT_HANDOFF_SAFE_SYSTEM_VARS;
 
 /// Phase 50.1 Plan 03 (T-50.1-03-04): bounded wait for the bot subprocess. A
 /// chat turn may involve several tool calls, so this is generous relative to
 /// `profile_verify_api::PROBE_TIMEOUT_SECONDS` (20s, a health probe only) —
 /// but still bounded, so a hung child cannot pin the blocking pool
 /// indefinitely.
+///
+/// Raised from 180 to 600 and made configurable: 180s was written against a
+/// chat turn with a few tool calls, and is not survivable by a research turn
+/// whose individual `web_extract` calls cost 11-33s each. Two live team
+/// drives were killed mid-work at exactly this ceiling — the leader sees
+/// only an opaque dispatch failure, because [`BotHandoffError::Timeout`]
+/// deliberately carries no detail to the client (T-52-02).
 #[cfg(feature = "server")]
-const BOT_HANDOFF_TIMEOUT_SECONDS: u64 = 180;
+const BOT_HANDOFF_TIMEOUT_SECONDS_DEFAULT: u64 = 600;
+
+/// Lower clamp for a configured bot-handoff timeout. Below this a turn
+/// cannot realistically complete even one model round-trip, so a smaller
+/// configured value is treated as a typo rather than honored.
+#[cfg(feature = "server")]
+const BOT_HANDOFF_TIMEOUT_SECONDS_MIN: u64 = 10;
+
+/// Upper clamp for a configured bot-handoff timeout (1 hour). The ceiling
+/// exists so a hung child cannot pin a blocking-pool thread indefinitely;
+/// an unbounded configured value would defeat the mechanism outright.
+#[cfg(feature = "server")]
+const BOT_HANDOFF_TIMEOUT_SECONDS_MAX: u64 = 3600;
+
+/// Env-var fallback for the bot-handoff timeout, read only when
+/// `web_ui.bot_handoff_timeout_seconds` is unset in `config.yaml`. Mirrors
+/// the `IRONHERMES_WEB_ALLOWED_ORIGINS` layering in
+/// [`crate::server::auth::auth_config_from`].
+#[cfg(feature = "server")]
+const BOT_HANDOFF_TIMEOUT_ENV: &str = "IRONHERMES_BOT_HANDOFF_TIMEOUT_SECONDS";
+
+/// Pure resolution of the bot-handoff timeout: `config.yaml` wins when set,
+/// otherwise [`BOT_HANDOFF_TIMEOUT_ENV`], otherwise
+/// [`BOT_HANDOFF_TIMEOUT_SECONDS_DEFAULT`]. The chosen value is clamped to
+/// `[MIN, MAX]`; an unparseable or zero env value is ignored entirely
+/// rather than clamped, so a malformed override falls back to the default
+/// instead of silently becoming `MIN`.
+///
+/// Split out from [`bot_handoff_timeout_seconds`] so the layering is unit
+/// testable without touching process env — this crate's tests share process
+/// state and race on `set_var` under the default multi-threaded runner.
+#[cfg(feature = "server")]
+fn resolve_bot_handoff_timeout_seconds(configured: Option<u64>, env_raw: Option<&str>) -> u64 {
+    let chosen = configured
+        .filter(|v| *v > 0)
+        .or_else(|| {
+            env_raw
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .filter(|v| *v > 0)
+        })
+        .unwrap_or(BOT_HANDOFF_TIMEOUT_SECONDS_DEFAULT);
+    chosen.clamp(
+        BOT_HANDOFF_TIMEOUT_SECONDS_MIN,
+        BOT_HANDOFF_TIMEOUT_SECONDS_MAX,
+    )
+}
+
+/// Resolve the effective bot-handoff timeout from disk + env. Read fresh on
+/// every spawn (like the `Config::load()` call sites in `api.rs`) so an
+/// operator edit to `config.yaml` takes effect on the next bot turn rather
+/// than requiring a server restart.
+#[cfg(feature = "server")]
+fn bot_handoff_timeout_seconds() -> u64 {
+    let configured = ironhermes_core::config::Config::load()
+        .ok()
+        .and_then(|c| c.web_ui.bot_handoff_timeout_seconds);
+    resolve_bot_handoff_timeout_seconds(
+        configured,
+        std::env::var(BOT_HANDOFF_TIMEOUT_ENV).ok().as_deref(),
+    )
+}
 
 /// Phase 50.1 Plan 03: every failure mode on the handoff path, named so each
 /// one arrives as an operator-readable message rather than a panic or an
@@ -125,6 +202,13 @@ pub(crate) enum BotHandoffError {
     WorkspacePathRejected { path: String, reason: String },
     /// The resolved workspace path does not exist or is not a directory.
     WorkspaceNotFound { path: PathBuf },
+    /// Phase 52.1 Plan 05 (D-04): the DEFAULT workspace directory (no
+    /// override) did not exist and auto-provisioning it (the directory
+    /// itself, or its [`ironhermes_tools::chat_capture::WORKSPACE_MARKER_DIR`]
+    /// marker subdirectory) failed. Never constructed for the override
+    /// branch — an explicit override path that does not exist stays
+    /// [`Self::WorkspaceNotFound`], never auto-created.
+    WorkspaceProvisionFailed { path: PathBuf, reason: String },
     /// `IRONHERMES_WORKER_BIN` was set to an empty/whitespace-only value.
     WorkerBinaryNotResolvable,
     /// `Command::spawn()` itself failed (binary not found, permission
@@ -132,7 +216,8 @@ pub(crate) enum BotHandoffError {
     SpawnFailed { reason: String },
     /// The child exited with a non-zero, non-key-related status.
     NonZeroExit { code: i32 },
-    /// The child did not finish within [`BOT_HANDOFF_TIMEOUT_SECONDS`] and
+    /// The child did not finish within the resolved bot-handoff timeout
+    /// ([`bot_handoff_timeout_seconds`]) and
     /// was killed.
     Timeout { seconds: u64 },
     /// The target profile has no resolvable key for its configured
@@ -161,6 +246,20 @@ pub(crate) enum BotHandoffError {
     /// member's distinguishable cancelled turn (D-20's failure-as-data
     /// contract).
     Cancelled,
+    /// Phase 51 Plan 10 (D-11/D-14/D-15): `ironhermes_core::profile_credentials
+    /// ::decide_spawn_credential`'s gate refused this bot's profile — no
+    /// credential exists in either substrate (`.env` or vault), or the vault
+    /// itself is unreachable/never-migrated. Carries the gate's own reason
+    /// string VERBATIM (never re-worded or wrapped — see the decision
+    /// function's own doc for why). No child process is ever created for
+    /// this variant.
+    CredentialGateRefused { reason: String },
+    /// Phase 51 Plan 10 (D-07/D-11/D-14): the gate resolved this profile as
+    /// vault-backed (`AllowFromVault`), but this process could not mint a
+    /// credential for it — no hosted endpoint, no audit sink, or the mint
+    /// itself failed. Carries the decision's own reason string verbatim. No
+    /// child process is ever created for this variant either.
+    CredentialMintUnavailable { reason: String },
 }
 
 // 49.4-02 fix: widened alongside `BotHandoffError`'s own definition above.
@@ -178,6 +277,13 @@ impl std::fmt::Display for BotHandoffError {
                 write!(
                     f,
                     "bot workspace not found or not a directory: {}",
+                    path.display()
+                )
+            }
+            Self::WorkspaceProvisionFailed { path, reason } => {
+                write!(
+                    f,
+                    "failed to provision bot workspace at {}: {reason}",
                     path.display()
                 )
             }
@@ -207,6 +313,8 @@ impl std::fmt::Display for BotHandoffError {
             Self::Cancelled => {
                 write!(f, "the bot turn was cancelled by the operator")
             }
+            Self::CredentialGateRefused { reason } => write!(f, "{reason}"),
+            Self::CredentialMintUnavailable { reason } => write!(f, "{reason}"),
         }
     }
 }
@@ -215,18 +323,19 @@ impl std::fmt::Display for BotHandoffError {
 #[cfg(not(target_arch = "wasm32"))]
 impl std::error::Error for BotHandoffError {}
 
-/// Phase 50.1 Plan 03 (D-02): resolve the ironhermes worker binary. Mirrors
-/// `ironhermes_kanban::worker_spawn::resolve_worker_bin` exactly — reads
-/// `IRONHERMES_WORKER_BIN` first (worktree `cargo run` pin), falls back to
-/// `"ironhermes"` (PATH lookup). Unlike the kanban original this returns a
-/// `Result`: an explicitly-set-but-empty override is a real misconfiguration
-/// this path names rather than silently spawning an empty-string command.
+/// Phase 51 Plan 10: delegates to `ironhermes_kanban::resolve_worker_bin()`
+/// (reads `IRONHERMES_WORKER_BIN` first, falls back to `"ironhermes"` PATH
+/// lookup) and keeps only what is genuinely different from the kanban
+/// original: the `Result` signature. An explicitly-set-but-empty override is
+/// a real misconfiguration this path names rather than silently spawning an
+/// empty-string command — `gateway_control_api.rs` depends on this `Result`
+/// shape, so it is kept even though the shared resolver itself is infallible.
 // 49.4-02 fix: widened from `feature = "server"` — pure `std::env::var`
 // lookup, no tokio dependency; `gateway_control_api.rs`'s native-only
 // `perform_start` helper (not `feature = "server"`-gated) calls this.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn resolve_bot_worker_bin() -> Result<String, BotHandoffError> {
-    let bin = std::env::var("IRONHERMES_WORKER_BIN").unwrap_or_else(|_| "ironhermes".to_string());
+    let bin = ironhermes_kanban::resolve_worker_bin();
     if bin.trim().is_empty() {
         return Err(BotHandoffError::WorkerBinaryNotResolvable);
     }
@@ -265,16 +374,43 @@ pub(crate) fn build_bot_handoff_argv(
     argv
 }
 
-/// Phase 50.1 Plan 03 (D-05 / T-50.1-03-01): builds the COMPLETE environment
-/// the child receives — the allowlisted parent variables that are actually
-/// present, plus `IRONHERMES_HOME` always pinned to the resolved hermes home
-/// (so the child resolves the target profile even when the parent process
-/// never had `IRONHERMES_HOME` set as an OS env var and relies on
-/// `get_hermes_home()`'s own default resolution) — and nothing else.
-/// Everything not in this map is dropped when the caller calls
+/// Phase 51 Plan 10 (D-11): what a bot child process should receive for its
+/// provider credential — resolved by [`decide_spawn_credential`] at the
+/// single funnel ([`run_bot_handoff_tracked_in`]) before any spawn. Never
+/// carries a `Refuse` — a refusal is handled at that funnel and returns
+/// before a credential is ever threaded this far, so this type has no
+/// variant for it: the compiler will not let a call site skip the decision
+/// or accidentally treat a refusal as spawnable.
+///
+/// [`decide_spawn_credential`]: ironhermes_core::profile_credentials::decide_spawn_credential
+#[cfg(feature = "server")]
+pub(crate) enum ResolvedBotCredential {
+    /// The profile's own `.env` resolves a key for its configured provider.
+    /// Produces an environment map byte-identical to before this plan.
+    Dotenv,
+    /// The vault holds the key; a scoped, ledgered token was minted for this
+    /// dispatch. Adds exactly the two `ironhermes_kanban::worker_spawn`
+    /// vault variables to the built environment.
+    Vault(ironhermes_core::profile_credentials::MintedWorkerCredential),
+}
+
+/// Phase 50.1 Plan 03 (D-05 / T-50.1-03-01), widened by Phase 51 Plan 10
+/// (D-11): builds the COMPLETE environment the child receives — the
+/// allowlisted parent variables that are actually present, `IRONHERMES_HOME`
+/// always pinned to the resolved hermes home (so the child resolves the
+/// target profile even when the parent process never had `IRONHERMES_HOME`
+/// set as an OS env var and relies on `get_hermes_home()`'s own default
+/// resolution), `IRONHERMES_WORKER_BIN` + `IRONHERMES_ROOT_HOME` always
+/// emitted explicitly (Phase 51 Plan 16, WR-06 — see below), and — only for
+/// `ResolvedBotCredential::Vault` — the two vault credential variables,
+/// emitted AFTER the allowlist loop, referenced from
+/// `ironhermes_kanban::worker_spawn` rather than written as a third literal
+/// copy of either name. `ResolvedBotCredential::Dotenv` adds nothing beyond
+/// what this function has always built, aside from the always-on steering
+/// variables. Everything not in this map is dropped when the caller calls
 /// `.env_clear()` before `.envs(...)`; that is the security guarantee.
 #[cfg(feature = "server")]
-pub(crate) fn build_bot_handoff_env() -> BTreeMap<String, String> {
+pub(crate) fn build_bot_handoff_env(credential: &ResolvedBotCredential) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     for var in BOT_HANDOFF_SAFE_SYSTEM_VARS {
         if let Ok(v) = std::env::var(var) {
@@ -306,22 +442,67 @@ pub(crate) fn build_bot_handoff_env() -> BTreeMap<String, String> {
     // primary fix does not eliminate (e.g. a future log call this
     // override doesn't anticipate).
     env.insert("RUST_LOG".to_string(), "off".to_string());
+
+    // Phase 51 Plan 16 (WR-06, bot surface): the two steering variables,
+    // emitted EXPLICITLY — no longer forwarded via BOT_HANDOFF_SAFE_SYSTEM_VARS
+    // (see this module's doc "Superseded" paragraph). Always emitted,
+    // regardless of `credential` — unlike the vault-arm block below, which is
+    // conditional on `Vault`. Computed via the SAME two functions
+    // `ironhermes_kanban::worker_spawn::build_kanban_worker_env` calls for its
+    // own explicit emission, so both spawn surfaces agree by construction
+    // rather than by convention.
+    env.insert(
+        "IRONHERMES_WORKER_BIN".to_string(),
+        ironhermes_kanban::resolve_worker_bin(),
+    );
+    env.insert(
+        "IRONHERMES_ROOT_HOME".to_string(),
+        ironhermes_core::get_root_hermes_home()
+            .to_string_lossy()
+            .into_owned(),
+    );
+
+    // Phase 51 Plan 10 (D-11): emitted AFTER the allowlist loop, only for a
+    // vault-backed dispatch — referenced from `ironhermes_kanban::worker_spawn`,
+    // never a third literal copy of either name. `Dotenv` adds nothing here,
+    // keeping the built map byte-identical to before this plan.
+    if let ResolvedBotCredential::Vault(minted) = credential {
+        env.insert(
+            ironhermes_kanban::worker_spawn::IRONHERMES_KANBAN_VAULT_TOKEN_ENV.to_string(),
+            secrecy::ExposeSecret::expose_secret(&minted.token).to_string(),
+        );
+        env.insert(
+            ironhermes_kanban::worker_spawn::IRONHERMES_KANBAN_VAULT_SOCKET_ENV.to_string(),
+            minted.socket_path.to_string_lossy().into_owned(),
+        );
+    }
+
     env
 }
 
-/// Phase 50.1 Plan 03 (D-06): resolve a validated, canonical, absolute
-/// working directory for the bot subprocess. Mirrors
-/// `ironhermes_kanban::worker_spawn::resolve_workspace_dir`'s validation
-/// shape: reject empty, reject a shell-expansion sigil, reject a
+/// Phase 50.1 Plan 03 (D-06), auto-provisioning relaxed by Phase 52.1 Plan 05
+/// (D-04): resolve a validated, canonical, absolute working directory for the
+/// bot subprocess. Mirrors `ironhermes_kanban::worker_spawn::resolve_workspace_dir`'s
+/// validation shape: reject empty, reject a shell-expansion sigil, reject a
 /// non-absolute path, reject a path that is not a directory, then
 /// canonicalize. `bot_name` is validated via
 /// `ironhermes_core::profile::validate_profile_name` before it is ever
 /// joined into a path. When `override_path` is `None`, defaults to the
 /// target profile's own `workspace/` subdirectory beneath the profiles root
 /// — every profile directory already carries one (RESEARCH.md, verified on
-/// the live filesystem). Unlike kanban's scratch-workspace case, a missing
-/// default workspace dir is a named error here, never auto-created — D-06
-/// leaves per-bot workspace *provisioning* to a later phase.
+/// the live filesystem).
+///
+/// **D-04 auto-provision, default path only.** A missing DEFAULT workspace
+/// directory is now created on demand (directory plus its
+/// [`ironhermes_tools::chat_capture::WORKSPACE_MARKER_DIR`] marker
+/// subdirectory), using the exact two-step shape
+/// `crate::server::profile_api::profile_workspace_dir` already uses, so the
+/// provisioned directory is an eligible producer-capture root immediately. An
+/// EXPLICIT override path that does not exist is unaffected by this and
+/// still returns [`BotHandoffError::WorkspaceNotFound`] — auto-creation never
+/// fires for a caller-supplied location, only for the host-computed default
+/// (Pitfall 3: silently materializing a directory at a caller-supplied path
+/// is the wrong default).
 #[cfg(feature = "server")]
 pub(crate) fn resolve_bot_workspace_dir(
     bot_name: &str,
@@ -335,6 +516,7 @@ pub(crate) fn resolve_bot_workspace_dir(
             }
         })?;
 
+    let is_default_path = override_path.is_none();
     let raw: String = match override_path {
         Some(p) => p.to_string(),
         None => crate::server::profile_api::profile_dir_for(&validated_name)
@@ -361,6 +543,23 @@ pub(crate) fn resolve_bot_workspace_dir(
             path: raw,
             reason: "not an absolute path".to_string(),
         });
+    }
+    if is_default_path && !ws_path.is_dir() {
+        // D-04: auto-provision the DEFAULT path only. Same two-step shape as
+        // `profile_workspace_dir` — create the workspace dir, then its marker
+        // subdirectory — so a provisioned workspace is immediately an
+        // eligible producer-capture root (chat_capture::WORKSPACE_MARKER_DIR).
+        std::fs::create_dir_all(ws_path).map_err(|e| BotHandoffError::WorkspaceProvisionFailed {
+            path: ws_path.to_path_buf(),
+            reason: format!("create workspace dir: {e}"),
+        })?;
+        let marker_dir = ws_path.join(ironhermes_tools::chat_capture::WORKSPACE_MARKER_DIR);
+        std::fs::create_dir_all(&marker_dir).map_err(|e| {
+            BotHandoffError::WorkspaceProvisionFailed {
+                path: ws_path.to_path_buf(),
+                reason: format!("create workspace marker dir: {e}"),
+            }
+        })?;
     }
     if !ws_path.is_dir() {
         return Err(BotHandoffError::WorkspaceNotFound {
@@ -586,7 +785,7 @@ pub(crate) fn strip_think_blocks(input: &str) -> String {
 
 /// Phase 50.1 Plan 03 (D-05): spawn `worker_bin argv...` with the environment
 /// scrubbed to exactly `env`, capture its exit status and both output
-/// streams, bounded by [`BOT_HANDOFF_TIMEOUT_SECONDS`]. Reader threads drain
+/// streams, bounded by [`bot_handoff_timeout_seconds`]. Reader threads drain
 /// stdout/stderr concurrently with the wait loop so a chatty child cannot
 /// deadlock on a full OS pipe buffer while this fn polls `try_wait()`.
 ///
@@ -641,7 +840,8 @@ fn spawn_and_capture(
         buf
     });
 
-    let timeout = std::time::Duration::from_secs(BOT_HANDOFF_TIMEOUT_SECONDS);
+    let timeout_seconds = bot_handoff_timeout_seconds();
+    let timeout = std::time::Duration::from_secs(timeout_seconds);
     let start = std::time::Instant::now();
     let status_result = loop {
         match child.try_wait() {
@@ -660,7 +860,7 @@ fn spawn_and_capture(
                     let _ = child.kill();
                     let _ = child.wait();
                     break Err(BotHandoffError::Timeout {
-                        seconds: BOT_HANDOFF_TIMEOUT_SECONDS,
+                        seconds: timeout_seconds,
                     });
                 }
                 std::thread::sleep(std::time::Duration::from_millis(25));
@@ -714,8 +914,9 @@ pub(crate) fn run_bot_handoff(
     message: &str,
     override_workspace: Option<&str>,
     session_title: Option<&str>,
+    credential: &ResolvedBotCredential,
 ) -> Result<crate::protocol::BotHandoffResult, BotHandoffError> {
-    run_bot_handoff_with_cancel(bot_name, message, override_workspace, session_title, None)
+    run_bot_handoff_with_cancel(bot_name, message, override_workspace, session_title, None, credential)
 }
 
 /// Phase 50.2 Plan 14 (G-50.2-2b): the same spawn-wait-capture-and-write-back
@@ -735,6 +936,7 @@ pub(crate) fn run_bot_handoff_with_cancel(
     override_workspace: Option<&str>,
     session_title: Option<&str>,
     cancel: Option<&tokio_util::sync::CancellationToken>,
+    credential: &ResolvedBotCredential,
 ) -> Result<crate::protocol::BotHandoffResult, BotHandoffError> {
     let validated_name =
         ironhermes_core::profile::validate_profile_name(bot_name).map_err(|e| {
@@ -770,7 +972,7 @@ pub(crate) fn run_bot_handoff_with_cancel(
 
     let worker_bin = resolve_bot_worker_bin()?;
     let argv = build_bot_handoff_argv(&validated_name, message, session_title);
-    let env = build_bot_handoff_env();
+    let env = build_bot_handoff_env(credential);
 
     let start = std::time::Instant::now();
     let (status, stdout, stderr) =
@@ -822,16 +1024,29 @@ pub(crate) fn run_bot_handoff_with_cancel(
             error: None,
             elapsed_ms,
         })
-    } else if stderr_indicates_missing_key(&stderr) {
-        let key_name = resolve_expected_key_name(&validated_name)
-            .unwrap_or_else(|| "provider API key".to_string());
-        Err(BotHandoffError::MissingProviderKey {
-            profile: validated_name,
-            key_name,
-        })
     } else {
-        let code = status.code().unwrap_or(-1);
-        Err(BotHandoffError::NonZeroExit { code })
+        // Phase 51 Plan 10 (D-11): the missing-provider-key classification is
+        // scoped to the DOTENV arm ONLY — on the vault path a non-zero exit
+        // means the credential bootstrap or the provider call failed, and
+        // telling the operator to add a key in the bot's Advanced pane is
+        // wrong advice there. After this, "missing provider key" is
+        // reachable only when the gate proved this profile resolves from
+        // its `.env` — genuinely no key in either substrate, never "the
+        // vault was never consulted".
+        match credential {
+            ResolvedBotCredential::Dotenv if stderr_indicates_missing_key(&stderr) => {
+                let key_name = resolve_expected_key_name(&validated_name)
+                    .unwrap_or_else(|| "provider API key".to_string());
+                Err(BotHandoffError::MissingProviderKey {
+                    profile: validated_name,
+                    key_name,
+                })
+            }
+            _ => {
+                let code = status.code().unwrap_or(-1);
+                Err(BotHandoffError::NonZeroExit { code })
+            }
+        }
     }
 }
 
@@ -908,6 +1123,95 @@ impl Drop for DeregisterOnDrop {
     }
 }
 
+/// Phase 51 Plan 10 (D-07): open the bot-scoped mint-ledger sink, mirroring
+/// `ironhermes-gateway/src/runner.rs`'s `open_vault_mint_audit_sink` shape
+/// exactly — same `TrajectoryWriter::open` -> `Arc<Mutex<_>>` ->
+/// `TrajectoryWriterHandleImpl::new` -> `TrajectoryProfileTokenAudit::new`
+/// chain, but writing to a SEPARATE file
+/// (`<home>/logs/bot/vault-mint-ledger.jsonl`, not kanban's
+/// `logs/kanban/vault-mint-ledger.jsonl`) — this path is named for its
+/// consumer, and an operator reading kanban's ledger should not find bot
+/// lines interleaved. Fail-closed on an open failure: `None`, which
+/// `decide_spawn_credential` turns into a refusal rather than an un-audited
+/// mint (the same posture `runner.rs`'s equivalent takes).
+#[cfg(feature = "server")]
+fn open_bot_vault_mint_audit_sink()
+-> Option<std::sync::Arc<dyn ironhermes_core::profile_credentials::ProfileTokenAudit>> {
+    let path = ironhermes_core::get_hermes_home()
+        .join("logs")
+        .join("bot")
+        .join("vault-mint-ledger.jsonl");
+    match ironhermes_trajectory::TrajectoryWriter::open(&path) {
+        Ok(w) => {
+            let arc_writer = std::sync::Arc::new(std::sync::Mutex::new(w));
+            let writer_handle: std::sync::Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle> =
+                std::sync::Arc::new(ironhermes_trajectory::TrajectoryWriterHandleImpl::new(
+                    arc_writer,
+                ));
+            Some(std::sync::Arc::new(
+                ironhermes_core::profile_credentials::TrajectoryProfileTokenAudit::new(writer_handle),
+            ))
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %path.display(),
+                "Phase 51 Plan 10: failed to open bot vault-mint-ledger trajectory writer; \
+                 AllowFromVault bot dispatches will refuse to mint rather than mint un-audited"
+            );
+            None
+        }
+    }
+}
+
+/// Phase 51 Plan 10 (D-11/D-14): process-wide, lazily-initialised holder for
+/// this process's ONE bot credential endpoint and ONE audit sink — never one
+/// per dispatch. `ProfileCredentialHost::socket_path()` is PID-keyed, so a
+/// second host in this process would REPLACE the first's socket file and
+/// orphan its listener (this repo's own documented orphaned-listener failure
+/// mode) — one per process is not a preference. Mirrors
+/// [`handoff_turn_registry`]'s own `OnceLock` fallback shape one level up
+/// (a `tokio::sync::OnceCell` here since initialisation itself is async).
+///
+/// Bound on first bot dispatch and then lives for the process's lifetime:
+/// the socket file is not removed at exit, and a stale file from a dead PID
+/// is replaced on the next bind (D-14's existing endpoint semantics).
+/// Enabling the vault in config therefore requires a server restart to take
+/// effect — the same property the kanban dispatcher's own host already has.
+#[cfg(feature = "server")]
+type BotCredentialHolder = (
+    Option<std::sync::Arc<ironhermes_core::profile_credentials::ProfileCredentialHost>>,
+    Option<std::sync::Arc<dyn ironhermes_core::profile_credentials::ProfileTokenAudit>>,
+);
+
+#[cfg(feature = "server")]
+static BOT_CREDENTIAL_HOLDER: tokio::sync::OnceCell<BotCredentialHolder> =
+    tokio::sync::OnceCell::const_new();
+
+/// Resolve (initialising on first call, exactly once per process) the bot
+/// credential endpoint/sink pair. Initialised INSIDE `tokio::task::spawn_blocking`
+/// — `host_profile_credentials` reaches `RustyVaultStore::open`, whose admin
+/// bridge blocks its calling thread on a channel receive (51-07 Deviation #5's
+/// reproduced 240s hangs); this crate serves Dioxus server functions inside a
+/// per-connection `LocalSet`, so this call must never run directly on a
+/// runtime worker. The accept loop's own `tokio::spawn` still has runtime
+/// context from inside a blocking task, so nothing else is needed.
+#[cfg(feature = "server")]
+async fn bot_credential_holder() -> &'static BotCredentialHolder {
+    BOT_CREDENTIAL_HOLDER
+        .get_or_init(|| async {
+            tokio::task::spawn_blocking(|| {
+                let config = ironhermes_core::config::Config::load().unwrap_or_default();
+                let host = ironhermes_core::profile_credentials::host_profile_credentials(&config);
+                let sink = open_bot_vault_mint_audit_sink();
+                (host, sink)
+            })
+            .await
+            .unwrap_or((None, None))
+        })
+        .await
+}
+
 /// Phase 50.2 Plan 14 (G-50.2-2b) / Phase 50.2 Plan 16 (G-50.2-2c):
 /// register-before-spawn around a single subprocess handoff, in `registry`
 /// (an owned handle — a clone is another handle to the SAME inner map,
@@ -982,6 +1286,60 @@ pub(crate) async fn run_bot_handoff_tracked_in(
     let queued = crate::server::handoff_steering::drain_steering(bot_name);
     let folded_message = crate::server::handoff_steering::fold_steering_into_prompt(&queued, message);
 
+    // Phase 51 Plan 10 (D-07/D-11/D-14/D-15): the credential decision, made
+    // HERE — immediately before the `spawn_blocking` call below, after the
+    // steering drain. This is deliberate: it is the shortest achievable
+    // window between the mint and the child's single read (the window
+    // Task 1's TTL ruling has to cover), and the turn is already past the
+    // queue-or-run decision by this point, so a minted token can never sit
+    // in a queued turn. No other production call site makes this decision,
+    // and none has to — every production bot dispatch passes through this
+    // one funnel.
+    let (host, sink) = bot_credential_holder().await;
+    let config = ironhermes_core::config::Config::load().unwrap_or_default();
+    let profiles_root = ironhermes_core::get_hermes_home().join(ironhermes_core::PROFILES_SUBDIR);
+    let decision = ironhermes_core::profile_credentials::decide_spawn_credential(
+        &config,
+        &profiles_root,
+        bot_name,
+        host.as_deref(),
+        sink.as_deref(),
+    )
+    .await;
+
+    let credential = match decision {
+        ironhermes_core::profile_credentials::SpawnCredentialDecision::Dotenv => {
+            ResolvedBotCredential::Dotenv
+        }
+        ironhermes_core::profile_credentials::SpawnCredentialDecision::Vault(minted) => {
+            ResolvedBotCredential::Vault(minted)
+        }
+        ironhermes_core::profile_credentials::SpawnCredentialDecision::Refuse {
+            source,
+            reason,
+        } => {
+            // No child process is ever created for a refusal. The
+            // `DeregisterOnDrop` guard and the in-flight guard both already
+            // exist by this point, so this early return deregisters the
+            // turn correctly on the way out.
+            drop(guard);
+            drop(in_flight);
+            // Phase 51 Plan 14 (WR-03): routes on `decide_spawn_credential`'s
+            // own typed `RefusalSource` discriminant, not on the shape of
+            // its `reason` prose — a reword of either crate's `format!`
+            // literals can no longer misroute an operator to the wrong
+            // remediation.
+            return Err(match source {
+                ironhermes_core::profile_credentials::RefusalSource::MintUnavailable => {
+                    BotHandoffError::CredentialMintUnavailable { reason }
+                }
+                ironhermes_core::profile_credentials::RefusalSource::Gate => {
+                    BotHandoffError::CredentialGateRefused { reason }
+                }
+            });
+        }
+    };
+
     let bot_name_owned = bot_name.to_string();
     let message_owned = folded_message;
     let override_workspace_owned = override_workspace.map(|s| s.to_string());
@@ -995,6 +1353,7 @@ pub(crate) async fn run_bot_handoff_tracked_in(
             override_workspace_owned.as_deref(),
             session_title_owned.as_deref(),
             Some(&cancel_for_blocking),
+            &credential,
         )
     })
     .await;
@@ -1058,7 +1417,7 @@ pub(crate) async fn run_bot_handoff_tracked(
 /// Each of those fns is a single HTTP request/response round trip, and
 /// axum/hyper drops the in-flight handler future for that request the
 /// moment the client disconnects — tab close, navigation, or a dropped
-/// connection — at any point inside the up-to-`BOT_HANDOFF_TIMEOUT_SECONDS`
+/// connection — at any point inside the up-to-`bot_handoff_timeout_seconds()`
 /// (180s) window a tracked dispatch can run. If the tracked call were
 /// `.await`ed directly inside that request's own future, dropping the
 /// future would immediately drop every guard the call owns
@@ -1257,11 +1616,6 @@ mod tests {
         )
     }
 
-    fn scaffold_profile_workspace(name: &str) -> PathBuf {
-        let ws = crate::server::profile_api::profile_dir_for(name).join("workspace");
-        std::fs::create_dir_all(&ws).expect("mkdir workspace");
-        ws
-    }
 
     /// Writes a `#!/bin/sh` stub at `dir/name`, `chmod +x` on unix. Test-only
     /// spawn target, pointed at through `IRONHERMES_WORKER_BIN`.
@@ -1343,7 +1697,7 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let _probe = ScopedEnv::set("BOT_HANDOFF_TEST_PROBE_VAR", "leak-test-value");
 
-        let env = build_bot_handoff_env();
+        let env = build_bot_handoff_env(&ResolvedBotCredential::Dotenv);
 
         assert!(
             !env.contains_key("BOT_HANDOFF_TEST_PROBE_VAR"),
@@ -1356,7 +1710,7 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let _term = ScopedEnv::set("TERM", "bot-handoff-test-term");
 
-        let env = build_bot_handoff_env();
+        let env = build_bot_handoff_env(&ResolvedBotCredential::Dotenv);
 
         assert_eq!(
             env.get("TERM").map(String::as_str),
@@ -1369,7 +1723,7 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let _term = ScopedEnv::remove("TERM");
 
-        let env = build_bot_handoff_env();
+        let env = build_bot_handoff_env(&ResolvedBotCredential::Dotenv);
 
         assert!(
             !env.contains_key("TERM"),
@@ -1386,7 +1740,7 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let _rust_log = ScopedEnv::set("RUST_LOG", "debug");
 
-        let env = build_bot_handoff_env();
+        let env = build_bot_handoff_env(&ResolvedBotCredential::Dotenv);
 
         assert_eq!(env.get("RUST_LOG").map(String::as_str), Some("off"));
     }
@@ -1396,7 +1750,7 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let _rust_log = ScopedEnv::remove("RUST_LOG");
 
-        let env = build_bot_handoff_env();
+        let env = build_bot_handoff_env(&ResolvedBotCredential::Dotenv);
 
         assert_eq!(env.get("RUST_LOG").map(String::as_str), Some("off"));
     }
@@ -1407,12 +1761,92 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
 
-        let env = build_bot_handoff_env();
+        let env = build_bot_handoff_env(&ResolvedBotCredential::Dotenv);
 
         assert_eq!(
             env.get("IRONHERMES_HOME").map(String::as_str),
             dir.path().to_str(),
             "IRONHERMES_HOME must always be pinned to the resolved hermes home"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // WR-06 (Phase 51 Plan 16): IRONHERMES_WORKER_BIN / IRONHERMES_ROOT_HOME
+    // no longer ride BOT_HANDOFF_SAFE_SYSTEM_VARS — mirrors
+    // ironhermes-kanban's worker_spawn_vault_env.rs tests of the same name.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn build_bot_handoff_env_does_not_carry_worker_bin_or_root_home_via_the_allowlist() {
+        let _lock = crate::server::test_support::env_lock();
+
+        assert!(
+            !BOT_HANDOFF_SAFE_SYSTEM_VARS.contains(&"IRONHERMES_WORKER_BIN"),
+            "IRONHERMES_WORKER_BIN must not ride the ambient pass-through allowlist"
+        );
+        assert!(
+            !BOT_HANDOFF_SAFE_SYSTEM_VARS.contains(&"IRONHERMES_ROOT_HOME"),
+            "IRONHERMES_ROOT_HOME must not ride the ambient pass-through allowlist"
+        );
+    }
+
+    #[test]
+    fn build_bot_handoff_env_always_emits_worker_bin_explicitly() {
+        let _lock = crate::server::test_support::env_lock();
+        let _guard = ScopedEnv::remove("IRONHERMES_WORKER_BIN");
+
+        let env = build_bot_handoff_env(&ResolvedBotCredential::Dotenv);
+
+        assert_eq!(
+            env.get("IRONHERMES_WORKER_BIN").map(String::as_str),
+            Some(ironhermes_kanban::resolve_worker_bin()).as_deref(),
+            "with no ambient value present, build_bot_handoff_env must still \
+             explicitly emit IRONHERMES_WORKER_BIN using resolve_worker_bin()'s \
+             own fallback — the old allowlist-only mechanism would have omitted \
+             the key entirely here"
+        );
+
+        // A hostile ambient value must still resolve through resolve_worker_bin()
+        // itself — proving the emitted value has exactly one source of truth.
+        let _hostile = ScopedEnv::set("IRONHERMES_WORKER_BIN", "attacker-controlled-worker-bin");
+        let expected = ironhermes_kanban::resolve_worker_bin();
+        let env_with_ambient = build_bot_handoff_env(&ResolvedBotCredential::Dotenv);
+        assert_eq!(
+            env_with_ambient.get("IRONHERMES_WORKER_BIN").map(String::as_str),
+            Some(expected.as_str())
+        );
+    }
+
+    #[test]
+    fn build_bot_handoff_env_always_emits_root_home_explicitly() {
+        let _lock = crate::server::test_support::env_lock();
+        let _guard = ScopedEnv::remove("IRONHERMES_ROOT_HOME");
+
+        let env = build_bot_handoff_env(&ResolvedBotCredential::Dotenv);
+
+        let expected = ironhermes_core::get_root_hermes_home()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            env.get("IRONHERMES_ROOT_HOME").map(String::as_str),
+            Some(expected.as_str()),
+            "with no ambient value present, build_bot_handoff_env must still \
+             explicitly emit IRONHERMES_ROOT_HOME using get_root_hermes_home()'s \
+             own fallback — the old allowlist-only mechanism would have omitted \
+             the key entirely here"
+        );
+
+        // A hostile ambient value must still resolve through
+        // get_root_hermes_home() itself — proving the emitted value has
+        // exactly one source of truth.
+        let _hostile = ScopedEnv::set("IRONHERMES_ROOT_HOME", "/tmp/attacker-controlled-root");
+        let expected_with_ambient = ironhermes_core::get_root_hermes_home()
+            .to_string_lossy()
+            .into_owned();
+        let env_with_ambient = build_bot_handoff_env(&ResolvedBotCredential::Dotenv);
+        assert_eq!(
+            env_with_ambient.get("IRONHERMES_ROOT_HOME").map(String::as_str),
+            Some(expected_with_ambient.as_str())
         );
     }
 
@@ -1474,11 +1908,56 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("scout");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("scout");
 
         let resolved =
             resolve_bot_workspace_dir("scout", None).expect("default workspace should resolve");
         assert!(resolved.ends_with("profiles/scout/workspace"));
+    }
+
+    #[test]
+    fn resolve_bot_workspace_dir_auto_creates_missing_default_workspace() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        // No scaffolding — the default workspace directory does not exist yet.
+        let workspace = dir.path().join("profiles").join("scout").join("workspace");
+        assert!(!workspace.exists());
+
+        let resolved = resolve_bot_workspace_dir("scout", None)
+            .expect("D-04: a missing default workspace must be auto-provisioned, not rejected");
+        assert!(resolved.is_dir());
+        assert!(resolved.ends_with("profiles/scout/workspace"));
+    }
+
+    #[test]
+    fn resolve_bot_workspace_dir_auto_created_workspace_carries_marker_dir() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+
+        let resolved = resolve_bot_workspace_dir("scout", None)
+            .expect("default workspace should auto-provision");
+        let marker = resolved.join(ironhermes_tools::chat_capture::WORKSPACE_MARKER_DIR);
+        assert!(
+            marker.is_dir(),
+            "auto-provisioned workspace must carry the producer-capture marker directory"
+        );
+    }
+
+    #[test]
+    fn resolve_bot_workspace_dir_still_rejects_missing_absolute_override() {
+        // Regression guard: the override branch must NEVER auto-create,
+        // even though the default branch now does (D-04, Pitfall 3).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("does-not-exist-subdir");
+        assert!(!missing.exists());
+        let err = resolve_bot_workspace_dir("scout", missing.to_str()).unwrap_err();
+        assert!(matches!(err, BotHandoffError::WorkspaceNotFound { .. }));
+        assert!(
+            !missing.exists(),
+            "an explicit override path must never be auto-created"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -1521,7 +2000,7 @@ mod tests {
             scoped_home.to_str().expect("utf8 path"),
         );
 
-        let result = run_bot_handoff("scout", "hi", None, None);
+        let result = run_bot_handoff("scout", "hi", None, None, &ResolvedBotCredential::Dotenv);
         assert_eq!(result, Err(BotHandoffError::LiveProfileMustStream));
     }
 
@@ -1530,14 +2009,14 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("scout");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("scout");
         let stub = write_stub_script(dir.path(), "stub-fail.sh", "exit 7");
         let _bin_guard = ScopedEnv::set(
             "IRONHERMES_WORKER_BIN",
             stub.to_str().expect("utf8 stub path"),
         );
 
-        let result = run_bot_handoff("scout", "hello", None, None);
+        let result = run_bot_handoff("scout", "hello", None, None, &ResolvedBotCredential::Dotenv);
         assert_eq!(result, Err(BotHandoffError::NonZeroExit { code: 7 }));
 
         let index = load_bot_meta_map(&crate::server::bot_meta_api::bot_meta_index_path())
@@ -1553,7 +2032,7 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("scout");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("scout");
         let stub = write_stub_script(
             dir.path(),
             "stub-ok.sh",
@@ -1564,7 +2043,7 @@ mod tests {
             stub.to_str().expect("utf8 stub path"),
         );
 
-        let result = run_bot_handoff("scout", "hello", None, None).expect("stub success should Ok");
+        let result = run_bot_handoff("scout", "hello", None, None, &ResolvedBotCredential::Dotenv).expect("stub success should Ok");
         assert_eq!(result.reply, "hello from scout");
         assert!(result.exit_ok);
         assert!(result.error.is_none());
@@ -1582,7 +2061,7 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("scout");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("scout");
 
         // Seed an existing preview via the real write-back path used on
         // success, so this test proves the SAME mechanism, not a hand-built
@@ -1596,7 +2075,7 @@ mod tests {
             stub.to_str().expect("utf8 stub path"),
         );
 
-        let result = run_bot_handoff("scout", "hello", None, None);
+        let result = run_bot_handoff("scout", "hello", None, None, &ResolvedBotCredential::Dotenv);
         assert!(result.is_err());
 
         let index = load_bot_meta_map(&crate::server::bot_meta_api::bot_meta_index_path())
@@ -1768,7 +2247,7 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("scout");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("scout");
         // `printf` emits real ESC bytes for the ANSI portion, followed by
         // the "reply" on its own trailing echo — mirrors a real
         // `tracing_subscriber::fmt()` INFO line landing on stdout ahead of
@@ -1783,7 +2262,7 @@ mod tests {
             stub.to_str().expect("utf8 stub path"),
         );
 
-        let result = run_bot_handoff("scout", "hello", None, None).expect("stub success should Ok");
+        let result = run_bot_handoff("scout", "hello", None, None, &ResolvedBotCredential::Dotenv).expect("stub success should Ok");
         assert_eq!(result.reply, "the real answer");
         assert!(
             !result.reply.contains('\u{1b}'),
@@ -1801,7 +2280,7 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("scout");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("scout");
         let stub = write_stub_script(
             dir.path(),
             "stub-log-only.sh",
@@ -1812,7 +2291,7 @@ mod tests {
             stub.to_str().expect("utf8 stub path"),
         );
 
-        let result = run_bot_handoff("scout", "hello", None, None);
+        let result = run_bot_handoff("scout", "hello", None, None, &ResolvedBotCredential::Dotenv);
         assert!(matches!(
             result,
             Err(BotHandoffError::ReplyWasLogOnly { .. })
@@ -1840,7 +2319,7 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        let workspace = scaffold_profile_workspace("scout");
+        let workspace = crate::server::profile_fixture::scaffold_dispatchable_profile("scout");
         std::fs::write(workspace.join("SOUL.md"), "Legacy persona, pre-OF-6")
             .expect("seed legacy persona");
         let stub = write_stub_script(dir.path(), "stub-migrate.sh", "echo 'hi'");
@@ -1849,7 +2328,7 @@ mod tests {
             stub.to_str().expect("utf8 stub path"),
         );
 
-        run_bot_handoff("scout", "hello", None, None).expect("stub success should Ok");
+        run_bot_handoff("scout", "hello", None, None, &ResolvedBotCredential::Dotenv).expect("stub success should Ok");
 
         assert_eq!(
             std::fs::read_to_string(
@@ -1873,7 +2352,7 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("scout");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("scout");
         let stub = write_stub_script(
             dir.path(),
             "stub-think-only.sh",
@@ -1884,7 +2363,7 @@ mod tests {
             stub.to_str().expect("utf8 stub path"),
         );
 
-        let result = run_bot_handoff("scout", "hello", None, None)
+        let result = run_bot_handoff("scout", "hello", None, None, &ResolvedBotCredential::Dotenv)
             .expect("a think-only reply must still be a successful dispatch, not an error");
 
         assert!(
@@ -1907,7 +2386,7 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("scout");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("scout");
 
         // First dispatch: a real reply, establishes a preview.
         let stub_real = write_stub_script(dir.path(), "stub-real.sh", "echo 'the first real answer'");
@@ -1915,7 +2394,7 @@ mod tests {
             "IRONHERMES_WORKER_BIN",
             stub_real.to_str().expect("utf8 stub path"),
         );
-        run_bot_handoff("scout", "hello", None, None).expect("first dispatch should Ok");
+        run_bot_handoff("scout", "hello", None, None, &ResolvedBotCredential::Dotenv).expect("first dispatch should Ok");
         let index = load_bot_meta_map(&crate::server::bot_meta_api::bot_meta_index_path())
             .expect("load index");
         assert_eq!(
@@ -1937,7 +2416,7 @@ mod tests {
             "IRONHERMES_WORKER_BIN",
             stub_think.to_str().expect("utf8 stub path"),
         );
-        run_bot_handoff("scout", "hello again", None, None)
+        run_bot_handoff("scout", "hello again", None, None, &ResolvedBotCredential::Dotenv)
             .expect("a think-only reply must still be a successful dispatch");
 
         let index_after = load_bot_meta_map(&crate::server::bot_meta_api::bot_meta_index_path())
@@ -1958,7 +2437,7 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("scout");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("scout");
         let stub = write_stub_script(
             dir.path(),
             "stub-think-plus-real.sh",
@@ -1969,7 +2448,7 @@ mod tests {
             stub.to_str().expect("utf8 stub path"),
         );
 
-        let result = run_bot_handoff("scout", "hello", None, None).expect("stub success should Ok");
+        let result = run_bot_handoff("scout", "hello", None, None, &ResolvedBotCredential::Dotenv).expect("stub success should Ok");
 
         assert!(
             result.reply.contains("<think>"),
@@ -1993,14 +2472,14 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("scout");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("scout");
         let stub = write_stub_script(dir.path(), "stub-plain.sh", "echo 'a perfectly ordinary reply'");
         let _bin_guard = ScopedEnv::set(
             "IRONHERMES_WORKER_BIN",
             stub.to_str().expect("utf8 stub path"),
         );
 
-        let result = run_bot_handoff("scout", "hello", None, None).expect("stub success should Ok");
+        let result = run_bot_handoff("scout", "hello", None, None, &ResolvedBotCredential::Dotenv).expect("stub success should Ok");
         assert_eq!(result.reply, "a perfectly ordinary reply");
 
         let index = load_bot_meta_map(&crate::server::bot_meta_api::bot_meta_index_path())
@@ -2089,7 +2568,7 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("zig");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("zig");
         let stub = write_stub_script(
             dir.path(),
             "stub-sleep30.sh",
@@ -2104,7 +2583,14 @@ mod tests {
         let token_for_task = token.clone();
         let start = std::time::Instant::now();
         let handle = tokio::task::spawn_blocking(move || {
-            run_bot_handoff_with_cancel("zig", "hello", None, None, Some(&token_for_task))
+            run_bot_handoff_with_cancel(
+                "zig",
+                "hello",
+                None,
+                None,
+                Some(&token_for_task),
+                &ResolvedBotCredential::Dotenv,
+            )
         });
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
         token.cancel();
@@ -2123,19 +2609,26 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("zig");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("zig");
         let stub = write_stub_script(dir.path(), "stub-fixed-reply.sh", "echo 'fixed reply text'");
         let _bin_guard = ScopedEnv::set(
             "IRONHERMES_WORKER_BIN",
             stub.to_str().expect("utf8 stub path"),
         );
 
-        let four_arg = tokio::task::spawn_blocking(|| run_bot_handoff("zig", "hello", None, None))
+        let four_arg = tokio::task::spawn_blocking(|| run_bot_handoff("zig", "hello", None, None, &ResolvedBotCredential::Dotenv))
             .await
             .expect("spawn_blocking join must succeed")
             .expect("four-argument form should Ok");
         let five_arg = tokio::task::spawn_blocking(|| {
-            run_bot_handoff_with_cancel("zig", "hello", None, None, None)
+            run_bot_handoff_with_cancel(
+                "zig",
+                "hello",
+                None,
+                None,
+                None,
+                &ResolvedBotCredential::Dotenv,
+            )
         })
         .await
         .expect("spawn_blocking join must succeed")
@@ -2156,7 +2649,7 @@ mod tests {
         crate::server::handoff_steering::reset_steering_for_test();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("zig");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("zig");
         let stub = write_stub_script(
             dir.path(),
             "stub-tracked-ok.sh",
@@ -2225,7 +2718,7 @@ mod tests {
         crate::server::handoff_steering::reset_steering_for_test();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("zig");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("zig");
         let stub = write_stub_script(
             dir.path(),
             "stub-tracked-cancel.sh",
@@ -2290,7 +2783,7 @@ mod tests {
         crate::server::handoff_steering::reset_steering_for_test();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("zig");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("zig");
         let stub = write_stub_script(dir.path(), "stub-tracked-fail.sh", "exit 9");
         let _bin_guard = ScopedEnv::set(
             "IRONHERMES_WORKER_BIN",
@@ -2337,7 +2830,7 @@ mod tests {
         crate::server::handoff_steering::reset_steering_for_test();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("zig");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("zig");
         let stub = write_stub_script(
             dir.path(),
             "stub-detached-drop.sh",
@@ -2425,7 +2918,7 @@ mod tests {
         crate::server::handoff_steering::reset_steering_for_test();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("zig");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("zig");
         let stub = write_stub_script(
             dir.path(),
             "stub-detached-complete.sh",
@@ -2510,7 +3003,7 @@ mod tests {
         crate::server::handoff_steering::reset_steering_for_test();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("zig");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("zig");
         steering_test_write_gate_config(dir.path());
 
         let capture_path = dir.path().join("capture.txt");
@@ -2582,7 +3075,7 @@ mod tests {
         crate::server::handoff_steering::reset_steering_for_test();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
-        scaffold_profile_workspace("zig");
+        crate::server::profile_fixture::scaffold_dispatchable_profile("zig");
         steering_test_write_gate_config(dir.path());
 
         let capture_path = dir.path().join("capture.txt");
@@ -2655,6 +3148,84 @@ mod tests {
             crate::server::handoff_steering::steering_depth("zig"),
             0,
             "G-50.2-2c: the queue must be empty once its contents have been drained into a turn"
+        );
+    }
+
+    // ----------------------------------------------------------------
+    // Bot-handoff timeout resolution (config > env > default, clamped).
+    // Pure-fn tests: no process env is touched, so these are safe under
+    // this crate's default multi-threaded test runner.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn timeout_falls_back_to_default_when_nothing_is_configured() {
+        assert_eq!(
+            resolve_bot_handoff_timeout_seconds(None, None),
+            BOT_HANDOFF_TIMEOUT_SECONDS_DEFAULT
+        );
+        assert_eq!(BOT_HANDOFF_TIMEOUT_SECONDS_DEFAULT, 600);
+    }
+
+    #[test]
+    fn config_value_wins_over_env_and_default() {
+        assert_eq!(
+            resolve_bot_handoff_timeout_seconds(Some(900), Some("300")),
+            900
+        );
+    }
+
+    #[test]
+    fn env_is_read_only_when_config_is_unset() {
+        assert_eq!(
+            resolve_bot_handoff_timeout_seconds(None, Some("1200")),
+            1200
+        );
+        assert_eq!(
+            resolve_bot_handoff_timeout_seconds(None, Some(" 1200 ")),
+            1200,
+            "surrounding whitespace must not defeat the override"
+        );
+    }
+
+    #[test]
+    fn malformed_or_zero_env_falls_back_to_default_rather_than_clamping_to_min() {
+        for raw in ["", "   ", "abc", "0", "-5", "12.5"] {
+            assert_eq!(
+                resolve_bot_handoff_timeout_seconds(None, Some(raw)),
+                BOT_HANDOFF_TIMEOUT_SECONDS_DEFAULT,
+                "a malformed override ({raw:?}) must not silently become MIN"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_config_value_is_treated_as_unset_not_as_no_timeout() {
+        assert_eq!(
+            resolve_bot_handoff_timeout_seconds(Some(0), None),
+            BOT_HANDOFF_TIMEOUT_SECONDS_DEFAULT,
+            "0 must never disable the ceiling — that would pin a blocking-pool thread"
+        );
+        assert_eq!(
+            resolve_bot_handoff_timeout_seconds(Some(0), Some("1200")),
+            1200,
+            "an unset (0) config value must fall through to the env override"
+        );
+    }
+
+    #[test]
+    fn resolved_value_is_clamped_to_the_supported_range() {
+        assert_eq!(
+            resolve_bot_handoff_timeout_seconds(Some(1), None),
+            BOT_HANDOFF_TIMEOUT_SECONDS_MIN
+        );
+        assert_eq!(
+            resolve_bot_handoff_timeout_seconds(Some(u64::MAX), None),
+            BOT_HANDOFF_TIMEOUT_SECONDS_MAX
+        );
+        assert_eq!(
+            resolve_bot_handoff_timeout_seconds(None, Some("999999")),
+            BOT_HANDOFF_TIMEOUT_SECONDS_MAX,
+            "an env override must be clamped exactly as a config value is"
         );
     }
 }

@@ -197,7 +197,7 @@ pub async fn run_goal_loop_if_enabled(
     let max_turns: u32 = ironhermes_kanban::kanban_env("GOAL_MAX_TURNS")
         .and_then(|s| s.parse().ok())
         .filter(|n| *n > 0)
-        .unwrap_or(20);
+        .unwrap_or(ironhermes_kanban::judge::GOAL_DEFAULT_MAX_TURNS);
 
     // Fetch task title + body once for judge requests. We re-fetch the
     // task on each iteration for the self-termination status check
@@ -361,7 +361,7 @@ pub async fn run_goal_loop_if_enabled(
                     );
                 }
                 consecutive_judge_errors += 1;
-                if consecutive_judge_errors >= 2 {
+                if consecutive_judge_errors >= ironhermes_kanban::judge::GOAL_JUDGE_ERROR_STRIKES {
                     synthetic_kanban_block(&store, task_id, run_id, "judge unavailable").await?;
                     sentinel.done = true;
                     return Ok(());

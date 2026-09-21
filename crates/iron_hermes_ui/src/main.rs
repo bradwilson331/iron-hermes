@@ -155,7 +155,7 @@ async fn main() {
     // auth-disabled fall-through) and build the shared AuthState. A
     // malformed `web_ui.auth.password_hash` PHC string is also a startup
     // error here (AuthState::new), not a per-login 500.
-    let auth_config = server::auth::auth_config_from(&app_state.config)
+    let auth_config = server::auth::auth_config_from(&app_state.config())
         .await
         .expect("failed to resolve web_ui.auth config (sealed/corrupt vault, or malformed hash)");
     // D-04 (49.1.1): capture whether an origin allowlist is configured BEFORE
@@ -218,8 +218,8 @@ async fn main() {
     // can introspect a broken config. This guard is a property of the
     // always-agent-serving web binary, which is the only thing
     // `docker/web-entrypoint.sh` execs — do not "fix" that asymmetry.
-    let main_provider = app_state.config.model.provider.clone();
-    match app_state.resolver.resolve(&main_provider) {
+    let main_provider = app_state.config().model.provider.clone();
+    match app_state.resolver().resolve(&main_provider) {
         Some(endpoint) => {
             if !ironhermes_core::provider::provider_key_guard_allows(
                 endpoint.api_key.as_deref(),
@@ -228,7 +228,7 @@ async fn main() {
                 let msg = provider_key_guard_refusal_message(
                     &main_provider,
                     &endpoint.base_url,
-                    &app_state.config,
+                    &app_state.config(),
                 );
                 tracing::error!(target: "iron_hermes_ui", "{msg}");
                 panic!("{msg}");
@@ -281,6 +281,13 @@ async fn main() {
         .route(
             "/artifacts/{id}",
             axum::routing::get(server::artifact_route::serve_artifact),
+        )
+        // Phase 52.1 Plan 02 (D-03): raw axum route for the unrendered
+        // artifact source download. Must mirror the mount below in
+        // login_page.rs's second router construction exactly.
+        .route(
+            "/artifacts/{id}/raw",
+            axum::routing::get(server::artifact_route::serve_artifact_raw),
         )
         // Phase 46.7 Plan 05 (D-06): raw axum route for session-attachment
         // serving (sent-bubble image thumbnails + non-image download chips).

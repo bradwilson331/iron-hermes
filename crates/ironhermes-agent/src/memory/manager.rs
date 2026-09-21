@@ -175,6 +175,133 @@ impl MemoryManager {
         self.handle_tool_call("memory_remove", args).await
     }
 
+    // ---- Index-addressed writes (Plan 50.4-02, D-03/D-04) ----
+    //
+    // These call the `MemoryProvider` trait directly rather than routing
+    // through `handle_tool_call` — the index API is the operator's path, not
+    // an agent tool, and D-03's premise is that widening the tool surface to
+    // cover it is the wrong shape. `handle_tool_call` is where the
+    // `user_profile_enabled` refusal and the mirror fanout live, so both are
+    // reproduced explicitly (duplicated, not extracted into a shared helper
+    // — the two blocks are short and the duplication is what keeps this an
+    // operator-only path rather than tempting a future author to route it
+    // back through the tool dispatcher) in each method below rather than lost.
+
+    /// Replace the entry at `idx`, guarded by `expected_text` (D-04).
+    /// Re-enforces the `user_profile_enabled` refusal `handle_tool_call`
+    /// applies to the substring path, and fans out to a configured mirror
+    /// with the same action/target/content shape `replace` produces.
+    pub async fn replace_at(
+        &self,
+        target: MemoryTarget,
+        idx: usize,
+        expected_text: &str,
+        new_content: &str,
+    ) -> MemoryResult {
+        // GAP-4 / T-21.4-03 parity, T-50.4-09b: reject User-target writes
+        // when user_profile_enabled=false, exactly as handle_tool_call does.
+        if !self.user_profile_enabled && target == MemoryTarget::User {
+            return Err("User profile memory is disabled via configuration. \
+                         Enable it with memory.user_profile_enabled=true in config.yaml."
+                .to_string());
+        }
+
+        // 1. Run the write on the primary. Drop guard before mirror call.
+        let outcome = {
+            let mut p = self.primary.lock().await;
+            p.replace_at(target, idx, expected_text, new_content)?
+        };
+
+        // 2. Fire the mirror if one is configured (T-50.4-09c). The triple is
+        // constructed directly rather than through infer_action_target_content,
+        // which matches on tool name and would return None for an
+        // index-addressed call, silently dropping the mirror write.
+        if let Some(mirror) = &self.mirror {
+            let mirror = Arc::clone(mirror);
+            let content = new_content.to_string();
+            let action = MemoryAction::Replace;
+            let fut = async move {
+                let mut m = mirror.lock().await;
+                m.on_memory_write(action, target, &content).await
+            };
+            match tokio::time::timeout(MIRROR_TIMEOUT, fut).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        action = ?action,
+                        target = ?target,
+                        error = %e,
+                        "mirror on_memory_write failed; primary write succeeded"
+                    );
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        action = ?action,
+                        target = ?target,
+                        timeout_secs = MIRROR_TIMEOUT.as_secs(),
+                        "mirror on_memory_write timed out; primary write succeeded"
+                    );
+                }
+            }
+        }
+
+        Ok(outcome)
+    }
+
+    /// Remove the entry at `idx`, guarded by `expected_text` (D-04). Mirrors
+    /// `replace_at`'s re-enforced guard and mirror fanout.
+    pub async fn remove_at(
+        &self,
+        target: MemoryTarget,
+        idx: usize,
+        expected_text: &str,
+    ) -> MemoryResult {
+        if !self.user_profile_enabled && target == MemoryTarget::User {
+            return Err("User profile memory is disabled via configuration. \
+                         Enable it with memory.user_profile_enabled=true in config.yaml."
+                .to_string());
+        }
+
+        let outcome = {
+            let mut p = self.primary.lock().await;
+            p.remove_at(target, idx, expected_text)?
+        };
+
+        // `expected_text` is the `old_text` analog here: the body of the
+        // entry that was removed, exactly what `memory_remove` sends its
+        // mirror.
+        if let Some(mirror) = &self.mirror {
+            let mirror = Arc::clone(mirror);
+            let content = expected_text.to_string();
+            let action = MemoryAction::Remove;
+            let fut = async move {
+                let mut m = mirror.lock().await;
+                m.on_memory_write(action, target, &content).await
+            };
+            match tokio::time::timeout(MIRROR_TIMEOUT, fut).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(
+                        action = ?action,
+                        target = ?target,
+                        error = %e,
+                        "mirror on_memory_write failed; primary write succeeded"
+                    );
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        action = ?action,
+                        target = ?target,
+                        timeout_secs = MIRROR_TIMEOUT.as_secs(),
+                        "mirror on_memory_write timed out; primary write succeeded"
+                    );
+                }
+            }
+        }
+
+        Ok(outcome)
+    }
+
     // ---- Read paths (primary only per D-26, D-28) ----
     pub async fn prefetch(&self, session_id: &str) -> anyhow::Result<MemoryEntries> {
         let p = self.primary.lock().await;
@@ -676,5 +803,134 @@ mod tests {
             "Memory-target write must succeed when user_profile_enabled=false, got: {:?}",
             result.err()
         );
+    }
+
+    // =========================================================================
+    // Plan 50.4-02: replace_at / remove_at (D-03, D-04, T-50.4-09b, T-50.4-09c)
+    // =========================================================================
+
+    #[tokio::test]
+    async fn test_manager_replace_at_round_trips() {
+        let (primary, _tmp) = primary_file();
+        let mgr = MemoryManager::new(primary, None).await.unwrap();
+        mgr.add(MemoryTarget::Memory, "original fact").await.unwrap();
+
+        let result = mgr
+            .replace_at(MemoryTarget::Memory, 0, "original fact", "updated fact")
+            .await;
+        assert!(result.is_ok(), "replace_at should succeed: {:?}", result);
+
+        let entries = mgr.to_memory_entries().await;
+        let mem_entries = entries.entries.get(&MemoryTarget::Memory).unwrap();
+        assert_eq!(mem_entries, &vec!["updated fact".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_manager_remove_at_refuses_on_stale_expected_text() {
+        let (primary, _tmp) = primary_file();
+        let mgr = MemoryManager::new(primary, None).await.unwrap();
+        mgr.add(MemoryTarget::Memory, "original fact").await.unwrap();
+
+        let result = mgr.remove_at(MemoryTarget::Memory, 0, "stale text").await;
+        assert!(
+            result.is_err(),
+            "remove_at should refuse a stale expected_text"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("entry_changed"),
+            "the store's refusal must survive the trait-object hop intact, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_manager_replace_at_refuses_user_target_when_user_profile_disabled() {
+        let (primary, tmp) = primary_file();
+        let mut mgr = MemoryManager::new(primary, None).await.unwrap();
+
+        // Seed a User entry while enabled, then disable.
+        mgr.add(MemoryTarget::User, "user entry").await.unwrap();
+        mgr.set_user_profile_enabled(false);
+
+        let user_md = tmp.path().join("memories").join("USER.md");
+        let before = std::fs::read(&user_md).unwrap();
+
+        let result = mgr
+            .replace_at(MemoryTarget::User, 0, "user entry", "new body")
+            .await;
+        assert!(
+            result.is_err(),
+            "replace_at on User target must be refused when user_profile_enabled=false"
+        );
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("user_profile_enabled"),
+            "error must mention the config key, got: {msg}"
+        );
+
+        let after = std::fs::read(&user_md).unwrap();
+        assert_eq!(
+            before, after,
+            "USER.md must be byte-identical after a refused write"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_manager_remove_at_allows_memory_target_when_user_profile_disabled() {
+        let (primary, _tmp) = primary_file();
+        let mut mgr = MemoryManager::new(primary, None).await.unwrap();
+        mgr.add(MemoryTarget::Memory, "memory entry").await.unwrap();
+        mgr.set_user_profile_enabled(false);
+
+        let result = mgr.remove_at(MemoryTarget::Memory, 0, "memory entry").await;
+        assert!(
+            result.is_ok(),
+            "remove_at on Memory target must succeed when only user_profile is disabled, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_manager_replace_at_notifies_the_mirror_with_the_replace_action() {
+        let (primary, _tmp) = primary_file();
+        let (mirror_provider, recorder_inner) = MockRecorderProvider::new();
+        let mirror: SharedProvider = Arc::new(Mutex::new(mirror_provider));
+        let mgr = MemoryManager::new(primary, Some(mirror)).await.unwrap();
+
+        mgr.add(MemoryTarget::Memory, "original fact").await.unwrap();
+        mgr.replace_at(MemoryTarget::Memory, 0, "original fact", "updated fact")
+            .await
+            .unwrap();
+
+        let writes = recorder_inner.lock().unwrap().writes.clone();
+        let replace_write = writes
+            .iter()
+            .find(|(action, ..)| *action == MemoryAction::Replace)
+            .expect("mirror should have observed a Replace write");
+        assert_eq!(replace_write.0, MemoryAction::Replace);
+        assert_eq!(replace_write.1, MemoryTarget::Memory);
+        assert_eq!(replace_write.2, "updated fact");
+    }
+
+    #[tokio::test]
+    async fn test_manager_remove_at_notifies_the_mirror_with_the_remove_action() {
+        let (primary, _tmp) = primary_file();
+        let (mirror_provider, recorder_inner) = MockRecorderProvider::new();
+        let mirror: SharedProvider = Arc::new(Mutex::new(mirror_provider));
+        let mgr = MemoryManager::new(primary, Some(mirror)).await.unwrap();
+
+        mgr.add(MemoryTarget::Memory, "fact to remove").await.unwrap();
+        mgr.remove_at(MemoryTarget::Memory, 0, "fact to remove")
+            .await
+            .unwrap();
+
+        let writes = recorder_inner.lock().unwrap().writes.clone();
+        let remove_write = writes
+            .iter()
+            .find(|(action, ..)| *action == MemoryAction::Remove)
+            .expect("mirror should have observed a Remove write");
+        assert_eq!(remove_write.0, MemoryAction::Remove);
+        assert_eq!(remove_write.1, MemoryTarget::Memory);
+        assert_eq!(remove_write.2, "fact to remove");
     }
 }

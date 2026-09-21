@@ -287,4 +287,90 @@ fi
 echo "    OK"
 echo
 
-echo "==> All 21.7 + 47.3 + 49.1 CI gates green."
+# -----------------------------------------------------------------------------
+# Gate 9 / h2-0.4-floor / Phase 52:
+#   Compensating control for the RUSTSEC-2026-0258 entry in .cargo/audit.toml.
+#
+#   Two copies of `h2` are in the lockfile. The 0.3.x copy is unfixable from here
+#   (actix-http 3.x <- actix-web 4.x <- the pinned rusty_vault git rev), so its
+#   advisory is risk-accepted. But cargo-audit ignores by ADVISORY ID, not by
+#   crate version — so that one ignore also silences the same advisory against
+#   the 0.4.x copy, which IS ours (reqwest/hyper) and WAS fixed by bumping it to
+#   0.4.16. Without this gate, a future re-resolve could quietly walk h2 0.4.x
+#   back below 0.4.16 and `cargo audit` would stay green.
+#
+#   This gate reads Cargo.lock directly and fails if the 0.4 line regresses.
+#   Delete it only when the audit.toml ignore for RUSTSEC-2026-0258 is deleted.
+# -----------------------------------------------------------------------------
+echo "--> Gate 9 (h2-0.4-floor): h2 0.4.x is at or above the RUSTSEC-2026-0258 fix"
+H2_MIN_MINOR=4
+H2_MIN_PATCH=16
+H2_04_VERSION=$(awk '
+    /^name = "h2"$/ { inpkg = 1; next }
+    inpkg && /^version = / { gsub(/[">]/, "", $3); if ($3 ~ /^0\.4\./) print $3; inpkg = 0 }
+' Cargo.lock | head -1)
+
+if [ -z "${H2_04_VERSION}" ]; then
+    echo "    GATE FAIL (h2-0.4-floor): no h2 0.4.x entry found in Cargo.lock."
+    echo "    If h2 0.4.x was intentionally removed, delete this gate AND the"
+    echo "    RUSTSEC-2026-0258 ignore in .cargo/audit.toml together."
+    exit 1
+fi
+
+# Phase 52 review IN-01: the previous one-liner was `H2_PATCH=${H2_04_VERSION##*.}`,
+# which assumes a bare three-component MAJOR.MINOR.PATCH. crates.io h2 releases are
+# exactly that today, so this was never a live failure — but the version string is
+# read from a file cargo rewrites, and semver permits a pre-release or build-metadata
+# suffix. On `0.4.16-rc1` the old expression yielded `16-rc1`, and `[ 16-rc1 -lt 16 ]`
+# aborts the script with a raw shell arithmetic error instead of this gate's own
+# crafted GATE FAIL text. Worse, on `0.4.16-rc.1` it yielded `1` — numeric, no error,
+# and the gate reported "h2 0.4.16-rc.1 is below 0.4.16" for the right verdict via
+# entirely bogus arithmetic. So: strip any `-pre` / `+build` suffix first, then
+# require what remains to be all digits before comparing.
+H2_CORE=${H2_04_VERSION%%[-+]*}
+H2_PATCH=${H2_CORE##*.}
+
+case "${H2_PATCH}" in
+    ''|*[!0-9]*)
+        echo "    GATE FAIL (h2-0.4-floor): cannot read a numeric patch level from"
+        echo "    the h2 0.4.x version '${H2_04_VERSION}' in Cargo.lock"
+        echo "    (parsed core '${H2_CORE}', patch '${H2_PATCH}')."
+        echo "    This gate compares patch levels numerically and refuses to guess."
+        echo "    Check the Cargo.lock entry, then update this gate's parser if h2"
+        echo "    has genuinely adopted a new version format."
+        exit 1
+        ;;
+esac
+
+# A pre-release SORTS BELOW the release of the same version (semver §11: 0.4.16-rc1
+# precedes 0.4.16), so it does NOT contain the RUSTSEC-2026-0258 fix even though its
+# patch number equals the floor. Reject it explicitly; a pre-release of a LATER patch
+# (0.4.17-rc1) is past the fix and passes on the numeric comparison below.
+H2_IS_PRERELEASE=no
+case "${H2_04_VERSION}" in
+    *-*) H2_IS_PRERELEASE=yes ;;
+esac
+
+if [ "${H2_IS_PRERELEASE}" = yes ] && [ "${H2_PATCH}" -eq "${H2_MIN_PATCH}" ]; then
+    echo "    GATE FAIL (h2-0.4-floor): h2 ${H2_04_VERSION} is a pre-release of"
+    echo "    0.${H2_MIN_MINOR}.${H2_MIN_PATCH} and therefore precedes it — it does"
+    echo "    not contain the RUSTSEC-2026-0258 fix. Move to the final release:"
+    echo "        cargo update -p h2@${H2_04_VERSION} --precise 0.${H2_MIN_MINOR}.${H2_MIN_PATCH}"
+    exit 1
+fi
+
+if [ "${H2_PATCH}" -lt "${H2_MIN_PATCH}" ]; then
+    echo "    GATE FAIL (h2-0.4-floor): h2 ${H2_04_VERSION} is below the"
+    echo "    RUSTSEC-2026-0258 fix version 0.${H2_MIN_MINOR}.${H2_MIN_PATCH}."
+    echo "    cargo audit will NOT catch this — the advisory is ignored in"
+    echo "    .cargo/audit.toml for the unfixable 0.3.x copy, and that ignore"
+    echo "    covers this copy too. Run:"
+    echo "        cargo update -p h2@${H2_04_VERSION} --precise 0.${H2_MIN_MINOR}.${H2_MIN_PATCH}"
+    echo "    then confirm the change landed in Cargo.lock — cargo prints an"
+    echo "    'Updating' line even when a later re-resolve reverts it."
+    exit 1
+fi
+echo "    OK (h2 ${H2_04_VERSION})"
+echo
+
+echo "==> All 21.7 + 47.3 + 49.1 + 52 CI gates green."

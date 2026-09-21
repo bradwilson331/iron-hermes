@@ -21,7 +21,7 @@ use ironhermes_tools::memory_tool::SharedMemoryManager;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-use crate::{AnyClientSummarizationHandle, AnyClientVisionHandle};
+use crate::{AnyClientSummarizationHandle, AnyClientVisionHandle, SharedResolver};
 
 #[derive(Clone)]
 pub struct DelegateTaskWiring {
@@ -59,6 +59,20 @@ pub struct AppRuntimeFactoryInput {
     /// Phase 36.17.5 D-13 / D-15: gateway-supplied audio dispatcher for the Telegram arm.
     /// None for CLI/Local-only paths.
     pub telegram_adapter: Option<Arc<dyn ironhermes_tools::AudioDispatcher>>,
+    /// Phase 50.4 (D-14, wave 2): the caller's shared, swappable resolver
+    /// handle — the SAME handle object `AgentRuntime::reload_config_and_resolver`
+    /// publishes into. `None` by default (this struct derives `Default`, and
+    /// callers construct it with `..Default::default()`), so an optional
+    /// field is additive and no caller outside `AgentRuntime::from_config`
+    /// needs touching.
+    ///
+    /// When `None`, `build_app_runtime_bundle` derives a PRIVATE handle
+    /// wrapping `resolver` above — identical behaviour to before this field
+    /// existed, which is what keeps every non-web surface (CLI run_chat /
+    /// run_single / run_gateway via any path that doesn't set this) working
+    /// unchanged. When `Some`, the vision and web-extract tool handles read
+    /// through it and therefore follow a mid-session reload.
+    pub resolver_handle: Option<SharedResolver>,
 }
 
 pub struct AppRuntimeBundle {
@@ -99,9 +113,32 @@ pub struct AppRuntimeBundle {
     pub bb_recorder: Option<Arc<ironhermes_blackbox::BlackBoxRecorder>>,
 }
 
+/// Phase 50.4 (D-14, wave 2): derive the effective resolver handle a caller's
+/// `AppRuntimeFactoryInput` should hand to the vision/web-extract tool
+/// handles. Extracted as a pure, synchronous helper — independent of
+/// `build_app_runtime_bundle`'s async vault/registry/MCP machinery — so the
+/// derivation itself is unit-testable without driving the full (heavy)
+/// bundle build.
+///
+/// A caller that supplies `resolver_handle: Some(..)` (only
+/// `AgentRuntime::from_config` does, today) gets reload-following tools; a
+/// caller that supplies none gets a PRIVATE handle wrapping the resolver it
+/// passed — identical behaviour to before this field existed, which is what
+/// keeps every non-web surface working unchanged.
+fn derive_resolver_handle(input: &AppRuntimeFactoryInput) -> SharedResolver {
+    input
+        .resolver_handle
+        .clone()
+        .unwrap_or_else(|| Arc::new(std::sync::RwLock::new(input.resolver.clone())))
+}
+
 pub async fn build_app_runtime_bundle(
     input: AppRuntimeFactoryInput,
 ) -> anyhow::Result<AppRuntimeBundle> {
+    // Derive the effective resolver handle once, at the top, before either
+    // tool-handle constructor below is reached (Phase 50.4 D-14, wave 2).
+    let resolver_handle: SharedResolver = derive_resolver_handle(&input);
+
     // Phase 27.1.1-gap-02: compute the merged config once at bundle construction.
     // with_default_toolsets_merged() fills absent toolset entries with enabled=true
     // (back-compat: old configs that predate a toolset keep full access), while
@@ -285,7 +322,7 @@ pub async fn build_app_runtime_bundle(
 
     let browser_session: Arc<tokio::sync::Mutex<Option<BrowserSession>>> =
         Arc::new(tokio::sync::Mutex::new(None));
-    let vision_handle = Arc::new(AnyClientVisionHandle::new(input.resolver.clone()));
+    let vision_handle = Arc::new(AnyClientVisionHandle::new(resolver_handle.clone()));
     registry.register_browser_tools_with_vision(
         browser_session.clone(),
         input.resolver.clone(),
@@ -322,7 +359,7 @@ pub async fn build_app_runtime_bundle(
     // toolset filter hides the schema).
     registry.register_skill_manage_tool();
 
-    let summarization_handle = Arc::new(AnyClientSummarizationHandle::new(input.resolver.clone()));
+    let summarization_handle = Arc::new(AnyClientSummarizationHandle::new(resolver_handle.clone()));
     registry.register_web_extract_tool(summarization_handle, skill_registry.clone());
 
     let rpc_registry = build_rpc_registry(input.memory_manager.clone(), tool_credentials.clone());
@@ -623,7 +660,39 @@ mod tests {
             emit_mcp_startup_logs: false,
             session_key: None,
             telegram_adapter: None,
+            resolver_handle: None,
         }
+    }
+
+    /// Test 3 (Phase 50.4 D-14, wave 2): a caller that supplies no
+    /// `resolver_handle` — the CLI/default path — still gets a working
+    /// handle that reads back the resolver it DID supply via `resolver`,
+    /// not a panic and not an empty handle. Exercises `derive_resolver_handle`
+    /// directly rather than the full async `build_app_runtime_bundle` — the
+    /// derivation is a pure, synchronous computation, and driving the full
+    /// bundle build (vault open, tool registry, MCP startup) to observe it
+    /// would be disproportionate to what this test actually asserts.
+    #[test]
+    fn factory_derives_a_resolver_handle_when_none_is_supplied() {
+        let input = default_input();
+        assert!(
+            input.resolver_handle.is_none(),
+            "test precondition: default_input() must supply no resolver_handle"
+        );
+        let expected_provider = input.resolver.main_provider().to_string();
+
+        let derived = derive_resolver_handle(&input);
+
+        let observed = match derived.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        assert_eq!(
+            observed.main_provider(),
+            expected_provider,
+            "a caller supplying no resolver_handle must still get a handle reading back the \
+             resolver it DID supply"
+        );
     }
 
     #[tokio::test]
@@ -848,6 +917,7 @@ mod tests {
             emit_mcp_startup_logs: false,
             session_key: None,
             telegram_adapter: None,
+            resolver_handle: None,
         };
 
         let bundle = build_app_runtime_bundle(input)
@@ -910,6 +980,7 @@ mod tests {
             emit_mcp_startup_logs: false,
             session_key: None,
             telegram_adapter: None,
+            resolver_handle: None,
         };
 
         let bundle = build_app_runtime_bundle(input)
@@ -966,6 +1037,7 @@ mod tests {
             emit_mcp_startup_logs: false,
             session_key: None,
             telegram_adapter: None,
+            resolver_handle: None,
         };
 
         let bundle = build_app_runtime_bundle(input)

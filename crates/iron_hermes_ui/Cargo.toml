@@ -1,7 +1,7 @@
 [package]
 name = "iron_hermes_ui"
 version.workspace = true
-authors = ["Brad Wilson <bradwilson331@users.noreply.github.com>"]
+authors.workspace = true
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -304,6 +304,27 @@ tempfile = "3"
 # precedent elsewhere in this crate (PATTERNS.md "No Analog Found"). Already
 # resolved transitively at 0.5.3 (axum's own dep tree).
 tower = { version = "0.5", features = ["util"] }
+# Phase 52 code-review follow-up: `model_picker.rs`'s
+# `on_change_fires_on_confirmed_row_pick_not_on_typing` test drives a real
+# `VirtualDom` through `dioxus::html::SerializedHtmlEventConverter`,
+# `SerializedMouseData` and `SerializedFormData`. All three live behind
+# `dioxus-html`'s `serialize` feature, and the `dioxus` facade declares
+# `dioxus-html` with `default-features = false` (dioxus-html's default IS
+# `serialize`, so turning defaults off drops it). Of the renderer crates only
+# `dioxus-desktop` re-enables it — `dioxus-web`, `dioxus-server` and
+# `dioxus-fullstack` all take it with defaults off — so under this crate's own
+# `web`/`server` builds those three types did not exist and the ENTIRE
+# `--bin iron_hermes_ui` TEST target failed to compile (E0425/E0422), taking
+# every unit test in the crate down with it while `cargo check` stayed green.
+#
+# Declared in dev-dependencies rather than [dependencies] deliberately: under
+# `resolver = "2"` a dev-dependency's features are unified only when building
+# tests/benches, never for a plain `cargo build` / `dx build`, so the wasm
+# bundle's dependency graph and size are unchanged. Version tracks what the
+# dioxus 0.7.1 facade already resolves to (0.7.7), so Cargo.lock gains only the
+# one `"dioxus-html",` edge line under this crate's entry — no new package and
+# no version change anywhere in the graph.
+dioxus-html = { version = "0.7.7", default-features = false, features = ["serialize"] }
 
 [features]
 default = ["web"]
@@ -340,4 +361,19 @@ avatar = []
 # Phase 46.8 Plan 07 (D-07): threads the RustyVault backend into the vault
 # fallback consulted by AppState::init. Off by default — env-var backend
 # (always-on, no cargo feature required) remains the default.
-rusty-vault = ["ironhermes-vault/rusty-vault"]
+#
+# Phase 51 UAT gap-closure (post-07): this forward was INCOMPLETE — see
+# `ironhermes-cli/Cargo.toml`'s identical note and `51-07-SUMMARY.md` for the
+# full incident record. `ironhermes-core::dispatch_gate`'s vault branch
+# (reached by `profile_api.rs`/`profile_verify_api.rs`'s server fns) and
+# `ironhermes-kanban`'s dispatcher wiring are gated behind THEIR OWN
+# `rusty-vault` features, and this crate depends on `ironhermes-core`,
+# `ironhermes-kanban`, AND `ironhermes-cli` directly (native target table,
+# lines ~159/197/165) — all three needed forwarding, not just
+# `ironhermes-vault` itself.
+rusty-vault = [
+    "ironhermes-vault/rusty-vault",
+    "ironhermes-core/rusty-vault",
+    "ironhermes-kanban/rusty-vault",
+    "ironhermes-cli/rusty-vault",
+]

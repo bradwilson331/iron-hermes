@@ -45,10 +45,27 @@
 //! would spawn more concurrent subprocesses than the decision sanctions.
 //!
 //! **The per-member turn timeout is NOT part of this record.** 180 seconds
-//! (`BOT_HANDOFF_TIMEOUT_SECONDS`) is a fixed cap on `run_bot_handoff` with
+//! (`bot_handoff_timeout_seconds()`) is a configurable cap on `run_bot_handoff` with
 //! no extend-while-working mechanism (RESEARCH Pitfall 4) — the settings
 //! drawer surfaces it as read-only information, never a field this module
 //! would validate or persist.
+//!
+//! **Phase 52 Plan 04 (D-14): `GroupRoom.max_cycles` is the FIRST per-room
+//! override in this subsystem** — every other tunable on
+//! [`GroupChatSettings`] is app-wide only. This is a deliberate D-14
+//! precedent later patterns may reuse, not a drift from this module's own
+//! "single app-wide record" framing above: the record itself stays
+//! app-wide, a room may merely override ONE of its fields.
+//! [`crate::server::group_team_api::resolve_cycle_budget`] is the one place
+//! the room override and the app-wide value are combined and clamped.
+
+// Plan 04 (D-13/D-14): `TEAM_CYCLE_MIN`/`TEAM_CYCLE_MAX`/`TEAM_WORKERS_MIN`/
+// `TEAM_WORKERS_MAX` are `protocol.rs`'s single bound source for the whole
+// phase — `clamp_group_settings` below references them rather than
+// restating the literals, the same consts Plan 03's room-override check and
+// `resolve_cycle_budget`/`resolve_worker_fanout_cap` (Plan 04) use.
+#[cfg(feature = "server")]
+use crate::protocol::{TEAM_CYCLE_MAX, TEAM_CYCLE_MIN, TEAM_WORKERS_MAX, TEAM_WORKERS_MIN};
 
 use dioxus::prelude::*;
 
@@ -214,6 +231,31 @@ pub(crate) fn clamp_group_settings(s: &GroupChatSettings) -> Result<(), GroupSet
     }
     if s.min_members > s.max_members {
         return Err(GroupSettingsError::MemberBoundsInverted);
+    }
+    // Phase 52 Plan 04 (D-13/D-14, T-52-08): the SAVE-path half of the
+    // three-guard DoS bound this phase now carries (the other two are
+    // Plan 03's per-room `validate_team_room_shape` WRITE-path check and
+    // `resolve_cycle_budget`/`resolve_worker_fanout_cap`'s RESOLUTION-time
+    // clamp — see this module's own doc for why all three are needed).
+    // Ceiling rationale: at RESEARCH Pitfall 3's documented 900-second
+    // worst case per cycle, a budget of `TEAM_CYCLE_MAX` (5) is already a
+    // 75-minute drive — the same generous-ceiling-an-operator-would-never-
+    // approach reasoning the checks above already use. `TEAM_CYCLE_MAX` is
+    // also the structural fan-out ceiling anyway: `max_members` caps a room
+    // at 6 and one of those is always the leader.
+    if s.max_cycles < TEAM_CYCLE_MIN || s.max_cycles > TEAM_CYCLE_MAX {
+        return Err(GroupSettingsError::FieldOutOfRange {
+            field: "max_cycles".to_string(),
+            reason: format!("must be between {TEAM_CYCLE_MIN} and {TEAM_CYCLE_MAX}"),
+        });
+    }
+    if s.max_workers_per_delegation < TEAM_WORKERS_MIN
+        || s.max_workers_per_delegation > TEAM_WORKERS_MAX
+    {
+        return Err(GroupSettingsError::FieldOutOfRange {
+            field: "max_workers_per_delegation".to_string(),
+            reason: format!("must be between {TEAM_WORKERS_MIN} and {TEAM_WORKERS_MAX}"),
+        });
     }
     Ok(())
 }
@@ -393,6 +435,8 @@ mod tests {
             history_limit: 12,
             min_members: 3,
             max_members: 5,
+            max_cycles: 2,
+            max_workers_per_delegation: 3,
         };
         let saved = save_group_settings_impl(&custom).expect("save must succeed");
         assert_eq!(saved, custom);
@@ -541,9 +585,77 @@ mod tests {
             history_limit: 24,
             min_members: 5,
             max_members: 4,
+            max_cycles: 1,
+            max_workers_per_delegation: 5,
         };
         let err = clamp_group_settings(&s).unwrap_err();
         assert!(matches!(err, GroupSettingsError::MemberBoundsInverted));
+    }
+
+    #[test]
+    fn clamp_group_settings_rejects_an_out_of_range_max_cycles() {
+        for bad in [0u32, 6u32] {
+            let s = GroupChatSettings {
+                max_cycles: bad,
+                ..GroupChatSettings::default()
+            };
+            let err = clamp_group_settings(&s).unwrap_err();
+            assert!(
+                matches!(err, GroupSettingsError::FieldOutOfRange { ref field, .. } if field == "max_cycles"),
+                "max_cycles={bad} must be rejected, got {err:?}"
+            );
+        }
+        for good in [1u32, 5u32] {
+            let s = GroupChatSettings {
+                max_cycles: good,
+                ..GroupChatSettings::default()
+            };
+            clamp_group_settings(&s).unwrap_or_else(|e| panic!("max_cycles={good} must be accepted: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn clamp_group_settings_rejects_an_out_of_range_max_workers_per_delegation() {
+        for bad in [0u32, 6u32] {
+            let s = GroupChatSettings {
+                max_workers_per_delegation: bad,
+                ..GroupChatSettings::default()
+            };
+            let err = clamp_group_settings(&s).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    GroupSettingsError::FieldOutOfRange { ref field, .. } if field == "max_workers_per_delegation"
+                ),
+                "max_workers_per_delegation={bad} must be rejected, got {err:?}"
+            );
+        }
+        for good in [1u32, 5u32] {
+            let s = GroupChatSettings {
+                max_workers_per_delegation: good,
+                ..GroupChatSettings::default()
+            };
+            clamp_group_settings(&s)
+                .unwrap_or_else(|e| panic!("max_workers_per_delegation={good} must be accepted: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn clamp_group_settings_reports_max_cycles_and_max_workers_independently() {
+        // Both out of range at once — the module's own per-field
+        // independently-reported-rejection invariant means field ORDER
+        // decides which is reported first, matching every other pair of
+        // checks in this fn.
+        let s = GroupChatSettings {
+            max_cycles: 0,
+            max_workers_per_delegation: 0,
+            ..GroupChatSettings::default()
+        };
+        let err = clamp_group_settings(&s).unwrap_err();
+        assert!(matches!(
+            err,
+            GroupSettingsError::FieldOutOfRange { ref field, .. } if field == "max_cycles"
+        ));
     }
 
     // -------------------------------------------------------------------

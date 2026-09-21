@@ -24,11 +24,43 @@
 //! observe `active_round: None`); the render path is nonetheless written
 //! against the DTO's full contract, matching `GroupRoomSummary.needs_you`'s
 //! own precedent of shipping a field's read path ahead of its writer.
+//!
+//! Phase 52 Plan 07 (D-09, UI-SPEC Surface Contracts §1): `.kn-chip
+//! [data-kind="pattern"]` renders only when `room.pattern` is `Some` — same
+//! absence-not-dimmed convention as the two chips above, sourced via
+//! [`pattern_chip_for`]. The chip has no loading state and no error state of
+//! its own — it is derived from the already-fetched `GroupRoomSummary`, so a
+//! summary that fails to load takes the whole row with it, and there is
+//! nothing left to paint independently once the summary itself is in hand.
 
 use crate::components::hermes_app::widgets::bot_face::BotFace;
-use crate::protocol::{BotMeta, GroupRoomSummary};
+use crate::protocol::{BotMeta, GroupRoomSummary, TeamPattern};
 use dioxus::prelude::*;
 use std::collections::BTreeMap;
+
+/// Phase 52 Plan 07 (D-09, UI-SPEC Surface Contracts §1): the roster row's
+/// `TEAM` pattern chip decision, pure and unit-testable without a render
+/// harness. Returns `(label, tooltip)` when `summary.pattern` is `Some`,
+/// `None` for a peer room — the caller renders nothing at all in the `None`
+/// case (absence, never a dimmed placeholder, matching this file's existing
+/// `needs-you`/`round` convention above).
+///
+/// The label is always the fixed 4-character literal `TEAM` regardless of
+/// the pattern arm — a second pattern in a later phase changes only the
+/// tooltip returned here, never the visible chip text, so the chip can
+/// never overflow its container. Reads only `pattern`: a summary whose
+/// `pattern` is `Some` but whose `roles` map is empty (the D-07 invariant a
+/// hand-edited or pre-demotion record can still violate) still yields a
+/// chip here and never panics — the roster is a read surface and cannot be
+/// made unloadable by bad data.
+pub(crate) fn pattern_chip_for(summary: &GroupRoomSummary) -> Option<(&'static str, &'static str)> {
+    summary.pattern.as_ref().map(|pattern| {
+        let tooltip = match pattern {
+            TeamPattern::OrchestratorWorkers => "Orchestrator-workers",
+        };
+        ("TEAM", tooltip)
+    })
+}
 
 /// Phase 50.2 Plan 01: one `.kn-room-row`. `meta_map` is the SAME bot-name
 /// -> `BotMeta` map the caller (`BotRoster`) already built from
@@ -43,6 +75,7 @@ pub fn GroupRow(
 ) -> Element {
     let room_id = room.id.clone();
     let members_chip = format!("{}/6", room.members.len());
+    let pattern_chip = pattern_chip_for(&room);
 
     rsx! {
         div {
@@ -74,6 +107,12 @@ pub fn GroupRow(
                 }
                 div { class: "kn-bot-card-title", "{room.name}" }
                 span { class: "kn-chip", "data-kind": "members", "{members_chip}" }
+                // Pattern chip (D-09) — conditional, TEAM rooms only; a
+                // peer room omits it entirely (absence, not a dimmed
+                // placeholder, matching this file's existing convention).
+                if let Some((label, tooltip)) = pattern_chip {
+                    span { class: "kn-chip", "data-kind": "pattern", title: "{tooltip}", "{label}" }
+                }
                 // Round chip — conditional, dispatching only; idle rows
                 // omit it entirely (absence, not a dimmed placeholder).
                 if let Some(n) = room.active_round {
@@ -91,5 +130,59 @@ pub fn GroupRow(
                 div { class: "kn-bot-card-preview", "{preview}" }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod pattern_chip_for_tests {
+    use super::*;
+
+    fn summary(pattern: Option<TeamPattern>) -> GroupRoomSummary {
+        GroupRoomSummary {
+            id: "room-1".to_string(),
+            name: "Room One".to_string(),
+            members: vec!["alpha".to_string(), "beta".to_string()],
+            group: None,
+            needs_you: false,
+            preview: None,
+            preview_at_ms: None,
+            active_round: None,
+            pattern,
+        }
+    }
+
+    /// `<behavior>` bullet 1: a team room's summary yields the chip, a peer
+    /// room's summary yields `None` — the caller renders nothing at all in
+    /// that case.
+    #[test]
+    fn a_team_room_summary_renders_the_pattern_chip_and_a_peer_room_renders_none() {
+        let team = summary(Some(TeamPattern::OrchestratorWorkers));
+        assert!(pattern_chip_for(&team).is_some());
+
+        let peer = summary(None);
+        assert!(pattern_chip_for(&peer).is_none());
+    }
+
+    /// `<behavior>` bullet 2: the label is the fixed literal regardless of
+    /// pattern arm; the tooltip carries the full human-readable name.
+    #[test]
+    fn the_pattern_chip_label_is_the_fixed_literal_and_the_tooltip_carries_the_full_name() {
+        let (label, tooltip) =
+            pattern_chip_for(&summary(Some(TeamPattern::OrchestratorWorkers))).unwrap();
+        assert_eq!(label, "TEAM");
+        assert_eq!(tooltip, "Orchestrator-workers");
+    }
+
+    /// `<behavior>` bullet 3: a summary carrying `pattern: Some(..)` with no
+    /// leader is the state a hand-edited or pre-demotion `group-rooms.json`
+    /// can produce even though the write-path invariant (D-07) forbids
+    /// writing one — `GroupRoomSummary` has no `roles` field of its own for
+    /// this projection to depend on, so `pattern_chip_for` structurally
+    /// cannot read (or panic on) roles data; this test pins that a bare
+    /// `Some(pattern)` alone is sufficient.
+    #[test]
+    fn a_summary_with_a_pattern_and_no_leader_still_yields_a_chip() {
+        let malformed = summary(Some(TeamPattern::OrchestratorWorkers));
+        assert!(pattern_chip_for(&malformed).is_some());
     }
 }

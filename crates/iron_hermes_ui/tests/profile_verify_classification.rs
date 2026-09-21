@@ -118,8 +118,8 @@ fn verify_profile_never_bridges_through_the_unsafe_in_place_blocking_helper() {
     assert_eq!(
         src.matches("block_in_place").count(),
         0,
-        "structuring disk work in spawn_blocking and awaiting the judge \
-         future directly must avoid this bridge entirely"
+        "awaiting build_probe_setup and the judge future directly (Phase 51, D-14) \
+         must avoid this bridge entirely"
     );
 }
 

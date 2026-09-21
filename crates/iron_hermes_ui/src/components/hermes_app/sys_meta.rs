@@ -28,11 +28,26 @@
 //! and vocabulary are otherwise unchanged (D-plan prohibition — no redesign)
 //! — the provider segment reuses the existing separator/segment vocabulary
 //! rather than introducing new chrome.
+//!
+//! Phase 50.5 (D-12/D-13): the `TOK` segment's `{limit}` number gains a `~`
+//! provenance marker when the window came from the global pin or the
+//! 128,000 default — the two provenances that are NOT genuinely about the
+//! selected model. `context_source: None` (the `ConfigSummary` resource
+//! still resolving, or a fetch error) renders no marker either — a marker
+//! that appeared before provenance was known would assert a pin/default
+//! that may not be there.
 
 use dioxus::prelude::*;
 
+use crate::server::api::ContextWindowSource;
+
 #[component]
-pub fn SysMeta(model: String, provider: String, uptime_secs: u64) -> Element {
+pub fn SysMeta(
+    model: String,
+    provider: String,
+    uptime_secs: u64,
+    context_source: Option<ContextWindowSource>,
+) -> Element {
     // Phase 26.7.1 Plan 01 tokens context (provided at mod.rs:787-ish) —
     // already clamped to [0, denominator] at every write site (T-46.9-09).
     // Defensive re-clamp here costs nothing and guards any future write
@@ -57,6 +72,28 @@ pub fn SysMeta(model: String, provider: String, uptime_secs: u64) -> Element {
         format!("{h:02}:{m:02}:{s:02}")
     };
 
+    // Phase 50.5 (D-12): flag ONLY the two provenances that are not the
+    // model's own — the global pin and the 128,000 default. `None` covers
+    // both the resource-unresolved and resource-error cases; neither ever
+    // renders a marker (UI-SPEC E1 loading/error).
+    let marker_title = match context_source {
+        Some(ContextWindowSource::GlobalPin) => Some(format!(
+            "This window comes from your model.context_length setting, not \
+             {model}'s own catalog value — click to review per-model overrides."
+        )),
+        Some(ContextWindowSource::Fallback) => Some(format!(
+            "{model} has no known context window — showing the 128,000-token \
+             default. Click to set the correct value."
+        )),
+        Some(ContextWindowSource::PerModelConfig) | Some(ContextWindowSource::Metadata) | None => {
+            None
+        }
+    };
+
+    // Phase 50.5 (D-13): the marker is the entry point to fixing the number,
+    // not merely a warning about it — clicking it navigates to Models.
+    let mut active_screen = use_context::<Signal<crate::state::Screen>>();
+
     rsx! {
         div { class: "sys-meta",
             span { "BUILD " span { class: "v", "{build_version}" } }
@@ -67,7 +104,23 @@ pub fn SysMeta(model: String, provider: String, uptime_secs: u64) -> Element {
             span { "·" }
             span { class: "v model-id", title: "{model}", "{model}" }
             span { "·" }
-            span { "TOK " span { class: "v", "{used_display} / {limit}" } }
+            span {
+                "TOK "
+                span { class: "v", "{used_display} / " }
+                if let Some(t) = marker_title {
+                    button {
+                        class: "tok-marker",
+                        r#type: "button",
+                        title: "{t}",
+                        aria_label: "{t}",
+                        onclick: move |_| active_screen.set(crate::state::Screen::Models),
+                        "~"
+                        span { class: "v", "{limit}" }
+                    }
+                } else {
+                    span { class: "v", "{limit}" }
+                }
+            }
             span { "·" }
             span { "OP " span { class: "v", "READY" } }
         }

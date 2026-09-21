@@ -17,14 +17,22 @@
 //! `expect`, or `panic!` — a panic here kills the session (T-49.5-05-07).
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 
-use ironhermes_core::commands::context::{CronJobSpec, CronJobWriter};
+use ironhermes_core::commands::context::{CronJobSpec, CronJobWriter, RawJobSpec};
 
 use crate::blueprint::{fill_blueprint, find_blueprint};
-use crate::job::ScheduleParsed;
+use crate::job::{JobOrigin, JobState, ScheduleParsed};
 use crate::parser::parse_schedule;
 use crate::scanner::scan_cron_prompt;
 use crate::store::{JobStore, NewJobSpec};
+
+/// Shared refusal message for `stop_job_for_chat` (Phase 49.7 Plan 04,
+/// T-49.7-04-02): returned identically whether the id is unknown, the job
+/// has no origin, or the job belongs to a different chat, so a probe
+/// cannot learn which case it hit — enumeration must not be cheaper than
+/// guessing.
+const STOP_REFUSED: &str = "No loop found with that id for this chat.";
 
 /// Production impl that opens the default cron job store per call.
 /// Phase 49.5 Plan 05.
@@ -51,6 +59,16 @@ fn schedule_display_of(schedule: &ScheduleParsed) -> String {
         ScheduleParsed::Once { display, .. } => display.clone(),
         ScheduleParsed::Interval { display, .. } => display.clone(),
         ScheduleParsed::Cron { display, .. } => display.clone(),
+    }
+}
+
+/// Derive a job name from the first 48 characters of `prompt`, trimmed at a
+/// char boundary so a multibyte character is never split mid-codepoint.
+/// Phase 49.7 Plan 01.
+fn job_name_from_prompt(prompt: &str) -> String {
+    match prompt.char_indices().nth(48) {
+        Some((byte_idx, _)) => prompt[..byte_idx].to_string(),
+        None => prompt.to_string(),
     }
 }
 
@@ -84,6 +102,153 @@ impl CronJobWriter for CronJobWriterImpl {
             .map_err(|e| format!("create job: {e}"))?;
 
         Ok(job.id)
+    }
+
+    /// Phase 49.7 Plan 01 (D-01/D-06/D-07): `/loop <cadence> <prompt>` raw
+    /// creation, bypassing the blueprint catalog entirely. Copies
+    /// `create_job_from_blueprint`'s ordering exactly — scan, then parse,
+    /// then persist (T-49.7-01-01) — and additionally refuses a cadence
+    /// that resolves to a one-shot schedule, because `/loop` must always
+    /// create a RECURRING job (D-06).
+    fn create_raw_job(&self, spec: RawJobSpec) -> Result<String, String> {
+        // Injection scan before persist — see create_job_from_blueprint's
+        // parity note above. `scan_cron_prompt` is not called inside
+        // `add_job_spec`; every caller is individually responsible for it,
+        // and this call MUST stay ahead of `parse_schedule` (T-49.7-01-01).
+        scan_cron_prompt(&spec.prompt)?;
+
+        let schedule = parse_schedule(&spec.cadence).map_err(|e| e.to_string())?;
+        if matches!(schedule, ScheduleParsed::Once { .. }) {
+            return Err(format!(
+                "/loop creates a RECURRING job, but {:?} resolved to a one-shot schedule. \
+                 Use a recurring cadence instead — \"every 30m\", a bare duration like \
+                 \"30m\", or a cron expression like \"0 9 * * 1\" — or use /cron for \
+                 one-shot scheduling.",
+                spec.cadence
+            ));
+        }
+        let schedule_display = schedule_display_of(&schedule);
+
+        let name = job_name_from_prompt(&spec.prompt);
+        let deliver = if spec.origin_chat_id.is_some() {
+            "origin"
+        } else {
+            "local"
+        };
+
+        let mut new_spec =
+            NewJobSpec::new(name, spec.prompt, schedule, schedule_display, deliver);
+        new_spec.repeat_times = spec.budget;
+        new_spec.enabled_toolsets = spec.tools;
+        // Leave script/workdir/base_url/no_agent/context_from/model/provider/
+        // continuity at NewJobSpec::new's zero values — RawJobSpec carries no
+        // fields for them, so there is nothing to assign (T-49.7-01-02).
+        if let (Some(platform), Some(chat_id)) = (spec.origin_platform, spec.origin_chat_id) {
+            new_spec.origin = Some(JobOrigin {
+                platform,
+                chat_id,
+                chat_name: None,
+                thread_id: spec.origin_thread_id,
+            });
+        }
+
+        let mut store = JobStore::new().map_err(|e| format!("open cron store: {e}"))?;
+        let job = store
+            .add_job_spec(new_spec)
+            .map_err(|e| format!("create job: {e}"))?;
+
+        Ok(job.id)
+    }
+
+    /// Phase 49.7 Plan 04 (D-10): render jobs originating from `chat_id` as
+    /// text for `/loop list`. Filters on `job.origin` being `Some` with a
+    /// matching `chat_id`; an origin-less job (CLI-created) belongs to no
+    /// chat and is skipped for every chat id. Matches
+    /// `CronJobReaderImpl::list_jobs_text`'s (`display::format_job_list`)
+    /// column idiom so `/loop list` and `/cron list` read alike, extended
+    /// with the id and per-job budget state a chat-scoped listing needs.
+    fn list_jobs_for_chat(&self, chat_id: &str) -> Result<String, String> {
+        let store = JobStore::new().map_err(|e| format!("open cron store: {e}"))?;
+        let mine: Vec<&crate::job::CronJob> = store
+            .list_jobs()
+            .iter()
+            .filter(|j| j.origin.as_ref().is_some_and(|o| o.chat_id == chat_id))
+            .collect();
+
+        if mine.is_empty() {
+            // Explicit empty-state sentence — a blank chat reply reads as a
+            // failure, not as "you have no loops".
+            return Ok("No loops running for this chat.".to_string());
+        }
+
+        let mut out = String::new();
+        let _ = writeln!(out, "Your Loops");
+        let _ = writeln!(out, "{}", "-".repeat(70));
+        let _ = writeln!(
+            out,
+            "  {:<24} {:<16} {:<12} {:<10} PROMPT",
+            "ID", "SCHEDULE", "STATUS", "BUDGET"
+        );
+        for job in &mine {
+            let status_str = match job.state {
+                JobState::Scheduled => {
+                    if job.enabled {
+                        "scheduled"
+                    } else {
+                        "disabled"
+                    }
+                }
+                JobState::Paused => "paused",
+                JobState::Completed => "completed",
+            };
+            let budget_str = match job.repeat.times {
+                Some(times) => format!("{}/{}", job.repeat.completed, times),
+                None => "unbounded".to_string(),
+            };
+            let _ = writeln!(
+                out,
+                "  {:<24} {:<16} {:<12} {:<10} {}",
+                job.id,
+                job.schedule_display,
+                status_str,
+                budget_str,
+                job_name_from_prompt(&job.prompt)
+            );
+        }
+        let _ = writeln!(out, "{}", "-".repeat(70));
+        let _ = writeln!(out, "  {} loop(s)", mine.len());
+
+        Ok(out.trim_end().to_string())
+    }
+
+    /// Phase 49.7 Plan 04 (D-09/D-10): stop (pause) the job `id_or_name` on
+    /// behalf of `chat_id` for `/loop stop <id>`. The access check runs
+    /// entirely BEFORE any mutation, and lives here in the impl rather than
+    /// only in the handler, so a second caller of this seam cannot bypass
+    /// it (T-49.7-04-01). Resolution reuses `JobStore::find_job`, the same
+    /// id-first-then-name resolver `/cron pause` already uses, so `/loop
+    /// stop` inherits its disambiguation rather than inventing a second
+    /// one. The only mutating call is `JobStore::toggle_job(&id, false)` —
+    /// the same method `CronJobReaderImpl::pause_job` wraps — which sets
+    /// `enabled = false`, `state = JobState::Paused` and `paused_at =
+    /// Some(now)` and leaves `next_run_at` untouched; this method does not
+    /// assign any `CronJob` field directly, so the stop path and `/cron
+    /// resume` semantics stay in agreement.
+    fn stop_job_for_chat(&self, chat_id: &str, id_or_name: &str) -> Result<String, String> {
+        let mut store = JobStore::new().map_err(|e| format!("open cron store: {e}"))?;
+
+        let (id, name) = {
+            let job = store
+                .find_job(id_or_name)
+                .ok_or_else(|| STOP_REFUSED.to_string())?;
+            match &job.origin {
+                Some(origin) if origin.chat_id == chat_id => (job.id.clone(), job.name.clone()),
+                _ => return Err(STOP_REFUSED.to_string()),
+            }
+        };
+
+        store.toggle_job(&id, false).map_err(|e| e.to_string())?;
+        Ok(format!("Stopped: {}", name))
     }
 }
 

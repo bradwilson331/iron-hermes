@@ -21,8 +21,13 @@
 //! behaviour is unchanged — the secret-scrub guarantee is preserved.
 //!
 //! ```text
-//! SAFE_SYSTEM_VARS (pass-through when present in caller env):
+//! SAFE_SYSTEM_VARS (pass-through when present in caller env, 7 entries):
 //!   PATH, HOME, USER, LANG, TERM, RUST_LOG, IRONHERMES_HOME
+//!
+//! Explicit (computed by the spawning process, never ambient pass-through) — always
+//! emitted regardless of the vault variables below (Phase 51 Plan 16, WR-06):
+//!   IRONHERMES_WORKER_BIN = resolve_worker_bin()
+//!   IRONHERMES_ROOT_HOME  = ironhermes_core::get_root_hermes_home()
 //!
 //! Kanban vars — each emitted twice: canonical (IRONHERMES_*) + legacy (HERMES_*):
 //!   IRONHERMES_KANBAN_TASK / HERMES_KANBAN_TASK         = task.id
@@ -53,6 +58,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+
+use secrecy::{ExposeSecret, SecretString};
 
 use tokio::process::Command;
 
@@ -120,6 +127,22 @@ fn resolve_workspace_dir(workspace: &str) -> Result<PathBuf> {
         std::fs::create_dir_all(ws_path).map_err(|e| {
             KanbanError::Other(anyhow::anyhow!("create kanban workspace {workspace}: {e}"))
         })?;
+
+        // Scratch-only workspace marker (D-01/D-04, 52.1): makes this
+        // workspace an ELIGIBLE producer root for the widened capture
+        // tiers (`chat_capture::is_eligible_producer_root`). Best-effort —
+        // a marker failure never fails the spawn. Deliberately NOT created
+        // on the dir:/project: branch below: planting a marker directory
+        // inside an operator's own repository is intrusive, and leaving
+        // those workspaces ineligible for the widened tiers is the correct
+        // conservative default.
+        let marker_dir = ws_path.join(ironhermes_tools::chat_capture::WORKSPACE_MARKER_DIR);
+        if let Err(e) = std::fs::create_dir_all(&marker_dir) {
+            tracing::warn!(
+                workspace = %workspace, error = %e,
+                "failed to create kanban workspace marker directory (non-fatal)"
+            );
+        }
     }
 
     if !ws_path.is_dir() {
@@ -275,12 +298,27 @@ pub fn copy_attachments_into(workspace: &Path, task_id: &str, board_slug: &str) 
 // Safe system vars allowlist (D-18)
 // ---------------------------------------------------------------------------
 
-/// The 7 system env vars that are allowed to pass through to the worker
+/// The system env vars that are allowed to pass through to the worker
 /// subprocess (D-18). Everything else is dropped by `env_clear()`.
 ///
 /// Reuses the `build_safe_env()` allowlist concept from
 /// `crates/ironhermes-exec/src/sandbox.rs` but adapted for the kanban worker
 /// spawn (not the Python RPC sandbox).
+///
+/// **Strictly ambient (Phase 51 Plan 16, WR-06).** This list forwards whatever
+/// value happens to already be present in the SPAWNING process's own
+/// environment, verbatim, under a matching name. `IRONHERMES_WORKER_BIN` (which
+/// `resolve_worker_bin()` reads to decide WHICH BINARY is exec'd) and
+/// `IRONHERMES_ROOT_HOME` (which `ironhermes_core::get_root_hermes_home()` reads
+/// to decide WHICH VAULT DATA DIR is opened) used to ride this list — but a value
+/// that steers either of those decisions is the same category as a credential
+/// under the rule this list exists to enforce, exactly like the two vault
+/// variables emitted explicitly below in [`build_kanban_worker_env`]. Both are now
+/// emitted EXPLICITLY, computed by the spawning process itself, rather than
+/// blindly forwarded here — see that function's own explicit-emission block for
+/// the recursive-spawn forward-compatibility this preserves (the original
+/// justification for putting them here in the first place: 36.3.7.13 D-02 for the
+/// binary, Phase 51 UAT F-04 for the root home).
 pub const SAFE_SYSTEM_VARS: &[&str] = &[
     "PATH",
     "HOME",
@@ -289,7 +327,6 @@ pub const SAFE_SYSTEM_VARS: &[&str] = &[
     "TERM",
     "RUST_LOG",
     "IRONHERMES_HOME",
-    "IRONHERMES_WORKER_BIN", // Phase 36.3.7.13 D-02: forward-compat for recursive worker spawn
 ];
 
 /// Phase 36.3.7.13 D-02: resolve the ironhermes worker binary.
@@ -308,6 +345,50 @@ pub fn resolve_worker_bin() -> String {
 }
 
 // ---------------------------------------------------------------------------
+// WorkerVaultBootstrap (Phase 51 Plan 07, D-11)
+// ---------------------------------------------------------------------------
+
+/// The env var carrying the worker's minted, profile-scoped vault token. Emitted
+/// EXPLICITLY by [`build_kanban_worker_env`] — deliberately excluded from the
+/// pass-through allowlist above, which forwards AMBIENT parent-process values and
+/// is not a place to put a credential this crate itself mints (see the module
+/// doc's D-11 prohibition and `51-07-PLAN.md`).
+pub const IRONHERMES_KANBAN_VAULT_TOKEN_ENV: &str = "IRONHERMES_KANBAN_VAULT_TOKEN";
+
+/// The env var carrying the path to the `0600` UDS the worker reads its credential
+/// from. Same emission rule as [`IRONHERMES_KANBAN_VAULT_TOKEN_ENV`] — explicit, never
+/// pass-through.
+pub const IRONHERMES_KANBAN_VAULT_SOCKET_ENV: &str = "IRONHERMES_KANBAN_VAULT_SOCKET";
+
+/// The two values a vault-backed dispatch (`DispatchDecision::AllowFromVault`) passes
+/// into a worker's spawn environment (Phase 51 Plan 07, D-07/D-11). `None` — the
+/// default for a dotenv-backed (`DispatchDecision::Allow`) dispatch — means neither
+/// vault var is emitted and the built environment map is byte-identical to today's
+/// (`worker_without_vault_vars_uses_dotenv_exactly_as_today`).
+///
+/// One `Option<&WorkerVaultBootstrap>` parameter rather than two separate
+/// `Option<String>`s is deliberate: the token and the socket path are only ever valid
+/// TOGETHER — a worker that gets one without the other has no way to distinguish "not
+/// migrated" from "half-configured spawn" and must refuse rather than guess (the
+/// worker-side four-branch control flow in `ironhermes-cli`'s `worker_bootstrap.rs`
+/// exists precisely because a single `Option` here cannot construct that
+/// half-configured state in the first place).
+pub struct WorkerVaultBootstrap {
+    token: SecretString,
+    socket_path: String,
+}
+
+impl WorkerVaultBootstrap {
+    /// Pair a minted token with the socket path of the endpoint that minted it.
+    pub fn new(token: SecretString, socket_path: impl Into<String>) -> Self {
+        Self {
+            token,
+            socket_path: socket_path.into(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // build_kanban_worker_env
 // ---------------------------------------------------------------------------
 
@@ -323,20 +404,32 @@ pub fn resolve_worker_bin() -> String {
 /// - Up to 7 safe system vars from [`SAFE_SYSTEM_VARS`] (only when present
 ///   in the current process env).
 /// - 8 always-present kanban vars.
+/// - `IRONHERMES_WORKER_BIN` + `IRONHERMES_ROOT_HOME` (Phase 51 Plan 16, WR-06) —
+///   always emitted explicitly, computed via [`resolve_worker_bin`] and
+///   [`ironhermes_core::get_root_hermes_home`] respectively, never forwarded from
+///   [`SAFE_SYSTEM_VARS`].
 /// - `IRONHERMES_TENANT` (+ legacy twin) only when `task.tenant` is `Some`.
 /// - `IRONHERMES_KANBAN_TASK_SKILLS` (+ legacy twin) only when `task.skills` is `Some` and
 ///   decodes to a non-empty `Vec<String>` (forward-compatible carrier for
 ///   skill extras; replaces the dropped `--skills` argv path, BUG-36.3.7-01).
+/// - [`IRONHERMES_KANBAN_VAULT_TOKEN_ENV`] + [`IRONHERMES_KANBAN_VAULT_SOCKET_ENV`]
+///   (Phase 51 Plan 07, D-11) only when `vault` is `Some` — a vault-backed
+///   (`DispatchDecision::AllowFromVault`) dispatch. `None` (the default, and every
+///   dotenv-backed dispatch) emits neither — the built map is then byte-identical to
+///   pre-Phase-51 behavior.
 ///
 /// # What is excluded
 ///
 /// Every other env var, including `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
-/// `GITHUB_TOKEN`, `*_SECRET`, `*_PASSWORD`, etc. (T-36.3.7-03-01).
+/// `GITHUB_TOKEN`, `*_SECRET`, `*_PASSWORD`, etc. (T-36.3.7-03-01). The two vault vars
+/// above are the sole, deliberate exception — a short-TTL, single-policy, bootstrap-only
+/// TOKEN, never a raw provider credential (D-11's explicit tradeoff).
 pub fn build_kanban_worker_env(
     task: &Task,
     run: &TaskRun,
     workspace: &str,
     board_slug: &str,
+    vault: Option<&WorkerVaultBootstrap>,
 ) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = Vec::new();
 
@@ -464,6 +557,49 @@ pub fn build_kanban_worker_env(
         );
     }
 
+    // Phase 51 Plan 16 (WR-06): the two steering variables, emitted EXPLICITLY —
+    // deliberately excluded from the pass-through allowlist above (see
+    // SAFE_SYSTEM_VARS's own doc), for the same reason the vault variables just
+    // below never rode it either: `IRONHERMES_WORKER_BIN` decides which binary is
+    // exec'd and `IRONHERMES_ROOT_HOME` decides which vault data dir is opened,
+    // and a value of that category must not ride a list meant for genuinely
+    // ambient system vars like PATH or HOME. Always emitted, regardless of
+    // `vault` — unlike the vault variables below, these two are not conditional
+    // on a vault-backed dispatch.
+    //
+    // Recursive-spawn forward-compatibility is preserved, not lost: these two
+    // calls are the SAME resolvers `resolve_and_set_profile` and
+    // `resolve_vault_config` use everywhere else, and both already read the
+    // identically-named ambient override this allowlist used to forward blindly
+    // (36.3.7.13 D-02 for the binary; Phase 51 UAT F-04 for the root home). A
+    // worker that itself spawns a sub-worker now emits its OWN correct value —
+    // computed by calling the same function again — rather than passing along
+    // whatever string happened to already be in its own ambient environment.
+    env.push(("IRONHERMES_WORKER_BIN".to_string(), resolve_worker_bin()));
+    env.push((
+        "IRONHERMES_ROOT_HOME".to_string(),
+        ironhermes_core::get_root_hermes_home()
+            .to_string_lossy()
+            .into_owned(),
+    ));
+
+    // Phase 51 Plan 07 (D-07/D-11): the two vault variables, emitted EXPLICITLY —
+    // deliberately excluded from the pass-through allowlist above, which forwards
+    // AMBIENT parent-process values; putting a credential variable in that list
+    // would let an attacker-controlled ambient value reach the worker. `None`
+    // emits neither, keeping the map byte-identical to today's for every
+    // dotenv-backed dispatch.
+    if let Some(bootstrap) = vault {
+        env.push((
+            IRONHERMES_KANBAN_VAULT_TOKEN_ENV.to_string(),
+            bootstrap.token.expose_secret().to_string(),
+        ));
+        env.push((
+            IRONHERMES_KANBAN_VAULT_SOCKET_ENV.to_string(),
+            bootstrap.socket_path.clone(),
+        ));
+    }
+
     env
 }
 
@@ -477,7 +613,7 @@ pub fn build_kanban_worker_env(
 /// not yet carry a resolved board slug. Prefer [`spawn_worker_for_board`] in
 /// new multi-board code (Phase 36.3.7.9).
 pub async fn spawn_worker(task: &Task, run: &TaskRun, workspace: &str) -> Result<u32> {
-    spawn_worker_for_board(task, run, workspace, "default").await
+    spawn_worker_for_board(task, run, workspace, "default", None).await
 }
 
 /// Spawn a kanban worker subprocess for a task, with an explicit board slug.
@@ -515,6 +651,7 @@ pub async fn spawn_worker_for_board(
     run: &TaskRun,
     workspace: &str,
     board_slug: &str,
+    vault: Option<&WorkerVaultBootstrap>,
 ) -> Result<u32> {
     // Profile-scoped worker logs (D-19): logs land under the assignee's
     // profile (`~/.ironhermes/profiles/<assignee>/logs/kanban/`) so every
@@ -574,7 +711,10 @@ pub async fn spawn_worker_for_board(
     // secrets reach the worker process (D-18 / INV-36.3.7-05).
     // Phase 36.3.7.13 D-02: use resolve_worker_bin() so IRONHERMES_WORKER_BIN
     // can pin the subprocess to a specific binary (worktree cargo-run scenario).
-    let child = Command::new(resolve_worker_bin())
+    let worker_bin = resolve_worker_bin();
+    let worker_env = build_kanban_worker_env(task, run, &resolved_workspace_env, board_slug, vault);
+
+    let child = Command::new(&worker_bin)
         .arg("--profile")
         .arg(&task.assignee)
         .arg("chat")
@@ -582,12 +722,7 @@ pub async fn spawn_worker_for_board(
         .arg(format!("work kanban task {}", task.id))
         .current_dir(&resolved_workspace)
         .env_clear()
-        .envs(build_kanban_worker_env(
-            task,
-            run,
-            &resolved_workspace_env,
-            board_slug,
-        ))
+        .envs(worker_env)
         .stdin(Stdio::null())
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file))
@@ -688,7 +823,7 @@ mod tests {
 
         let task = fake_task("t_abc123", "alice");
         let run = fake_run("r_run001", "t_abc123", "host:123:uuid");
-        let env = build_kanban_worker_env(&task, &run, "/tmp/ws", "default");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws", "default", None);
 
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
 
@@ -721,7 +856,7 @@ mod tests {
     fn build_kanban_worker_env_includes_eight_kanban_vars() {
         let task = fake_task("t_def456", "bob");
         let run = fake_run("r_run002", "t_def456", "host:456:uuid2");
-        let env = build_kanban_worker_env(&task, &run, "/tmp/ws2", "default");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws2", "default", None);
 
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
 
@@ -766,7 +901,7 @@ mod tests {
         task.tenant = Some("acme".to_string());
 
         let run = fake_run("r_run003", "t_ghi789", "host:789:uuid3");
-        let env = build_kanban_worker_env(&task, &run, "/tmp/ws3", "default");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws3", "default", None);
 
         let found_legacy = env.iter().find(|(k, _)| k == "HERMES_TENANT");
         assert!(
@@ -790,7 +925,7 @@ mod tests {
     fn build_kanban_worker_env_task_id_matches() {
         let task = fake_task("t_specific_id", "diana");
         let run = fake_run("r_run004", "t_specific_id", "host:1:uuid4");
-        let env = build_kanban_worker_env(&task, &run, "/tmp/ws4", "default");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws4", "default", None);
 
         let task_val = env
             .iter()
@@ -811,7 +946,7 @@ mod tests {
     fn build_kanban_worker_env_board_is_default() {
         let task = fake_task("t_board_test", "evan");
         let run = fake_run("r_run005", "t_board_test", "host:2:uuid5");
-        let env = build_kanban_worker_env(&task, &run, "/tmp/ws5", "default");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws5", "default", None);
 
         let board = env
             .iter()
@@ -832,7 +967,7 @@ mod tests {
         let task = fake_task("t_goal_off", "alice");
         // fake_task defaults: goal_mode: false, goal_max_turns: 20.
         let run = fake_run("r_goal_off", "t_goal_off", "host:1:goal_off");
-        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_goal_off", "default");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_goal_off", "default", None);
 
         let goal_keys: Vec<&str> = env
             .iter()
@@ -857,7 +992,7 @@ mod tests {
         task.goal_mode = true;
         task.goal_max_turns = 7;
         let run = fake_run("r_goal_on", "t_goal_on", "host:2:goal_on");
-        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_goal_on", "default");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_goal_on", "default", None);
 
         let mode = env
             .iter()
@@ -928,7 +1063,7 @@ mod tests {
         task.goal_mode = true;
         task.goal_max_turns = 0; // defensive: caller forgot the budget
         let run = fake_run("r_goal_zero", "t_goal_zero", "host:3:goal_zero");
-        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_goal_zero", "default");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_goal_zero", "default", None);
 
         let budget = env
             .iter()
@@ -965,7 +1100,7 @@ mod tests {
         task.goal_mode = true;
         task.goal_toolset = None; // NULL in DB
         let run = fake_run("r_ts_null", "t_toolset_null", "host:1:ts_null");
-        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_ts_null", "default");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_ts_null", "default", None);
 
         let found = env
             .iter()
@@ -998,7 +1133,7 @@ mod tests {
         task.goal_mode = true;
         task.goal_toolset = Some("extended".to_string());
         let run = fake_run("r_ts_ext", "t_toolset_ext", "host:2:ts_ext");
-        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_ts_ext", "default");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_ts_ext", "default", None);
 
         let found = env
             .iter()
@@ -1029,7 +1164,7 @@ mod tests {
         let task = fake_task("t_toolset_off", "carol");
         // fake_task defaults: goal_mode: false, goal_toolset: None.
         let run = fake_run("r_ts_off", "t_toolset_off", "host:3:ts_off");
-        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_ts_off", "default");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_ts_off", "default", None);
 
         let found = env.iter().find(|(k, _)| k == "HERMES_KANBAN_GOAL_TOOLSET");
         assert!(
@@ -1051,7 +1186,7 @@ mod tests {
     fn build_kanban_worker_env_board_slug_propagates() {
         let task = fake_task("t_slug_test", "alice");
         let run = fake_run("r_run999", "t_slug_test", "host:2:uuid9");
-        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_slug", "atm10-server");
+        let env = build_kanban_worker_env(&task, &run, "/tmp/ws_slug", "atm10-server", None);
 
         let board = env
             .iter()

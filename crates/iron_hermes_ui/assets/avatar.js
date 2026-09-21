@@ -346,7 +346,7 @@ async function attachRealtimeStream() {
     streamAttached = true;
     if (attachTimer !== null) { clearInterval(attachTimer); attachTimer = null; }
   } catch (e) {
-    console.warn('[ironHermesAvatar] realtime stream attach failed:', e);
+    console.warn(`[ironHermesAvatar] realtime stream attach failed: ${e && e.stack ? e.stack : e}`);
   }
   return streamAttached;
 }
@@ -521,7 +521,7 @@ window.ironHermesAvatar = {
   init(canvasId, glbUrl, preset) {
     const canvas = document.getElementById(canvasId);
     if (!canvas) {
-      console.warn('[ironHermesAvatar] canvas not found:', canvasId);
+      console.warn(`[ironHermesAvatar] canvas not found: ${canvasId}`);
       return;
     }
 
@@ -608,7 +608,7 @@ window.ironHermesAvatar = {
       },
       undefined,
       (err) => {
-        console.warn('[ironHermesAvatar] GLB load failed:', err);
+        console.warn(`[ironHermesAvatar] GLB load failed: ${err && err.stack ? err.stack : err}`);
         signalAvatarError('GLB_LOAD_FAIL', String(err));
       },
     );
@@ -791,7 +791,7 @@ function setupFacecap(gltf, seedCamPos, seedLookAt) {
   eyeMeshes = [eyeL, eyeR].filter(Boolean);
   eyeBaseWQ = [];
   for (const em of eyeMeshes) eyeBaseWQ.push(em.getWorldQuaternion(new THREE.Quaternion()));
-  console.log('[ironHermesAvatar] facecap eye nodes for gaze:', eyeMeshes.length);
+  console.log(`[ironHermesAvatar] facecap eye nodes for gaze: ${eyeMeshes.length}`);
 }
 
 // ── rigged Groovy setup (skeleton + multi-mesh morphs + head.x bone aim) ──────
@@ -880,9 +880,9 @@ function setupRigged(gltf, seedCamPos, seedLookAt) {
     || findByGltfName(gltf.scene, 'Head')
     || findByGltfName(gltf.scene, 'mixamorig:Head')
     || null;
-  console.log('[ironHermesAvatar] head bone:',
+  console.log(`[ironHermesAvatar] head bone: ${
     headBone ? (headBone.name + (headBone.isBone ? ' (Bone)' : ' (not a Bone)'))
-             : 'NOT FOUND — head turn/idle disabled');
+             : 'NOT FOUND — head turn/idle disabled'}`);
   aimTarget = headBone || null;   // no bone → no head aim (rotating the whole body looks wrong)
   if (!aimTarget && activeBodyType === 'half') {
     // Boneless bust (matrix): whole-object aim, same mechanism as facecap's
@@ -909,7 +909,7 @@ function setupRigged(gltf, seedCamPos, seedLookAt) {
     gltf.scene.updateMatrixWorld(true);
     for (const em of eyeMeshes) eyeBaseWQ.push(em.getWorldQuaternion(new THREE.Quaternion()));
   }
-  console.log('[ironHermesAvatar] eye meshes for gaze:', eyeMeshes.length);
+  console.log(`[ironHermesAvatar] eye meshes for gaze: ${eyeMeshes.length}`);
 
   sceneBaseY = sceneRoot.position.y;
 
@@ -996,7 +996,7 @@ function frameHeadAndShoulders(gltf, seedCamPos, seedLookAt) {
     camera.position.set(center.x, headCenterY, center.z + dist);
     camera.lookAt(lookAtVec);
   } catch (boxErr) {
-    console.warn('[ironHermesAvatar] Box3 auto-frame failed, using seed framing:', boxErr);
+    console.warn(`[ironHermesAvatar] Box3 auto-frame failed, using seed framing: ${boxErr && boxErr.stack ? boxErr.stack : boxErr}`);
     camera.position.set(...seedCamPos);
     camera.lookAt(...seedLookAt);
   }

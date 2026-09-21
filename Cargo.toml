@@ -58,9 +58,9 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.3.9"
+version = "0.4.5"
 edition = "2024"
-authors = ["Nous Research"]
+authors = ["Wilson Tech"]
 license = "MIT"
 description = "IronHermes — The self-improving AI agent, rewritten in Rust"
 
@@ -194,7 +194,13 @@ toml = "0.8"
 # Locally, `cargo nextest run -p <crate>` validates only that crate's binaries.
 # ---------------------------------------------------------------------------
 [profile.dev]
-debug = "line-tables-only"
+debug = 1
+
+# Dependencies carry no debug info at all — they are never stepped through and
+# they dominate `target/debug` on disk. Workspace members keep `debug = 1`
+# above; `package."*"` applies to dependencies only, never to members.
+[profile.dev.package."*"]
+debug = false
 
 # ---------------------------------------------------------------------------
 # Security fix: RUSTSEC-2026-0104 — reachable panic in rustls-webpki CRL

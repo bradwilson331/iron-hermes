@@ -104,19 +104,26 @@ pub fn source_ref_leaf(filename: &str) -> String {
 }
 
 /// The largest `*.html` file directly under `root` (non-recursive), ties
-/// broken by path for determinism. Ported from
-/// `ironhermes-kanban::tools::complete::primary_html_in`, plus the `since`
-/// freshness filter (see [`locate_deliverable_since`]).
+/// broken by path for determinism. Thin wrapper over
+/// [`primary_by_extension_in`] so the two implementations cannot drift.
 fn primary_html_in(root: &Path, since: Option<SystemTime>) -> Option<PathBuf> {
-    let mut htmls: Vec<(u64, PathBuf)> = std::fs::read_dir(root)
+    primary_by_extension_in(root, &["html"], since)
+}
+
+/// The largest fresh file directly under `root` (non-recursive) whose
+/// extension case-insensitively matches any entry in `exts`, ties broken by
+/// path for determinism. Generalization of the legacy HTML-only scan —
+/// [`primary_html_in`] is a thin wrapper over this.
+fn primary_by_extension_in(root: &Path, exts: &[&str], since: Option<SystemTime>) -> Option<PathBuf> {
+    let mut candidates: Vec<(u64, PathBuf)> = std::fs::read_dir(root)
         .ok()?
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let path = entry.path();
-            let is_html = path
+            let matches_ext = path
                 .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("html"));
-            if is_html && path.is_file() && is_fresh(&path, since) {
+                .is_some_and(|ext| exts.iter().any(|e| ext.eq_ignore_ascii_case(e)));
+            if matches_ext && path.is_file() && is_fresh(&path, since) {
                 let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
                 Some((size, path))
             } else {
@@ -125,8 +132,725 @@ fn primary_html_in(root: &Path, since: Option<SystemTime>) -> Option<PathBuf> {
         })
         .collect();
     // Largest first; tie-break by path so the choice is deterministic.
-    htmls.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    htmls.into_iter().next().map(|(_, path)| path)
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    candidates.into_iter().next().map(|(_, path)| path)
+}
+
+/// The project's workspace marker directory name — the same dot-prefixed
+/// directory `profile_workspace_dir` creates
+/// (`crates/iron_hermes_ui/src/server/profile_api.rs::profile_workspace_dir`)
+/// and `ironhermes_core::workspace::resolve_from_cwd` walks up looking for.
+/// Its presence on a scan root is what makes that root ELIGIBLE for the
+/// widened producer-capture tiers (D-01/D-04, [`is_eligible_producer_root`]).
+pub const WORKSPACE_MARKER_DIR: &str = ".ironhermes";
+
+/// Extensions recognized as a "code" deliverable by the widened producer
+/// capture engine (D-01, [`locate_producer_deliverable`] tier 5).
+/// Configuration, lock and data-file extensions (`toml`, `json`, `yaml`,
+/// `yml`, `lock`, `ini`, `cfg`, `txt`) are deliberately EXCLUDED — they
+/// dominate any ordinary directory and are not work products; including them
+/// would turn "capture the bot's script" into "publish whatever config file
+/// happens to be newest."
+pub const CODE_EXTENSIONS: &[&str] = &[
+    "py", "rs", "ts", "tsx", "js", "jsx", "sh", "bash", "zsh", "c", "h", "cc", "cpp", "hpp", "go",
+    "rb", "java", "kt", "swift", "php", "pl", "lua", "sql", "r", "scala", "cs",
+];
+
+/// Whether `scan_root` is eligible for the widened (tiers 2/4/5) producer
+/// capture — a host-provisioned workspace (carries [`WORKSPACE_MARKER_DIR`]),
+/// or a caller-supplied freshness bound (`since: Some`). An unbounded,
+/// marker-less scan of a directory the host did not provision is an
+/// uncontrolled directory (an operator's own project), and selecting an
+/// arbitrary source file out of it and publishing it is an
+/// information-disclosure path, not a capture (T-52.1-02).
+fn is_eligible_producer_root(scan_root: &Path, since: Option<SystemTime>) -> bool {
+    since.is_some() || scan_root.join(WORKSPACE_MARKER_DIR).is_dir()
+}
+
+/// Widened producer-scan deliverable locator shared by all three bot/kanban
+/// producer paths (D-01/D-04). Tier order, first match wins, every tier
+/// freshness-filtered through [`is_fresh`]:
+///  1. always — exact name `index.html`, as Html.
+///  2. eligible roots only — exact name `README.md`, as Markdown.
+///  3. always — largest `*.html`, as Html.
+///  4. eligible roots only — largest `*.md`/`*.markdown`, as Markdown.
+///  5. eligible roots only — largest [`CODE_EXTENSIONS`] file, as Code.
+///
+/// Tiers 1 and 3 reproduce the legacy HTML-only engine's exact behavior on
+/// an ineligible root, so widening cannot regress an existing capture.
+pub fn locate_producer_deliverable(
+    scan_root: &Path,
+    since: Option<SystemTime>,
+) -> Option<(PathBuf, SourceFormat)> {
+    let eligible = is_eligible_producer_root(scan_root, since);
+
+    // Tier 1: always, exact index.html.
+    let index_html = scan_root.join("index.html");
+    if index_html.is_file() && is_fresh(&index_html, since) {
+        return Some((index_html, SourceFormat::Html));
+    }
+
+    // Tier 2: eligible roots only, exact README.md.
+    if eligible {
+        let readme = scan_root.join("README.md");
+        if readme.is_file() && is_fresh(&readme, since) {
+            return Some((readme, SourceFormat::Markdown));
+        }
+    }
+
+    // Tier 3: always, largest *.html.
+    if let Some(html) = primary_html_in(scan_root, since) {
+        return Some((html, SourceFormat::Html));
+    }
+
+    if eligible {
+        // Tier 4: eligible roots only, largest *.md / *.markdown.
+        if let Some(md) = primary_by_extension_in(scan_root, &["md", "markdown"], since) {
+            return Some((md, SourceFormat::Markdown));
+        }
+        // Tier 5: eligible roots only, largest CODE_EXTENSIONS file.
+        if let Some(code) = primary_by_extension_in(scan_root, CODE_EXTENSIONS, since) {
+            return Some((code, SourceFormat::Code));
+        }
+    }
+
+    None
+}
+
+/// Input to [`publish_producer_deliverable`] — the shared publish path all
+/// three bot/kanban producers call (D-01/D-04/D-06).
+pub struct ProducerPublish<'a> {
+    pub scan_root: &'a Path,
+    pub since: Option<SystemTime>,
+    pub source_kind: &'a str,
+    pub source_ref: &'a str,
+    pub title: &'a str,
+    /// D-05 semantics: a declared-prose fallback published as Markdown ONLY
+    /// when the turn wrote no file. `None`, or blank after trimming,
+    /// publishes nothing.
+    pub fallback_body: Option<&'a str>,
+}
+
+/// Locate and publish a producer's deliverable (D-01/D-04/D-06): the file a
+/// completed turn wrote wins (file-wins, D-04, via
+/// [`locate_producer_deliverable`]); when no file exists and
+/// `fallback_body` is `Some` and non-blank after trimming, that text
+/// publishes as Markdown (D-05); when neither, returns `None`. Every
+/// failure path (read, store open, publish) is a `tracing::warn!` plus a
+/// `None` return — capture must never fail the caller's completion.
+pub fn publish_producer_deliverable(input: ProducerPublish<'_>) -> Option<String> {
+    let (body, source_format) = match locate_producer_deliverable(input.scan_root, input.since) {
+        Some((path, fmt)) => match std::fs::read_to_string(&path) {
+            Ok(b) => (b, fmt),
+            Err(e) => {
+                tracing::warn!(
+                    source_kind = %input.source_kind, source_ref = %input.source_ref,
+                    path = %path.display(), error = %e,
+                    "producer capture: failed to read deliverable"
+                );
+                return None;
+            }
+        },
+        None => {
+            let fallback = input
+                .fallback_body
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let text = fallback?;
+            (text.to_string(), SourceFormat::Markdown)
+        }
+    };
+
+    // Operator override (dispatcher-set) wins, else the canonical profile —
+    // mirrors `complete.rs::capture_completion_artifact`'s resolution, so
+    // new producers' rows stay visible to the gallery's profile filter.
+    let profile = std::env::var(ironhermes_core::ARTIFACTS_PROFILE_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(ironhermes_core::current_profile);
+
+    let mut store = match ArtifactStore::open_default() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                source_kind = %input.source_kind, source_ref = %input.source_ref, error = %e,
+                "producer capture: failed to open artifact store"
+            );
+            return None;
+        }
+    };
+
+    // Idempotent per source: a repeat publish versions the existing artifact
+    // in place rather than duplicating.
+    let update_id = store
+        .latest_for_source(input.source_kind, input.source_ref)
+        .ok()
+        .flatten()
+        .map(|summary| summary.id);
+
+    match store.publish(PublishInput {
+        profile,
+        update_id,
+        title: Some(input.title.to_string()),
+        icon: None,
+        source_kind: Some(input.source_kind.to_string()),
+        source_ref: Some(input.source_ref.to_string()),
+        source_format,
+        body,
+    }) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::warn!(
+                source_kind = %input.source_kind, source_ref = %input.source_ref, error = %e,
+                "producer capture: publish failed"
+            );
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod producer_capture_tests {
+    use super::*;
+    use std::fs;
+
+    /// An unmarked root with no `since` selects nothing the legacy
+    /// HTML-only engine would not have selected: a README.md, a *.md, or a
+    /// *.py in that root is NOT selected (T-52.1-02 regression guard).
+    #[test]
+    fn unmarked_unbounded_root_selects_only_what_legacy_engine_would() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("README.md"), "# notes").unwrap();
+        fs::write(root.path().join("report.py"), "print(1)").unwrap();
+        assert!(
+            locate_producer_deliverable(root.path(), None).is_none(),
+            "an unmarked root with no since bound must not select README.md or report.py"
+        );
+
+        fs::write(root.path().join("index.html"), "<h1>x</h1>").unwrap();
+        let (path, fmt) = locate_producer_deliverable(root.path(), None)
+            .expect("index.html is always selected, marked or not");
+        assert_eq!(path.file_name().unwrap(), "index.html");
+        assert_eq!(fmt, SourceFormat::Html);
+    }
+
+    /// A marked root: a lone report.py is selected as Code; a lone notes.md
+    /// is selected as Markdown.
+    #[test]
+    fn marked_root_selects_code_and_markdown() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(WORKSPACE_MARKER_DIR)).unwrap();
+        fs::write(root.path().join("report.py"), "print(1)").unwrap();
+        let (path, fmt) =
+            locate_producer_deliverable(root.path(), None).expect("marked root selects report.py");
+        assert_eq!(path.file_name().unwrap(), "report.py");
+        assert_eq!(fmt, SourceFormat::Code);
+
+        let root2 = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root2.path().join(WORKSPACE_MARKER_DIR)).unwrap();
+        fs::write(root2.path().join("notes.md"), "# notes").unwrap();
+        let (path2, fmt2) = locate_producer_deliverable(root2.path(), None)
+            .expect("marked root selects notes.md");
+        assert_eq!(path2.file_name().unwrap(), "notes.md");
+        assert_eq!(fmt2, SourceFormat::Markdown);
+    }
+
+    /// An unmarked root with `since: Some(t)`: a file written after `t` is
+    /// selected, a file written before `t` is not.
+    #[test]
+    fn unmarked_root_with_since_selects_only_fresh_files() {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("old.py"), "print('old')").unwrap();
+        // Sleep to guarantee a distinguishable mtime boundary.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let cutoff = SystemTime::now();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(root.path().join("new.py"), "print('new')").unwrap();
+
+        let (path, fmt) = locate_producer_deliverable(root.path(), Some(cutoff))
+            .expect("the file written after the cutoff must be selected");
+        assert_eq!(path.file_name().unwrap(), "new.py");
+        assert_eq!(fmt, SourceFormat::Code);
+    }
+
+    /// A Cargo.toml, a config.json and a settings.yaml in a marked root are
+    /// never selected — CODE_EXTENSIONS deliberately excludes config/lock/
+    /// data extensions.
+    #[test]
+    fn marked_root_never_selects_config_lock_or_data_files() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(WORKSPACE_MARKER_DIR)).unwrap();
+        fs::write(root.path().join("Cargo.toml"), "[package]").unwrap();
+        fs::write(root.path().join("config.json"), "{}").unwrap();
+        fs::write(root.path().join("settings.yaml"), "a: b").unwrap();
+        assert!(
+            locate_producer_deliverable(root.path(), None).is_none(),
+            "config/lock/data extensions must never be selected as a code deliverable"
+        );
+    }
+
+    #[test]
+    fn code_extensions_excludes_config_lock_and_data_extensions() {
+        for banned in ["toml", "json", "yaml", "yml", "lock", "ini", "cfg", "txt"] {
+            assert!(
+                !CODE_EXTENSIONS.contains(&banned),
+                "CODE_EXTENSIONS must not contain {banned}"
+            );
+        }
+    }
+
+    fn setup_artifacts_db() -> (tokio::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
+        let guard = crate::ENV_LOCK.blocking_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("artifacts.db");
+        unsafe {
+            std::env::set_var(ironhermes_artifacts::ARTIFACTS_DB_ENV, &db_path);
+        }
+        (guard, dir)
+    }
+
+    #[test]
+    fn publish_producer_deliverable_prefers_file_over_fallback() {
+        let (_guard, _db_dir) = setup_artifacts_db();
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir_all(root.path().join(WORKSPACE_MARKER_DIR)).unwrap();
+        fs::write(root.path().join("report.py"), "print('file wins')").unwrap();
+
+        let id = publish_producer_deliverable(ProducerPublish {
+            scan_root: root.path(),
+            since: None,
+            source_kind: "test_kind",
+            source_ref: "ref1",
+            title: "Title",
+            fallback_body: Some("this text must be ignored"),
+        })
+        .expect("file must be published");
+
+        let store = ArtifactStore::open_default().unwrap();
+        let summary = store
+            .latest_for_source("test_kind", "ref1")
+            .unwrap()
+            .expect("artifact recorded");
+        assert_eq!(summary.id, id);
+    }
+
+    #[test]
+    fn publish_producer_deliverable_publishes_fallback_when_no_file() {
+        let (_guard, _db_dir) = setup_artifacts_db();
+        let root = tempfile::tempdir().unwrap();
+
+        let id = publish_producer_deliverable(ProducerPublish {
+            scan_root: root.path(),
+            since: None,
+            source_kind: "test_kind",
+            source_ref: "ref2",
+            title: "Title",
+            fallback_body: Some("declared result text"),
+        })
+        .expect("fallback text must be published as Markdown");
+
+        let store = ArtifactStore::open_default().unwrap();
+        let summary = store.latest_for_source("test_kind", "ref2").unwrap();
+        assert!(summary.is_some());
+        drop(id);
+    }
+
+    #[test]
+    fn publish_producer_deliverable_returns_none_for_no_file_and_no_fallback() {
+        let (_guard, _db_dir) = setup_artifacts_db();
+        let root = tempfile::tempdir().unwrap();
+
+        assert!(
+            publish_producer_deliverable(ProducerPublish {
+                scan_root: root.path(),
+                since: None,
+                source_kind: "test_kind",
+                source_ref: "ref3",
+                title: "Title",
+                fallback_body: None,
+            })
+            .is_none()
+        );
+
+        assert!(
+            publish_producer_deliverable(ProducerPublish {
+                scan_root: root.path(),
+                since: None,
+                source_kind: "test_kind",
+                source_ref: "ref3b",
+                title: "Title",
+                fallback_body: Some("   "),
+            })
+            .is_none(),
+            "whitespace-only fallback must not publish"
+        );
+    }
+}
+
+/// Marker prefixed to every pointer-artifact body (D-12), so a pointer row is
+/// visibly distinguishable from a full deliverable at a glance and by grep —
+/// never confused with an ordinary Markdown deliverable.
+pub const POINTER_ARTIFACT_MARKER: &str = "<!-- ironhermes:pointer-artifact -->";
+
+/// D-12's six named pointer fields, minus the artifact title — the title is
+/// supplied separately by [`publish_pointer_artifact`]'s caller so it flows
+/// through `PublishInput::title` unchanged, exactly as the full-artifact path
+/// already does.
+pub struct PointerRecord<'a> {
+    pub producer: &'a str,
+    pub destination: &'a str,
+    pub byte_len: usize,
+    pub digest_hex: &'a str,
+    pub recorded_at: &'a str,
+}
+
+/// Render `record` as a small Markdown document, prefixed by
+/// [`POINTER_ARTIFACT_MARKER`], so it renders through the existing
+/// Markdown-to-HTML path with no new render arm. Never includes the
+/// deliverable's own body — a pointer carries metadata about output that
+/// lives elsewhere.
+///
+/// **CR-01:** `producer` and `destination` are attacker-influenceable —
+/// `destination` in particular is the filename component of a path the
+/// PRODUCING AGENT chose, i.e. LLM-steerable via prompt injection. Because
+/// this body is published as `SourceFormat::Markdown` and pulldown-cmark
+/// passes inline literal HTML straight through unsanitized, both fields are
+/// escaped with the renderer's own `escape_html_text` (ampersand-first
+/// ordering) before interpolation, so neither can smuggle a live tag into
+/// the rendered pointer artifact. `byte_len`/`digest_hex`/`recorded_at` are
+/// computed by this module, never attacker-controlled, so they need no
+/// escaping.
+pub fn pointer_body(record: &PointerRecord<'_>) -> String {
+    let producer = ironhermes_artifacts::render::escape_html_text(record.producer);
+    let destination = ironhermes_artifacts::render::escape_html_text(record.destination);
+    format!(
+        "{marker}\n\n\
+         The operator opted out of publishing this deliverable's body, or directed it \
+         elsewhere, so only a pointer to it is recorded here — the deliverable itself \
+         was not stored.\n\n\
+         - **Producer:** {producer}\n\
+         - **Destination:** {destination}\n\
+         - **Size:** {byte_len} bytes\n\
+         - **SHA-256:** {digest_hex}\n\
+         - **Recorded at:** {recorded_at}\n",
+        marker = POINTER_ARTIFACT_MARKER,
+        byte_len = record.byte_len,
+        digest_hex = record.digest_hex,
+        recorded_at = record.recorded_at,
+    )
+}
+
+/// Hex-encode the SHA-256 digest of `bytes`, using the workspace-pinned `sha2`
+/// crate rather than a hand-rolled checksum. Kept as a standalone helper so a
+/// unit test can assert its output against an independently known digest.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Publish a demoted "pointer" artifact for a producer's deliverable (D-12):
+/// when the operator opted out of a full-body publish, or directed the
+/// deliverable elsewhere, this records title, producer, destination, byte
+/// size, a real SHA-256 digest and a timestamp — never the deliverable's own
+/// bytes. Keyed by the SAME `source_kind`/`source_ref` the full artifact
+/// would have used, so a pointer versions in place exactly like
+/// [`publish_producer_deliverable`] does (shared idempotency key).
+///
+/// **Deliberate divergence from Phase 46.7's D-15.** The web-chat opt-out
+/// path (`capture_chat_deliverable`/`capture_chat_deliverable_since`,
+/// gated by [`detect_turn_opt_out`]) captures nothing on opt-out and is left
+/// completely unmodified and uncalled by this function — 52.1's D-12 is
+/// deliberately stricter for the bot/kanban/team producer paths ONLY. See
+/// `52.1-CONTEXT.md`'s D-12 entry for the reasoning; a downstream agent must
+/// not "reconcile" the two by making chat publish pointers too.
+///
+/// Every failure path (store open, publish) is a `tracing::warn!` plus a
+/// `None` return — pointer publishing is best-effort, matching every other
+/// capture fn in this module.
+pub fn publish_pointer_artifact(
+    source_kind: &str,
+    source_ref: &str,
+    title: &str,
+    producer: &str,
+    destination: &str,
+    bytes: &[u8],
+) -> Option<String> {
+    let digest_hex = sha256_hex(bytes);
+    let recorded_at = chrono::Utc::now().to_rfc3339();
+
+    let record = PointerRecord {
+        producer,
+        destination,
+        byte_len: bytes.len(),
+        digest_hex: &digest_hex,
+        recorded_at: &recorded_at,
+    };
+    let body = pointer_body(&record);
+
+    // Operator override (dispatcher-set) wins, else the canonical profile —
+    // mirrors `publish_producer_deliverable`'s resolution, so a pointer row
+    // stays visible to the gallery's profile filter exactly like the full
+    // artifact it demotes would have been.
+    let profile = std::env::var(ironhermes_core::ARTIFACTS_PROFILE_ENV)
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(ironhermes_core::current_profile);
+
+    let mut store = match ArtifactStore::open_default() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(
+                source_kind = %source_kind, source_ref = %source_ref, error = %e,
+                "pointer capture: failed to open artifact store"
+            );
+            return None;
+        }
+    };
+
+    // Same idempotency key the full artifact would have used — a pointer
+    // occupies the same slot rather than a distinct one.
+    let update_id = store
+        .latest_for_source(source_kind, source_ref)
+        .ok()
+        .flatten()
+        .map(|summary| summary.id);
+
+    match store.publish(PublishInput {
+        profile,
+        update_id,
+        title: Some(title.to_string()),
+        icon: None,
+        source_kind: Some(source_kind.to_string()),
+        source_ref: Some(source_ref.to_string()),
+        source_format: SourceFormat::Markdown,
+        body,
+    }) {
+        Ok(id) => Some(id),
+        Err(e) => {
+            tracing::warn!(
+                source_kind = %source_kind, source_ref = %source_ref, error = %e,
+                "pointer capture: publish failed"
+            );
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod pointer_capture_tests {
+    use super::*;
+
+    fn setup_artifacts_db() -> (tokio::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
+        let guard = crate::ENV_LOCK.blocking_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("artifacts.db");
+        unsafe {
+            std::env::set_var(ironhermes_artifacts::ARTIFACTS_DB_ENV, &db_path);
+        }
+        (guard, dir)
+    }
+
+    /// NIST SHA-256 test vector for `"abc"` — an independently known digest,
+    /// not derived from the implementation under test.
+    #[test]
+    fn sha256_hex_matches_independently_known_digest() {
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn pointer_body_carries_marker_and_all_six_fields_but_not_deliverable_text() {
+        let record = PointerRecord {
+            producer: "alice-bot",
+            destination: "/workspace/report.py",
+            byte_len: 42,
+            digest_hex: "deadbeef",
+            recorded_at: "2026-09-19T00:00:00Z",
+        };
+        let body = pointer_body(&record);
+        assert!(body.starts_with(POINTER_ARTIFACT_MARKER));
+        assert!(body.contains("alice-bot"));
+        assert!(body.contains("/workspace/report.py"));
+        assert!(body.contains("42 bytes"));
+        assert!(body.contains("deadbeef"));
+        assert!(body.contains("2026-09-19T00:00:00Z"));
+        assert!(
+            !body.contains("THE DELIVERABLE'S SECRET BODY"),
+            "a pointer body must never contain deliverable text"
+        );
+    }
+
+    #[test]
+    fn publish_pointer_artifact_writes_marked_body_without_deliverable_text() {
+        let (_guard, _db_dir) = setup_artifacts_db();
+        let deliverable_text = b"THIS IS THE DELIVERABLE'S OWN SECRET TEXT, NEVER STORED";
+
+        let id = publish_pointer_artifact(
+            "test_kind",
+            "ptr-ref-1",
+            "Title",
+            "bot-producer",
+            "/workspace/out.py",
+            deliverable_text,
+        )
+        .expect("pointer publish must succeed");
+
+        let store = ArtifactStore::open_default().unwrap();
+        let (fmt, body) = store.load_latest_source(&id).unwrap();
+        assert_eq!(fmt, SourceFormat::Markdown, "pointer body is markdown-wire");
+        assert!(body.starts_with(POINTER_ARTIFACT_MARKER));
+        assert!(body.contains("bot-producer"));
+        assert!(body.contains("/workspace/out.py"));
+        assert!(
+            !body.contains("SECRET TEXT"),
+            "the deliverable's own text must never appear in the stored pointer body"
+        );
+
+        let independently_computed = sha256_hex(deliverable_text);
+        assert!(
+            body.contains(&independently_computed),
+            "the stored digest must match an independently computed digest of the same bytes"
+        );
+    }
+
+    #[test]
+    fn publish_pointer_artifact_twice_same_key_versions_not_duplicates() {
+        let (_guard, _db_dir) = setup_artifacts_db();
+
+        let first = publish_pointer_artifact(
+            "test_kind",
+            "ptr-ref-2",
+            "Title",
+            "bot-producer",
+            "/workspace/out.py",
+            b"first bytes",
+        )
+        .expect("first pointer publish must succeed");
+
+        let second = publish_pointer_artifact(
+            "test_kind",
+            "ptr-ref-2",
+            "Title",
+            "bot-producer",
+            "/workspace/out.py",
+            b"second bytes, different content",
+        )
+        .expect("second pointer publish must succeed");
+
+        assert_eq!(
+            first, second,
+            "a repeat pointer publish under the same source kind/ref must version in place"
+        );
+
+        let store = ArtifactStore::open_default().unwrap();
+        let artifacts = store.list_for_profile(&ironhermes_core::current_profile()).unwrap();
+        assert_eq!(
+            artifacts.len(),
+            1,
+            "exactly one artifact row must exist after two pointer publishes under the same key"
+        );
+    }
+
+    #[test]
+    fn publish_pointer_artifact_for_declared_prose_records_prose_bytes_and_digest() {
+        let (_guard, _db_dir) = setup_artifacts_db();
+        let prose = b"the declared result text, published as a pointer instead of a file";
+
+        let id = publish_pointer_artifact(
+            "test_kind",
+            "ptr-ref-prose",
+            "Title",
+            "bot-producer",
+            "declared prose (no file)",
+            prose,
+        )
+        .expect("prose pointer publish must succeed");
+
+        let store = ArtifactStore::open_default().unwrap();
+        let (_fmt, body) = store.load_latest_source(&id).unwrap();
+        assert!(body.contains("declared prose (no file)"));
+        assert!(body.contains(&prose.len().to_string()));
+        assert!(body.contains(&sha256_hex(prose)));
+        assert!(
+            !body.contains("the declared result text"),
+            "the prose's own text must not appear in the pointer body"
+        );
+    }
+
+    /// CR-01 regression: `producer` and `destination` are attacker-influenceable
+    /// (an agent chooses its own output filename), and the pointer body is
+    /// published as `SourceFormat::Markdown` — rendered through the real
+    /// `ironhermes_artifacts::render::render` path, an inline HTML tag in
+    /// either field must never survive as a live element. Asserting only on
+    /// `pointer_body`'s raw string would be the "verifies its own assumption"
+    /// pattern this project keeps getting burned by, so this renders through
+    /// the actual Markdown-to-HTML pipeline the pointer artifact is served
+    /// through in production.
+    #[test]
+    fn pointer_body_with_metacharacters_in_producer_and_destination_renders_no_live_element() {
+        let record = PointerRecord {
+            producer: "<img src=x onerror=alert('producer-pwn')>",
+            destination: "<script>alert('destination-pwn')</script>report.html",
+            byte_len: 7,
+            digest_hex: "deadbeef",
+            recorded_at: "2026-09-19T00:00:00Z",
+        };
+        let body = pointer_body(&record);
+        let rendered = ironhermes_artifacts::render::render(SourceFormat::Markdown, &body);
+
+        assert!(
+            !rendered.contains("<img"),
+            "an <img> tag from the producer field must not survive rendering: {rendered}"
+        );
+        assert!(
+            !rendered.contains("<script>"),
+            "a <script> tag from the destination field must not survive rendering: {rendered}"
+        );
+        assert!(
+            rendered.contains("&lt;img"),
+            "the producer's angle bracket must be escaped, not merely absent: {rendered}"
+        );
+        assert!(
+            rendered.contains("&lt;script&gt;"),
+            "the destination's script tag must be escaped, not merely absent: {rendered}"
+        );
+    }
+
+    #[test]
+    fn publish_pointer_artifact_store_open_failure_returns_none_not_panic() {
+        let _guard = crate::ENV_LOCK.blocking_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let bogus_db_path = dir.path().join("not-a-file");
+        std::fs::create_dir_all(&bogus_db_path).unwrap();
+        unsafe {
+            std::env::set_var(ironhermes_artifacts::ARTIFACTS_DB_ENV, &bogus_db_path);
+        }
+
+        let result = publish_pointer_artifact(
+            "test_kind",
+            "ptr-ref-fail",
+            "Title",
+            "bot-producer",
+            "/workspace/out.py",
+            b"bytes",
+        );
+        assert!(
+            result.is_none(),
+            "a store that cannot open must yield None, not a panic"
+        );
+
+        unsafe {
+            std::env::remove_var(ironhermes_artifacts::ARTIFACTS_DB_ENV);
+        }
+    }
 }
 
 /// Deterministically capture and publish a chat turn's deliverable, if any

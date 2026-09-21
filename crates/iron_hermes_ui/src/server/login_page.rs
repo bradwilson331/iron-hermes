@@ -1344,6 +1344,12 @@ mod tests {
                 "/artifacts/{id}",
                 axum::routing::get(crate::server::artifact_route::serve_artifact),
             )
+            // Phase 52.1 Plan 02 (D-03): must mirror main.rs's route set
+            // exactly — see this fn's own doc note above.
+            .route(
+                "/artifacts/{id}/raw",
+                axum::routing::get(crate::server::artifact_route::serve_artifact_raw),
+            )
             .route(
                 "/chat-attachments/{session_id}/{id}",
                 axum::routing::get(crate::server::chat_attachment_route::serve_chat_attachment),

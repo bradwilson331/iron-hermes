@@ -56,7 +56,7 @@ use crate::components::hermes_app::screens::profile_shared::switcher::{
 };
 use crate::protocol::{ActivationScope, ProfileRow};
 use crate::server::bot_meta_api::live_profile_name;
-use crate::server::profile_activation_api::{activate_profile, get_active_profile};
+use crate::server::profile_activation_api::{activate_profile, clear_active_profile, get_active_profile};
 use dioxus::prelude::*;
 
 /// Phase 49.4 Plan 11 (D-19): shared refresh signal so the topbar's own
@@ -130,6 +130,18 @@ pub fn TopbarProfileSwitch() -> Element {
     };
     let closed_label = topbar_closed_label(active_resource().as_ref(), &fallback_name);
     let is_open = *menu_open.read();
+    // Ad-hoc fix (2026-09): "default" is the sentinel meaning "no persisted
+    // activation record" — never a real profile (see
+    // `profile_activation_api::clear_active_profile`'s doc comment). The
+    // synthetic row is ACTIVE exactly when `get_active_profile` resolved to
+    // `None`; still loading or errored both read as "not (yet) the active
+    // one", matching `topbar_closed_label`'s own loading/error fallback.
+    let default_is_active = matches!(active_resource().as_ref(), Some(Ok(None)));
+    let default_item_class = if default_is_active {
+        "topbar-profile-menu-item topbar-profile-menu-item--default topbar-profile-menu-item--active"
+    } else {
+        "topbar-profile-menu-item topbar-profile-menu-item--default"
+    };
 
     rsx! {
         div { class: "topbar-profile",
@@ -146,6 +158,33 @@ pub fn TopbarProfileSwitch() -> Element {
             }
             if is_open {
                 div { class: "topbar-profile-menu",
+                    // Ad-hoc fix (2026-09): pinned "default" row, rendered
+                    // above the fetched-profiles list at every load state —
+                    // mirrors the kanban `ProfileSwitcher`'s own pinned
+                    // "ALL PROFILES" lens-clear row
+                    // (`profile_shared/switcher.rs`, `.kn-profile-menu-item--all`),
+                    // which is likewise shown regardless of loading/error/
+                    // empty cardinality. "default" means the root home / no
+                    // profile override — clicking it clears the persisted
+                    // activation record rather than activating a name.
+                    div {
+                        class: default_item_class,
+                        key: "__default__",
+                        title: "default — root home, no profile override",
+                        onclick: move |_| {
+                            spawn(async move {
+                                if clear_active_profile().await.is_ok() {
+                                    refresh_tick.set(refresh_tick() + 1);
+                                }
+                            });
+                            menu_open.set(false);
+                        },
+                        span { class: "topbar-profile-health-dot topbar-profile-health-dot--ok", "aria-hidden": "true" }
+                        div { class: "topbar-profile-menu-item-body",
+                            div { class: "topbar-profile-menu-item-name", "default" }
+                            div { class: "topbar-profile-menu-item-meta", "Root home — no profile override" }
+                        }
+                    }
                     if is_loading {
                         div { class: "topbar-profile-menu-loading", "{PROFILE_LIST_LOADING_TEXT}" }
                     } else if load_error {

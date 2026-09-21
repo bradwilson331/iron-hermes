@@ -58,8 +58,8 @@ pub use decomposer::{
     decompose_triage_task, specify_triage_task,
 };
 pub use dispatcher::{
-    DispatcherContext, StrandedReport, StrandedSeverity, diagnose_stranded, run_dispatch_loop,
-    run_dispatch_tick, run_dispatch_tick_for_board,
+    DispatcherContext, ONE_SHOT_HOST_REFUSAL_MARKER, StrandedReport, StrandedSeverity,
+    diagnose_stranded, run_dispatch_loop, run_dispatch_tick, run_dispatch_tick_for_board,
 };
 pub use env_compat::{kanban_env, tenant_env};
 pub use error::{KanbanError, Result};

@@ -14,13 +14,38 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
-tokio = { workspace = true, features = ["sync", "fs", "io-util", "time", "rt"] }
+tokio = { workspace = true, features = ["sync", "fs", "io-util", "time", "rt", "net"] }
+tokio-util = { workspace = true }
 secrecy = { version = "0.10.3", features = ["serde"] }
-rusty_vault = { version = "=0.2.1", optional = true }
+uuid = { workspace = true }
+rusty_vault = { git = "https://github.com/Tongsuo-Project/RustyVault", rev = "0922e6d5e6fbe6fd2d909863eca6d583623f4ad7", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tracing-subscriber = { workspace = true }
+# Phase 51 Plan 12 (CR-01/T16): `declared_targets_are_tracked.rs` parses every workspace
+# member's Cargo.toml to find explicitly-declared [[example]]/[[bin]]/[[test]]/[[bench]]
+# targets. Already a pinned workspace dependency (used by ironhermes-cli et al.).
+toml = { workspace = true }
 
 [features]
 rusty-vault = ["dep:rusty_vault"]
+
+# `examples/seed_profile_secret.rs` is operator scaffolding for seeding and removing a
+# profile-scoped vault entry (`secret/profiles/{slug}/{leaf}`) — the only way to do either
+# today, since `ironhermes vault set` writes through the root `secret/providers/` prefix and
+# cannot address a profile path (F-03: no profile-vault CLI exists yet). It is committed and
+# tracked, retained until that CLI ships; this target and its `[[example]]` block below are
+# then removed together in one commit. (CR-01, 51-12: this file was previously untracked
+# while still declared here — cargo resolves explicitly-declared targets at manifest-parse
+# time, BEFORE feature resolution, so an untracked declared target breaks every cargo
+# command, `cargo metadata` included, on a fresh checkout.)
+# It references `RustyVaultStore`/`ProfileSecretStore` unconditionally, so without this
+# declaration Cargo auto-discovers it and tries to build it for every feature set, including
+# the default (no `rusty-vault`) baseline, where those types are `#[cfg]`'d out — breaking
+# `cargo test -p ironhermes-vault` (no features) with an unrelated E0432. `required-features`
+# scopes the example to builds/tests that actually enable the feature it needs.
+[[example]]
+name = "seed_profile_secret"
+required-features = ["rusty-vault"]

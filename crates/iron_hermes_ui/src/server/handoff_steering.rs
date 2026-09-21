@@ -339,6 +339,33 @@ pub(crate) fn begin_room_drive_or_queue(
     }
 }
 
+/// Phase 52 Plan 05 (D-02, Round 1 codex HIGH): the non-queueing twin of
+/// [`begin_room_drive_or_queue`] — its busy branch with the
+/// [`push_room_queue`] call removed. A "New conversation" reset must not
+/// enqueue itself as an operator message the way a busy-room chat send
+/// does; `None` here means "refuse the reset outright," never "wait for the
+/// running drive's next round boundary." A drive holds `transcript` and
+/// `session_title` as locals across every await and persists rows by
+/// re-loading under the lock and appending, so a reset that only took
+/// `GROUP_CHAT_LOCK` could not stop an in-flight drive from landing rows
+/// AFTER the reset's own marker row — this fn, acquired and held BEFORE
+/// `GROUP_CHAT_LOCK`, is what makes a concurrent drive and a concurrent
+/// reset mutually exclusive. Its only caller is
+/// `group_chat_store::reset_room_conversation_impl`.
+#[cfg(feature = "server")]
+pub(crate) fn try_acquire_room_drive(room_id: &str) -> Option<RoomDriveGuard> {
+    let mut guard = state().lock().unwrap_or_else(|e| e.into_inner());
+    let busy = guard.room_in_flight.get(room_id).copied().unwrap_or(0) > 0;
+    if busy {
+        None
+    } else {
+        *guard.room_in_flight.entry(room_id.to_string()).or_insert(0) += 1;
+        Some(RoomDriveGuard {
+            room: room_id.to_string(),
+        })
+    }
+}
+
 /// Phase 50.2 Plan 18 (G-50.2-2c): unconditionally enqueue `message` for
 /// `room_id`, regardless of whether a drive is currently marked in flight
 /// for that room. Does NOT consult or mutate `room_in_flight` — this is
@@ -695,6 +722,77 @@ mod tests {
                 panic!("room must be drivable again once its guard is dropped via any exit path")
             }
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 52 Plan 05 (D-02, Round 1 codex HIGH): try_acquire_room_drive
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn try_acquire_room_drive_returns_a_guard_when_the_room_is_idle() {
+        let _lock = crate::server::test_support::env_lock();
+        reset_steering_for_test();
+
+        let guard = try_acquire_room_drive("room-try-acquire-idle");
+        assert!(guard.is_some(), "an idle room must yield a guard");
+    }
+
+    #[test]
+    fn try_acquire_room_drive_returns_none_when_a_drive_already_holds_the_room() {
+        let _lock = crate::server::test_support::env_lock();
+        reset_steering_for_test();
+
+        let room = "room-try-acquire-busy";
+        let _drive_guard = match begin_room_drive_or_queue(room, "kickoff").expect("must not error") {
+            BeginRoomDriveOrQueue::Begin(guard) => guard,
+            BeginRoomDriveOrQueue::Queued { .. } => panic!("first call on an idle room must Begin"),
+        };
+
+        assert!(
+            try_acquire_room_drive(room).is_none(),
+            "a room with a drive already in flight must refuse a concurrent reset acquire"
+        );
+    }
+
+    #[test]
+    fn try_acquire_room_drive_does_not_enqueue_anything_when_busy() {
+        // The whole point of the non-queueing acquire: unlike
+        // `begin_room_drive_or_queue`'s busy branch, a refused
+        // `try_acquire_room_drive` call must never push onto `room_queues`.
+        let _lock = crate::server::test_support::env_lock();
+        reset_steering_for_test();
+
+        let room = "room-try-acquire-no-enqueue";
+        let _drive_guard = match begin_room_drive_or_queue(room, "kickoff").expect("must not error") {
+            BeginRoomDriveOrQueue::Begin(guard) => guard,
+            BeginRoomDriveOrQueue::Queued { .. } => panic!("first call on an idle room must Begin"),
+        };
+
+        assert!(try_acquire_room_drive(room).is_none());
+        assert_eq!(
+            room_steering_depth(room),
+            0,
+            "a refused try_acquire_room_drive call must never enqueue a message"
+        );
+    }
+
+    #[test]
+    fn try_acquire_room_drive_succeeds_again_once_the_drive_guard_drops() {
+        let _lock = crate::server::test_support::env_lock();
+        reset_steering_for_test();
+
+        let room = "room-try-acquire-after-drop";
+        let drive_guard = match begin_room_drive_or_queue(room, "kickoff").expect("must not error") {
+            BeginRoomDriveOrQueue::Begin(guard) => guard,
+            BeginRoomDriveOrQueue::Queued { .. } => panic!("first call on an idle room must Begin"),
+        };
+        assert!(try_acquire_room_drive(room).is_none());
+        drop(drive_guard);
+
+        assert!(
+            try_acquire_room_drive(room).is_some(),
+            "once the drive guard drops, the room must be acquirable again"
+        );
     }
 
     // -------------------------------------------------------------------

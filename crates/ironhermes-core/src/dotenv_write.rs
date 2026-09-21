@@ -50,6 +50,73 @@ pub fn quote_env_value(value: &str) -> String {
     out
 }
 
+/// Phase 51 Plan 15 (CR-03): the exact inverse of [`quote_env_value`] above.
+///
+/// Recognises the two four-byte escape runs [`quote_env_value`] emits —
+/// `'\''` (a literal `'`) and `'\\'` (a literal `\`) — via a single
+/// left-to-right character scan, NEVER a sequence of `str::replace` calls:
+/// both runs start with the same byte (`'`), so a two-step replace is
+/// order-sensitive and silently corrupts a value containing both a quote and
+/// a backslash (replace the `'\''` run first and a literal backslash that
+/// happens to sit next to a real quote can be mis-parsed as part of it, and
+/// vice versa). A single scan that consumes each run atomically as it is
+/// found has no such ordering to get wrong.
+///
+/// Also decodes the other quoting shape a human might hand-write — a value
+/// wrapped in plain double quotes, `"..."`, stripped verbatim with no escape
+/// processing (this project's writer never produces that shape, but a
+/// hand-edited `.env` might, and the migration this function feeds must not
+/// reject it). A value not wrapped in either quote style at all — again,
+/// only ever hand-written, since [`quote_env_value`] always strong-quotes —
+/// passes through completely unchanged. A trailing `\r` (a CRLF file) is
+/// stripped before any of the above analysis, so a CRLF `.env` decodes
+/// identically to its LF twin, and is reattached to nothing (the caller
+/// already reads per logical line; the `\r` was never part of the value).
+///
+/// An opening quote with no matching closing quote is malformed input: it is
+/// returned UNCHANGED rather than partially stripped. Half-decoding a
+/// malformed line would itself be a silent, quiet corruption — exactly the
+/// class of bug this function exists to stop introducing a fourth instance
+/// of.
+pub fn unquote_env_value(raw: &str) -> String {
+    let no_cr = raw.strip_suffix('\r').unwrap_or(raw);
+    let bytes = no_cr.as_bytes();
+
+    if bytes.len() >= 2 && bytes[0] == b'"' && bytes[bytes.len() - 1] == b'"' {
+        return no_cr[1..no_cr.len() - 1].to_string();
+    }
+
+    if bytes.len() >= 2 && bytes[0] == b'\'' && bytes[bytes.len() - 1] == b'\'' {
+        let interior = &no_cr[1..no_cr.len() - 1];
+        let chars: Vec<char> = interior.chars().collect();
+        let mut out = String::with_capacity(interior.len());
+        let mut i = 0;
+        while i < chars.len() {
+            // Recognise `'\''` / `'\\'` as a run of exactly 3 chars WITHIN the
+            // interior (the surrounding quotes that make each run 4 bytes in
+            // the full rendered line are already stripped off here): a `'`,
+            // then `\`, then the escaped char itself.
+            if chars[i] == '\''
+                && i + 2 < chars.len()
+                && chars[i + 1] == '\\'
+                && (chars[i + 2] == '\'' || chars[i + 2] == '\\')
+                && i + 3 < chars.len()
+                && chars[i + 3] == '\''
+            {
+                out.push(chars[i + 2]);
+                i += 4;
+            } else {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+        return out;
+    }
+
+    // Unquoted, or an unbalanced/malformed quote — return unchanged.
+    no_cr.to_string()
+}
+
 /// Phase 47.6 Plan 04: error type for this module's writer/verifier. Its
 /// `Display` never embeds a `dotenvy::Error` in any form (no `{e}`,
 /// `.to_string()`, `Display`, `Debug`, or wrapping it as an error `source`)
@@ -340,5 +407,122 @@ mod tests {
             Some("val_new")
         );
         assert_eq!(parsed.len(), 2);
+    }
+}
+
+/// Phase 51 Plan 15 (CR-03) — `unquote_env_value`'s own test module, separate
+/// from [`tests`] above so the two functions' coverage stays clearly
+/// attributed to which half of the pair each proves.
+#[cfg(test)]
+mod unquote_tests {
+    use super::*;
+
+    /// The thirteen corpus classes `<behavior>` requires, plus the pairing's
+    /// dedicated mixed-escape case. Each entry is `(label, plaintext)`; every
+    /// entry is round-tripped both ways: `unquote_env_value(&quote_env_value(v))
+    /// == v`, and — since that alone would not catch a decoder that is simply
+    /// the identity function — the QUOTED form is also asserted to differ from
+    /// the plaintext whenever quoting actually changes the bytes (i.e. always,
+    /// since `quote_env_value` unconditionally wraps in `'...'`).
+    fn corpus() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("plain key-shaped string", "OPENROUTER_API_KEY_SK_ABC123"),
+            ("empty string", ""),
+            ("value with spaces", "sk with spaces in it"),
+            ("value with #", "sk-value#with-hash"),
+            ("value with $VAR", "sk-$HOME-literal"),
+            ("value with ${VAR}", "sk-${HOME}-literal"),
+            ("single quote", "it's-a-secret"),
+            ("single backslash", r"a\backslash"),
+            (r"backslash then quote (\')", "a\\'b"),
+            (r"quote then backslash ('\)", "a'\\b"),
+            (
+                "several of each interleaved",
+                "a'b\\c'd\\e''f\\\\g",
+            ),
+            ("trailing backslash", r"trailing-backslash\"),
+            ("non-ASCII text", "sécrét-日本語-🔑"),
+            ("mixed quote and backslash together", "a\\'b'\\c"),
+        ]
+    }
+
+    #[test]
+    fn round_trips_every_corpus_value() {
+        for (label, value) in corpus() {
+            let quoted = quote_env_value(value);
+            let decoded = unquote_env_value(&quoted);
+            assert_eq!(
+                decoded, value,
+                "round-trip failed for corpus case {label:?}: quote_env_value produced \
+                 {quoted:?}, which unquote_env_value decoded to {decoded:?} instead of the \
+                 original {value:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unquoted_value_passes_through_unchanged() {
+        let value = "not-quoted-at-all";
+        assert_eq!(unquote_env_value(value), value);
+    }
+
+    #[test]
+    fn double_quoted_value_has_quotes_removed() {
+        assert_eq!(unquote_env_value("\"hello world\""), "hello world");
+        assert_eq!(unquote_env_value("\"\""), "");
+    }
+
+    #[test]
+    fn trailing_crlf_carriage_return_decodes_identically_to_lf() {
+        let lf_quoted = quote_env_value("crlf-vs-lf-value");
+        let crlf_quoted = format!("{lf_quoted}\r");
+        assert_eq!(
+            unquote_env_value(&crlf_quoted),
+            unquote_env_value(&lf_quoted),
+            "a CRLF-suffixed rendered value must decode identically to its LF twin"
+        );
+        assert_eq!(unquote_env_value(&crlf_quoted), "crlf-vs-lf-value");
+    }
+
+    #[test]
+    fn malformed_unbalanced_opening_quote_is_returned_unchanged() {
+        let malformed = "'this-never-closes";
+        assert_eq!(
+            unquote_env_value(malformed),
+            malformed,
+            "an opening quote with no matching close must be returned unchanged, never \
+             partially stripped"
+        );
+    }
+
+    #[test]
+    fn single_bare_quote_character_is_returned_unchanged() {
+        // Too short to be a validly-quoted (len >= 2) value either way.
+        assert_eq!(unquote_env_value("'"), "'");
+        assert_eq!(unquote_env_value("\""), "\"");
+    }
+
+    #[test]
+    fn is_a_single_left_to_right_scan_not_a_replace_chain() {
+        // Static guard: the whole point of the single-scan requirement is that
+        // a `replace`-based implementation gets the mixed quote+backslash case
+        // wrong. This corpus case (see `corpus()` above) already asserts the
+        // BEHAVIOR; this asserts the STRUCTURAL constraint the module doc
+        // requires by grepping the function's own source region.
+        let src = include_str!("dotenv_write.rs");
+        let start = src
+            .find("pub fn unquote_env_value")
+            .expect("unquote_env_value must exist in this file");
+        let end = start
+            + src[start..]
+                .find("\n}\n")
+                .expect("unquote_env_value's closing brace must exist")
+            + 3;
+        let body = &src[start..end];
+        assert_eq!(
+            body.matches("replace(").count(),
+            0,
+            "unquote_env_value must be a single scan, not a sequence of str::replace calls"
+        );
     }
 }

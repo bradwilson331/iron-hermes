@@ -306,6 +306,15 @@ pub enum SlashOutcome {
     /// `active_overlay = Some(OverlayKind::ModelPicker { step: PickerStep::ProviderOnly,
     /// selected_provider: None })`.
     OpenProviderPicker,
+    /// Phase 49.7 Plan 05 (D-02/D-06/D-08): `/goal <text> [--budget N]`
+    /// resolved. Plan 05 Task 2's `apply_slash_outcome` arm is
+    /// honest-but-inert (no spawn); Task 3 replaces it with the real
+    /// launch, following this surface's existing convention for running a
+    /// turn asynchronously.
+    StartGoalLoop {
+        objective: String,
+        budget: Option<u32>,
+    },
 }
 
 // ── dispatch_slash ────────────────────────────────────────────────────────────
@@ -1419,6 +1428,12 @@ fn map_core_to_slash_outcome(result: CommandResult) -> SlashOutcome {
         // these variants straight to `Output(fallback_text)` instead.
         CommandResult::OpenModelPicker { .. } => SlashOutcome::OpenModelPicker,
         CommandResult::OpenProviderPicker { .. } => SlashOutcome::OpenProviderPicker,
+        // Phase 49.7 Plan 05 (D-02/D-06/D-08): threads straight through —
+        // `apply_slash_outcome` (app.rs) is the site that actually launches
+        // the loop (Task 3).
+        CommandResult::StartGoalLoop { objective, budget } => {
+            SlashOutcome::StartGoalLoop { objective, budget }
+        }
     }
 }
 

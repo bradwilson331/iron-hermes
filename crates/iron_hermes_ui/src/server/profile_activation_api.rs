@@ -226,6 +226,31 @@ pub(crate) fn resolve_active_profile_for(
     }
 }
 
+/// Ad-hoc fix (2026-09): reset the persisted activation record to its
+/// empty/default shape — the inverse of [`write_active_profile_record`].
+/// "default" is a sentinel meaning "no persisted activation record", not a
+/// real profile (see [`crate::server::profile_api::list_profiles`] — a
+/// `profiles/default` directory can never exist, `RESERVED_NAMES` refuses
+/// the name). Clearing the record is therefore how the UI returns to
+/// "default": [`resolve_active_profile_for`] already falls through to
+/// `ironhermes_core::current_profile()` when [`read_active_profile_record`]
+/// returns `None`, and the topbar's `topbar_closed_label` already renders
+/// the environment-derived fallback name in that case — no resolver or
+/// label change needed, only a way to produce the `None` state again once
+/// a named profile has been activated. Same load-fresh/write-then-rename
+/// discipline as `write_active_profile_record`; caller is responsible for
+/// the fail-closed write gate, matching that fn's own separation of
+/// concerns (the `#[server]` wrapper gates, this fn writes).
+#[cfg(feature = "server")]
+pub(crate) fn clear_active_profile_record() -> Result<(), String> {
+    let mut config =
+        ironhermes_core::config::Config::load().map_err(|e| format!("Config load failed: {e}"))?;
+    config.active_profile = ironhermes_core::config::ActiveProfileConfig::default();
+    config
+        .save()
+        .map_err(|e| format!("Config save failed: {e}"))
+}
+
 /// Phase 49.4 Plan 08 (D-14): activate a profile with a scope. Four-step
 /// write protocol (mirrors `update_provider_config`,
 /// `provider_config_api.rs:240-281`, and `profile_api::create_profile`):
@@ -306,6 +331,42 @@ pub async fn get_active_profile() -> Result<Option<ActiveProfileRecord>, ServerF
     {
         Err(ServerFnError::new(
             "get_active_profile unavailable without `server` feature",
+        ))
+    }
+}
+
+/// Ad-hoc fix (2026-09): clear the persisted activation record, returning
+/// every surface's resolution to `ironhermes_core::current_profile()` — the
+/// "default" sentinel described on [`clear_active_profile_record`]. Same
+/// write protocol as `activate_profile` minus the two steps that only apply
+/// to activating a NAMED profile (name validation, profile-directory
+/// existence check): fresh `Config::load()` -> fail-closed gate -> write
+/// off the runtime via `spawn_blocking`. Clearing when no record exists is
+/// a successful no-op, not an error — `clear_active_profile_record` writes
+/// the same empty shape regardless of what was there before.
+#[server]
+pub async fn clear_active_profile() -> Result<(), ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        // Fresh disk read (NOT app_state.config — the startup snapshot).
+        let config = ironhermes_core::config::Config::load()
+            .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
+
+        // Fail-closed gate — same flag `activate_profile` enforces.
+        crate::server::profile_api::check_profile_write_gate(&config)
+            .map_err(ServerFnError::new)?;
+
+        tokio::task::spawn_blocking(clear_active_profile_record)
+            .await
+            .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
+            .map_err(ServerFnError::new)?;
+
+        Ok(())
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        Err(ServerFnError::new(
+            "clear_active_profile unavailable without `server` feature",
         ))
     }
 }
@@ -592,6 +653,118 @@ mod profile_activation_tests {
         // for a missing file (see `Config::load_from`'s own contract), so
         // this exercises the "no record" path via a genuinely absent file
         // rather than a malformed one.
+        assert!(read_active_profile_record().is_none());
+    }
+
+    // -------------------------------------------------------------------
+    // Ad-hoc fix (2026-09): `clear_active_profile_record` / `clear_active_profile`.
+    // -------------------------------------------------------------------
+
+    /// Mirrors `active_profile_record_round_trips_through_write_and_read`,
+    /// exercising `clear_active_profile_record` directly (impl level, no
+    /// server-fn gate involved) — write a record, clear it, confirm the
+    /// resolver falls back to the environment-derived profile exactly like
+    /// the never-activated case.
+    #[test]
+    fn clear_active_profile_record_round_trips_through_write_and_clear() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile(dir.path(), "roundtrip-clear-bot");
+
+        let record = ActiveProfileRecord {
+            name: "roundtrip-clear-bot".to_string(),
+            scope: ActivationScope::Everywhere,
+            updated_at_ms: 7,
+        };
+        write_active_profile_record(&record).expect("seed record");
+        assert!(read_active_profile_record().is_some());
+
+        clear_active_profile_record().expect("clear should succeed");
+
+        assert!(read_active_profile_record().is_none());
+        let expected = ironhermes_core::current_profile();
+        assert_eq!(
+            resolve_active_profile_for(ActivationSurface::Chat, None),
+            expected
+        );
+    }
+
+    /// Clearing when no record was ever written is a successful no-op, not
+    /// an error.
+    #[test]
+    fn clear_active_profile_record_with_no_existing_record_is_a_noop_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        assert!(read_active_profile_record().is_none());
+
+        clear_active_profile_record().expect("clearing an absent record must succeed");
+        assert!(read_active_profile_record().is_none());
+    }
+
+    /// Mirrors `activate_profile_refuses_when_write_gate_disabled_and_persists_nothing`:
+    /// the fail-closed write gate covers `clear_active_profile` exactly like
+    /// every other browser-reachable config write in this crate.
+    #[tokio::test]
+    async fn clear_active_profile_refuses_when_write_gate_disabled_and_persists_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile(dir.path(), "gated-clear-bot");
+
+        let record = ActiveProfileRecord {
+            name: "gated-clear-bot".to_string(),
+            scope: ActivationScope::ChatOnly,
+            updated_at_ms: 1,
+        };
+        write_active_profile_record(&record).expect("seed record");
+        // `SecurityConfig::default().web_config_write_enabled` is already
+        // `false` (config.rs's own documented default) — no explicit
+        // disable needed, matching this seeded-record starting state.
+
+        let result = clear_active_profile().await;
+        assert!(result.is_err(), "a disabled write gate must refuse clearing");
+
+        let after = read_active_profile_record().expect("record must still be present");
+        assert_eq!(after.name, "gated-clear-bot");
+    }
+
+    /// The full server-fn round trip with the gate enabled: activate,
+    /// clear, confirm the record is gone and the resolver falls back.
+    #[tokio::test]
+    async fn clear_active_profile_succeeds_with_gate_enabled_and_clears_the_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile(dir.path(), "ungated-clear-bot");
+
+        let record = ActiveProfileRecord {
+            name: "ungated-clear-bot".to_string(),
+            scope: ActivationScope::Everywhere,
+            updated_at_ms: 1,
+        };
+        write_active_profile_record(&record).expect("seed record");
+
+        let mut config = ironhermes_core::config::Config::load().expect("load seeded config");
+        config.security.web_config_write_enabled = true;
+        config.save().expect("enable write gate");
+
+        let result = clear_active_profile().await;
+        assert!(result.is_ok(), "clearing with the gate enabled must succeed");
+        assert!(read_active_profile_record().is_none());
+    }
+
+    /// Clearing via the server fn when no record exists (gate enabled) is
+    /// also a successful no-op, not an error.
+    #[tokio::test]
+    async fn clear_active_profile_succeeds_with_no_existing_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+
+        let mut config = ironhermes_core::config::Config::load().expect("load default config");
+        config.security.web_config_write_enabled = true;
+        config.save().expect("enable write gate");
+
+        assert!(read_active_profile_record().is_none());
+        let result = clear_active_profile().await;
+        assert!(result.is_ok(), "clearing an absent record must succeed");
         assert!(read_active_profile_record().is_none());
     }
 }

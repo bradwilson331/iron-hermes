@@ -42,11 +42,117 @@ pub struct SlashCommandInfo {
     pub aliases: Vec<String>,
 }
 
+/// Phase 50.5 (D-12): which tier resolved a window that reaches the browser.
+/// Mirrors `ironhermes_core::provider::ContextLengthSource`, but is defined
+/// LOCALLY rather than re-exported: every `ironhermes_core` reference in this
+/// file sits inside a `#[cfg(not(target_arch = "wasm32"))]` block because
+/// that crate is native-only, while this DTO must cross to the browser.
+/// Only `GlobalPin` and `Fallback` are flagged in the topbar (D-12) —
+/// `PerModelConfig` and `Metadata` are both genuinely about the selected
+/// model and get no marker.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextWindowSource {
+    /// `providers.<p>.models.<m>.context_length` — a sparse, operator-authored
+    /// per-(provider, model) override. Most specific.
+    PerModelConfig,
+    /// The model registry's cache or static-table entry for this model.
+    #[default]
+    Metadata,
+    /// `config.model.context_length` — the global pin, now a floor for
+    /// models no more specific tier knows about (Phase 50.5 D-02).
+    GlobalPin,
+    /// `DEFAULT_CONTEXT_LENGTH` (128,000) — nothing else resolved.
+    Fallback,
+}
+
+/// Phase 50.5 (D-12): the mapping exists in exactly one place so the DTO and
+/// the core resolver's own enum can never drift apart.
+#[cfg(not(target_arch = "wasm32"))]
+impl From<ironhermes_core::provider::ContextLengthSource> for ContextWindowSource {
+    fn from(value: ironhermes_core::provider::ContextLengthSource) -> Self {
+        match value {
+            ironhermes_core::provider::ContextLengthSource::PerModelConfig => {
+                Self::PerModelConfig
+            }
+            ironhermes_core::provider::ContextLengthSource::Metadata => Self::Metadata,
+            ironhermes_core::provider::ContextLengthSource::GlobalPin => Self::GlobalPin,
+            ironhermes_core::provider::ContextLengthSource::Fallback => Self::Fallback,
+        }
+    }
+}
+
+/// Phase 50.5 (D-12/D-13): the four human-facing provenance words. These are
+/// a CONTRACT, not a label — Plan 06's placeholder copy consumes them
+/// verbatim. Wasm-safe (no `cfg` gate needed): it renders in the browser.
+/// `#[allow(dead_code)]`: this plan (05) only needs the DTO/enum this
+/// derives from — the first caller lands in Plan 06's Models-screen field
+/// placeholder (mirrors the existing `decide_realtime_tool_action` precedent
+/// in this same file for a symbol declared ahead of its first call site).
+#[allow(dead_code)]
+pub fn provenance_word(source: ContextWindowSource) -> &'static str {
+    match source {
+        ContextWindowSource::PerModelConfig => "override",
+        ContextWindowSource::Metadata => "cache",
+        ContextWindowSource::GlobalPin => "pin",
+        ContextWindowSource::Fallback => "default",
+    }
+}
+
+#[cfg(test)]
+mod context_window_source_tests {
+    use super::{provenance_word, ContextWindowSource};
+
+    /// These four words are a CONTRACT — Plan 06's placeholder copy consumes
+    /// them verbatim.
+    #[test]
+    fn provenance_word_matches_the_contract() {
+        assert_eq!(
+            provenance_word(ContextWindowSource::PerModelConfig),
+            "override"
+        );
+        assert_eq!(provenance_word(ContextWindowSource::Metadata), "cache");
+        assert_eq!(provenance_word(ContextWindowSource::GlobalPin), "pin");
+        assert_eq!(provenance_word(ContextWindowSource::Fallback), "default");
+    }
+
+    /// `ContextWindowSource` serializes to lowercase snake_case strings and
+    /// round-trips through serde.
+    #[test]
+    fn round_trips_through_serde_as_snake_case() {
+        let cases = [
+            (ContextWindowSource::PerModelConfig, "\"per_model_config\""),
+            (ContextWindowSource::Metadata, "\"metadata\""),
+            (ContextWindowSource::GlobalPin, "\"global_pin\""),
+            (ContextWindowSource::Fallback, "\"fallback\""),
+        ];
+        for (source, expected_json) in cases {
+            let json = serde_json::to_string(&source).expect("serialize");
+            assert_eq!(json, expected_json);
+            let back: ContextWindowSource = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, source, "round-trip must preserve the variant");
+        }
+    }
+}
+
+/// Phase 50.5: guard a `usize -> u32` DTO-boundary cast with a saturating
+/// conversion rather than `as`, so a poisoned cache/config value cannot wrap
+/// silently instead of merely rendering as an implausibly large number.
+/// Wasm-safe (no `ironhermes_core` reference) even though every current
+/// caller is server-only.
+fn saturating_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ConfigSummary {
     pub model: String,
     pub provider: String,
     pub context_length: u32,
+    /// Phase 50.5 (D-12): which tier resolved `context_length`, from the SAME
+    /// `context_length_with_source()` evaluation as the number itself, so the
+    /// two can never disagree. Consumed by `sys_meta.rs`'s `~` marker.
+    pub context_length_source: ContextWindowSource,
     pub memory_enabled: bool,
     /// Phase 46.9 Plan 03 (D-07): seconds since this server process began
     /// answering `get_config_summary` — feeds `sys_meta.rs`'s `UPTIME`
@@ -102,11 +208,40 @@ pub struct MemoryEntry {
     pub store: String,
     /// Raw text block from MemoryEntries Vec<String> — one row per block.
     pub body: String,
+    /// Phase 50.4 Plan 04 (D-01/D-04): this entry's position within its
+    /// OWN target's `Vec<String>` — the stable per-target address the
+    /// write server fns' D-04 `expected_text` guard is keyed on. Populated
+    /// from the same per-target iteration that already pushes `store`/
+    /// `body` (50.4-RESEARCH.md Pitfall 3); NOT a global index across the
+    /// flattened agent+user list — the two panels write to two different
+    /// stores, so a global index would send the wrong row number for every
+    /// user-store entry. The client-side filter is purely client-side
+    /// (module doc above) and subsets rows without renumbering them, so
+    /// this index survives filtering.
+    pub idx: usize,
+}
+
+/// Phase 50.4 Plan 04 (D-01 stats panel): per-store entry/char accounting
+/// for the right-bottom panel, computed from the store's own `char_count`/
+/// `char_limit` (not a duplicate implementation) so the number the operator
+/// reads here always matches the number the agent sees in its system
+/// prompt.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct MemoryStoreStats {
+    /// "agent" or "user" — same store key as `MemoryEntry::store`.
+    pub store: String,
+    pub entries: usize,
+    pub chars_used: usize,
+    pub chars_limit: usize,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct MemoryInfo {
     pub entries: Vec<MemoryEntry>,
+    /// Empty when `memory_manager` is `None` (or on a load error) — the
+    /// `Default` derive gives an empty `Vec` here, so the disabled path
+    /// keeps rendering zero/dash stats instead of an error (Task 3).
+    pub stats: Vec<MemoryStoreStats>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -206,10 +341,25 @@ pub struct ArtifactInfo {
     pub icon: Option<String>,
     pub source_kind: Option<String>,
     pub source_ref: Option<String>,
+    /// Phase 52.1 Plan 02 (D-03): the canonical wire string ("html" | "md" |
+    /// "code") from `ArtifactSummary.source_format`, used by the gallery's
+    /// `artifact_download_name` helper to pick the raw-download extension.
+    pub source_format: String,
     pub updated_at: String,
     /// Phase 46.6 artifact management: soft-archived state (hidden from the
     /// default gallery listing; surfaced only under the "show archived" toggle).
     pub archived: bool,
+    /// Phase 52.1 Plan 06 (D-13/D-15): the producing bot's name, resolved at
+    /// render time rather than stored — keeps D-13's no-new-column constraint
+    /// literally true. Populated server-side for kanban rows only (a
+    /// batch-resolved kanban-store lookup, see `resolve_kanban_producers`
+    /// below); `None` for every other source kind, including team, whose
+    /// producer the gallery component parses client-side from `source_ref`
+    /// (`team_producer_from_source_ref` in `screens/artifacts.rs`) since it
+    /// needs no store lookup. `None` also on an unresolvable kanban task
+    /// (deleted task, unopenable board) — the row degrades to pill-only,
+    /// never an error.
+    pub producer: Option<String>,
 }
 
 /// Phase 46.6 Plan 03 (D-04): profile-scoped artifact list for the Sessions-page
@@ -239,18 +389,108 @@ pub async fn list_artifacts(include_archived: bool) -> Result<Vec<ArtifactInfo>,
             .map_err(|e| ServerFnError::new(format!("ArtifactStore list failed: {e}")))?
     };
 
+    // Phase 52.1 Plan 06 (D-15): batch-resolve every kanban row's producing
+    // bot in ONE pass over this listing — the store lock above is already
+    // released, and the store is dropped before we ever touch the kanban
+    // board store, so the two stores are never held at once. `kanban_ids` is
+    // empty for a kanban-free listing, in which case `resolve_kanban_producers`
+    // returns immediately without opening anything (T-52.1-21).
+    let kanban_ids = kanban_task_ids(&summaries);
+    let kanban_producers = resolve_kanban_producers(&kanban_ids);
+
     Ok(summaries
         .into_iter()
-        .map(|s| ArtifactInfo {
-            id: s.id,
-            title: s.title,
-            icon: s.icon,
-            source_kind: s.source_kind,
-            source_ref: s.source_ref,
-            updated_at: format!("{}", s.updated_at as i64),
-            archived: s.archived,
+        .map(|s| {
+            let producer =
+                producer_for_summary(s.source_kind.as_deref(), s.source_ref.as_deref(), &kanban_producers);
+            ArtifactInfo {
+                id: s.id,
+                title: s.title,
+                icon: s.icon,
+                source_kind: s.source_kind,
+                source_ref: s.source_ref,
+                source_format: s.source_format,
+                updated_at: format!("{}", s.updated_at as i64),
+                archived: s.archived,
+                producer,
+            }
         })
         .collect())
+}
+
+/// Phase 52.1 Plan 06 (D-15): the deduplicated set of kanban task ids across
+/// every kanban-sourced row in a listing. Pure and store-free — a caller can
+/// check `is_empty()` to skip kanban resolution entirely for a kanban-free
+/// listing, which is what keeps `resolve_kanban_producers` below at zero
+/// board opens in that case (T-52.1-21).
+#[cfg(feature = "server")]
+fn kanban_task_ids(summaries: &[ArtifactSummary]) -> std::collections::BTreeSet<String> {
+    summaries
+        .iter()
+        .filter(|s| s.source_kind.as_deref() == Some("kanban"))
+        .filter_map(|s| s.source_ref.clone())
+        .collect()
+}
+
+/// Phase 52.1 Plan 06 (D-15): the per-row producer-selection rule, pure and
+/// store-free — kept separate from `resolve_kanban_producers` so the
+/// selection logic (kanban rows read from the already-resolved map by task
+/// id; every other source kind, including a kanban row whose id is absent
+/// from the map, is `None`) is unit-testable without a real kanban store.
+#[cfg(feature = "server")]
+fn producer_for_summary(
+    source_kind: Option<&str>,
+    source_ref: Option<&str>,
+    kanban_producers: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+    if source_kind != Some("kanban") {
+        return None;
+    }
+    source_ref.and_then(|task_id| kanban_producers.get(task_id).cloned())
+}
+
+/// Phase 52.1 Plan 06 (D-15): resolve every id in `task_ids` to its task's
+/// assignee, opening the kanban board store at most once (skipped entirely
+/// when `task_ids` is empty — no per-row open, T-52.1-21). Every failure
+/// degrades rather than propagates: a board that cannot be opened logs a
+/// warning and returns an empty map; a task id that resolves to an error or a
+/// missing row simply does not appear in the returned map, leaving that row's
+/// `producer` as `None`. This fn never constructs a `ServerFnError` — the
+/// artifact listing must succeed regardless of kanban's own state
+/// (T-52.1-22).
+#[cfg(feature = "server")]
+fn resolve_kanban_producers(
+    task_ids: &std::collections::BTreeSet<String>,
+) -> std::collections::HashMap<String, String> {
+    let mut producers = std::collections::HashMap::new();
+    if task_ids.is_empty() {
+        return producers;
+    }
+    let store = match ironhermes_kanban::KanbanStore::open_from_env_or_board(None) {
+        Ok(store) => store,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "kanban producer resolution: could not open board store, rows degrade to no producer name"
+            );
+            return producers;
+        }
+    };
+    for task_id in task_ids {
+        match store.get_task(task_id) {
+            Ok(task) => {
+                producers.insert(task_id.clone(), task.assignee);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %e,
+                    "kanban producer resolution: task lookup failed, row degrades to no producer name"
+                );
+            }
+        }
+    }
+    producers
 }
 
 /// Phase 46.6 gap-closure: the latest artifact a kanban task produced, or `None`.
@@ -273,15 +513,235 @@ pub async fn artifact_for_task(task_id: String) -> Result<Option<ArtifactInfo>, 
             .latest_for_source("kanban", &task_id)
             .map_err(|e| ServerFnError::new(format!("latest_for_source failed: {e}")))?
     };
+    // Phase 52.1 Plan 06 (D-15): this fn already has the single task id in
+    // hand, so it resolves its producer through the exact same
+    // `resolve_kanban_producers`/`producer_for_summary` helpers `list_artifacts`
+    // uses (one open per call, degrading to `None` on any failure) rather than
+    // a second, divergent lookup path. This fn's own scoping is unchanged: it
+    // stays unscoped by profile, exactly as its doc comment states.
+    let producer = summary.as_ref().and_then(|s| {
+        let ids = std::collections::BTreeSet::from([task_id.clone()]);
+        let kanban_producers = resolve_kanban_producers(&ids);
+        producer_for_summary(s.source_kind.as_deref(), s.source_ref.as_deref(), &kanban_producers)
+    });
     Ok(summary.map(|s| ArtifactInfo {
         id: s.id,
         title: s.title,
         icon: s.icon,
         source_kind: s.source_kind,
         source_ref: s.source_ref,
+        source_format: s.source_format,
         updated_at: format!("{}", s.updated_at as i64),
         archived: s.archived,
+        producer,
     }))
+}
+
+#[cfg(all(test, feature = "server"))]
+mod artifact_producer_tests {
+    use super::{kanban_task_ids, producer_for_summary, resolve_kanban_producers};
+    use ironhermes_artifacts::ArtifactSummary;
+    use ironhermes_kanban::{CreateTaskOptions, KanbanStore};
+
+    /// Sets an env var for the guard's lifetime, restoring the previous value
+    /// (or removing it) on drop. Duplicated from this crate's own established
+    /// `ScopedEnv` pattern (e.g. `group_team_api.rs`, `schedules_api.rs`) —
+    /// each test module keeps its own copy rather than sharing a `pub(crate)`
+    /// type across unrelated test modules.
+    struct ScopedEnv {
+        key: String,
+        prev: Option<String>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &str, value: &str) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: single-threaded test context (`--test-threads=1` is
+            // mandated for this crate's test suite).
+            unsafe { std::env::set_var(key, value) };
+            Self {
+                key: key.to_string(),
+                prev,
+            }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var(&self.key, v) },
+                None => unsafe { std::env::remove_var(&self.key) },
+            }
+        }
+    }
+
+    fn summary(source_kind: Option<&str>, source_ref: Option<&str>) -> ArtifactSummary {
+        ArtifactSummary {
+            id: "artifact-1".to_string(),
+            title: "Title".to_string(),
+            icon: None,
+            source_kind: source_kind.map(str::to_string),
+            source_ref: source_ref.map(str::to_string),
+            source_format: "html".to_string(),
+            updated_at: 0.0,
+            archived: false,
+        }
+    }
+
+    // -- kanban_task_ids ------------------------------------------------
+
+    #[test]
+    fn kanban_task_ids_collects_only_kanban_rows() {
+        let summaries = vec![
+            summary(Some("kanban"), Some("task-1")),
+            summary(Some("chat"), Some("session:file.html")),
+            summary(Some("team"), Some("room:drive:worker")),
+            summary(Some("kanban"), Some("task-2")),
+            summary(Some("delegate"), Some("task-3")),
+        ];
+        let ids = kanban_task_ids(&summaries);
+        assert_eq!(
+            ids,
+            std::collections::BTreeSet::from(["task-1".to_string(), "task-2".to_string()])
+        );
+    }
+
+    #[test]
+    fn kanban_task_ids_empty_when_no_kanban_rows() {
+        let summaries = vec![
+            summary(Some("chat"), Some("session:file.html")),
+            summary(Some("team"), Some("room:drive:worker")),
+            summary(None, None),
+        ];
+        assert!(kanban_task_ids(&summaries).is_empty());
+    }
+
+    // -- resolve_kanban_producers -----------------------------------------
+
+    #[test]
+    fn resolve_kanban_producers_skips_open_entirely_for_empty_ids() {
+        // No IRONHERMES_KANBAN_DB set and no default board exists in this
+        // process's env — if this attempted to open a board it would either
+        // error (returning an empty map anyway) or, worse, touch a real
+        // ~/.ironhermes/kanban.db. Asserting an instant empty result with no
+        // env configured is the behavioral proxy for "opened zero times"
+        // (T-52.1-21); the source-level guarantee (exactly one call site) is
+        // enforced separately by this plan's `<verify>` source grep.
+        let ids = std::collections::BTreeSet::new();
+        let producers = resolve_kanban_producers(&ids);
+        assert!(producers.is_empty());
+    }
+
+    #[test]
+    fn resolve_kanban_producers_resolves_existing_task_assignee() {
+        let db_dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = db_dir.path().join("kanban.db");
+        let _env = ScopedEnv::set("IRONHERMES_KANBAN_DB", db_path.to_str().unwrap());
+
+        let mut store = KanbanStore::open(&db_path).expect("open kanban store");
+        let task = store
+            .create_task("Do the thing", "worker-bot", CreateTaskOptions::default())
+            .expect("create_task");
+
+        let ids = std::collections::BTreeSet::from([task.id.clone()]);
+        let producers = resolve_kanban_producers(&ids);
+        assert_eq!(producers.get(&task.id).map(String::as_str), Some("worker-bot"));
+    }
+
+    #[test]
+    fn resolve_kanban_producers_missing_task_yields_no_entry_not_error() {
+        let db_dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = db_dir.path().join("kanban.db");
+        let _env = ScopedEnv::set("IRONHERMES_KANBAN_DB", db_path.to_str().unwrap());
+        // Opening once (via a throwaway store) so the DB file/schema exists,
+        // but never creating the task this test looks up.
+        let _store = KanbanStore::open(&db_path).expect("open kanban store");
+
+        let ids = std::collections::BTreeSet::from(["does-not-exist".to_string()]);
+        let producers = resolve_kanban_producers(&ids);
+        assert!(
+            !producers.contains_key("does-not-exist"),
+            "a missing task must be absent from the map, not present with a bogus value"
+        );
+    }
+
+    #[test]
+    fn resolve_kanban_producers_unopenable_board_returns_empty_map_not_panic() {
+        // Point IRONHERMES_KANBAN_DB at a directory, not a file — SQLite
+        // cannot open a directory as a database, so this reliably fails
+        // `Connection::open` without needing to simulate a permissions error.
+        let dir_as_db = tempfile::TempDir::new().expect("tempdir");
+        let _env = ScopedEnv::set("IRONHERMES_KANBAN_DB", dir_as_db.path().to_str().unwrap());
+
+        let ids = std::collections::BTreeSet::from(["task-1".to_string()]);
+        let producers = resolve_kanban_producers(&ids);
+        assert!(
+            producers.is_empty(),
+            "an unopenable board must degrade to an empty map, never panic or propagate"
+        );
+    }
+
+    #[test]
+    fn resolve_kanban_producers_partial_resolution_for_mixed_ids() {
+        let db_dir = tempfile::TempDir::new().expect("tempdir");
+        let db_path = db_dir.path().join("kanban.db");
+        let _env = ScopedEnv::set("IRONHERMES_KANBAN_DB", db_path.to_str().unwrap());
+
+        let mut store = KanbanStore::open(&db_path).expect("open kanban store");
+        let task_a = store
+            .create_task("Task A", "alpha-bot", CreateTaskOptions::default())
+            .expect("create_task a");
+        let task_b = store
+            .create_task("Task B", "beta-bot", CreateTaskOptions::default())
+            .expect("create_task b");
+
+        let ids = std::collections::BTreeSet::from([
+            task_a.id.clone(),
+            task_b.id.clone(),
+            "missing-task".to_string(),
+        ]);
+        let producers = resolve_kanban_producers(&ids);
+        assert_eq!(producers.len(), 2, "only the two resolvable tasks should be present");
+        assert_eq!(producers.get(&task_a.id).map(String::as_str), Some("alpha-bot"));
+        assert_eq!(producers.get(&task_b.id).map(String::as_str), Some("beta-bot"));
+        assert!(!producers.contains_key("missing-task"));
+    }
+
+    // -- producer_for_summary (pure, per-row selection) ---------------------
+
+    #[test]
+    fn producer_for_summary_kanban_row_reads_from_map() {
+        let mut producers = std::collections::HashMap::new();
+        producers.insert("task-1".to_string(), "worker-bot".to_string());
+        assert_eq!(
+            producer_for_summary(Some("kanban"), Some("task-1"), &producers),
+            Some("worker-bot".to_string())
+        );
+    }
+
+    #[test]
+    fn producer_for_summary_kanban_row_missing_from_map_is_none() {
+        let producers = std::collections::HashMap::new();
+        assert_eq!(
+            producer_for_summary(Some("kanban"), Some("unresolved-task"), &producers),
+            None
+        );
+    }
+
+    #[test]
+    fn producer_for_summary_non_kanban_rows_are_always_none() {
+        let mut producers = std::collections::HashMap::new();
+        // Even if the map happens to contain a matching key, a non-kanban row
+        // must never read from it — that map is scoped to kanban rows only.
+        producers.insert("task-1".to_string(), "worker-bot".to_string());
+        for kind in [Some("chat"), Some("team"), Some("delegate"), None] {
+            assert_eq!(
+                producer_for_summary(kind, Some("task-1"), &producers),
+                None,
+                "source_kind {kind:?} must never read the kanban producer map"
+            );
+        }
+    }
 }
 
 /// Phase 46.6 artifact management: permanently delete an artifact and all of
@@ -366,12 +826,17 @@ fn server_uptime_secs() -> u64 {
 #[get("/api/config")]
 pub async fn get_config_summary() -> Result<ConfigSummary> {
     let state = crate::server::state::global_app_state();
-    let cfg = state.config.clone();
-    let context_length = state.resolver.resolve_for_main().context_length() as u32;
+    let cfg = state.config();
+    // Phase 50.5 (D-12): ONE call to `context_length_with_source()` — the
+    // number and its provenance must come from the same tier evaluation, or
+    // the topbar's `~` marker and its number could disagree.
+    let (context_length, context_length_source) =
+        state.resolver().resolve_for_main().context_length_with_source();
     Ok(ConfigSummary {
         model: cfg.model.default.clone(),
         provider: cfg.model.provider.clone(),
-        context_length,
+        context_length: saturating_u32(context_length),
+        context_length_source: context_length_source.into(),
         memory_enabled: cfg.memory.memory_enabled,
         uptime_secs: server_uptime_secs(),
     })
@@ -405,21 +870,290 @@ pub async fn get_memory() -> Result<MemoryInfo> {
     // tokio Mutex .lock().await.to_memory_entries().await chained; guard
     // drops at the `;`. Pattern mirrors list_tools (api.rs:107-112).
     let entries = mgr.lock().await.to_memory_entries().await;
+    Ok(build_memory_info(&entries))
+}
 
+/// Pure builder for [`get_memory`]'s response — extracted so the per-target
+/// idx assignment and stats accounting are directly unit-testable without
+/// `global_app_state()` (mirrors this crate's "test the logic layer" split,
+/// e.g. `check_profile_write_gate`). Indexes are assigned per target (this
+/// target's position within its own `Vec<String>`), never globally across
+/// the flattened agent+user list — see `MemoryEntry::idx`'s doc comment.
+#[cfg(feature = "server")]
+fn build_memory_info(entries: &ironhermes_core::memory_provider::MemoryEntries) -> MemoryInfo {
     let mut out: Vec<MemoryEntry> = Vec::new();
+    let mut stats: Vec<MemoryStoreStats> = Vec::new();
     for (target, items) in entries.entries.iter() {
         let store = match target {
             ironhermes_core::memory_store::MemoryTarget::Memory => "agent",
             ironhermes_core::memory_store::MemoryTarget::User => "user",
         };
-        for body in items.iter() {
+        for (idx, body) in items.iter().enumerate() {
             out.push(MemoryEntry {
                 store: store.to_string(),
                 body: body.clone(),
+                idx,
             });
         }
+        // Plan 50.4-02 made char_count/ENTRY_DELIMITER public on
+        // memory_store specifically so this does not become a second,
+        // drifting accounting implementation.
+        stats.push(MemoryStoreStats {
+            store: store.to_string(),
+            entries: items.len(),
+            chars_used: ironhermes_core::memory_store::char_count(
+                items,
+                ironhermes_core::memory_store::ENTRY_DELIMITER,
+            ),
+            chars_limit: target.char_limit(),
+        });
     }
-    Ok(MemoryInfo { entries: out })
+    MemoryInfo {
+        entries: out,
+        stats,
+    }
+}
+
+/// Phase 50.4 Plan 04 (T-50.4-15): fail-closed write gate for the three
+/// memory write server fns below. Memory writes are gated behind
+/// `web_config_write_enabled` because it is the only write-permission
+/// concept this crate has — an ungated memory-write surface would be the
+/// sole browser-reachable mutation with no gate at all, and memory content
+/// feeds directly into the system prompt (PLANNER DISCRETION, RESEARCH
+/// assumption A2 — no D-NN rules on this; accepted consequence: an operator
+/// who has disabled config writes also cannot edit memory).
+///
+/// The refusal MESSAGE is a distinct decision from the flag it gates: it
+/// does NOT reuse `update_provider_config`/`apply_config_now`'s "Config
+/// writes are disabled" string, because a memory edit refused with that
+/// wording names a subsystem the operator was not using. The two gates
+/// share `web_config_write_enabled`, not their copy. Pure and disk-I/O-free
+/// (mirrors `check_profile_write_gate`'s "test the logic layer" discipline)
+/// so it is directly unit-testable without `global_app_state()` or the
+/// network.
+#[cfg(feature = "server")]
+fn check_memory_write_gate(config: &ironhermes_core::config::Config) -> Result<(), String> {
+    if !config.security.web_config_write_enabled {
+        return Err("Memory edits are disabled while web config writes are off.".to_string());
+    }
+    Ok(())
+}
+
+/// Phase 50.4 Plan 04 (D-01): add a new memory entry from the browser.
+/// Four-step gated-write protocol (mirrors `update_provider_config`,
+/// `provider_config_api.rs:252-281`): validate `store` -> fresh
+/// `Config::load()` -> gate -> act. Returns the store's own JSON result
+/// string UNMODIFIED (success or error) — D-02 requires the operator see
+/// the identical scanner refusal the agent's tool path sees, and
+/// paraphrasing it would imply a different rule; the same applies to the
+/// store's over-limit message.
+#[server]
+pub async fn add_memory_entry(store: String, content: String) -> Result<String, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        let target = memory_target_from_store_key(&store)?;
+
+        let config = ironhermes_core::config::Config::load()
+            .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
+        check_memory_write_gate(&config).map_err(ServerFnError::new)?;
+
+        let state = crate::server::state::global_app_state();
+        let Some(ref mgr) = state.memory_manager else {
+            // A write that cannot happen must not look like it happened —
+            // unlike get_memory's silent empty, this is an explicit error
+            // (T-50.4-19).
+            return Err(ServerFnError::new("Memory is disabled"));
+        };
+        mgr.lock()
+            .await
+            .add(target, &content)
+            .await
+            .map_err(ServerFnError::new)
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = (store, content);
+        Err(ServerFnError::new(
+            "add_memory_entry unavailable without `server` feature",
+        ))
+    }
+}
+
+/// Phase 50.4 Plan 04 (D-01/D-04): replace the entry at `idx`, guarded by
+/// `expected_text` — the row's ORIGINAL displayed body, not the edited
+/// text. Same gated-write protocol and unmodified-error-passthrough
+/// contract as [`add_memory_entry`].
+#[server]
+pub async fn replace_memory_entry(
+    store: String,
+    idx: usize,
+    expected_text: String,
+    new_content: String,
+) -> Result<String, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        let target = memory_target_from_store_key(&store)?;
+
+        let config = ironhermes_core::config::Config::load()
+            .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
+        check_memory_write_gate(&config).map_err(ServerFnError::new)?;
+
+        let state = crate::server::state::global_app_state();
+        let Some(ref mgr) = state.memory_manager else {
+            return Err(ServerFnError::new("Memory is disabled"));
+        };
+        mgr.lock()
+            .await
+            .replace_at(target, idx, &expected_text, &new_content)
+            .await
+            .map_err(ServerFnError::new)
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = (store, idx, expected_text, new_content);
+        Err(ServerFnError::new(
+            "replace_memory_entry unavailable without `server` feature",
+        ))
+    }
+}
+
+/// Phase 50.4 Plan 04 (D-01/D-04): remove the entry at `idx`, guarded by
+/// `expected_text`. Same gated-write protocol and unmodified-error-
+/// passthrough contract as [`add_memory_entry`].
+#[server]
+pub async fn remove_memory_entry(
+    store: String,
+    idx: usize,
+    expected_text: String,
+) -> Result<String, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        let target = memory_target_from_store_key(&store)?;
+
+        let config = ironhermes_core::config::Config::load()
+            .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
+        check_memory_write_gate(&config).map_err(ServerFnError::new)?;
+
+        let state = crate::server::state::global_app_state();
+        let Some(ref mgr) = state.memory_manager else {
+            return Err(ServerFnError::new("Memory is disabled"));
+        };
+        mgr.lock()
+            .await
+            .remove_at(target, idx, &expected_text)
+            .await
+            .map_err(ServerFnError::new)
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = (store, idx, expected_text);
+        Err(ServerFnError::new(
+            "remove_memory_entry unavailable without `server` feature",
+        ))
+    }
+}
+
+/// Maps the client's "agent"/"user" store key to a `MemoryTarget` — the
+/// exact reverse of the mapping `get_memory` already applies going the
+/// other way — and rejects any other value rather than defaulting.
+#[cfg(feature = "server")]
+fn memory_target_from_store_key(
+    store: &str,
+) -> Result<ironhermes_core::memory_store::MemoryTarget, ServerFnError> {
+    match store {
+        "agent" => Ok(ironhermes_core::memory_store::MemoryTarget::Memory),
+        "user" => Ok(ironhermes_core::memory_store::MemoryTarget::User),
+        other => Err(ServerFnError::new(format!(
+            "Unknown memory store '{other}' — expected 'agent' or 'user'"
+        ))),
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "server"))]
+mod memory_write_tests {
+    use super::{build_memory_info, check_memory_write_gate};
+    use ironhermes_core::memory_provider::MemoryEntries;
+    use ironhermes_core::memory_store::{char_count, MemoryTarget, ENTRY_DELIMITER};
+    use std::collections::HashMap;
+
+    /// Task 1 behavior test: indexes are assigned PER TARGET, not globally
+    /// across the flattened agent+user list — two agent entries and three
+    /// user entries must carry idx 0/1 (agent) and 0/1/2 (user), never a
+    /// running counter across both stores.
+    #[test]
+    fn test_get_memory_assigns_per_target_indexes() {
+        let mut map: HashMap<MemoryTarget, Vec<String>> = HashMap::new();
+        map.insert(
+            MemoryTarget::Memory,
+            vec!["agent one".to_string(), "agent two".to_string()],
+        );
+        map.insert(
+            MemoryTarget::User,
+            vec![
+                "user one".to_string(),
+                "user two".to_string(),
+                "user three".to_string(),
+            ],
+        );
+        let info = build_memory_info(&MemoryEntries { entries: map });
+
+        let mut agent_idxs: Vec<usize> = info
+            .entries
+            .iter()
+            .filter(|e| e.store == "agent")
+            .map(|e| e.idx)
+            .collect();
+        agent_idxs.sort_unstable();
+        assert_eq!(agent_idxs, vec![0, 1]);
+
+        let mut user_idxs: Vec<usize> = info
+            .entries
+            .iter()
+            .filter(|e| e.store == "user")
+            .map(|e| e.idx)
+            .collect();
+        user_idxs.sort_unstable();
+        assert_eq!(user_idxs, vec![0, 1, 2]);
+    }
+
+    /// Task 1 behavior test: the pure gate helper refuses when config
+    /// writes are off and allows when they are on, exercised without
+    /// `global_app_state()` or the network. Full-string `assert_eq!`
+    /// (not `contains`) — this is the only place this literal is pinned.
+    #[test]
+    fn test_memory_write_gate_refuses_when_config_writes_disabled() {
+        let mut config = ironhermes_core::config::Config::default();
+        config.security.web_config_write_enabled = false;
+        let err = check_memory_write_gate(&config).expect_err("must refuse when writes are off");
+        assert_eq!(
+            err,
+            "Memory edits are disabled while web config writes are off."
+        );
+
+        config.security.web_config_write_enabled = true;
+        assert!(check_memory_write_gate(&config).is_ok());
+    }
+
+    /// Task 1 behavior test: stats come from the store's own
+    /// `char_count`/`char_limit` accounting, proving no duplicate
+    /// implementation was introduced.
+    #[test]
+    fn test_memory_stats_use_the_store_accounting() {
+        let mut map: HashMap<MemoryTarget, Vec<String>> = HashMap::new();
+        let agent_entries = vec!["alpha".to_string(), "beta".to_string()];
+        let expected_used = char_count(&agent_entries, ENTRY_DELIMITER);
+        map.insert(MemoryTarget::Memory, agent_entries);
+        let info = build_memory_info(&MemoryEntries { entries: map });
+
+        let agent_stats = info
+            .stats
+            .iter()
+            .find(|s| s.store == "agent")
+            .expect("agent stats row must exist");
+        assert_eq!(agent_stats.chars_used, expected_used);
+        assert_eq!(agent_stats.chars_limit, MemoryTarget::Memory.char_limit());
+        assert_eq!(agent_stats.entries, 2);
+    }
 }
 
 /// Phase 26.7 Plan 04 (D-10, R-1): Known model types for the Models screen.
@@ -440,8 +1174,11 @@ pub struct ModelInfo {
 #[get("/api/models")]
 pub async fn list_models() -> Result<Vec<ModelInfo>> {
     let state = crate::server::state::global_app_state();
-    let registry = state.resolver.model_registry();
-    let default_id = state.config.model.default.clone();
+    // `resolver()` is now an owned-return hot-swap accessor (Phase 50.4) — bind
+    // it to a local so `registry` (borrowed from it below) outlives this statement.
+    let resolver = state.resolver();
+    let registry = resolver.model_registry();
+    let default_id = state.config().model.default.clone();
 
     let out = registry
         .all_models()
@@ -472,23 +1209,64 @@ pub struct ProviderModelsSnapshot {
     pub fell_back: bool,
 }
 
-/// Phase 46.9 Plan 13 (GAP-1): pure parser for an OpenAI-compatible `/models`
-/// response body (`{"data": [{"id": "..."}, ...]}`). Extracts the ordered
-/// list of model ids, skipping any entry whose `id` is not a string.
-/// Deterministic order = response order. Mirrors
-/// `ironhermes_core::models_cache::parse_openrouter_response`'s traversal of
-/// the same OpenAI-shaped `data` array, but returns bare ids (no metadata) —
-/// this fn answers "what models does the provider serve", not "what are
-/// their capabilities".
+/// Phase 46.9 Plan 13 (GAP-1) / Phase 50.5 (D-06): pure parser for an
+/// OpenAI-compatible `/models` response body
+/// (`{"data": [{"id": "...", "context_length": N}, ...]}`). Answers BOTH
+/// questions now: the ordered served-id list (skipping any entry whose `id`
+/// is not a string, deterministic order = response order), and a partial
+/// context-window observation per id that reported one — the window half
+/// feeds the resolver's compaction budget, not only this dropdown (see the
+/// write-through function directly below). Delegates to
+/// `ironhermes_core::parse_provider_models_response` rather than
+/// duplicating the traversal (D-19's triplication lesson applies here too).
 #[cfg(not(target_arch = "wasm32"))]
-fn parse_openai_models_response(body: &serde_json::Value) -> Vec<String> {
-    let Some(data) = body.get("data").and_then(|d| d.as_array()) else {
-        return Vec::new();
-    };
-    data.iter()
-        .filter_map(|entry| entry.get("id").and_then(|v| v.as_str()))
-        .map(|s| s.to_string())
-        .collect()
+fn parse_openai_models_response(
+    body: &serde_json::Value,
+) -> (
+    Vec<String>,
+    std::collections::HashMap<String, ironhermes_core::PartialModelMetadata>,
+) {
+    ironhermes_core::parse_provider_models_response(body)
+}
+
+/// Phase 50.5 (D-06/D-07): writes the context-window observations
+/// `list_provider_models` already fetched into the on-disk `ModelsCache` —
+/// the SAME store `ProviderResolver::build` reads (`provider.rs:258`), so a
+/// harvest benefits the resolver's compaction budget, not only the topbar.
+/// Every failure path — including an empty `entries` map, which returns
+/// early without touching disk — logs at `tracing::warn!` and returns `()`;
+/// this function must never be able to change `list_provider_models`'s
+/// result.
+#[cfg(not(target_arch = "wasm32"))]
+fn harvest_provider_windows(
+    entries: std::collections::HashMap<String, ironhermes_core::PartialModelMetadata>,
+) {
+    if entries.is_empty() {
+        return;
+    }
+
+    let now = chrono::Utc::now();
+    let fresh: std::collections::HashMap<String, ironhermes_core::ModelsCacheEntry> = entries
+        .into_iter()
+        .map(|(id, metadata)| {
+            (
+                id,
+                ironhermes_core::ModelsCacheEntry {
+                    metadata,
+                    fetched_at: now,
+                },
+            )
+        })
+        .collect();
+
+    let mut cache = ironhermes_core::ModelsCache::load();
+    cache.merge_entries(fresh);
+    if let Err(e) = cache.save() {
+        tracing::warn!(
+            error = %e,
+            "failed to persist provider /models context-window harvest"
+        );
+    }
 }
 
 /// Phase 46.9 Plan 13 (GAP-1): pure decision of whether the named provider
@@ -585,7 +1363,7 @@ pub async fn list_provider_models(
 
     let state = crate::server::state::global_app_state();
     let catalog_ids: Vec<String> = state
-        .resolver
+        .resolver()
         .model_registry()
         .all_models()
         .into_iter()
@@ -628,13 +1406,21 @@ pub async fn list_provider_models(
             };
         };
 
-        let models = parse_openai_models_response(&body);
+        let (models, windows) = parse_openai_models_response(&body);
         if models.is_empty() {
             return ProviderModelsSnapshot {
                 models: catalog_ids,
                 fell_back: true,
             };
         }
+
+        // Phase 50.5 (D-06/D-07): harvest on this ONE path only — a
+        // genuinely provider-sourced, non-empty response, immediately
+        // before the non-fallback snapshot is built. None of the fallback
+        // branches above reach here, and the cache hit at the top of this
+        // function returns before this async block ever runs, so D-07's
+        // single-flight constraint is preserved by construction.
+        harvest_provider_windows(windows);
 
         ProviderModelsSnapshot {
             models,
@@ -666,7 +1452,7 @@ mod provider_models {
                 { "id": 42 }
             ]
         });
-        let ids = parse_openai_models_response(&body);
+        let (ids, _windows) = parse_openai_models_response(&body);
         assert_eq!(
             ids,
             vec!["prov-only-a".to_string(), "prov-only-b".to_string()],
@@ -677,7 +1463,38 @@ mod provider_models {
     #[test]
     fn parser_returns_empty_when_data_array_missing() {
         let body = serde_json::json!({ "unexpected": "shape" });
-        assert!(parse_openai_models_response(&body).is_empty());
+        let (ids, windows) = parse_openai_models_response(&body);
+        assert!(ids.is_empty());
+        assert!(windows.is_empty());
+    }
+
+    /// Phase 50.5 (D-06): the id list stays byte-identical to today's for a
+    /// body with no `context_length` fields — existing id assertions above
+    /// keep passing unmodified. This test asserts the NEW window half: a
+    /// fixture with one entry carrying `context_length` and one without
+    /// yields two served ids and exactly one partial entry.
+    #[test]
+    fn web_harvest_extracts_context_length() {
+        let body = serde_json::json!({
+            "data": [
+                { "id": "prov-only-a", "context_length": 1_048_576 },
+                { "id": "prov-only-b" }
+            ]
+        });
+
+        let (ids, windows) = parse_openai_models_response(&body);
+
+        assert_eq!(
+            ids,
+            vec!["prov-only-a".to_string(), "prov-only-b".to_string()]
+        );
+        assert_eq!(windows.len(), 1);
+        let entry = windows.get("prov-only-a").expect("prov-only-a");
+        assert_eq!(entry.context_length, Some(1_048_576));
+        assert!(entry.tokenizer.is_none());
+        assert!(entry.max_output_tokens.is_none());
+        assert!(entry.capabilities.is_none());
+        assert!(!windows.contains_key("prov-only-b"));
     }
 
     /// Task 1 acceptance (b): an unknown provider name yields fell_back=true
@@ -2604,6 +3421,141 @@ pub fn realtime_signal_for(cancel: &tokio_util::sync::CancellationToken) -> Real
     }
 }
 
+// =============================================================================
+// avatar-not-hearing-voice follow-up (.planning/debug/avatar-not-hearing-voice.md):
+// instructions + tools moved from the RTCDataChannel session.update into the
+// ephemeral-token request
+// =============================================================================
+//
+// MEASURED 2026-09-18 19:52 (live instrumented reading): `instructions` alone
+// was 440,628 bytes (91.8% of a 480,128-byte session.update) — 1.68x Chrome's
+// own 262,144-byte SCTP maxMessageSize on its own, and `tools` (35 entries) was
+// another 37,341 bytes (7.8%). A split-message design cannot fix this because
+// `instructions` alone still exceeds the limit. The fix: `instructions` and
+// `tools` now travel in `issue_realtime_token`'s POST to
+// `/v1/realtime/client_secrets` — a server→OpenAI HTTPS leg with no SCTP
+// message-size ceiling — instead of riding along in the browser's
+// `session.update`. Per OpenAI's client_secrets docs (verified 2026), session
+// config set at token-creation time can still be overridden by the client's own
+// `session.update`, so `realtime_session_config`'s audio/VAD-only payload
+// (see below) remains valid as an override layer, not a duplicate.
+
+/// Build the realtime `instructions` string (D-01) and `tools` array (D-02)
+/// exactly once, shared between `issue_realtime_token` (which now carries them
+/// in the ephemeral-token request) and `realtime_session_config` (which now
+/// carries ONLY the audio/VAD config over the RTCDataChannel).
+///
+/// D-01: builds `instructions` from `PromptBuilder` — same identity + active
+/// skills + context as the text-chat path (state.rs L519-533). Verbatim; no
+/// realtime-specific trimming.
+/// D-02: serializes the full `ToolRegistry` tool set (same set as the text
+/// path) in OpenAI function-tool format. No curated subset.
+/// D-05a verbal ack: the built instructions contain an explicit directive
+/// telling the agent to verbally acknowledge when it starts a long-running
+/// background task.
+///
+/// T-LOG-LEAK: this function never logs its return values — callers must not
+/// either. Only byte-length instrumentation (never content) is permitted, and
+/// only at the two existing measurement boundaries (`realtime_session_config`'s
+/// warn and the client's data-channel-open log).
+#[cfg(not(target_arch = "wasm32"))]
+async fn build_realtime_instructions_and_tools() -> (String, Vec<serde_json::Value>) {
+    let app_state = crate::server::state::global_app_state();
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mut prompt_builder =
+        ironhermes_agent::PromptBuilder::new(&app_state.config().model.default, "web")
+            .with_provider(&app_state.config().model.provider)
+            .load_context(&cwd);
+    prompt_builder.set_skill_registry(app_state.runtime.skill_registry().clone());
+    if let Some(ref manager) = app_state.memory_manager {
+        prompt_builder.set_memory_manager(manager.clone());
+    }
+    prompt_builder.set_user_profile_enabled(app_state.config().memory.user_profile_enabled);
+    prompt_builder.set_active_toolsets(app_state.runtime.merged_tools().enabled_toolset_names());
+    // D-08 (Phase 46 Plan 04): populate connected_mcp_servers so requires_mcp_servers-gated
+    // skills (e.g. the Cloudflare skills) only surface when their MCP server is connected.
+    prompt_builder.set_connected_mcp_servers(
+        app_state
+            .runtime
+            .mcp_manager()
+            .map(|m| m.connected_server_names().into_iter().collect())
+            .unwrap_or_default(),
+    );
+    // Phase 38.1 (D-04/D-05): freeze session timezone into PromptBuilder Timestamp slot.
+    prompt_builder.set_timezone(app_state.config().agent.timezone.clone());
+    prompt_builder.load_memory().await;
+    prompt_builder.load_skills();
+    // Use build() (returns String) rather than build_system_message() (returns ChatMessage)
+    // because we need the raw instructions string for the realtime session config.
+    let base_instructions = prompt_builder.build();
+
+    // D-05a verbal acknowledgment directive: append an explicit instruction that
+    // tells the agent to verbally acknowledge when it kicks off a long-running or
+    // background tool/research call, keeping the conversation going rather than
+    // going silent. The visual in-flight badge (Plan 05) is the screen-side signal;
+    // this directive is the voice-side half of D-05a.
+    let instructions = format!(
+        "{base_instructions}\n\n\
+        LANGUAGE DIRECTIVE: Always respond in English, regardless of the language \
+        spoken to you, unless the user explicitly asks you to switch languages.\n\n\
+        VOICE INTERACTION DIRECTIVE: When you start a long-running or background \
+        tool call, research task, or any async operation, immediately verbally \
+        acknowledge that you are doing so — for example: \"I'll look into that \
+        while we keep talking\" or \"I'm on it, give me a moment.\" Do not go \
+        silent while background work runs. Continue the conversation naturally \
+        while async tasks complete in the background."
+    );
+
+    // ── D-02: Serialize the full ToolRegistry tool set ────────────────────────
+    // Mirror the chat path's field accessors (api.rs list_tools ~L204-212).
+    // Read, collect, drop — never hold the async RwLock guard across .await.
+    // Each entry uses the GA Realtime function-tool format:
+    //   { "type": "function", "name": ..., "description": ..., "parameters": ... }
+    // [VERIFIED: developers.openai.com/api/docs/guides/realtime-conversations]
+    let tool_definitions = app_state
+        .runtime
+        .registry()
+        .read()
+        .await
+        .get_definitions(None);
+    let tools: Vec<serde_json::Value> = tool_definitions
+        .into_iter()
+        .map(|def| {
+            serde_json::json!({
+                "type": "function",
+                "name": def.function.name,
+                "description": def.function.description,
+                "parameters": def.function.parameters,
+            })
+        })
+        .collect();
+
+    (instructions, tools)
+}
+
+/// Pure, testable builder for the POST body sent to
+/// `/v1/realtime/client_secrets`. Split out from `issue_realtime_token` so the
+/// shape can be asserted without any network call, mirroring the existing
+/// `build_realtime_session_json` seam.
+#[cfg(not(target_arch = "wasm32"))]
+fn build_realtime_token_request_json(
+    model: &str,
+    voice: &str,
+    instructions: &str,
+    tools: &[serde_json::Value],
+) -> serde_json::Value {
+    serde_json::json!({
+        "session": {
+            "type": "realtime",
+            "model": model,
+            "instructions": instructions,
+            "tools": tools,
+            "tool_choice": "auto",
+            "audio": { "output": { "voice": voice } }
+        }
+    })
+}
+
 /// Phase 36.17.12 Plan 02: Exchange the server-side OPENAI_API_KEY for a short-lived
 /// ephemeral token for a WebRTC-direct realtime session (D-04/D-05).
 ///
@@ -2683,6 +3635,13 @@ pub async fn issue_realtime_token(
         ServerFnError::new("OPENAI_API_KEY not set — realtime unavailable")
     })?;
 
+    // Step 3.5 (avatar-not-hearing-voice follow-up — see block comment above
+    // build_realtime_instructions_and_tools): build instructions + tools ONCE
+    // here so they travel in this request instead of the browser's
+    // session.update, which is what previously pushed that message 1.83x over
+    // Chrome's SCTP maxMessageSize.
+    let (instructions, tools) = build_realtime_instructions_and_tools().await;
+
     // Step 4: Exchange permanent key for an ephemeral token via POST to
     // /v1/realtime/client_secrets. Verified against OpenAI Realtime WebRTC docs
     // (A2/A3 from RESEARCH.md — endpoint and response field confirmed current).
@@ -2691,13 +3650,12 @@ pub async fn issue_realtime_token(
         .post("https://api.openai.com/v1/realtime/client_secrets")
         .header("Authorization", format!("Bearer {api_key}"))
         .header("Content-Type", "application/json")
-        .json(&serde_json::json!({
-            "session": {
-                "type": "realtime",
-                "model": model,
-                "audio": { "output": { "voice": voice } }
-            }
-        }))
+        .json(&build_realtime_token_request_json(
+            &model,
+            &voice,
+            &instructions,
+            &tools,
+        ))
         .send()
         .await
         .map_err(|e| {
@@ -2844,17 +3802,24 @@ const REALTIME_ALLOWED_TRANSCRIPTION: &[&str] = &[
     "off",
 ];
 
-/// BUG 5 / Phase 39.3 Plan 01 (D-01, D-02): Pure, hermetic builder for the GA-shaped
-/// Realtime `session` object JSON. Inputs are validated/clamped by the caller; this
-/// function only shapes the JSON so it is unit-testable without Config::load or any
-/// network call.
+/// BUG 5 / Phase 39.3 Plan 01, revised by the avatar-not-hearing-voice follow-up:
+/// Pure, hermetic builder for the GA-shaped Realtime `session` object JSON sent
+/// over the RTCDataChannel. Inputs are validated/clamped by the caller; this
+/// function only shapes the JSON so it is unit-testable without Config::load or
+/// any network call.
 ///
-/// `instructions` (D-01): PromptBuilder output verbatim — agent identity + skills.
-/// `tools` (D-02): Full ToolRegistry tool set in OpenAI function-tool format.
-/// Both are TOP-LEVEL session fields (siblings of `audio`), per the GA Realtime
-/// schema [VERIFIED: developers.openai.com/api/docs/guides/realtime-conversations].
+/// AUDIO/VAD CONFIG ONLY — no `instructions`, no `tools`, no `tool_choice`.
+/// Those two fields previously lived here as TOP-LEVEL session siblings of
+/// `audio` (D-01/D-02), but measurement showed `instructions` alone (440,628
+/// bytes) was 1.68x Chrome's own 262,144-byte SCTP maxMessageSize, so the
+/// combined message was rejected outright by `RTCDataChannel.send()` (see
+/// .planning/debug/avatar-not-hearing-voice.md, MEASURED 2026-09-18 19:52).
+/// They now travel in `issue_realtime_token`'s ephemeral-token request via
+/// `build_realtime_token_request_json` (server→OpenAI HTTPS — no SCTP limit),
+/// and OpenAI's client_secrets docs confirm session config set there can still
+/// be overridden by the client's own `session.update`, so this smaller
+/// audio-only message remains a valid override layer for VAD/noise/barge-in.
 #[cfg(not(target_arch = "wasm32"))]
-#[allow(clippy::too_many_arguments)]
 fn build_realtime_session_json(
     noise_reduction: &str,
     vad_mode: &str,
@@ -2862,8 +3827,6 @@ fn build_realtime_session_json(
     silence_ms: u32,
     prefix_ms: u32,
     transcription_model: &str,
-    instructions: &str,
-    tools: &[serde_json::Value],
 ) -> String {
     // noise_reduction: "off" → JSON null (disables filtering); else { "type": ... }.
     let noise_reduction_val = if noise_reduction == "off" {
@@ -2901,14 +3864,11 @@ fn build_realtime_session_json(
             "interrupt_response": true
         })
     };
-    // D-01: instructions and D-02: tools are TOP-LEVEL session fields, siblings of
-    // `audio` (NOT nested under audio). GA schema verified at:
-    // developers.openai.com/api/docs/guides/realtime-conversations
+    // avatar-not-hearing-voice follow-up: NO instructions/tools/tool_choice here
+    // — see the function doc comment above for why they moved to
+    // build_realtime_token_request_json instead.
     serde_json::json!({
         "type": "realtime",
-        "instructions": instructions,
-        "tools": tools,
-        "tool_choice": "auto",
         "audio": {
             "input": {
                 "noise_reduction": noise_reduction_val,
@@ -2920,19 +3880,21 @@ fn build_realtime_session_json(
     .to_string()
 }
 
-/// Phase 36.17.12 BUG 5 / Phase 39.3 Plan 01 (D-01, D-02): Return the GA-shaped
-/// Realtime `session` config JSON, resolved from `config.voice.*`. The browser sends
-/// this verbatim inside a `session.update` event over the DataChannel. Invalid config
-/// values fall back to safe defaults (far_field / semantic_vad) rather than erroring,
-/// so a typo degrades gracefully instead of disabling realtime.
+/// Phase 36.17.12 BUG 5, revised by the avatar-not-hearing-voice follow-up:
+/// Return the GA-shaped Realtime `session` config JSON, resolved from
+/// `config.voice.*`. The browser sends this verbatim inside a `session.update`
+/// event over the DataChannel. Invalid config values fall back to safe
+/// defaults (far_field / semantic_vad) rather than erroring, so a typo
+/// degrades gracefully instead of disabling realtime.
 ///
-/// D-01: builds the `instructions` string from `PromptBuilder` — same identity +
-/// active skills + context as the text-chat path (state.rs L519-533). Verbatim;
-/// no realtime-specific trimming.
-/// D-02: serializes the full `ToolRegistry` tool set (same set as text path) in
-/// OpenAI function-tool format. No curated subset.
-/// D-05a verbal ack: the built instructions contain an explicit directive telling
-/// the agent to verbally acknowledge when it starts a long-running background task.
+/// AUDIO/VAD CONFIG ONLY. `instructions` (D-01) and `tools` (D-02) no longer
+/// flow through this function — they are built once by
+/// `build_realtime_instructions_and_tools` and sent in `issue_realtime_token`'s
+/// ephemeral-token request instead, because together they measured 480,128
+/// bytes (1.83x Chrome's 262,144-byte SCTP maxMessageSize) and made this
+/// message's `RTCDataChannel.send()` fail outright, silently dropping the VAD
+/// config that used to ride along with them (see
+/// .planning/debug/avatar-not-hearing-voice.md, MEASURED 2026-09-18 19:52).
 #[server]
 pub async fn realtime_session_config() -> Result<String, ServerFnError> {
     let config = ironhermes_core::config::Config::load()
@@ -2958,91 +3920,28 @@ pub async fn realtime_session_config() -> Result<String, ServerFnError> {
             "gpt-4o-mini-transcribe"
         };
 
-    // ── D-01: Build the Hermes system prompt (mirrors state.rs L519-533) ──────
-    // Use PromptBuilder exactly as the text-chat path does. This gives the realtime
-    // session the same identity + active skills + context as text turns.
-    let app_state = crate::server::state::global_app_state();
-    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let mut prompt_builder =
-        ironhermes_agent::PromptBuilder::new(&app_state.config.model.default, "web")
-            .with_provider(&app_state.config.model.provider)
-            .load_context(&cwd);
-    prompt_builder.set_skill_registry(app_state.runtime.skill_registry().clone());
-    if let Some(ref manager) = app_state.memory_manager {
-        prompt_builder.set_memory_manager(manager.clone());
-    }
-    prompt_builder.set_user_profile_enabled(app_state.config.memory.user_profile_enabled);
-    prompt_builder.set_active_toolsets(app_state.runtime.merged_tools().enabled_toolset_names());
-    // D-08 (Phase 46 Plan 04): populate connected_mcp_servers so requires_mcp_servers-gated
-    // skills (e.g. the Cloudflare skills) only surface when their MCP server is connected.
-    prompt_builder.set_connected_mcp_servers(
-        app_state
-            .runtime
-            .mcp_manager()
-            .map(|m| m.connected_server_names().into_iter().collect())
-            .unwrap_or_default(),
-    );
-    // Phase 38.1 (D-04/D-05): freeze session timezone into PromptBuilder Timestamp slot.
-    // Note: this path calls build() via skip_context_files, so the ephemeral Timestamp slot
-    // is dropped for the realtime subagent; set_timezone is wired for correctness/consistency.
-    prompt_builder.set_timezone(app_state.config.agent.timezone.clone());
-    prompt_builder.load_memory().await;
-    prompt_builder.load_skills();
-    // Use build() (returns String) rather than build_system_message() (returns ChatMessage)
-    // because we need the raw instructions string for the realtime session config.
-    let base_instructions = prompt_builder.build();
-
-    // D-05a verbal acknowledgment directive: append an explicit instruction that
-    // tells the agent to verbally acknowledge when it kicks off a long-running or
-    // background tool/research call, keeping the conversation going rather than
-    // going silent. The visual in-flight badge (Plan 05) is the screen-side signal;
-    // this directive is the voice-side half of D-05a.
-    let instructions = format!(
-        "{base_instructions}\n\n\
-        LANGUAGE DIRECTIVE: Always respond in English, regardless of the language \
-        spoken to you, unless the user explicitly asks you to switch languages.\n\n\
-        VOICE INTERACTION DIRECTIVE: When you start a long-running or background \
-        tool call, research task, or any async operation, immediately verbally \
-        acknowledge that you are doing so — for example: \"I'll look into that \
-        while we keep talking\" or \"I'm on it, give me a moment.\" Do not go \
-        silent while background work runs. Continue the conversation naturally \
-        while async tasks complete in the background."
-    );
-
-    // ── D-02: Serialize the full ToolRegistry tool set ────────────────────────
-    // Mirror the chat path's field accessors (api.rs list_tools ~L204-212).
-    // Read, collect, drop — never hold the async RwLock guard across .await.
-    // Each entry uses the GA Realtime function-tool format:
-    //   { "type": "function", "name": ..., "description": ..., "parameters": ... }
-    // [VERIFIED: developers.openai.com/api/docs/guides/realtime-conversations]
-    let tool_definitions = app_state
-        .runtime
-        .registry()
-        .read()
-        .await
-        .get_definitions(None);
-    let tools: Vec<serde_json::Value> = tool_definitions
-        .into_iter()
-        .map(|def| {
-            serde_json::json!({
-                "type": "function",
-                "name": def.function.name,
-                "description": def.function.description,
-                "parameters": def.function.parameters,
-            })
-        })
-        .collect();
-
-    Ok(build_realtime_session_json(
+    let session_json = build_realtime_session_json(
         noise_reduction,
         vad_mode,
         threshold,
         v.realtime_vad_silence_ms,
         v.realtime_vad_prefix_ms,
         transcription_model,
-        &instructions,
-        &tools,
-    ))
+    );
+
+    // DIAGNOSTIC (Avatar-mode regression follow-up, left in place per the
+    // avatar-not-hearing-voice debug session so a live reading still confirms
+    // the fix): this object is sent as ONE RTCDataChannel message client-side.
+    // It is now audio/VAD-only (instructions/tools moved to
+    // issue_realtime_token), so total_bytes should be a small fraction of the
+    // 262,144-byte SCTP maxMessageSize going forward — a regression back
+    // toward the old size is the signal to watch for here.
+    tracing::warn!(
+        total_bytes = session_json.len(),
+        "[realtime_session_config] session object size (audio/VAD only)"
+    );
+
+    Ok(session_json)
 }
 
 // =============================================================================
@@ -3503,7 +4402,7 @@ pub async fn realtime_tool_call(
 
     // --- D-03: approval gate ---
     let needs_approval =
-        ironhermes_tools::approval::should_prompt_for_approval(app_state.config.autonomous.yolo);
+        ironhermes_tools::approval::should_prompt_for_approval(app_state.config().autonomous.yolo);
 
     if needs_approval {
         // Hold: insert PendingApproval, return immediately (two-call pattern).
@@ -4307,9 +5206,10 @@ mod realtime_approve_tests {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod realtime_token_tests {
-    use super::build_realtime_session_json;
     use super::REALTIME_ALLOWED_MODELS;
     use super::REALTIME_ALLOWED_VOICES;
+    use super::build_realtime_session_json;
+    use super::build_realtime_token_request_json;
 
     // Helper: run whitelist validation inline (mirrors the server fn's first two checks).
     // This is offline/hermetic — no reqwest, no env var, no network call.
@@ -4396,8 +5296,6 @@ mod realtime_token_tests {
             500,
             300,
             "gpt-4o-mini-transcribe",
-            "",
-            &[],
         );
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         let input = &v["audio"]["input"];
@@ -4423,16 +5321,8 @@ mod realtime_token_tests {
     /// BUG 5: server_vad carries the energy threshold + timing; semantic_vad does not.
     #[test]
     fn realtime_session_json_server_vad_carries_threshold() {
-        let json = build_realtime_session_json(
-            "near_field",
-            "server_vad",
-            0.7,
-            600,
-            250,
-            "whisper-1",
-            "",
-            &[],
-        );
+        let json =
+            build_realtime_session_json("near_field", "server_vad", 0.7, 600, 250, "whisper-1");
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         let td = &v["audio"]["input"]["turn_detection"];
         assert_eq!(td["type"], "server_vad");
@@ -4452,8 +5342,6 @@ mod realtime_token_tests {
             500,
             300,
             "gpt-4o-mini-transcribe",
-            "",
-            &[],
         );
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(
@@ -4472,8 +5360,6 @@ mod realtime_token_tests {
             500,
             300,
             "gpt-4o-transcribe",
-            "",
-            &[],
         );
         let on_v: serde_json::Value = serde_json::from_str(&on).unwrap();
         assert_eq!(
@@ -4481,8 +5367,7 @@ mod realtime_token_tests {
             "gpt-4o-transcribe"
         );
 
-        let off =
-            build_realtime_session_json("far_field", "semantic_vad", 0.5, 500, 300, "off", "", &[]);
+        let off = build_realtime_session_json("far_field", "semantic_vad", 0.5, 500, 300, "off");
         let off_v: serde_json::Value = serde_json::from_str(&off).unwrap();
         assert!(
             off_v["audio"]["input"]["transcription"].is_null(),
@@ -4527,13 +5412,17 @@ mod realtime_token_tests {
         );
     }
 
-    // ── Phase 39.3 Plan 01 Task 1: instructions + tools injection (D-01 / D-02) ──
+    // ── avatar-not-hearing-voice follow-up: instructions/tools moved OFF the
+    // data channel and ONTO the token request (supersedes Phase 39.3 Plan 01
+    // Task 1's T-39.3-01-T1..T4, which locked the OLD — now-fixed — shape) ────
 
-    /// T-39.3-01-T1: A non-empty `instructions` string is placed at the top-level
-    /// `instructions` key of the parsed session JSON (D-01).
+    /// Regression lock for the fix: the data-channel session.update must carry
+    /// ONLY audio/VAD config. `instructions` + `tools` together previously
+    /// measured 480,128 bytes here (1.83x the 262,144-byte SCTP limit) and made
+    /// `RTCDataChannel.send()` reject the whole message outright — see
+    /// .planning/debug/avatar-not-hearing-voice.md, MEASURED 2026-09-18 19:52.
     #[test]
-    fn realtime_session_json_instructions_at_top_level() {
-        let instructions = "You are Hermes, a helpful assistant.";
+    fn realtime_session_json_carries_no_instructions_or_tools() {
         let json = build_realtime_session_json(
             "far_field",
             "semantic_vad",
@@ -4541,20 +5430,33 @@ mod realtime_token_tests {
             500,
             300,
             "gpt-4o-mini-transcribe",
-            instructions,
-            &[],
         );
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(
-            v["instructions"], instructions,
-            "instructions must be a top-level key with the exact passed string"
+        assert!(
+            v.get("instructions").is_none(),
+            "instructions must NOT be in the data-channel session.update: {json}"
         );
+        assert!(
+            v.get("tools").is_none(),
+            "tools must NOT be in the data-channel session.update: {json}"
+        );
+        assert!(
+            v.get("tool_choice").is_none(),
+            "tool_choice must NOT be in the data-channel session.update: {json}"
+        );
+        assert_eq!(v["type"], "realtime");
     }
 
-    /// T-39.3-01-T2: A tools slice of two function-tool Values is placed at the
-    /// top-level `tools` array (length 2), and `tool_choice` is `"auto"` (D-02).
+    // ── build_realtime_token_request_json: instructions + tools now live HERE,
+    // in the ephemeral-token request (server→OpenAI HTTPS — no SCTP limit) ────
+
+    /// T1 (was T-39.3-01-T1/T2, retargeted): `instructions`, `tools`, and
+    /// `tool_choice` are top-level `session` fields in the client_secrets
+    /// request body, siblings of `audio` — same GA shape the data-channel
+    /// message used to carry, just relocated to the request that has no
+    /// message-size ceiling.
     #[test]
-    fn realtime_session_json_tools_and_tool_choice_at_top_level() {
+    fn token_request_json_carries_instructions_and_tools_top_level() {
         let tool_a = serde_json::json!({
             "type": "function",
             "name": "search",
@@ -4568,87 +5470,74 @@ mod realtime_token_tests {
             "parameters": {"type": "object", "properties": {}, "required": []}
         });
         let tools = vec![tool_a, tool_b];
-        let json = build_realtime_session_json(
-            "far_field",
-            "semantic_vad",
-            0.5,
-            500,
-            300,
-            "gpt-4o-mini-transcribe",
-            "",
-            &tools,
+        let instructions = "You are Hermes, a helpful assistant.";
+        let body = build_realtime_token_request_json("gpt-realtime", "alloy", instructions, &tools);
+        let session = &body["session"];
+        assert_eq!(
+            session["instructions"], instructions,
+            "instructions must be a top-level session field: {body}"
         );
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let tools_arr = v["tools"].as_array().expect("tools must be an array");
+        let tools_arr = session["tools"].as_array().expect("tools must be an array");
         assert_eq!(tools_arr.len(), 2, "tools array must have 2 entries");
         assert_eq!(tools_arr[0]["name"], "search");
         assert_eq!(tools_arr[1]["name"], "read_file");
-        assert_eq!(v["tool_choice"], "auto", "tool_choice must be 'auto'");
+        assert_eq!(session["tool_choice"], "auto", "tool_choice must be 'auto'");
     }
 
-    /// T-39.3-01-T3: Empty tools slice still emits a `tools` array and the existing
-    /// `audio.input.*` nesting is unchanged (no regression to BUG-5 GA schema).
+    /// T2: `model`/`voice`/`type` are preserved exactly as the pre-fix request
+    /// carried them (no regression to the existing token-mint contract).
     #[test]
-    fn realtime_session_json_empty_tools_and_audio_nesting_intact() {
-        let json = build_realtime_session_json(
-            "far_field",
-            "semantic_vad",
-            0.5,
-            500,
-            300,
-            "gpt-4o-mini-transcribe",
-            "some instructions",
-            &[],
-        );
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        // tools must be an array (possibly empty)
+    fn token_request_json_keeps_model_type_and_voice() {
+        let body = build_realtime_token_request_json("gpt-realtime", "shimmer", "", &[]);
+        let session = &body["session"];
+        assert_eq!(session["type"], "realtime");
+        assert_eq!(session["model"], "gpt-realtime");
+        assert_eq!(session["audio"]["output"]["voice"], "shimmer");
+    }
+
+    /// T3: empty instructions/tools still produce a well-formed request (no
+    /// panics on the degenerate/empty case — boundary neighbor of T1).
+    #[test]
+    fn token_request_json_handles_empty_instructions_and_tools() {
+        let body = build_realtime_token_request_json("gpt-realtime", "alloy", "", &[]);
+        let session = &body["session"];
+        assert_eq!(session["instructions"], "");
         assert!(
-            v["tools"].is_array(),
-            "tools must be an array even when empty"
+            session["tools"]
+                .as_array()
+                .expect("tools must be an array")
+                .is_empty(),
+            "empty tools slice must still serialize as an empty array: {body}"
         );
-        // audio.input nesting must be intact (BUG-5 GA shape regression check)
-        let input = &v["audio"]["input"];
-        assert!(input.is_object(), "audio.input must still be an object");
-        assert_eq!(input["turn_detection"]["type"], "semantic_vad");
-        assert_eq!(input["noise_reduction"]["type"], "far_field");
     }
 
-    /// T-39.3-01-T4: `instructions` and `tools` are siblings of `audio`, NOT nested
-    /// under `audio` (Pitfall 2 from RESEARCH.md — wrong schema nesting).
+    /// T4 (was T-39.3-01-T4, retargeted): `instructions`/`tools` are siblings
+    /// of `audio`, NOT nested under it (Pitfall 2 from RESEARCH.md — wrong
+    /// schema nesting — still applies at this new call site).
     #[test]
-    fn realtime_session_json_instructions_tools_are_siblings_of_audio() {
+    fn token_request_json_instructions_tools_are_siblings_of_audio() {
         let tool = serde_json::json!({
             "type": "function",
             "name": "ping",
             "description": "ping tool",
             "parameters": {"type": "object", "properties": {}, "required": []}
         });
-        let json = build_realtime_session_json(
-            "far_field",
-            "semantic_vad",
-            0.5,
-            500,
-            300,
-            "gpt-4o-mini-transcribe",
-            "hermes identity",
-            &[tool],
-        );
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        // instructions and tools must NOT appear under audio
+        let body =
+            build_realtime_token_request_json("gpt-realtime", "alloy", "hermes identity", &[tool]);
+        let session = &body["session"];
         assert!(
-            v["audio"]["instructions"].is_null() || v["audio"].get("instructions").is_none(),
-            "instructions must NOT be nested under audio"
+            session["audio"].get("instructions").is_none(),
+            "instructions must NOT be nested under audio: {body}"
         );
         assert!(
-            v["audio"]["tools"].is_null() || v["audio"].get("tools").is_none(),
-            "tools must NOT be nested under audio"
+            session["audio"].get("tools").is_none(),
+            "tools must NOT be nested under audio: {body}"
         );
-        // they must be top-level siblings of audio
         assert!(
-            v.get("instructions").is_some(),
+            session.get("instructions").is_some(),
             "instructions must be top-level"
         );
-        assert!(v.get("tools").is_some(), "tools must be top-level");
+        assert!(session.get("tools").is_some(), "tools must be top-level");
     }
 }
 
@@ -4747,11 +5636,34 @@ pub const MODEL_ROLE_KEYS: [&str; 6] = [
 /// `config.model.roles` (or the entry exists but carries no model override) —
 /// the client renders "— uses default" in that case. Also reused as the
 /// per-role write entry in `ModelsRolesWritePayload`.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct ModelRoleAssignment {
     pub role_key: String,
     pub provider: Option<String>,
     pub model: Option<String>,
+    /// Phase 50.5 (D-14): READ — the currently configured per-model window
+    /// override (`providers.<p>.models.<m>.context_length`) for this role's
+    /// model, if any. WRITE — the value to set when `apply_context_length`
+    /// is true. `#[serde(default)]` keeps every pre-50.5 caller compiling
+    /// against the wire format unchanged.
+    #[serde(default)]
+    pub context_length: Option<u32>,
+    /// Phase 50.5 (D-14): WRITE-ONLY intent flag. `false` (the default) means
+    /// leave the stored override alone; `true` + `context_length: None`
+    /// clears it; `true` + `context_length: Some(n)` sets it. This explicit
+    /// flag is what lets `context_length: None` mean two different things
+    /// without a nested `Option<Option<_>>` and its serde ambiguity.
+    #[serde(default)]
+    pub apply_context_length: bool,
+    /// Phase 50.5 (D-12): READ-ONLY. The resolved window for this role's
+    /// model — falls back to the main endpoint's resolved value when the
+    /// role has no override (`resolve_role` returns `None`).
+    #[serde(default)]
+    pub resolved_context_length: u32,
+    /// Phase 50.5 (D-12): READ-ONLY. Which tier produced
+    /// `resolved_context_length`, from the same evaluation as the number.
+    #[serde(default)]
+    pub resolved_context_source: ContextWindowSource,
 }
 
 /// Phase 46.9 Plan 02 (D-05): Read-only snapshot for the Models screen —
@@ -4767,6 +5679,18 @@ pub struct ModelsRolesSnapshot {
     pub roles: Vec<ModelRoleAssignment>,
     /// Whether the web config write gate is open. The UI locks ASSIGN when false.
     pub web_config_write_enabled: bool,
+    /// Phase 50.5 (D-12/D-15): the default card's resolved context window,
+    /// from `resolve_for_main().context_length_with_source()`.
+    #[serde(default)]
+    pub default_resolved_context_length: u32,
+    /// Phase 50.5 (D-12/D-15): which tier produced
+    /// `default_resolved_context_length`.
+    #[serde(default)]
+    pub default_resolved_context_source: ContextWindowSource,
+    /// Phase 50.5 (D-14/D-15): the currently configured per-model override
+    /// for the default card's (provider, model) pair, if any.
+    #[serde(default)]
+    pub default_context_override: Option<u32>,
 }
 
 /// Phase 46.9 Plan 02 (D-05/D-10): Web-safe write payload for the Models
@@ -4774,7 +5698,7 @@ pub struct ModelsRolesSnapshot {
 /// each entry in `roles` upserts one `config.model.roles` key. Only the six
 /// MODEL_ROLE_KEYS are accepted — `validate_models_roles_payload` rejects
 /// anything else before any mutation (T-46.9-06).
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
 pub struct ModelsRolesWritePayload {
     pub default_model: Option<String>,
     /// Phase 46.9 Plan 07 (GAP-1/D-05): `Some` merges into
@@ -4783,7 +5707,21 @@ pub struct ModelsRolesWritePayload {
     #[serde(default)]
     pub provider: Option<String>,
     pub roles: Vec<ModelRoleAssignment>,
+    /// Phase 50.5 (D-14): the default card's per-model window value to set
+    /// when `apply_context_length` is true. Same three-state semantics as
+    /// `ModelRoleAssignment::context_length`/`apply_context_length`.
+    #[serde(default)]
+    pub context_length: Option<u32>,
+    /// Phase 50.5 (D-14): WRITE-ONLY intent flag for `context_length` above.
+    #[serde(default)]
+    pub apply_context_length: bool,
 }
+
+/// Phase 50.5 (T-50.5-02): server-side ceiling for a browser-submitted
+/// context-window value — mirrors `ironhermes_core::constants::
+/// MAX_PLAUSIBLE_CONTEXT_LENGTH`. The browser's `type="number"`/`min="0"`
+/// are affordances, not a security boundary; this is where it counts.
+const MAX_WEB_CONTEXT_LENGTH: u32 = 10_000_000;
 
 /// Phase 46.9 Plan 02 (T-46.9-06): Validate the payload BEFORE any config
 /// mutation. Rejects role keys outside the fixed six and over-length strings
@@ -4800,6 +5738,16 @@ fn validate_models_roles_payload(payload: &ModelsRolesWritePayload) -> Result<()
     if let Some(ref p) = payload.provider {
         if p.len() > 64 {
             return Err(ServerFnError::new("provider too long (max 64 chars)"));
+        }
+    }
+    // Phase 50.5 (T-50.5-02): reject an implausible default-card context
+    // window BEFORE any mutation. `context_length` is `u32`, so a negative
+    // value cannot reach here on the wire — no dead code needed for that case.
+    if let Some(n) = payload.context_length {
+        if n == 0 || n > MAX_WEB_CONTEXT_LENGTH {
+            return Err(ServerFnError::new(format!(
+                "context_length must be between 1 and {MAX_WEB_CONTEXT_LENGTH} (got {n})"
+            )));
         }
     }
     for role in &payload.roles {
@@ -4825,24 +5773,101 @@ fn validate_models_roles_payload(payload: &ModelsRolesWritePayload) -> Result<()
                 )));
             }
         }
+        // Phase 50.5 (T-50.5-02): same range check for each role row's window.
+        if let Some(n) = role.context_length {
+            if n == 0 || n > MAX_WEB_CONTEXT_LENGTH {
+                return Err(ServerFnError::new(format!(
+                    "context_length for role '{}' must be between 1 and {MAX_WEB_CONTEXT_LENGTH} (got {n})",
+                    role.role_key
+                )));
+            }
+        }
     }
     Ok(())
+}
+
+/// Phase 50.5 (D-14): resolve a `ModelRoleConfig.provider` value, mapping the
+/// `"main"` sentinel to the actual active provider name — the same
+/// resolution `ProviderResolver::resolve_role` performs. Needed here because
+/// the sparse per-model override lives under the REAL provider name, never
+/// literally `"main"`.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_role_provider_name<'c>(
+    config: &'c ironhermes_core::config::Config,
+    provider: &'c str,
+) -> &'c str {
+    if provider == "main" {
+        config.model.provider.as_str()
+    } else {
+        provider
+    }
+}
+
+/// Phase 50.5 (D-14): read the sparse per-(provider, model) context-window
+/// override directly off `config.providers`, mirroring
+/// `ironhermes_core::config_extras::resolve_extras`'s per-model lookup shape.
+#[cfg(not(target_arch = "wasm32"))]
+fn configured_context_length(
+    config: &ironhermes_core::config::Config,
+    provider: &str,
+    model: &str,
+) -> Option<u32> {
+    config
+        .providers
+        .get(provider)
+        .and_then(|p| p.models.get(model))
+        .and_then(|m| m.context_length)
+        .map(saturating_u32)
 }
 
 /// Phase 46.9 Plan 02: Build the read-side snapshot from a loaded Config.
 /// Shared by `get_models_roles_config` and the `model_roles` test module so
 /// the write-then-read assertion never has to go through the #[server]
 /// HTTP-extractor machinery (mirrors `build_voice_snapshot`).
+///
+/// Phase 50.5 (D-12/D-14): takes the `ProviderResolver` built from the SAME
+/// config so every row's resolved window and provenance come from ONE
+/// evaluation of the resolver's tier chain (`context_length_with_source`) —
+/// the number and its provenance can never drift apart from separate
+/// implementations.
 #[cfg(not(target_arch = "wasm32"))]
-fn build_models_roles_snapshot(config: &ironhermes_core::config::Config) -> ModelsRolesSnapshot {
+fn build_models_roles_snapshot(
+    config: &ironhermes_core::config::Config,
+    resolver: &ironhermes_core::provider::ProviderResolver,
+) -> ModelsRolesSnapshot {
+    let (default_resolved_context_length, default_resolved_context_source) =
+        resolver.resolve_for_main().context_length_with_source();
+    let default_context_override =
+        configured_context_length(config, &config.model.provider, &config.model.default);
+
     let roles = MODEL_ROLE_KEYS
         .iter()
         .map(|key| {
             let entry = config.model.roles.get(*key);
+            // Phase 50.5 (D-12): resolve_role returning None means "uses
+            // default" — fall back to the main endpoint's resolved values
+            // rather than a separate re-derivation, so this row can never
+            // disagree with the topbar about what "default" means.
+            let (resolved_length, resolved_source) = match resolver.resolve_role(key) {
+                Some(ep) => ep.context_length_with_source(),
+                None => (
+                    default_resolved_context_length,
+                    default_resolved_context_source,
+                ),
+            };
+            let context_length = entry.and_then(|r| {
+                let provider = resolve_role_provider_name(config, &r.provider);
+                let model = r.model.as_deref().unwrap_or(config.model.default.as_str());
+                configured_context_length(config, provider, model)
+            });
             ModelRoleAssignment {
                 role_key: (*key).to_string(),
                 provider: entry.map(|r| r.provider.clone()),
                 model: entry.and_then(|r| r.model.clone()),
+                context_length,
+                apply_context_length: false,
+                resolved_context_length: saturating_u32(resolved_length),
+                resolved_context_source: resolved_source.into(),
             }
         })
         .collect();
@@ -4851,6 +5876,104 @@ fn build_models_roles_snapshot(config: &ironhermes_core::config::Config) -> Mode
         provider: config.model.provider.clone(),
         roles,
         web_config_write_enabled: config.security.web_config_write_enabled,
+        default_resolved_context_length: saturating_u32(default_resolved_context_length),
+        default_resolved_context_source: default_resolved_context_source.into(),
+        default_context_override,
+    }
+}
+
+/// Phase 50.5 (D-12): fallback snapshot for the case where
+/// `ProviderResolver::build` itself failed (e.g. a malformed provider
+/// `base_url`) — the read-only Models screen must not go dark because of
+/// that. Configured overrides are still read directly off `config.providers`
+/// (no resolver needed for that); only the RESOLVED window/tier fields
+/// degrade to `Fallback`/128,000, since no resolver executed to compute them.
+#[cfg(not(target_arch = "wasm32"))]
+fn degraded_models_roles_snapshot(
+    config: &ironhermes_core::config::Config,
+) -> ModelsRolesSnapshot {
+    let fallback_len = saturating_u32(ironhermes_core::constants::DEFAULT_CONTEXT_LENGTH);
+    let default_context_override =
+        configured_context_length(config, &config.model.provider, &config.model.default);
+    let roles = MODEL_ROLE_KEYS
+        .iter()
+        .map(|key| {
+            let entry = config.model.roles.get(*key);
+            let context_length = entry.and_then(|r| {
+                let provider = resolve_role_provider_name(config, &r.provider);
+                let model = r.model.as_deref().unwrap_or(config.model.default.as_str());
+                configured_context_length(config, provider, model)
+            });
+            ModelRoleAssignment {
+                role_key: (*key).to_string(),
+                provider: entry.map(|r| r.provider.clone()),
+                model: entry.and_then(|r| r.model.clone()),
+                context_length,
+                apply_context_length: false,
+                resolved_context_length: fallback_len,
+                resolved_context_source: ContextWindowSource::Fallback,
+            }
+        })
+        .collect();
+    ModelsRolesSnapshot {
+        default_model: config.model.default.clone(),
+        provider: config.model.provider.clone(),
+        roles,
+        web_config_write_enabled: config.security.web_config_write_enabled,
+        default_resolved_context_length: fallback_len,
+        default_resolved_context_source: ContextWindowSource::Fallback,
+        default_context_override,
+    }
+}
+
+/// Phase 50.5 (D-14): upsert-or-prune `providers.<p>.models.<m>.context_length`.
+/// `pub(crate)`, not private: Plan 06 Task 3 calls this from the Providers
+/// write path so the browser reaches exactly one implementation of "which
+/// per-model keys can it touch" (T-50.5-18).
+///
+/// - `Some(n)`: upsert the entry, creating the provider/model map levels if
+///   they are absent.
+/// - `None`: clear the stored value, then remove the model entry entirely
+///   when it is left carrying nothing else (D-01's "zero entries in the
+///   normal steady state" — a cleared override must not leave a husk behind
+///   in `config.yaml`). The provider entry itself is never removed; a
+///   provider with an empty `models` map is a normal, meaningful state.
+///
+/// A blank (post-trim) `provider` or `model` has nothing to key on and is a
+/// silent no-op — a payload naming no model cannot write anywhere sane.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn write_per_model_context_length(
+    config: &mut ironhermes_core::config::Config,
+    provider: &str,
+    model: &str,
+    value: Option<usize>,
+) {
+    let provider = provider.trim();
+    let model = model.trim();
+    if provider.is_empty() || model.is_empty() {
+        return;
+    }
+    match value {
+        Some(n) => {
+            config
+                .providers
+                .entry(provider.to_string())
+                .or_default()
+                .models
+                .entry(model.to_string())
+                .or_default()
+                .context_length = Some(n);
+        }
+        None => {
+            if let Some(provider_cfg) = config.providers.get_mut(provider) {
+                if let Some(model_cfg) = provider_cfg.models.get_mut(model) {
+                    model_cfg.context_length = None;
+                    if model_cfg.extra_request_options.is_empty() {
+                        provider_cfg.models.remove(model);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -4859,16 +5982,66 @@ fn build_models_roles_snapshot(config: &ironhermes_core::config::Config) -> Mode
 /// per `ModelRoleConfig`'s doc comment, config.rs:245) when a role entry
 /// omits it — the Models catalog (`list_models`) has no per-model provider
 /// field, so the ASSIGN flow always writes the inherit-main sentinel.
+///
+/// Phase 50.4 Plan 03 (operator decision, live UAT finding, 2026-09-08):
+/// `ProviderResolver::resolve_for_main()` overlays `providers.<active>.
+/// default_model` OVER the top-level `config.model.default`
+/// (`resolved_main_model`'s doc comment above, and `provider.rs`'s
+/// endpoint-build step 2). Before this fix, a Models-screen Default-model
+/// save wrote ONLY `config.model.default`, reported success, and did
+/// NOTHING whenever the active provider carried its own `default_model` —
+/// observed live: the operator picked a new model here, the write
+/// succeeded, and the model actually in effect stayed the OLD one because
+/// `providers.openrouter.default_model` was still set. The operator's
+/// explicit decision (not a bug fix the resolver would otherwise need):
+/// this write ALSO syncs `providers.<active>.default_model` to the
+/// newly-picked model, so the Models screen's selection actually takes
+/// effect instead of being silently shadowed. Deliberately cross-scope —
+/// one screen updating a provider-scoped key — do not "fix" this back into
+/// a write-only-`model.default` no-op.
+///
+/// Scoped narrowly on purpose:
+/// - Only `config.model.provider` (the CURRENTLY active provider, read
+///   AFTER any `payload.provider` update on this same call so a combined
+///   provider+model save syncs the provider the operator just picked, not
+///   the stale one) is ever touched — never any other entry in
+///   `config.providers`.
+/// - Only fires when `payload.default_model` is `Some`, which the six role
+///   rows never populate (`CascadeKind::Role` writes only `payload.roles`)
+///   — a role-only save cannot reach this branch.
+/// - Only mutates an EXISTING overlay (`active.default_model` already
+///   `Some`) — if the active provider has no overlay, `config.model.
+///   default` already resolves correctly on its own and nothing here needs
+///   to change.
 #[cfg(not(target_arch = "wasm32"))]
 fn merge_models_roles_payload(
     config: &mut ironhermes_core::config::Config,
     payload: &ModelsRolesWritePayload,
 ) {
-    if let Some(ref default_model) = payload.default_model {
-        config.model.default = default_model.clone();
-    }
     if let Some(ref provider) = payload.provider {
         config.model.provider = provider.clone();
+    }
+    if let Some(ref default_model) = payload.default_model {
+        config.model.default = default_model.clone();
+        if let Some(active) = config.providers.get_mut(&config.model.provider) {
+            if active.default_model.is_some() {
+                active.default_model = Some(default_model.clone());
+            }
+        }
+    }
+    // Phase 50.5 (D-14/D-16): the default card's window write, AFTER any
+    // provider/default_model update above (same ordering rule as the overlay
+    // sync above it) so a combined provider+model+window save keys on the
+    // provider and model the operator just picked, not the stale ones.
+    if payload.apply_context_length {
+        let provider = config.model.provider.clone();
+        let model = config.model.default.clone();
+        write_per_model_context_length(
+            config,
+            &provider,
+            &model,
+            payload.context_length.map(|n| n as usize),
+        );
     }
     for role in &payload.roles {
         config.model.roles.insert(
@@ -4878,6 +6051,25 @@ fn merge_models_roles_payload(
                 model: role.model.clone(),
             },
         );
+        // Phase 50.5 (D-14): a role with no model has no per-model key to
+        // write into, so it is skipped rather than falling back to the
+        // default model.
+        if role.apply_context_length {
+            if let Some(ref model) = role.model {
+                let provider_raw = role.provider.clone().unwrap_or_else(|| "main".to_string());
+                let provider = if provider_raw == "main" {
+                    config.model.provider.clone()
+                } else {
+                    provider_raw
+                };
+                write_per_model_context_length(
+                    config,
+                    &provider,
+                    model,
+                    role.context_length.map(|n| n as usize),
+                );
+            }
+        }
     }
 }
 
@@ -4888,7 +6080,20 @@ fn merge_models_roles_payload(
 pub async fn get_models_roles_config() -> Result<ModelsRolesSnapshot, ServerFnError> {
     let config = ironhermes_core::config::Config::load()
         .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
-    Ok(build_models_roles_snapshot(&config))
+    // Phase 50.5 (D-12): degrade rather than error when the resolver itself
+    // fails to build (e.g. one provider's `base_url` is malformed) — this fn
+    // feeds the whole Models screen and must not go dark over one provider.
+    match ironhermes_core::provider::ProviderResolver::build(&config) {
+        Ok(resolver) => Ok(build_models_roles_snapshot(&config, &resolver)),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "ProviderResolver::build failed while building the Models-screen snapshot; \
+                 degrading resolved windows to Fallback/128,000"
+            );
+            Ok(degraded_models_roles_snapshot(&config))
+        }
+    }
 }
 
 /// Phase 46.9 Plan 02 (D-05/D-10): Write server fn for the Models screen.
@@ -4924,9 +6129,24 @@ pub async fn update_models_roles_config(
 mod model_roles {
     use super::{
         build_models_roles_snapshot, merge_models_roles_payload, validate_models_roles_payload,
-        ModelRoleAssignment, ModelsRolesWritePayload,
+        ModelRoleAssignment, ModelsRolesWritePayload, MAX_WEB_CONTEXT_LENGTH,
     };
     use ironhermes_core::config::Config;
+    use ironhermes_core::config_extras::ProviderModelConfig;
+
+    /// Build a resolver for a test config the same way `get_models_roles_config`
+    /// does, but pinned to the static model-registry table
+    /// (`ModelsCache::default()`) so the test is not silently sensitive to
+    /// whatever `models-cache.json` happens to exist on the machine running it
+    /// (mirrors `default_model_write_syncs_active_provider_overlay`'s existing
+    /// comment on this exact hazard).
+    fn resolver_for(config: &Config) -> ironhermes_core::ProviderResolver {
+        ironhermes_core::ProviderResolver::build_with_cache(
+            config,
+            ironhermes_core::ModelsCache::default(),
+        )
+        .expect("resolver must build for a default-shaped test config")
+    }
 
     /// T-46.9-05: The write gate must fail closed by default (mirrors
     /// `gate_fails_closed_by_default`, api.rs:1403).
@@ -4951,7 +6171,9 @@ mod model_roles {
                 role_key: "kanban_judge".to_string(),
                 provider: None,
                 model: Some("openrouter/gpt-4o-mini".to_string()),
+                ..Default::default()
             }],
+            ..Default::default()
         };
         validate_models_roles_payload(&payload).expect("payload must validate");
         merge_models_roles_payload(&mut config, &payload);
@@ -4968,7 +6190,8 @@ mod model_roles {
         );
         assert_eq!(stored.model.as_deref(), Some("openrouter/gpt-4o-mini"));
 
-        let snapshot = build_models_roles_snapshot(&config);
+        let resolver = resolver_for(&config);
+        let snapshot = build_models_roles_snapshot(&config, &resolver);
         assert_eq!(snapshot.default_model, "anthropic/claude-sonnet-4");
         let row = snapshot
             .roles
@@ -4996,7 +6219,9 @@ mod model_roles {
                 role_key: "not_a_real_role".to_string(),
                 provider: None,
                 model: Some("some/model".to_string()),
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let result = validate_models_roles_payload(&payload);
         assert!(result.is_err(), "unknown role key must be rejected");
@@ -5007,7 +6232,8 @@ mod model_roles {
     #[test]
     fn snapshot_always_has_six_rows() {
         let config = Config::default();
-        let snapshot = build_models_roles_snapshot(&config);
+        let resolver = resolver_for(&config);
+        let snapshot = build_models_roles_snapshot(&config, &resolver);
         assert_eq!(
             snapshot.roles.len(),
             6,
@@ -5025,6 +6251,7 @@ mod model_roles {
             default_model: None,
             provider: Some("anthropic".to_string()),
             roles: Vec::new(),
+            ..Default::default()
         };
         validate_models_roles_payload(&payload).expect("payload must validate");
         merge_models_roles_payload(&mut config, &payload);
@@ -5034,7 +6261,8 @@ mod model_roles {
             "provider write must persist into config.model.provider"
         );
 
-        let snapshot = build_models_roles_snapshot(&config);
+        let resolver = resolver_for(&config);
+        let snapshot = build_models_roles_snapshot(&config, &resolver);
         assert_eq!(
             snapshot.provider, "anthropic",
             "provider must read back through the shared snapshot builder"
@@ -5049,9 +6277,381 @@ mod model_roles {
             default_model: None,
             provider: Some("x".repeat(65)),
             roles: Vec::new(),
+            ..Default::default()
         };
         let result = validate_models_roles_payload(&payload);
         assert!(result.is_err(), "oversized provider must be rejected");
+    }
+
+    /// Phase 50.4 Plan 03 (operator decision, live UAT finding): reproduces
+    /// the EXACT overlay shape the operator observed — `model.default` set
+    /// to one value, `providers.<active>.default_model` (the OVERLAY that
+    /// wins per `resolve_for_main()`) holding a DIFFERENT one — then asserts
+    /// the resolver returns the NEWLY-PICKED model after a Default-model
+    /// merge. This test FAILS against the pre-fix write-only-`model.default`
+    /// behaviour: before `merge_models_roles_payload` synced the overlay,
+    /// the resolver kept returning the stale `"stale-overlay-model"` even
+    /// though the merge reported the field write as successful — the exact
+    /// "save reported success and did nothing" bug the operator hit live.
+    #[test]
+    fn default_model_write_syncs_active_provider_overlay() {
+        let mut config = Config::default();
+        config.model.provider = "openrouter".to_string();
+        config.model.default = "old-default-model".to_string();
+        config.providers.insert(
+            "openrouter".to_string(),
+            ironhermes_core::config::ProviderConfig {
+                default_model: Some("stale-overlay-model".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let payload = ModelsRolesWritePayload {
+            default_model: Some("newly-picked-model".to_string()),
+            provider: None,
+            roles: Vec::new(),
+            ..Default::default()
+        };
+        validate_models_roles_payload(&payload).expect("payload must validate");
+        merge_models_roles_payload(&mut config, &payload);
+
+        let resolver = ironhermes_core::ProviderResolver::build_with_cache(
+            &config,
+            ironhermes_core::ModelsCache::default(),
+        )
+        .expect("resolver should build with a valid overlay");
+        assert_eq!(
+            resolver.resolve_for_main().default_model,
+            "newly-picked-model",
+            "the Models screen's picked model must be what the resolver actually \
+             returns — writing only config.model.default left the provider's \
+             default_model overlay shadowing the pick, so a save reported success \
+             while doing nothing"
+        );
+    }
+
+    /// The cross-scope write is scoped to ONLY the currently active
+    /// provider — a sibling provider's overlay must survive untouched.
+    #[test]
+    fn default_model_write_does_not_touch_other_providers() {
+        let mut config = Config::default();
+        config.model.provider = "openrouter".to_string();
+        config.providers.insert(
+            "openrouter".to_string(),
+            ironhermes_core::config::ProviderConfig {
+                default_model: Some("stale-overlay-model".to_string()),
+                ..Default::default()
+            },
+        );
+        config.providers.insert(
+            "anthropic".to_string(),
+            ironhermes_core::config::ProviderConfig {
+                default_model: Some("untouched-model".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let payload = ModelsRolesWritePayload {
+            default_model: Some("newly-picked-model".to_string()),
+            provider: None,
+            roles: Vec::new(),
+            ..Default::default()
+        };
+        merge_models_roles_payload(&mut config, &payload);
+
+        assert_eq!(
+            config
+                .providers
+                .get("anthropic")
+                .and_then(|p| p.default_model.as_deref()),
+            Some("untouched-model"),
+            "only the currently active provider's overlay may be touched"
+        );
+        assert_eq!(
+            config
+                .providers
+                .get("openrouter")
+                .and_then(|p| p.default_model.as_deref()),
+            Some("newly-picked-model"),
+            "the active provider's overlay must be synced to the new pick"
+        );
+    }
+
+    /// A role-row save never populates `payload.default_model`
+    /// (`CascadeKind::Role` writes only `payload.roles`) — it must never
+    /// touch the active provider's overlay.
+    #[test]
+    fn role_only_write_does_not_touch_provider_overlay() {
+        let mut config = Config::default();
+        config.model.provider = "openrouter".to_string();
+        config.providers.insert(
+            "openrouter".to_string(),
+            ironhermes_core::config::ProviderConfig {
+                default_model: Some("stale-overlay-model".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let payload = ModelsRolesWritePayload {
+            default_model: None,
+            provider: None,
+            roles: vec![ModelRoleAssignment {
+                role_key: "fast".to_string(),
+                provider: None,
+                model: Some("some-model".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        merge_models_roles_payload(&mut config, &payload);
+
+        assert_eq!(
+            config
+                .providers
+                .get("openrouter")
+                .and_then(|p| p.default_model.as_deref()),
+            Some("stale-overlay-model"),
+            "a role-only save must never touch the active provider's default_model overlay"
+        );
+    }
+
+    /// When the active provider carries NO overlay, a default-model write
+    /// must not introduce one — `config.model.default` already resolves
+    /// correctly on its own in that case.
+    #[test]
+    fn default_model_write_does_not_introduce_overlay_where_none_existed() {
+        let mut config = Config::default();
+        config.model.provider = "openrouter".to_string();
+        config
+            .providers
+            .insert("openrouter".to_string(), ironhermes_core::config::ProviderConfig::default());
+
+        let payload = ModelsRolesWritePayload {
+            default_model: Some("newly-picked-model".to_string()),
+            provider: None,
+            roles: Vec::new(),
+            ..Default::default()
+        };
+        merge_models_roles_payload(&mut config, &payload);
+
+        assert_eq!(
+            config.providers.get("openrouter").and_then(|p| p.default_model.as_deref()),
+            None,
+            "no overlay existed before the write, so none should be introduced"
+        );
+        assert_eq!(config.model.default, "newly-picked-model");
+    }
+
+    /// Phase 50.5 (D-14): the default-card branch upserts the sparse
+    /// per-model entry, AND a role entry whose `provider` is the `"main"`
+    /// sentinel writes under `config.model.provider`'s value — never under a
+    /// provider literally named `"main"`.
+    #[test]
+    fn window_write_upserts_the_sparse_entry() {
+        let mut config = Config::default();
+        let payload = ModelsRolesWritePayload {
+            default_model: Some("k3".to_string()),
+            provider: Some("moonshot".to_string()),
+            roles: Vec::new(),
+            context_length: Some(1_048_576),
+            apply_context_length: true,
+        };
+        validate_models_roles_payload(&payload).expect("payload must validate");
+        merge_models_roles_payload(&mut config, &payload);
+        assert_eq!(
+            config
+                .providers
+                .get("moonshot")
+                .and_then(|p| p.models.get("k3"))
+                .and_then(|m| m.context_length),
+            Some(1_048_576),
+            "the default-card window write must upsert providers.<p>.models.<m>.context_length"
+        );
+
+        let mut config = Config::default();
+        config.model.provider = "anthropic".to_string();
+        let payload = ModelsRolesWritePayload {
+            default_model: None,
+            provider: None,
+            roles: vec![ModelRoleAssignment {
+                role_key: "fast".to_string(),
+                provider: Some("main".to_string()),
+                model: Some("claude-haiku".to_string()),
+                context_length: Some(200_000),
+                apply_context_length: true,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        merge_models_roles_payload(&mut config, &payload);
+        assert_eq!(
+            config
+                .providers
+                .get("anthropic")
+                .and_then(|p| p.models.get("claude-haiku"))
+                .and_then(|m| m.context_length),
+            Some(200_000),
+            "a role's 'main' provider sentinel must resolve to config.model.provider, \
+             never a literal 'main' key"
+        );
+        assert!(
+            !config.providers.contains_key("main"),
+            "the literal string 'main' must never become a provider key"
+        );
+    }
+
+    /// Phase 50.5 (D-14): clearing the window prunes an entry that carries
+    /// nothing else (no husk), but leaves a sibling entry present — with
+    /// `context_length` cleared and its extras untouched — when it also
+    /// carries `extra_request_options`.
+    #[test]
+    fn blank_window_clears_and_prunes_the_entry() {
+        let payload = ModelsRolesWritePayload {
+            default_model: Some("k3".to_string()),
+            provider: Some("moonshot".to_string()),
+            roles: Vec::new(),
+            context_length: None,
+            apply_context_length: true,
+        };
+
+        // Case 1: an entry with nothing else is removed entirely.
+        let mut config = Config::default();
+        config.providers.insert(
+            "moonshot".to_string(),
+            ironhermes_core::config::ProviderConfig {
+                models: std::collections::HashMap::from([(
+                    "k3".to_string(),
+                    ProviderModelConfig {
+                        context_length: Some(1_048_576),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            },
+        );
+        merge_models_roles_payload(&mut config, &payload);
+        assert!(
+            !config.providers["moonshot"].models.contains_key("k3"),
+            "a cleared entry with nothing else must be pruned entirely, not left as a husk"
+        );
+
+        // Case 2: an entry carrying extra_request_options survives the
+        // clear, with context_length cleared and its extras untouched.
+        let mut extras = std::collections::HashMap::new();
+        extras.insert("temperature".to_string(), serde_json::json!(0.7));
+        let mut config = Config::default();
+        config.providers.insert(
+            "moonshot".to_string(),
+            ironhermes_core::config::ProviderConfig {
+                models: std::collections::HashMap::from([(
+                    "k3".to_string(),
+                    ProviderModelConfig {
+                        context_length: Some(1_048_576),
+                        extra_request_options: extras.clone(),
+                    },
+                )]),
+                ..Default::default()
+            },
+        );
+        merge_models_roles_payload(&mut config, &payload);
+        let entry = config
+            .providers
+            .get("moonshot")
+            .and_then(|p| p.models.get("k3"))
+            .expect("an entry with surviving extras must not be pruned");
+        assert_eq!(entry.context_length, None, "context_length must be cleared");
+        assert_eq!(
+            entry.extra_request_options, extras,
+            "extra_request_options must be untouched by the window clear"
+        );
+    }
+
+    /// T-50.5-02: `Some(0)` and any value above `MAX_WEB_CONTEXT_LENGTH` are
+    /// rejected by validation, and — proving the ORDERING, not just the
+    /// rejection — a config that a caller correctly never merges (because
+    /// the real four-step protocol only calls `merge` after `validate`
+    /// succeeds) stays byte-identical to before the attempt.
+    #[test]
+    fn window_validation_rejects_out_of_range_before_mutation() {
+        for bad in [0u32, MAX_WEB_CONTEXT_LENGTH + 1] {
+            let mut config = Config::default();
+            config.providers.insert(
+                "moonshot".to_string(),
+                ironhermes_core::config::ProviderConfig {
+                    models: std::collections::HashMap::from([(
+                        "k3".to_string(),
+                        ProviderModelConfig {
+                            context_length: Some(999_999),
+                            ..Default::default()
+                        },
+                    )]),
+                    ..Default::default()
+                },
+            );
+            let before = config.clone();
+            let payload = ModelsRolesWritePayload {
+                default_model: Some("k3".to_string()),
+                provider: Some("moonshot".to_string()),
+                roles: Vec::new(),
+                context_length: Some(bad),
+                apply_context_length: true,
+            };
+
+            // Mirrors update_models_roles_config's real step order: validate
+            // FIRST, only merge on success.
+            let validation = validate_models_roles_payload(&payload);
+            assert!(validation.is_err(), "context_length {bad} must be rejected");
+            if validation.is_ok() {
+                merge_models_roles_payload(&mut config, &payload);
+            }
+            assert_eq!(
+                config
+                    .providers
+                    .get("moonshot")
+                    .and_then(|p| p.models.get("k3"))
+                    .and_then(|m| m.context_length),
+                before
+                    .providers
+                    .get("moonshot")
+                    .and_then(|p| p.models.get("k3"))
+                    .and_then(|m| m.context_length),
+                "a rejected payload must never reach a mutation"
+            );
+        }
+    }
+
+    /// Phase 50.5 (D-14): `apply_context_length: false` leaves any existing
+    /// entry byte-identical, whatever `context_length` holds.
+    #[test]
+    fn unapplied_window_leaves_the_entry_untouched() {
+        let mut config = Config::default();
+        config.providers.insert(
+            "moonshot".to_string(),
+            ironhermes_core::config::ProviderConfig {
+                models: std::collections::HashMap::from([(
+                    "k3".to_string(),
+                    ProviderModelConfig {
+                        context_length: Some(1_048_576),
+                        ..Default::default()
+                    },
+                )]),
+                ..Default::default()
+            },
+        );
+        let before = config.clone();
+        let payload = ModelsRolesWritePayload {
+            default_model: Some("k3".to_string()),
+            provider: Some("moonshot".to_string()),
+            roles: Vec::new(),
+            context_length: Some(999),
+            apply_context_length: false,
+        };
+        merge_models_roles_payload(&mut config, &payload);
+        assert_eq!(
+            config.providers["moonshot"].models["k3"].context_length,
+            before.providers["moonshot"].models["k3"].context_length,
+            "apply_context_length: false must leave the stored value untouched"
+        );
     }
 }
 
@@ -5590,6 +7190,339 @@ pub async fn update_kanban_config(payload: KanbanWritePayload) -> Result<(), Ser
         .map_err(|e| ServerFnError::new(format!("Config save failed: {e}")))?;
 
     Ok(())
+}
+
+/// Phase 50.4 Plan 01 (D-08/D-09/D-12/D-14): outcome of an "APPLY CONFIG NOW"
+/// click. Carries the applied provider/model on success, or a concrete
+/// `failure_reason` on the D-09 failure path — `ApplyConfigBanner` renders
+/// "Apply failed — the previous config is still active. {reason}" from that
+/// field rather than a bare opaque error.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ApplyConfigOutcome {
+    pub provider: String,
+    pub model: String,
+    pub failure_reason: Option<String>,
+}
+
+/// D-12/D-14 regression guard: the ONLY way `apply_config_now` may compute a
+/// model string for the `config.apply` audit entry. `resolve_for_main()`
+/// applies the `providers.<name>.default_model` overlay
+/// (`ironhermes_core::provider::ProviderResolver::build`, step 2), which
+/// takes precedence over the raw `config.model.default` field. Reading the
+/// raw field for `before_model` while reading this resolved form for
+/// `after_model` reported a phantom model change on every apply where the
+/// active provider carries a `default_model` overlay — the two sides of the
+/// audit entry described the model through two different resolution paths.
+/// Both `before_model` and `after_model` MUST be computed by calling this on
+/// the pre- and post-reload resolver respectively, so a no-op apply always
+/// reports the same model on both sides.
+#[cfg(feature = "server")]
+fn resolved_main_model(resolver: &ironhermes_core::ProviderResolver) -> String {
+    resolver.resolve_for_main().default_model.clone()
+}
+
+/// Phase 50.4 Plan 01 (D-12): append one `config.apply` audit entry recording
+/// the previous (still-running) provider/model, the attempted outcome, and —
+/// on success — the newly-applied provider/model. Every refusal path AND the
+/// success path write through this one fn so a reader filtering
+/// `audit.jsonl` on `config.apply` sees attempts and outcomes in one stream —
+/// the success/failure distinction lives in the entry's own `decision` field,
+/// never in a different action name. Never includes an API key, key
+/// material, or a vault path in `args` — only provider names and model ids.
+#[cfg(feature = "server")]
+async fn append_apply_config_audit(
+    audit_log: &ironhermes_core::AuditLog,
+    before_provider: &str,
+    before_model: &str,
+    decision: &str,
+    reason: &str,
+    after: Option<(&str, &str)>,
+) {
+    let mut args = serde_json::json!({
+        "before_provider": before_provider,
+        "before_model": before_model,
+    });
+    if let Some((provider, model)) = after {
+        args["after_provider"] = serde_json::Value::String(provider.to_string());
+        args["after_model"] = serde_json::Value::String(model.to_string());
+    }
+    let entry = audit_log.make_entry(
+        "config_apply",
+        "config.apply",
+        None,
+        "web-config",
+        "web",
+        "web-config",
+        reason,
+        decision,
+        "operator",
+        &args,
+    );
+    if let Err(e) = audit_log.append(&entry).await {
+        tracing::warn!(
+            target: "iron_hermes_ui::apply_config",
+            error = %e,
+            "failed to append apply-config-now audit entry"
+        );
+    }
+}
+
+/// Phase 50.4 Plan 01 (D-08/D-09/D-12/D-14): the "APPLY CONFIG NOW" seam. A
+/// successful Providers save leaves `config.yaml` updated but the LIVE
+/// `AgentRuntime`/`AppState` config, resolver and cached main client
+/// unchanged until an operator clicks APPLY NOW — this is that click's
+/// handler, wired through `AppState::apply_config_now` ->
+/// `AgentRuntime::reload_config_and_resolver`.
+///
+/// All-or-nothing (D-09): fresh `Config::load()`, `ProviderResolver::build`,
+/// and the optional vault top-up all run into LOCALS and propagate their
+/// error before anything is published — nothing here is published unless
+/// every fallible step returned Ok. Gated the SAME way every other
+/// config-write server fn is (D-12's "inherits the existing config-write gate
+/// by construction").
+#[server]
+pub async fn apply_config_now() -> Result<ApplyConfigOutcome, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        let state = crate::server::state::global_app_state();
+
+        // Step 1: fresh disk read — never the startup snapshot, never
+        // app_state's current handle, since the whole point is to pick up
+        // what the operator just saved.
+        let config = match ironhermes_core::config::Config::load() {
+            Ok(c) => c,
+            Err(e) => {
+                // No `config` exists to read `config.audit` from — use
+                // AuditConfig::default() rather than skip the entry. The
+                // still-running config/resolver on `state` ARE "the previous
+                // config [still] active" this failure leaves in place.
+                let audit_log =
+                    ironhermes_core::AuditLog::load(ironhermes_core::AuditConfig::default());
+                let reason = e.to_string();
+                append_apply_config_audit(
+                    &audit_log,
+                    state.resolver().main_provider(),
+                    &resolved_main_model(&state.resolver()),
+                    "denied",
+                    &reason,
+                    None,
+                )
+                .await;
+                return Err(ServerFnError::new(format!("Config load failed: {reason}")));
+            }
+        };
+
+        // Step 2: gate — web config write is disabled unless operator opts
+        // in. This is D-12's "inherits the existing config-write gate by
+        // construction": an ungated reload would let a caller who cannot
+        // save config still activate whatever happens to be on disk.
+        if !config.security.web_config_write_enabled {
+            let audit_log = ironhermes_core::AuditLog::load(config.audit.clone());
+            append_apply_config_audit(
+                &audit_log,
+                state.resolver().main_provider(),
+                &resolved_main_model(&state.resolver()),
+                "denied",
+                "Config writes are disabled",
+                None,
+            )
+            .await;
+            return Err(ServerFnError::new("Config writes are disabled"));
+        }
+
+        // Step 3: build the new resolver + optional vault top-up — the SAME
+        // sequence AppState::init runs — into LOCALS. Nothing published yet.
+        let audit_log = ironhermes_core::AuditLog::load(config.audit.clone());
+        let mut resolver = match ironhermes_core::ProviderResolver::build(&config) {
+            Ok(r) => r,
+            Err(e) => {
+                let reason = e.to_string();
+                append_apply_config_audit(
+                    &audit_log,
+                    state.resolver().main_provider(),
+                    &resolved_main_model(&state.resolver()),
+                    "denied",
+                    &reason,
+                    None,
+                )
+                .await;
+                return Err(ServerFnError::new(format!(
+                    "Provider resolver build failed: {reason}"
+                )));
+            }
+        };
+        if config.vault.enabled {
+            match ironhermes_vault::open_store(&ironhermes_core::resolve_vault_config(&config)) {
+                Ok(store) => {
+                    if let Err(e) = resolver.apply_vault_fallback(&*store).await {
+                        let reason = e.to_string();
+                        append_apply_config_audit(
+                            &audit_log,
+                            state.resolver().main_provider(),
+                            &resolved_main_model(&state.resolver()),
+                            "denied",
+                            &reason,
+                            None,
+                        )
+                        .await;
+                        return Err(ServerFnError::new(format!(
+                            "Vault fallback failed: {reason}"
+                        )));
+                    }
+                }
+                Err(e) => {
+                    let reason = e.to_string();
+                    append_apply_config_audit(
+                        &audit_log,
+                        state.resolver().main_provider(),
+                        &resolved_main_model(&state.resolver()),
+                        "denied",
+                        &reason,
+                        None,
+                    )
+                    .await;
+                    return Err(ServerFnError::new(format!("Vault open failed: {reason}")));
+                }
+            }
+        }
+
+        // Step 4: the reload itself — the only step that touches the live
+        // runtime. D-09's all-or-nothing guarantee is enforced inside
+        // `AgentRuntime::reload_config_and_resolver`: a client that cannot be
+        // built there leaves the previously-running config, resolver and
+        // client all untouched, and we surface that as a concrete reason
+        // rather than a bare failed call.
+        let before_provider = state.resolver().main_provider().to_string();
+        let before_model = resolved_main_model(&state.resolver());
+        let applied_provider = resolver.main_provider().to_string();
+        let applied_model = resolved_main_model(&resolver);
+        let config_arc = std::sync::Arc::new(config);
+        let resolver_arc = std::sync::Arc::new(resolver);
+
+        match state.apply_config_now(config_arc, resolver_arc).await {
+            Ok(()) => {
+                append_apply_config_audit(
+                    &audit_log,
+                    &before_provider,
+                    &before_model,
+                    "approved",
+                    "operator requested apply-config-now",
+                    Some((&applied_provider, &applied_model)),
+                )
+                .await;
+                Ok(ApplyConfigOutcome {
+                    provider: applied_provider,
+                    model: applied_model,
+                    failure_reason: None,
+                })
+            }
+            Err(e) => {
+                let reason = e.to_string();
+                append_apply_config_audit(
+                    &audit_log,
+                    &before_provider,
+                    &before_model,
+                    "denied",
+                    &reason,
+                    None,
+                )
+                .await;
+                Ok(ApplyConfigOutcome {
+                    provider: before_provider,
+                    model: before_model,
+                    failure_reason: Some(reason),
+                })
+            }
+        }
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        Err(ServerFnError::new(
+            "apply_config_now unavailable without `server` feature",
+        ))
+    }
+}
+
+/// Regression coverage for the `resolved_main_model` fix: `before_model` and
+/// `after_model` in the `config.apply` audit entry must be drawn from the
+/// SAME resolution path (the provider overlay `resolve_for_main()` applies),
+/// never from the raw `config.model.default` field. Before this fix,
+/// `apply_config_now` read `before_model` from `state.config().model.default`
+/// while `after_model` came from `resolver.resolve_for_main().default_model`
+/// — with `model.default: "MiniMax-M3"` and `providers.<main>.default_model:
+/// "kimi-k3"`, a no-op apply reported a phantom `MiniMax-M3` -> `kimi-k3`
+/// change, because the effective model both before and after was already
+/// `kimi-k3`.
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "server"))]
+mod apply_config_model_resolution {
+    use super::resolved_main_model;
+    use ironhermes_core::config::{Config, ProviderConfig};
+    use ironhermes_core::{ModelsCache, ProviderResolver};
+
+    /// Builds the exact overlay shape reported by the operator: the main
+    /// provider's `providers.<name>.default_model` overrides the top-level
+    /// `model.default`. `resolve_for_main()` must return the OVERLAY value.
+    fn overlay_config() -> Config {
+        let mut config = Config::default();
+        config.model.provider = "openrouter".to_string();
+        config.model.default = "MiniMax-M3".to_string();
+        config.providers.insert(
+            "openrouter".to_string(),
+            ProviderConfig {
+                default_model: Some("kimi-k3".to_string()),
+                ..Default::default()
+            },
+        );
+        config
+    }
+
+    /// `resolve_for_main()` resolves the overlay, not the raw field — the
+    /// fixture must actually exercise the divergence Test below depends on,
+    /// or the regression test would be vacuous.
+    #[test]
+    fn overlay_config_diverges_from_raw_model_default() {
+        let config = overlay_config();
+        let resolver = ProviderResolver::build_with_cache(&config, ModelsCache::default())
+            .expect("resolver should build with a valid overlay");
+        assert_eq!(config.model.default, "MiniMax-M3");
+        assert_eq!(resolved_main_model(&resolver), "kimi-k3");
+        assert_ne!(
+            config.model.default,
+            resolved_main_model(&resolver),
+            "fixture must diverge from the raw config field, or this regression test is vacuous"
+        );
+    }
+
+    /// The actual regression: a no-op apply (the SAME config reloaded,
+    /// nothing changed) must report no model change. This is the assertion
+    /// that FAILS if `before_model` is ever read from the raw
+    /// `config.model.default` field again instead of through
+    /// `resolved_main_model` — reverting `resolved_main_model`'s call sites
+    /// in `apply_config_now` back to `state.config().model.default.clone()`
+    /// reproduces the phantom-change bug this test guards against.
+    #[test]
+    fn noop_apply_with_provider_overlay_reports_no_model_change() {
+        let config = overlay_config();
+
+        // "Before": the currently-running resolver (mirrors `state.resolver()`
+        // inside `apply_config_now`).
+        let before_resolver = ProviderResolver::build_with_cache(&config, ModelsCache::default())
+            .expect("resolver should build");
+        let before_model = resolved_main_model(&before_resolver);
+
+        // "After": the operator clicked APPLY NOW without changing anything —
+        // the freshly-loaded config and rebuilt resolver are identical to the
+        // running ones.
+        let after_resolver = ProviderResolver::build_with_cache(&config, ModelsCache::default())
+            .expect("resolver should build");
+        let after_model = resolved_main_model(&after_resolver);
+
+        assert_eq!(
+            before_model, after_model,
+            "a no-op apply must not report a model change — both sides must resolve \
+             through the provider overlay, not one through the raw config field"
+        );
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

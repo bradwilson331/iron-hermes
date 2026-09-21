@@ -110,6 +110,12 @@ pub struct ArtifactSummary {
     pub icon: Option<String>,
     pub source_kind: Option<String>,
     pub source_ref: Option<String>,
+    /// The canonical wire string ("html" | "md" | "code") as stored in
+    /// `artifacts.source_format` (Plan 02, D-03). Kept as the raw wire
+    /// `String` rather than the `SourceFormat` enum so an unrecognized
+    /// legacy value cannot fail a whole listing query — consumers parse it
+    /// where they need the enum.
+    pub source_format: String,
     pub updated_at: f64,
     pub archived: bool,
 }
@@ -329,7 +335,7 @@ impl ArtifactStore {
         include_archived: bool,
     ) -> Result<Vec<ArtifactSummary>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, title, icon, source_kind, source_ref, updated_at, archived \
+            "SELECT id, title, icon, source_kind, source_ref, source_format, updated_at, archived \
              FROM artifacts WHERE profile = ?1 AND (?2 OR archived = 0) \
              ORDER BY updated_at DESC",
         )?;
@@ -340,16 +346,25 @@ impl ArtifactStore {
                 icon: r.get(2)?,
                 source_kind: r.get(3)?,
                 source_ref: r.get(4)?,
-                updated_at: r.get(5)?,
-                archived: r.get::<_, i64>(6)? != 0,
+                source_format: r.get(5)?,
+                updated_at: r.get(6)?,
+                archived: r.get::<_, i64>(7)? != 0,
             })
         })?;
         rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(Into::into)
     }
 
-    /// Return the rendered HTML for the highest `version_no` row of `id`.
-    pub fn load_latest_html(&self, id: &str) -> Result<String> {
+    /// Return the unrendered body of the highest `version_no` row of `id`,
+    /// paired with the format it was published in (Plan 02, D-03). Unlike
+    /// [`Self::load_latest_html`], the body is returned exactly as stored —
+    /// no markdown-to-HTML conversion, no code-block escaping/wrapping.
+    ///
+    /// Returns the same typed [`ArtifactError::NotFound`] as
+    /// `load_latest_html` for both a missing artifact row and a missing
+    /// version row, and the same unknown-format error for an unparseable
+    /// `source_format` value.
+    pub fn load_latest_source(&self, id: &str) -> Result<(SourceFormat, String)> {
         let source_format_str: Option<String> = self
             .conn
             .query_row(
@@ -377,6 +392,15 @@ impl ArtifactStore {
             .optional()?;
         let body = body.ok_or_else(|| ArtifactError::NotFound(id.to_string()))?;
 
+        Ok((source_format, body))
+    }
+
+    /// Return the rendered HTML for the highest `version_no` row of `id`.
+    /// Implemented in terms of [`Self::load_latest_source`] so the two
+    /// cannot drift on ordering or error behavior — the only difference is
+    /// that this method renders the body before returning it.
+    pub fn load_latest_html(&self, id: &str) -> Result<String> {
+        let (source_format, body) = self.load_latest_source(id)?;
         Ok(render::render(source_format, &body))
     }
 
@@ -392,7 +416,7 @@ impl ArtifactStore {
     ) -> Result<Option<ArtifactSummary>> {
         self.conn
             .query_row(
-                "SELECT id, title, icon, source_kind, source_ref, updated_at, archived \
+                "SELECT id, title, icon, source_kind, source_ref, source_format, updated_at, archived \
                  FROM artifacts WHERE source_kind = ?1 AND source_ref = ?2 \
                  ORDER BY updated_at DESC LIMIT 1",
                 params![source_kind, source_ref],
@@ -403,8 +427,9 @@ impl ArtifactStore {
                         icon: r.get(2)?,
                         source_kind: r.get(3)?,
                         source_ref: r.get(4)?,
-                        updated_at: r.get(5)?,
-                        archived: r.get::<_, i64>(6)? != 0,
+                        source_format: r.get(5)?,
+                        updated_at: r.get(6)?,
+                        archived: r.get::<_, i64>(7)? != 0,
                     })
                 },
             )
@@ -745,6 +770,186 @@ mod tests {
         let (store, _dir) = temp_store();
         let result = store.load_latest_html("does-not-exist");
         assert!(matches!(result, Err(ArtifactError::NotFound(_))));
+    }
+
+    // -- Task 1 (Plan 02, D-03): load_latest_source ------------------------
+
+    #[test]
+    fn load_latest_source_returns_markdown_unrendered() {
+        let (mut store, _dir) = temp_store();
+        let id = store
+            .publish(PublishInput {
+                profile: "alice".into(),
+                update_id: None,
+                title: Some("MD".into()),
+                icon: None,
+                source_kind: None,
+                source_ref: None,
+                source_format: SourceFormat::Markdown,
+                body: "# Heading".into(),
+            })
+            .unwrap();
+
+        let (format, body) = store.load_latest_source(&id).unwrap();
+        assert_eq!(format, SourceFormat::Markdown);
+        assert_eq!(
+            body, "# Heading",
+            "load_latest_source must return the raw markdown, not rendered HTML"
+        );
+
+        let html = store.load_latest_html(&id).unwrap();
+        assert_ne!(
+            body, html,
+            "the unrendered source must differ from load_latest_html's output"
+        );
+        assert!(html.contains("<h1>"));
+    }
+
+    #[test]
+    fn load_latest_source_returns_code_unrendered() {
+        let (mut store, _dir) = temp_store();
+        let id = store
+            .publish(PublishInput {
+                profile: "alice".into(),
+                update_id: None,
+                title: Some("Code".into()),
+                icon: None,
+                source_kind: None,
+                source_ref: None,
+                source_format: SourceFormat::Code,
+                body: "print('hi')".into(),
+            })
+            .unwrap();
+
+        let (format, body) = store.load_latest_source(&id).unwrap();
+        assert_eq!(format, SourceFormat::Code);
+        assert_eq!(
+            body, "print('hi')",
+            "load_latest_source must return the raw code, not the escaped <pre><code> wrapper"
+        );
+    }
+
+    #[test]
+    fn load_latest_source_not_found() {
+        let (store, _dir) = temp_store();
+        let result = store.load_latest_source("does-not-exist");
+        assert!(matches!(result, Err(ArtifactError::NotFound(_))));
+    }
+
+    #[test]
+    fn load_latest_source_returns_newest_version() {
+        let (mut store, _dir) = temp_store();
+        let id = store
+            .publish(PublishInput {
+                profile: "alice".into(),
+                update_id: None,
+                title: Some("MD".into()),
+                icon: None,
+                source_kind: None,
+                source_ref: None,
+                source_format: SourceFormat::Markdown,
+                body: "# v1".into(),
+            })
+            .unwrap();
+        store
+            .publish(PublishInput {
+                profile: "alice".into(),
+                update_id: Some(id.clone()),
+                title: None,
+                icon: None,
+                source_kind: None,
+                source_ref: None,
+                source_format: SourceFormat::Markdown,
+                body: "# v2".into(),
+            })
+            .unwrap();
+
+        let (_, body) = store.load_latest_source(&id).unwrap();
+        assert_eq!(
+            body, "# v2",
+            "load_latest_source must return the HIGHEST version_no row, matching load_latest_html's ordering"
+        );
+    }
+
+    #[test]
+    fn load_latest_source_reports_refreshed_format_after_markdown_then_html_version() {
+        let (mut store, _dir) = temp_store();
+        let id = store
+            .publish(PublishInput {
+                profile: "alice".into(),
+                update_id: None,
+                title: Some("t".into()),
+                icon: None,
+                source_kind: None,
+                source_ref: None,
+                source_format: SourceFormat::Markdown,
+                body: "# original".into(),
+            })
+            .unwrap();
+        store
+            .publish(PublishInput {
+                profile: "alice".into(),
+                update_id: Some(id.clone()),
+                title: None,
+                icon: None,
+                source_kind: None,
+                source_ref: None,
+                source_format: SourceFormat::Html,
+                body: "<p>updated</p>".into(),
+            })
+            .unwrap();
+
+        let (format, body) = store.load_latest_source(&id).unwrap();
+        assert_eq!(
+            format,
+            SourceFormat::Html,
+            "an artifact created as markdown and re-versioned as html must report html from load_latest_source"
+        );
+        assert_eq!(body, "<p>updated</p>");
+    }
+
+    #[test]
+    fn list_for_profile_filtered_populates_source_format() {
+        let (mut store, _dir) = temp_store();
+        store
+            .publish(PublishInput {
+                profile: "alice".into(),
+                update_id: None,
+                title: Some("Code".into()),
+                icon: None,
+                source_kind: None,
+                source_ref: None,
+                source_format: SourceFormat::Code,
+                body: "fn main() {}".into(),
+            })
+            .unwrap();
+
+        let listed = store.list_for_profile_filtered("alice", false).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].source_format, "code");
+    }
+
+    #[test]
+    fn latest_for_source_populates_source_format() {
+        let (mut store, _dir) = temp_store();
+        store
+            .publish(PublishInput {
+                profile: "alice".into(),
+                update_id: None,
+                title: Some("MD".into()),
+                icon: None,
+                source_kind: Some("kanban".into()),
+                source_ref: Some("task-1".into()),
+                source_format: SourceFormat::Markdown,
+                body: "# hi".into(),
+            })
+            .unwrap();
+
+        let found = store
+            .latest_for_source("kanban", "task-1")
+            .unwrap()
+            .expect("must find the published artifact");
+        assert_eq!(found.source_format, "md");
     }
 
     // -- Artifact management: archive / delete / migration ----------------

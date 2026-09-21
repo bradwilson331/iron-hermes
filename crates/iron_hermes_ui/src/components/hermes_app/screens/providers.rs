@@ -59,6 +59,10 @@ use dioxus::prelude::*;
 
 use base64::Engine as _;
 
+use crate::components::hermes_app::screens::model_picker::ModelPickerField;
+use crate::components::hermes_app::screens::models::{
+    compute_model_options, drift_note, parse_window_input, window_placeholder,
+};
 use crate::server::provider_config_api::{
     get_provider_config, update_provider_config, ProviderSnapshot, ProviderWritePayload,
 };
@@ -174,12 +178,63 @@ pub fn ScreenProviders(is_active: bool) -> Element {
     let mut editor_base_url = use_signal(String::new);
     let mut editor_enabled = use_signal(|| true);
     let mut editor_default_model = use_signal(String::new);
+    // Phase 50.5 (D-17/D-19): the value `editor_default_model` was seeded
+    // with when the editor opened — set ONLY alongside `editor_default_model`
+    // at seed time, never on every keystroke, so `ModelPickerField`'s
+    // `seeded` prop stays the seed rather than always equalling the live
+    // typed value (which would permanently disable the filter).
+    let mut editor_default_model_seed = use_signal(String::new);
+    // Phase 50.5 (D-14): the CONTEXT WINDOW field's raw text — seeded from
+    // the stored override (`ProviderSnapshot.context_length_override`), not
+    // the resolved value, same rationale as `models.rs`'s `window_input`.
+    let mut editor_context_length = use_signal(String::new);
     let mut editor_api_mode = use_signal(|| "chat_completions".to_string());
     let mut editor_fallback_providers: Signal<Vec<String>> = use_signal(Vec::new);
     let mut editor_has_secret = use_signal(|| false);
     let mut saving = use_signal(|| false);
     let mut save_error: Signal<Option<(String, String)>> = use_signal(|| None);
-    let mut show_restart_banner = use_signal(|| false);
+    // Phase 50.4 Plan 01 follow-up (team-lead, 2026-09-08): hoisted out of a
+    // screen-LOCAL `use_signal` into the root-provided `ApplyConfigPendingCtx`
+    // (see state.rs doc comment for the full rationale). A local signal
+    // cleared itself on navigating away from Providers and back even though
+    // the config change it was flagging was still unapplied, and it gave the
+    // Models screen's Default-model save no way to raise the SAME banner.
+    // `ApplyConfigBanner` now reads/writes this shared flag instead of a
+    // per-screen signal — same mount position, same "set to true after a
+    // successful save" trigger.
+    let mut apply_config_pending = use_context::<crate::state::ApplyConfigPendingCtx>().0;
+
+    // Phase 50.4 Plan 05 (D-06/D-07): the Providers "Default model" field's
+    // model list. Gated on THREE conditions in the sync prefix — the editor
+    // being closed, the provider name being empty, and `editor_is_new` —
+    // returning an empty snapshot WITHOUT awaiting `list_provider_models`
+    // when any holds. The Provider name input above is `readonly`/`disabled`
+    // unless `editor_is_new_val`, so the name signal can only churn while
+    // CREATING a provider — the `editor_is_new` condition is what stops a
+    // per-keystroke fetch (and per-keystroke 60s-cache key) while typing a
+    // brand-new provider's name that has no `/models` endpoint to enumerate
+    // yet anyway. Mirrors the drawer's `is_open`-gated resource
+    // (`edit_dialog.rs`), not `use_server_future` + `?` and never
+    // `.restart()` (this crate's discipline note).
+    let editor_models_resource = use_resource(move || {
+        let editor_closed = !*editor_open.read();
+        let editor_is_new_val = *editor_is_new.read();
+        let name = editor_name.read().clone();
+        async move {
+            if editor_closed || editor_is_new_val || name.trim().is_empty() {
+                return crate::server::api::ProviderModelsSnapshot {
+                    models: Vec::new(),
+                    fell_back: false,
+                };
+            }
+            crate::server::api::list_provider_models(name)
+                .await
+                .unwrap_or(crate::server::api::ProviderModelsSnapshot {
+                    models: Vec::new(),
+                    fell_back: false,
+                })
+        }
+    });
 
     // ── Secret row state (Task 2, D-03/D-04) ────────────────────────────
     // `None` = presence unknown (initial-fetch in flight for an EDIT open);
@@ -212,7 +267,6 @@ pub fn ScreenProviders(is_active: bool) -> Element {
     let editor_has_secret_val = *editor_has_secret.read();
     let saving_val = *saving.read();
     let save_error_val = save_error.read().clone();
-    let show_restart_banner_val = *show_restart_banner.read();
     let secret_status_val = *secret_status.read();
     let secret_blocked_val = secret_blocked.read().clone();
     let secret_input_open_val = *secret_input_open.read();
@@ -228,6 +282,58 @@ pub fn ScreenProviders(is_active: bool) -> Element {
         .map(|p| p.name.clone())
         .filter(|n| editor_is_new_val || n != &editor_name_val)
         .collect();
+
+    // Phase 50.4 Plan 05 (D-06/D-07): Default-model popup options — SAME
+    // derivation `ProviderModelCascade` (models.rs) uses:
+    // compute_model_options (provider-sourced, current value prepended if
+    // absent). Phase 50.5 (D-17/D-19): the text filter and cap moved into
+    // `ModelPickerField` itself, so this is now the FULL, unfiltered,
+    // uncapped catalog — the component applies the cap.
+    let editor_models_snapshot = editor_models_resource();
+    let editor_models_loading = editor_models_snapshot.is_none();
+    let editor_models_fell_back = editor_models_snapshot
+        .as_ref()
+        .map(|s| s.fell_back)
+        .unwrap_or(false);
+    let editor_model_assigned_ref = if editor_default_model_val.trim().is_empty() {
+        None
+    } else {
+        Some(editor_default_model_val.as_str())
+    };
+    let editor_model_options =
+        compute_model_options(editor_models_snapshot.as_ref(), editor_model_assigned_ref);
+    let editor_default_model_seed_val = editor_default_model_seed.read().clone();
+
+    // Phase 50.5 (D-14): the CONTEXT WINDOW field's parse, placeholder, and
+    // resolved-window lookup — owned locals before `rsx!` (Pattern B). The
+    // resolved value/provenance come from the currently-loaded provider list
+    // entry for this provider name, so re-opening the editor after a save
+    // shows the freshly resolved window rather than a stale seed.
+    let editor_context_length_val = editor_context_length.read().clone();
+    let editor_window_parsed = parse_window_input(&editor_context_length_val);
+    let editor_window_error: Option<&'static str> = editor_window_parsed.as_ref().err().copied();
+    let editor_provider_snapshot = provider_list.iter().find(|p| p.name == editor_name_val);
+    let editor_resolved_window = editor_provider_snapshot.map(|p| p.resolved_context_length);
+    let editor_resolved_source = editor_provider_snapshot
+        .map(|p| p.resolved_context_source)
+        .unwrap_or_default();
+    let editor_window_placeholder = window_placeholder(editor_resolved_window, editor_resolved_source);
+
+    // Phase 50.5 (D-11): the drift note for the Default-model row — same
+    // pure fn Models uses, `is_missing: false` (this surface has no MISSING
+    // pill to defer to).
+    let editor_served_ids: Vec<String> = editor_models_snapshot
+        .as_ref()
+        .map(|s| s.models.clone())
+        .unwrap_or_default();
+    let editor_drift_note = drift_note(
+        &editor_served_ids,
+        &editor_default_model_val,
+        &editor_name_val,
+        editor_models_fell_back,
+        editor_models_loading,
+        false,
+    );
 
     rsx! {
         section {
@@ -296,6 +402,8 @@ pub fn ScreenProviders(is_active: bool) -> Element {
                             editor_base_url.set(String::new());
                             editor_enabled.set(true);
                             editor_default_model.set(String::new());
+                            editor_default_model_seed.set(String::new());
+                            editor_context_length.set(String::new());
                             editor_api_mode.set("chat_completions".to_string());
                             editor_fallback_providers.set(Vec::new());
                             editor_has_secret.set(false);
@@ -326,19 +434,11 @@ pub fn ScreenProviders(is_active: bool) -> Element {
                 }
             }
 
-            if show_restart_banner_val {
-                div {
-                    class: "panel",
-                    style: "border-color:rgba(210,153,34,0.45);background:rgba(210,153,34,0.06);flex-direction:row;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:10px 16px;",
-                    span { style: "color:var(--amber);font-size:11px;line-height:1.5;",
-                        "Restart required — provider and model changes take effect after restart. Schedule changes apply immediately."
-                    }
-                    button {
-                        class: "btn btn--ghost btn--sm",
-                        onclick: move |_| show_restart_banner.set(false),
-                        "DISMISS"
-                    }
-                }
+            // Phase 50.4 Plan 01 (D-11): the shared apply-config banner
+            // supersedes the old dismissible "Restart required" banner on
+            // this screen — same mount position, same trigger signal.
+            crate::components::hermes_app::screens::apply_config_banner::ApplyConfigBanner {
+                visible: apply_config_pending,
             }
 
             if editor_open_val {
@@ -395,11 +495,55 @@ pub fn ScreenProviders(is_active: bool) -> Element {
                     }
                     div { class: "field-row",
                         div { class: "field-label", "Default model" }
+                        ModelPickerField {
+                            value: editor_default_model,
+                            all_options: editor_model_options.clone(),
+                            seeded: editor_default_model_seed_val.clone(),
+                            disabled: saving_val || editor_models_loading,
+                            placeholder: "type to search models…".to_string(),
+                            title: "e.g. anthropic/claude-3.5-sonnet".to_string(),
+                            // Phase 50.5 CR-01 fix: `editor_context_length` was
+                            // seeded once for the ORIGINAL default model and
+                            // never re-synced when the operator picks a
+                            // different one inside the same open editor
+                            // session — the exact same class of bug as
+                            // `models.rs`'s `window_input`, and it is the
+                            // provider's own `context_length` override that
+                            // is at stake (`providers.<this provider>.models.<m>.context_length`).
+                            // Reset to blank on a confirmed pick for the same
+                            // reason `models.rs` does: no per-model override
+                            // data is available client-side for a model other
+                            // than the one this editor was opened with.
+                            on_change: move |_new_model: String| {
+                                editor_context_length.set(String::new());
+                            },
+                        }
+                        if editor_models_fell_back && !editor_models_loading {
+                            div { class: "help", style: "margin-top:4px;",
+                                "This provider exposes no model list — showing the full catalog."
+                            }
+                        }
+                        // Phase 50.5 (D-11): identical slot, identical style
+                        // (`class: "help"`) to the fell_back note above.
+                        if let Some((ref body, ref title)) = editor_drift_note {
+                            div { class: "help", style: "margin-top:4px;", title: "{title}", "{body}" }
+                        }
+                    }
+                    div { class: "field-row",
+                        div { class: "field-label",
+                            "CONTEXT WINDOW"
+                            if let Some(err) = editor_window_error {
+                                span { class: "help", style: "color:var(--red);", "{err}" }
+                            }
+                        }
                         input {
+                            r#type: "number",
+                            min: "0",
                             class: "field-input",
-                            placeholder: "e.g. anthropic/claude-3.5-sonnet",
-                            value: "{editor_default_model_val}",
-                            oninput: move |e| editor_default_model.set(e.value()),
+                            placeholder: "{editor_window_placeholder}",
+                            value: "{editor_context_length_val}",
+                            disabled: saving_val,
+                            oninput: move |e| editor_context_length.set(e.value()),
                         }
                     }
                     div { class: "field-row",
@@ -616,7 +760,10 @@ pub fn ScreenProviders(is_active: bool) -> Element {
                     div { style: "display:flex;gap:10px;margin-top:6px;",
                         button {
                             class: "btn btn--sm",
-                            disabled: saving_val,
+                            // Phase 50.5 (D-14): reuse the existing disabled
+                            // gate — no second disabled state for the window
+                            // field's validation error.
+                            disabled: saving_val || editor_window_error.is_some(),
                             onclick: move |_| {
                                 // Pattern B: read all signal values into owned
                                 // locals BEFORE spawn — no borrow across .await.
@@ -624,9 +771,16 @@ pub fn ScreenProviders(is_active: bool) -> Element {
                                 let base_url_local = editor_base_url.read().clone();
                                 let enabled_local = *editor_enabled.read();
                                 let default_model_local = editor_default_model.read().clone();
+                                let context_length_raw = editor_context_length.read().clone();
                                 let api_mode_local = editor_api_mode.read().clone();
                                 let fallback_local = editor_fallback_providers.read().clone();
                                 let is_new_local = *editor_is_new.read();
+                                // Belt-and-braces re-check — `disabled` above
+                                // already blocks this click on a parse error.
+                                let Ok(context_length_parsed) = parse_window_input(&context_length_raw)
+                                else {
+                                    return;
+                                };
 
                                 // Gap 3 (D-01, CR-03): client-side collision
                                 // guard — a + NEW PROVIDER save must never
@@ -670,6 +824,8 @@ pub fn ScreenProviders(is_active: bool) -> Element {
                                         api_mode: Some(api_mode_local),
                                         fallback_providers: Some(fallback_local),
                                         expect_new: is_new_local,
+                                        context_length: context_length_parsed,
+                                        apply_context_length: true,
                                     };
                                     match update_provider_config(payload).await {
                                         Ok(()) => {
@@ -681,7 +837,7 @@ pub fn ScreenProviders(is_active: bool) -> Element {
                                             }
                                             saving.set(false);
                                             editor_open.set(false);
-                                            show_restart_banner.set(true);
+                                            apply_config_pending.set(true);
                                         }
                                         Err(e) => {
                                             saving.set(false);
@@ -739,6 +895,13 @@ pub fn ScreenProviders(is_active: bool) -> Element {
                                 editor_base_url.set(p.base_url.clone().unwrap_or_default());
                                 editor_enabled.set(p.enabled);
                                 editor_default_model.set(p.default_model.clone().unwrap_or_default());
+                                editor_default_model_seed
+                                    .set(p.default_model.clone().unwrap_or_default());
+                                editor_context_length.set(
+                                    p.context_length_override
+                                        .map(|n| n.to_string())
+                                        .unwrap_or_default(),
+                                );
                                 editor_api_mode.set(p.api_mode.clone());
                                 editor_fallback_providers.set(p.fallback_providers.clone());
                                 editor_has_secret.set(p.has_secret);

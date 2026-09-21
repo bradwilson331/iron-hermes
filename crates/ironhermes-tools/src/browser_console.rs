@@ -20,7 +20,9 @@ use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::approval::should_prompt_for_approval;
-use crate::browser_session::{BrowserSession, find_chromium_binary};
+use crate::browser_session::{
+    BrowserSession, configured_browser_engine_available, configured_engine_prerequisite,
+};
 use crate::registry::{Prerequisite, Tool};
 
 /// JS injected on demand to install a console override that buffers entries.
@@ -112,19 +114,11 @@ impl Tool for BrowserConsoleTool {
     }
 
     fn is_available(&self) -> bool {
-        find_chromium_binary(None).is_some()
+        configured_browser_engine_available(&self.config.browser)
     }
 
     fn prerequisites(&self) -> Vec<Prerequisite> {
-        vec![Prerequisite {
-            kind: "binary_present".to_string(),
-            name: "chromium-or-chrome".to_string(),
-            description:
-                "Chromium or Google Chrome browser binary on PATH or at a standard install location"
-                    .to_string(),
-            required: true,
-            group: None,
-        }]
+        vec![configured_engine_prerequisite(&self.config.browser)]
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<String> {
@@ -159,7 +153,7 @@ impl BrowserConsoleTool {
         };
 
         // Merge with any rust-side console_buffer (kept for future CDP-event path).
-        let mut entries: Vec<serde_json::Value> = sess.console_buffer.drain(..).collect();
+        let mut entries: Vec<serde_json::Value> = std::mem::take(&mut sess.console_buffer);
         if let Some(arr) = drained.as_array() {
             entries.extend(arr.iter().cloned());
         }

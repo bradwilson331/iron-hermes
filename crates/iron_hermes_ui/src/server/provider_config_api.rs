@@ -39,6 +39,20 @@ pub struct ProviderSnapshot {
     pub model_count: usize,
     /// Presence-only — never the credential value itself.
     pub has_secret: bool,
+    /// Phase 50.5 (D-14): the stored per-model window override
+    /// (`providers.<name>.models.<default_model>.context_length`) for this
+    /// provider's own default model, if any — seeds the CONTEXT WINDOW field.
+    #[serde(default)]
+    pub context_length_override: Option<u32>,
+    /// Phase 50.5 (D-14): the resolved context window for this provider's
+    /// own (provider, default_model) pair, from the SAME
+    /// `context_length_with_source()` evaluation as `resolved_context_source`
+    /// — feeds the field's `resolved: {n} ({word})` placeholder.
+    #[serde(default)]
+    pub resolved_context_length: u32,
+    /// Phase 50.5 (D-14): which tier produced `resolved_context_length`.
+    #[serde(default)]
+    pub resolved_context_source: crate::server::api::ContextWindowSource,
 }
 
 /// Read-only snapshot returned by `get_provider_config`. Never contains the
@@ -75,7 +89,25 @@ pub struct ProviderWritePayload {
     /// unaffected) preserves the original upsert-by-name behavior.
     #[serde(default)]
     pub expect_new: bool,
+    /// Phase 50.5 (D-14): the per-model window value to set on
+    /// `providers.<name>.models.<default_model>.context_length` when
+    /// `apply_context_length` is true. Same three-state semantics as
+    /// `server::api::ModelsRolesWritePayload::context_length` — `None` +
+    /// `apply_context_length: true` clears the stored override.
+    #[serde(default)]
+    pub context_length: Option<u32>,
+    /// Phase 50.5 (D-14): WRITE-ONLY intent flag for `context_length` above.
+    /// `false` (the default) leaves the stored override alone.
+    #[serde(default)]
+    pub apply_context_length: bool,
 }
+
+/// Phase 50.5 (T-50.5-02): mirrors `server::api::MAX_WEB_CONTEXT_LENGTH`,
+/// duplicated locally because that constant is private to its own module —
+/// the Providers write path independently enforces the same ceiling, exactly
+/// as `models.rs`'s client-side `parse_window_input` independently enforces
+/// it with its own literal.
+const MAX_WEB_CONTEXT_LENGTH: u32 = 10_000_000;
 
 /// Phase 46.9 Plan 01: Validate payload field lengths/shape before any
 /// `Config` mutation (V5 input validation, T-46.9-02).
@@ -114,6 +146,16 @@ fn validate_provider_payload(payload: &ProviderWritePayload) -> Result<(), Serve
                     "fallback_providers entry too long (max 64 chars)",
                 ));
             }
+        }
+    }
+    // Phase 50.5 (T-50.5-02): reject an implausible context window BEFORE
+    // any mutation — the same range `server::api::validate_models_roles_
+    // payload` applies on the Models write path.
+    if let Some(n) = payload.context_length {
+        if n == 0 || n > MAX_WEB_CONTEXT_LENGTH {
+            return Err(ServerFnError::new(format!(
+                "context_length must be between 1 and {MAX_WEB_CONTEXT_LENGTH} (got {n})"
+            )));
         }
     }
     Ok(())
@@ -177,6 +219,25 @@ fn merge_provider_payload(
     if let Some(ref v) = payload.fallback_providers {
         entry.fallback_providers = v.clone();
     }
+    // Phase 50.5 (D-14/D-16): the Providers window write, keyed on
+    // `payload.name` + `payload.default_model` — reuses Plan 05's shared
+    // upsert-and-prune helper rather than a second implementation
+    // (T-50.5-18: one place defines which per-model keys the browser can
+    // touch). A payload with no `default_model` has no model key to write
+    // under and is a no-op, not an error — the operator changed some other
+    // field.
+    if payload.apply_context_length {
+        if let Some(ref model) = payload.default_model {
+            if !model.trim().is_empty() {
+                crate::server::api::write_per_model_context_length(
+                    config,
+                    &payload.name,
+                    model,
+                    payload.context_length.map(|n| n as usize),
+                );
+            }
+        }
+    }
 }
 
 /// Build a `ProviderSnapshot` for one provider entry. `has_secret` is
@@ -186,6 +247,7 @@ fn merge_provider_payload(
 fn build_provider_snapshot(
     name: &str,
     cfg: &ironhermes_core::config::ProviderConfig,
+    resolver: Option<&ironhermes_core::provider::ProviderResolver>,
 ) -> ProviderSnapshot {
     let api_mode = cfg
         .api_mode
@@ -203,6 +265,36 @@ fn build_provider_snapshot(
         model_ids.insert(dm.clone());
     }
 
+    // Phase 50.5 (D-14): the stored override for THIS provider's own
+    // default_model, read directly off `cfg.models` (mirrors
+    // `server::api::configured_context_length`'s per-model lookup shape).
+    let context_length_override = cfg
+        .default_model
+        .as_deref()
+        .and_then(|m| cfg.models.get(m))
+        .and_then(|m| m.context_length)
+        .map(|n| u32::try_from(n).unwrap_or(u32::MAX));
+
+    // Phase 50.5 (D-14): `resolver.resolve(name)` returns the endpoint built
+    // from THIS provider's own default_model (provider.rs's per-provider
+    // endpoint loop) — one shared evaluation with its provenance, same
+    // pattern as `build_models_roles_snapshot`. `None` (resolver failed to
+    // build, or this provider has no endpoint) degrades to Fallback/128,000
+    // rather than going dark on one malformed provider.
+    let (resolved_context_length, resolved_context_source) = resolver
+        .and_then(|r| r.resolve(name))
+        .map(|ep| {
+            let (len, src) = ep.context_length_with_source();
+            (
+                u32::try_from(len).unwrap_or(u32::MAX),
+                crate::server::api::ContextWindowSource::from(src),
+            )
+        })
+        .unwrap_or((
+            u32::try_from(ironhermes_core::constants::DEFAULT_CONTEXT_LENGTH).unwrap_or(u32::MAX),
+            crate::server::api::ContextWindowSource::Fallback,
+        ));
+
     ProviderSnapshot {
         name: name.to_string(),
         base_url: cfg.base_url.clone(),
@@ -212,6 +304,9 @@ fn build_provider_snapshot(
         fallback_providers: cfg.fallback_providers.clone(),
         model_count: model_ids.len(),
         has_secret: cfg.has_secret(),
+        context_length_override,
+        resolved_context_length,
+        resolved_context_source,
     }
 }
 
@@ -223,10 +318,27 @@ pub async fn get_provider_config() -> Result<ProviderConfigSnapshot, ServerFnErr
     let config = ironhermes_core::config::Config::load()
         .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
 
+    // Phase 50.5 (D-14): build once, reuse for every provider row — mirrors
+    // `get_models_roles_config`'s degrade-not-error pattern (one malformed
+    // provider's `base_url` must not take the whole Providers screen dark;
+    // resolved windows degrade to Fallback/128,000 via `build_provider_
+    // snapshot`'s `None` branch instead).
+    let resolver = match ironhermes_core::provider::ProviderResolver::build(&config) {
+        Ok(r) => Some(r),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "ProviderResolver::build failed while building the Providers-screen snapshot; \
+                 degrading resolved windows to Fallback/128,000"
+            );
+            None
+        }
+    };
+
     let mut providers: Vec<ProviderSnapshot> = config
         .providers
         .iter()
-        .map(|(name, cfg)| build_provider_snapshot(name, cfg))
+        .map(|(name, cfg)| build_provider_snapshot(name, cfg, resolver.as_ref()))
         .collect();
     // Deterministic ordering — HashMap iteration order is not stable.
     providers.sort_by(|a, b| a.name.cmp(&b.name));
@@ -285,6 +397,7 @@ mod provider_config_tests {
     use super::{
         build_provider_snapshot, is_well_formed_http_url, merge_provider_payload,
         provider_name_collides, validate_provider_payload, ProviderWritePayload,
+        MAX_WEB_CONTEXT_LENGTH,
     };
     use ironhermes_core::config::{Config, ProviderConfig};
 
@@ -297,6 +410,8 @@ mod provider_config_tests {
             api_mode: None,
             fallback_providers: None,
             expect_new: false,
+            context_length: None,
+            apply_context_length: false,
         }
     }
 
@@ -344,7 +459,7 @@ mod provider_config_tests {
         );
         assert_eq!(cfg.fallback_providers, vec!["anthropic".to_string()]);
 
-        let snapshot = build_provider_snapshot("openrouter", cfg);
+        let snapshot = build_provider_snapshot("openrouter", cfg, None);
         assert!(
             !snapshot.enabled,
             "enabled toggle must persist through to the snapshot"
@@ -444,7 +559,7 @@ mod provider_config_tests {
             ..ProviderConfig::default()
         };
 
-        let snapshot = build_provider_snapshot("partial-provider", &cfg);
+        let snapshot = build_provider_snapshot("partial-provider", &cfg, None);
         assert_eq!(snapshot.model_count, 0);
         assert!(snapshot.default_model.is_none());
         assert_eq!(
@@ -480,5 +595,93 @@ mod provider_config_tests {
         assert!(!is_well_formed_http_url("ftp://example.com"));
         assert!(!is_well_formed_http_url("not-a-url"));
         assert!(!is_well_formed_http_url("https://"));
+    }
+
+    /// Phase 50.5 (D-14, T-50.5-02): the Providers window write — upsert,
+    /// prune-on-clear, `apply_context_length: false` no-op, range
+    /// validation, and the `default_model: None` no-op, per `<behavior>`.
+    #[test]
+    fn provider_window_write_upserts_and_prunes() {
+        // 1. Upsert: apply_context_length + a value writes the sparse entry
+        // keyed on (payload.name, payload.default_model).
+        let mut config = Config::default();
+        let mut payload = empty_payload("moonshot");
+        payload.default_model = Some("k3".to_string());
+        payload.apply_context_length = true;
+        payload.context_length = Some(1_048_576);
+        merge_provider_payload(&mut config, &payload);
+        assert_eq!(
+            config
+                .providers
+                .get("moonshot")
+                .and_then(|p| p.models.get("k3"))
+                .and_then(|m| m.context_length),
+            Some(1_048_576)
+        );
+
+        // 2. Clear: context_length: None removes the entry (nothing else stored).
+        let mut clear_payload = empty_payload("moonshot");
+        clear_payload.default_model = Some("k3".to_string());
+        clear_payload.apply_context_length = true;
+        clear_payload.context_length = None;
+        merge_provider_payload(&mut config, &clear_payload);
+        assert!(
+            !config
+                .providers
+                .get("moonshot")
+                .expect("provider entry still present")
+                .models
+                .contains_key("k3"),
+            "a cleared override must not leave a husk model entry behind"
+        );
+
+        // 3. apply_context_length: false leaves a stored value untouched.
+        let mut config2 = Config::default();
+        let mut seed = empty_payload("moonshot");
+        seed.default_model = Some("k3".to_string());
+        seed.apply_context_length = true;
+        seed.context_length = Some(1_048_576);
+        merge_provider_payload(&mut config2, &seed);
+
+        let mut unapplied_payload = empty_payload("moonshot");
+        unapplied_payload.default_model = Some("k3".to_string());
+        unapplied_payload.apply_context_length = false;
+        unapplied_payload.context_length = Some(9_999);
+        merge_provider_payload(&mut config2, &unapplied_payload);
+        assert_eq!(
+            config2
+                .providers
+                .get("moonshot")
+                .and_then(|p| p.models.get("k3"))
+                .and_then(|m| m.context_length),
+            Some(1_048_576),
+            "apply_context_length: false must leave the stored value alone"
+        );
+
+        // 4. validate_provider_payload rejects 0 and above-ceiling BEFORE
+        // any mutation.
+        let mut zero_payload = empty_payload("moonshot");
+        zero_payload.context_length = Some(0);
+        assert!(validate_provider_payload(&zero_payload).is_err());
+
+        let mut over_payload = empty_payload("moonshot");
+        over_payload.context_length = Some(MAX_WEB_CONTEXT_LENGTH + 1);
+        assert!(validate_provider_payload(&over_payload).is_err());
+
+        // 5. apply_context_length: true with default_model: None writes
+        // nothing and does not error — there is no model key to write under.
+        let mut config3 = Config::default();
+        let mut no_model_payload = empty_payload("no-model-provider");
+        no_model_payload.apply_context_length = true;
+        no_model_payload.context_length = Some(50_000);
+        merge_provider_payload(&mut config3, &no_model_payload);
+        assert!(
+            config3
+                .providers
+                .get("no-model-provider")
+                .map(|p| p.models.is_empty())
+                .unwrap_or(true),
+            "default_model: None must never create a per-model window entry"
+        );
     }
 }

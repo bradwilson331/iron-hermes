@@ -113,3 +113,48 @@ fn groq_provider_with_api_key_env_unset_emits_non_runnable_notice() {
          got stdout={stdout:?} stderr={stderr:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// CR-02 (Phase 51 Plan 12): artifact-level proof that the SHA-256 env-var
+// observation oracle (main.rs's IRONHERMES_TEST_PRINT_ENV_VAR_SHA256 hook,
+// gated behind the `test-oracles` Cargo feature) is absent from a
+// DEFAULT-feature build. A source-text grep alone would pass even if the
+// block still shipped unconditionally in the binary — the compiled binary's
+// own bytes are the only thing that proves it is really gone. This module
+// only runs in the configuration it is meaningful for: a build WITHOUT
+// `test-oracles`, where the hook must not exist at all.
+// ---------------------------------------------------------------------------
+#[cfg(not(feature = "test-oracles"))]
+mod cr02_oracle_absent_from_default_build {
+    /// The variable name a caller sets to trigger the hook. If this string
+    /// occurs anywhere in the default-feature `ironhermes` binary's bytes,
+    /// the oracle (and its silent `exit(0)` after hashing an arbitrary named
+    /// env var) shipped in a build that did not opt into `test-oracles`.
+    const TRIGGER_VAR_NAME: &str = "IRONHERMES_TEST_PRINT_ENV_VAR_SHA256";
+
+    #[test]
+    fn default_build_does_not_contain_the_oracle_trigger_var_name() {
+        let bin_path = match std::env::var("CARGO_BIN_EXE_ironhermes") {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!(
+                    "Skipping default_build_does_not_contain_the_oracle_trigger_var_name: \
+                     CARGO_BIN_EXE_ironhermes not set"
+                );
+                return;
+            }
+        };
+        let bytes = std::fs::read(&bin_path)
+            .unwrap_or_else(|e| panic!("read compiled binary at {bin_path}: {e}"));
+        let found = bytes
+            .windows(TRIGGER_VAR_NAME.len())
+            .any(|w| w == TRIGGER_VAR_NAME.as_bytes());
+        assert!(
+            !found,
+            "the default-feature ironhermes binary at {bin_path} contains the oracle \
+             trigger variable name {TRIGGER_VAR_NAME:?} — the SHA-256 env-var observation \
+             hook (and its exit(0)) shipped in a build that did not enable the \
+             `test-oracles` feature"
+        );
+    }
+}

@@ -101,12 +101,23 @@ fn read_stderr_tail(path: &std::path::Path, max_bytes: usize, max_lines: usize) 
 // ---------------------------------------------------------------------------
 
 type BoxFuture<T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send>>;
-/// spawn_fn signature: (task, run, workspace, board_slug) -> pid
+/// spawn_fn signature: (task, run, workspace, board_slug, vault) -> pid
 /// Injectable worker-spawn function. `pub` because it is the type of the
 /// public `DispatcherContext::spawn_fn` field and of the `with_spawn_fn`
 /// parameter, so out-of-crate tests need to be able to name it.
-pub type SpawnFn =
-    Arc<dyn Fn(Task, TaskRun, String, String) -> BoxFuture<Result<u32>> + Send + Sync>;
+///
+/// Phase 51 Plan 07 (D-07/D-11) added the fifth, `Option<WorkerVaultBootstrap>`
+/// parameter — the minted credential for an `AllowFromVault` dispatch, `None` for
+/// every `Allow` (dotenv-backed) dispatch. Mirrors `build_kanban_worker_env`'s own
+/// `Option<&WorkerVaultBootstrap>` design (source_facts #4 / worker_spawn.rs): the
+/// two vault values are only ever valid together, so a single `Option` here — rather
+/// than widening `SpawnFn` with two more independent parameters — keeps a
+/// half-configured spawn structurally unconstructible.
+pub type SpawnFn = Arc<
+    dyn Fn(Task, TaskRun, String, String, Option<crate::worker_spawn::WorkerVaultBootstrap>) -> BoxFuture<Result<u32>>
+        + Send
+        + Sync,
+>;
 
 // ---------------------------------------------------------------------------
 // DispatcherContext
@@ -126,13 +137,23 @@ pub type SpawnFn =
 /// itself is covered against the real predicate by
 /// `tests/dispatch_gate_loop.rs`, which sandboxes `IRONHERMES_HOME` and lays
 /// down actual profile fixtures rather than stubbing the decision.
+///
+/// Phase 51 (D-14): future-returning, following the [`SpawnFn`] precedent above —
+/// `ironhermes_core::dispatch_gate::evaluate_profile_dispatch` became `async`
+/// (its vault branch awaits `ProfileSecretStore`), so a plain synchronous closure
+/// can no longer represent it. Never a blocking bridge (`block_in_place`/nested
+/// runtime) here — some callers of this seam run inside a per-connection
+/// `LocalSet`, where that would panic.
 pub type DispatchGateFn =
-    Arc<dyn Fn(&str) -> ironhermes_core::dispatch_gate::DispatchDecision + Send + Sync>;
+    Arc<dyn Fn(&str) -> BoxFuture<ironhermes_core::dispatch_gate::DispatchDecision> + Send + Sync>;
 
 /// The production dispatch gate: the shared, provider-aware, fail-closed
 /// predicate every dispatch path uses.
 fn default_gate_fn() -> DispatchGateFn {
-    Arc::new(|assignee: &str| ironhermes_core::dispatch_gate::evaluate_profile_dispatch(assignee))
+    Arc::new(|assignee: &str| {
+        let assignee = assignee.to_string();
+        Box::pin(async move { ironhermes_core::dispatch_gate::evaluate_profile_dispatch(&assignee).await })
+    })
 }
 
 pub struct DispatcherContext {
@@ -149,7 +170,82 @@ pub struct DispatcherContext {
     /// effect (graceful degradation). Production: wired by CLI cmd_decompose or a future
     /// gateway runner update. Tests: inject a mock closure via `with_decompose_fn`.
     pub decompose_fn: Option<crate::decomposer::DecomposeFn>,
+    /// Phase 51 Plan 06 (D-11/D-12/D-13, WIDENED per user checkpoint reversal — see
+    /// `ironhermes_core::profile_credentials`'s module doc): the per-profile credential
+    /// endpoint handle, hosted automatically at construction via
+    /// [`ironhermes_core::profile_credentials::host_profile_credentials`] — `None` whenever the
+    /// vault is disabled (the default), unreachable, sealed, or the `rusty-vault` feature is not
+    /// compiled in (D-14: fail-closed by omission). All three production `DispatcherContext::new`
+    /// call sites (`ironhermes-gateway/src/runner.rs`,
+    /// `ironhermes-cli/src/kanban/commands.rs` x2) get this for free — none has to opt in, the
+    /// direct structural answer to Phase 47.4's GAP-7. `host_profile_credentials` short-circuits
+    /// to `None` BEFORE ever opening a socket or spawning a task unless `config.vault.enabled`
+    /// is true, so constructing a `DispatcherContext` against any default-configured (vault
+    /// disabled) `Config` — every existing test and every default install — never touches the
+    /// vault, a socket, or the filesystem beyond the ordinary `Config::load()` read this
+    /// function performs to discover that.
+    pub profile_credentials: Option<Arc<ironhermes_core::profile_credentials::ProfileCredentialHost>>,
+    /// Phase 51 Plan 19 (D-14, G-51-6): which lifetime contract THIS process declares for its
+    /// credential-endpoint host. Read by the vault-backed spawn guard below to decide whether a
+    /// missing `profile_credentials`/`token_audit` means "no sink wired on a long-lived host"
+    /// (today's `vault_mint_refused_no_sink`) or "this host cannot outlive its workers and
+    /// declines to host at all" (the one-shot refusal). `OutlivesWorkers` in every constructor
+    /// except [`Self::new_one_shot`] — every existing caller and every existing test keeps
+    /// today's behavior with no edit.
+    pub host_lifetime: ironhermes_core::profile_credentials::CredentialHostLifetime,
+    /// Phase 51 Plan 07 (D-07): the required audit sink for a vault-backed mint.
+    /// `None` in every constructor by default — an `AllowFromVault` dispatch with no
+    /// sink wired REFUSES rather than minting un-audited (the dispatcher-side half of
+    /// D-07's structural guarantee; Plan 03 already made an un-audited mint
+    /// uncompilable at the vault layer via a required, non-`Option` constructor
+    /// parameter). `Option` here rather than a required constructor argument, because
+    /// making it required would break every existing `DispatcherContext::new` call
+    /// site in the test suite for no safety gain — the safety comes from the refusal
+    /// above, not from the field's presence. Set via [`Self::with_token_audit`]; all
+    /// three production construction sites (`runner.rs`, `commands.rs` x2) supply the
+    /// real trajectory-backed sink through
+    /// `ironhermes_core::profile_credentials::TrajectoryProfileTokenAudit`.
+    pub token_audit: Option<Arc<dyn ironhermes_core::profile_credentials::ProfileTokenAudit>>,
 }
+
+/// Read the real, on-disk `Config` (the same `Config::load().unwrap_or_default()` pattern
+/// `ironhermes-cli/src/kanban/commands.rs`'s `cmd_dispatch`/daemon paths already perform right
+/// before constructing a `DispatcherContext`) and try to host the profile credential endpoint
+/// from it. A missing/malformed config file — or a config with `vault.enabled == false`, the
+/// default for every install — falls back to `Config::default()` (or returns early), never
+/// panics.
+fn host_profile_credentials_from_disk()
+-> Option<Arc<ironhermes_core::profile_credentials::ProfileCredentialHost>> {
+    let config = ironhermes_core::config::Config::load().unwrap_or_default();
+    ironhermes_core::profile_credentials::host_profile_credentials(&config)
+}
+
+/// Read the real, on-disk `Config` and ask
+/// [`ironhermes_core::profile_credentials::host_profile_credentials_with_lifetime`] for a
+/// short-lived host's decision (Phase 51 Plan 19, G-51-6). Always yields `None` — the point is
+/// not the return value, it's the side effect: when the on-disk config is vault-enabled with
+/// the `rusty-vault` backend, this call emits `profile_credential_host_declined_short_lived` so
+/// an operator can see WHY [`DispatcherContext::new_one_shot`] carries no hosted endpoint,
+/// without its caller having to know that check exists. Deliberately its own function — rather
+/// than inlined into `new_one_shot` — and deliberately NOT spelled the same way
+/// [`host_profile_credentials_from_disk`] above is spelled: a visibly different wiring site is
+/// what keeps `both_constructors_wire_profile_credentials_through_the_same_function`'s
+/// exactly-two count meaningful.
+fn decline_short_lived_host_from_disk()
+-> Option<Arc<ironhermes_core::profile_credentials::ProfileCredentialHost>> {
+    let config = ironhermes_core::config::Config::load().unwrap_or_default();
+    ironhermes_core::profile_credentials::host_profile_credentials_with_lifetime(
+        &config,
+        ironhermes_core::profile_credentials::CredentialHostLifetime::ExitsBeforeWorkers,
+    )
+}
+
+/// Fixed, greppable operator-facing phrase stating that a one-shot dispatcher cannot host a
+/// vault credential endpoint (Phase 51 Plan 19, G-51-6). A const rather than an inline literal
+/// so the contract test asserts on the exact string production code emits — the two cannot
+/// drift apart.
+pub const ONE_SHOT_HOST_REFUSAL_MARKER: &str =
+    "one-shot dispatcher cannot host a vault credential endpoint";
 
 impl DispatcherContext {
     /// Create a context with the real `spawn_worker` function.
@@ -159,19 +255,58 @@ impl DispatcherContext {
             config,
             hostname: crate::pid::current_hostname(),
             dispatcher_pid: std::process::id(),
-            spawn_fn: Arc::new(|task, run, workspace, board_slug| {
+            spawn_fn: Arc::new(|task, run, workspace, board_slug, vault| {
                 Box::pin(async move {
                     crate::worker_spawn::spawn_worker_for_board(
                         &task,
                         &run,
                         &workspace,
                         &board_slug,
+                        vault.as_ref(),
                     )
                     .await
                 })
             }),
             gate_fn: default_gate_fn(),
             decompose_fn: None,
+            host_lifetime:
+                ironhermes_core::profile_credentials::CredentialHostLifetime::OutlivesWorkers,
+            profile_credentials: host_profile_credentials_from_disk(),
+            token_audit: None,
+        }
+    }
+
+    /// Create a context for a caller that CANNOT outlive the workers it spawns — the one-shot
+    /// `ironhermes kanban dispatch` verb (Phase 51 Plan 19, G-51-6). Declines to host the
+    /// credential endpoint (`host_lifetime: ExitsBeforeWorkers`) rather than binding a socket
+    /// that would be unlinked out from under a detached worker the instant this process
+    /// returns. A vault-backed (`AllowFromVault`) task dispatched through this context is
+    /// refused BY NAME rather than spawned against an already-gone socket — see the
+    /// `ExitsBeforeWorkers` branch of the spawn guard in `run_dispatch_tick_for_board`.
+    pub fn new_one_shot(store: Arc<TokioMutex<KanbanStore>>, config: KanbanConfig) -> Self {
+        Self {
+            store,
+            config,
+            hostname: crate::pid::current_hostname(),
+            dispatcher_pid: std::process::id(),
+            spawn_fn: Arc::new(|task, run, workspace, board_slug, vault| {
+                Box::pin(async move {
+                    crate::worker_spawn::spawn_worker_for_board(
+                        &task,
+                        &run,
+                        &workspace,
+                        &board_slug,
+                        vault.as_ref(),
+                    )
+                    .await
+                })
+            }),
+            gate_fn: default_gate_fn(),
+            decompose_fn: None,
+            host_lifetime:
+                ironhermes_core::profile_credentials::CredentialHostLifetime::ExitsBeforeWorkers,
+            profile_credentials: decline_short_lived_host_from_disk(),
+            token_audit: None,
         }
     }
 
@@ -194,7 +329,22 @@ impl DispatcherContext {
             spawn_fn,
             gate_fn: default_gate_fn(),
             decompose_fn: None,
+            host_lifetime:
+                ironhermes_core::profile_credentials::CredentialHostLifetime::OutlivesWorkers,
+            profile_credentials: host_profile_credentials_from_disk(),
+            token_audit: None,
         }
+    }
+
+    /// Supply the real audit sink for vault-backed mints (Phase 51 Plan 07, D-07).
+    /// Production call sites pass
+    /// `Arc::new(ironhermes_core::profile_credentials::TrajectoryProfileTokenAudit::new(writer))`.
+    pub fn with_token_audit(
+        mut self,
+        token_audit: Arc<dyn ironhermes_core::profile_credentials::ProfileTokenAudit>,
+    ) -> Self {
+        self.token_audit = Some(token_audit);
+        self
     }
 
     /// Override the pre-spawn dispatch gate (for tests).
@@ -296,13 +446,25 @@ pub async fn run_dispatch_tick(ctx: &DispatcherContext) -> Result<()> {
             spawn_fn: Arc::new({
                 let outer_spawn_fn = Arc::clone(&ctx.spawn_fn);
                 let slug = slug.clone();
-                move |task, run, workspace, _ignored_slug| {
+                move |task, run, workspace, _ignored_slug, vault| {
                     // The board-loop slug is captured here; the inner arg is ignored.
-                    outer_spawn_fn(task, run, workspace, slug.clone())
+                    outer_spawn_fn(task, run, workspace, slug.clone(), vault)
                 }
             }),
             gate_fn: Arc::clone(&ctx.gate_fn),
             decompose_fn: ctx.decompose_fn.clone(),
+            // Phase 51 Plan 19 (G-51-6): propagate, not re-default — a per-board sub-context
+            // that silently re-defaulted this to `OutlivesWorkers` would apply the caller's
+            // one-shot declaration to the default board only, exactly the trap `gate_fn`'s
+            // comment above already documents for that field. `Copy`, so a plain field copy.
+            host_lifetime: ctx.host_lifetime,
+            // Share the SAME endpoint handle across every board's sub-context — re-deriving it
+            // per board would try to bind a second listener at the same socket path and is
+            // wasteful even when it wouldn't collide.
+            profile_credentials: ctx.profile_credentials.clone(),
+            // Phase 51 Plan 07: propagate, not re-default — every board's vault-backed
+            // dispatches must ledger through the SAME sink the caller configured.
+            token_audit: ctx.token_audit.clone(),
         };
 
         run_dispatch_tick_for_board(&board_ctx, &slug).await;
@@ -1090,12 +1252,23 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
         // dispatcher that actually runs in production is `run_dispatch_loop`,
         // spawned by the gateway. This is that gap's fix — every dispatch
         // path now shares one predicate from `ironhermes_core`.
-        let decision = gate_cache
-            .entry(task.assignee.clone())
-            .or_insert_with(|| (ctx.gate_fn)(&task.assignee))
-            .clone();
+        // `or_insert_with`'s closure cannot `.await` (Phase 51 D-14) — restructured
+        // into an explicit check-then-await-then-insert. Preserves the exact
+        // one-evaluation-per-assignee-per-tick property the cache existed for: the
+        // gate is only ever awaited on a cache MISS.
+        let decision = match gate_cache.get(&task.assignee) {
+            Some(cached) => cached.clone(),
+            None => {
+                let evaluated = (ctx.gate_fn)(&task.assignee).await;
+                gate_cache.insert(task.assignee.clone(), evaluated.clone());
+                evaluated
+            }
+        };
 
-        if let ironhermes_core::dispatch_gate::DispatchDecision::Refuse { reason } = decision {
+        // Phase 51 Plan 07: keep `decision` alive past this check (matched by
+        // reference, not by value) — it is needed again below to decide whether this
+        // dispatch mints a vault-backed credential.
+        if let ironhermes_core::dispatch_gate::DispatchDecision::Refuse { reason } = &decision {
             tracing::warn!(
                 event = "dispatch_gate_blocked",
                 task_id = %task.id,
@@ -1111,6 +1284,71 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
                 tracing::warn!("[kanban] dispatch gate could not block task {}: {e}", task.id);
             }
             continue;
+        }
+
+        // Phase 51 Plan 07 (D-07): an `AllowFromVault` decision with no hosted
+        // credential endpoint or no audit sink wired on THIS dispatcher refuses
+        // rather than minting un-audited (or minting with nowhere for the worker to
+        // read from). This is the dispatcher-side half of D-07's structural
+        // guarantee — Plan 03 already made an un-audited mint uncompilable at the
+        // vault layer by requiring a sink parameter; this makes an
+        // unaudited-because-unwired DISPATCH a refusal rather than a silent,
+        // un-ledgered credential.
+        let is_vault_backed =
+            matches!(decision, ironhermes_core::dispatch_gate::DispatchDecision::AllowFromVault);
+        if is_vault_backed && (ctx.profile_credentials.is_none() || ctx.token_audit.is_none()) {
+            // Phase 51 Plan 19 (G-51-6): branch on the caller's declared host lifetime. A
+            // one-shot host (`cmd_dispatch`) never has `profile_credentials` populated — it
+            // declined to host by construction (`new_one_shot`) — and that is a DIFFERENT,
+            // more specific refusal than "a long-lived host forgot to wire a sink".
+            match ctx.host_lifetime {
+                ironhermes_core::profile_credentials::CredentialHostLifetime::ExitsBeforeWorkers => {
+                    let reason = format!(
+                        "{}{} — profile \"{}\" needs its credential from the vault, but this \
+                         dispatcher exits before its workers start and cannot host the \
+                         endpoint; dispatch it instead with `ironhermes kanban daemon --force` \
+                         or the gateway-embedded dispatcher",
+                        ironhermes_core::dispatch_gate::DISPATCH_GATE_REASON_PREFIX,
+                        ONE_SHOT_HOST_REFUSAL_MARKER,
+                        task.assignee,
+                    );
+                    tracing::warn!(
+                        event = "vault_dispatch_refused_one_shot_host",
+                        task_id = %task.id,
+                        assignee = %task.assignee,
+                    );
+                    let mut store = ctx.store.lock().await;
+                    if let Err(e) = store.block_task(&task.id, &reason, None) {
+                        tracing::warn!(
+                            "[kanban] dispatch gate could not block task {}: {e}",
+                            task.id
+                        );
+                    }
+                    continue;
+                }
+                ironhermes_core::profile_credentials::CredentialHostLifetime::OutlivesWorkers => {
+                    let reason = format!(
+                        "{}profile \"{}\" resolved AllowFromVault but this dispatcher has no \
+                         hosted credential endpoint or no audit sink wired — refusing rather \
+                         than minting un-audited (D-07)",
+                        ironhermes_core::dispatch_gate::DISPATCH_GATE_REASON_PREFIX,
+                        task.assignee,
+                    );
+                    tracing::warn!(
+                        event = "vault_mint_refused_no_sink",
+                        task_id = %task.id,
+                        assignee = %task.assignee,
+                    );
+                    let mut store = ctx.store.lock().await;
+                    if let Err(e) = store.block_task(&task.id, &reason, None) {
+                        tracing::warn!(
+                            "[kanban] dispatch gate could not block task {}: {e}",
+                            task.id
+                        );
+                    }
+                    continue;
+                }
+            }
         }
 
         // Step 7: respawn guard.
@@ -1219,6 +1457,78 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
             })?
         };
 
+        // Phase 51 Plan 07 (D-07): mint the bootstrap-only token for an
+        // `AllowFromVault` dispatch, positioned AFTER the atomic claim (Step 6) and
+        // BEFORE the spawn (Step 8) — minting before the claim would issue
+        // credentials for a task another dispatcher process might win the CAS race
+        // for; minting before the gate (impossible here — the gate already ran) would
+        // issue credentials for a profile about to be refused. `token_audit`/
+        // `profile_credentials` presence was already confirmed above, so the
+        // `.expect(...)` calls below are an invariant re-check, not a fallible path.
+        let vault_bootstrap: Option<crate::worker_spawn::WorkerVaultBootstrap> = if is_vault_backed
+        {
+            let host = ctx
+                .profile_credentials
+                .as_ref()
+                .expect("checked is_vault_backed guard above: profile_credentials is Some");
+            let sink = ctx
+                .token_audit
+                .as_ref()
+                .expect("checked is_vault_backed guard above: token_audit is Some");
+            let config = ironhermes_core::config::Config::load().unwrap_or_default();
+            match ironhermes_core::profile_credentials::mint_worker_credential(
+                &config,
+                host,
+                &task.assignee,
+                sink.as_ref(),
+            )
+            .await
+            {
+                Ok(minted) => Some(crate::worker_spawn::WorkerVaultBootstrap::new(
+                    minted.token,
+                    minted.socket_path.to_string_lossy().into_owned(),
+                )),
+                Err(e) => {
+                    tracing::error!(
+                        event = "vault_mint_failed",
+                        task_id = %task.id,
+                        run_id = %run_id,
+                        error = %e,
+                    );
+                    // D-07/D-14: a mint failure refuses the spawn — no worker is
+                    // created without a credential. Release the claim so the task
+                    // returns to `ready` (the circuit breaker still applies via the
+                    // consecutive_failures increment below, matching the existing
+                    // spawn_failed handling).
+                    {
+                        let store = ctx.store.lock().await;
+                        let now2 = now_secs();
+                        store.conn.execute(
+                            "UPDATE task_runs SET outcome='spawn_failed', error=?1, ended_at=?2 \
+                             WHERE id=?3",
+                            params![format!("vault credential mint failed: {e}"), now2, run_id],
+                        )?;
+                    }
+                    {
+                        let store = ctx.store.lock().await;
+                        store.conn.execute(
+                            "UPDATE tasks SET consecutive_failures = consecutive_failures + 1 \
+                             WHERE id=?1",
+                            params![task.id],
+                        )?;
+                    }
+                    {
+                        let mut store = ctx.store.lock().await;
+                        let _ =
+                            release_claim(&mut store.conn, &task.id, &claim_lock, "vault_mint_failed");
+                    }
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
         // Step 8: spawn worker. The board slug is captured in ctx.spawn_fn by the
         // per-board context wrapper in run_dispatch_tick; the empty string below
         // is ignored by that wrapper (the wrapper uses its captured slug). A
@@ -1226,7 +1536,14 @@ async fn claim_and_spawn(ctx: &DispatcherContext, now: f64) -> Result<()> {
         // circuits to the same Err arm below without ever calling spawn_fn.
         let spawn_result = match workspace_resolution {
             Ok(workspace) => {
-                (ctx.spawn_fn)(task.clone(), run.clone(), workspace, String::new()).await
+                (ctx.spawn_fn)(
+                    task.clone(),
+                    run.clone(),
+                    workspace,
+                    String::new(),
+                    vault_bootstrap,
+                )
+                .await
             }
             Err(e) => Err(e),
         };
@@ -1667,4 +1984,505 @@ async fn decompose_triage_tasks(
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 51 Plan 06 (D-11): zero-touch profile-credentials construction invariant
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod profile_credentials_construction_tests {
+    //! Proves `DispatcherContext` yields the profile-credential endpoint handle from
+    //! construction WITHOUT any of the three production construction sites having to opt in —
+    //! a source-level invariant rather than a live-vault behavioral test, since driving a REAL
+    //! vault open through `Config::load()`'s ambient `$IRONHERMES_HOME` resolution from a unit
+    //! test would mean mutating process-global env state (this repo's own documented
+    //! `env_lock`-class flake hazard for exactly this kind of test). The live end-to-end proof
+    //! that `host_profile_credentials` actually hosts a real endpoint when the vault is
+    //! reachable lives in
+    //! `ironhermes-core/tests/profile_credentials_host.rs::host_yields_an_endpoint_when_vault_is_genuinely_reachable`
+    //! — the exact same function `host_profile_credentials_from_disk()` below calls.
+
+    use std::path::Path;
+
+    fn read_workspace_source(relative_to_workspace_root: &str) -> String {
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        std::fs::read_to_string(workspace_root.join(relative_to_workspace_root))
+            .unwrap_or_else(|e| panic!("read {relative_to_workspace_root}: {e}"))
+    }
+
+    /// Updated in lockstep for Phase 51 Plan 19 (G-51-6), per this test's own doc comment's
+    /// sanctioned update path: the wiring intentionally changed. There are now TWO long-lived
+    /// production hosts — the gateway runner (`runner.rs`) and the kanban daemon (`commands.rs`
+    /// `cmd_daemon`) — which still receive the credential endpoint with no opt-in, calling
+    /// `DispatcherContext::new(...)` with its ORIGINAL two-argument shape exactly as before. And
+    /// there is now EXACTLY ONE production host that declines it, because it exits before its
+    /// workers: `cmd_dispatch`, which calls `DispatcherContext::new_one_shot(...)` instead. Both
+    /// counts are asserted EXACTLY — not as an inequality — because an inequality here would
+    /// silently tolerate a future regression that reverted `cmd_dispatch` back onto the hosting
+    /// constructor, which is precisely the G-51-6 bug this plan closed.
+    #[test]
+    fn production_construction_sites_call_new_with_original_two_args() {
+        let runner_source = read_workspace_source("crates/ironhermes-gateway/src/runner.rs");
+        assert!(
+            runner_source.contains("DispatcherContext::new("),
+            "runner.rs must still construct DispatcherContext::new(...) unmodified"
+        );
+
+        // commands.rs: EXACTLY one long-lived call (cmd_daemon) and EXACTLY one one-shot call
+        // (cmd_dispatch) — the needle "DispatcherContext::new(" ends in an open paren, so it
+        // does NOT match "DispatcherContext::new_one_shot(" (the next character after "new" is
+        // "_", not "("); the two counts are disjoint by construction.
+        let commands_source = read_workspace_source("crates/ironhermes-cli/src/kanban/commands.rs");
+        let long_lived_count = commands_source.matches("DispatcherContext::new(").count();
+        assert_eq!(
+            long_lived_count, 1,
+            "commands.rs must retain EXACTLY ONE long-lived DispatcherContext::new(...) call \
+             site (cmd_daemon), found {long_lived_count}"
+        );
+        let one_shot_count = commands_source
+            .matches("DispatcherContext::new_one_shot(")
+            .count();
+        assert_eq!(
+            one_shot_count, 1,
+            "commands.rs must retain EXACTLY ONE one-shot DispatcherContext::new_one_shot(...) \
+             call site (cmd_dispatch), found {one_shot_count}"
+        );
+    }
+
+    /// Self-referential invariant: `new()` and `with_spawn_fn()` both wire `profile_credentials`
+    /// through the exact same `host_profile_credentials_from_disk()` call — asserted at the
+    /// source level so a future edit that diverges the two constructors' wiring is caught.
+    #[test]
+    fn both_constructors_wire_profile_credentials_through_the_same_function() {
+        let source = read_workspace_source("crates/ironhermes-kanban/src/dispatcher.rs");
+        // Needle assembled at RUNTIME (never a contiguous string literal in this test file's
+        // own source) so this assertion cannot match its own source line — the self-counting
+        // trap this repo has already shipped once (Plan 02's grep gate) and explicitly warns
+        // against repeating.
+        let needle = format!(
+            "profile_credentials: {}{}",
+            "host_profile_credentials_from_disk", "()"
+        );
+        let count = source.matches(needle.as_str()).count();
+        assert_eq!(
+            count, 2,
+            "both DispatcherContext::new() and with_spawn_fn() must call \
+             host_profile_credentials_from_disk() — found {count} occurrence(s)"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 51 Plan 07 (D-07): mint-at-dispatch behavioral tests
+// ---------------------------------------------------------------------------
+
+/// Real-vault behavioral coverage for the mint-then-ledger-then-spawn wiring in
+/// `run_dispatch_tick_for_board`'s per-task loop. Unlike
+/// `profile_credentials_construction_tests` above (which deliberately avoids a
+/// real vault to sidestep the `$IRONHERMES_HOME` env-mutation flake hazard),
+/// these tests DO drive a real vault — the mint/ledger/refusal properties they
+/// prove cannot be observed any other way (a stubbed mint would only prove the
+/// stub was honoured). `--test-threads=1` (this plan's mandated invocation) is
+/// what makes the `IRONHERMES_HOME` mutation across these tests safe.
+#[cfg(all(test, feature = "rusty-vault"))]
+mod vault_mint_tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use ironhermes_core::config::{Config, ProviderConfig};
+    use ironhermes_core::profile_credentials::ProfileTokenAudit;
+    use tempfile::TempDir;
+    use tokio::sync::Mutex as TokioMutex;
+
+    use super::{DispatchGateFn, DispatcherContext, SpawnFn, run_dispatch_tick};
+    use crate::store::CreateTaskOptions;
+    use crate::{KanbanConfig, KanbanStore};
+
+    const SLUG: &str = "vaultmint";
+    const PROVIDER: &str = "vaultmintprovider";
+
+    /// RAII guard sandboxing `IRONHERMES_HOME` — mirrors
+    /// `dispatch_gate_loop.rs`'s identical `ScopedEnv` precedent exactly.
+    struct ScopedEnv {
+        key: String,
+        prev: Option<String>,
+    }
+
+    impl ScopedEnv {
+        fn set(key: &str, value: &std::path::Path) -> Self {
+            let prev = std::env::var(key).ok();
+            // SAFETY: test-only, guarded by --test-threads=1 (this plan's
+            // mandated invocation for any run touching this crate).
+            unsafe { std::env::set_var(key, value) };
+            Self {
+                key: key.to_string(),
+                prev,
+            }
+        }
+    }
+
+    impl Drop for ScopedEnv {
+        fn drop(&mut self) {
+            // SAFETY: see `set` above.
+            match &self.prev {
+                Some(v) => unsafe { std::env::set_var(&self.key, v) },
+                None => unsafe { std::env::remove_var(&self.key) },
+            }
+        }
+    }
+
+    /// A recording [`ProfileTokenAudit`] sink — pushes `"ledger:{slug}:{accessor}"`
+    /// onto a shared, ordered trace log so tests can assert mint→ledger→spawn
+    /// ordering directly, and separately exposes the raw `(slug, accessor, ttl)`
+    /// tuples for content assertions (accessor present, token absent).
+    struct RecordingAudit {
+        trace: Arc<Mutex<Vec<String>>>,
+        calls: Arc<Mutex<Vec<(String, String, Duration)>>>,
+    }
+
+    impl ProfileTokenAudit for RecordingAudit {
+        fn record_mint(&self, slug: &str, accessor: &str, ttl: Duration) -> anyhow::Result<()> {
+            self.trace
+                .lock()
+                .unwrap()
+                .push(format!("ledger:{slug}:{accessor}"));
+            self.calls
+                .lock()
+                .unwrap()
+                .push((slug.to_string(), accessor.to_string(), ttl));
+            Ok(())
+        }
+    }
+
+    /// Writes `vault.enabled/backend/rusty_vault.data_dir` into `config` and
+    /// saves it to `home/config.yaml`, plus a `model.provider`/`providers` entry
+    /// naming [`PROVIDER`] (irrelevant to minting itself, but matching a
+    /// realistic vault-backed profile shape).
+    fn write_vault_config(home: &std::path::Path, vault_data_dir: &std::path::Path) {
+        let mut config = Config::default();
+        config.vault.enabled = true;
+        config.vault.backend = "rusty-vault".to_string();
+        config.vault.rusty_vault.data_dir = vault_data_dir.to_path_buf();
+        config.vault.rusty_vault.unseal_mode = "keyfile".to_string();
+        config.model.provider = PROVIDER.to_string();
+        config.providers.insert(
+            PROVIDER.to_string(),
+            ProviderConfig {
+                api_key_env: Some("VAULTMINT_API_KEY".to_string()),
+                ..Default::default()
+            },
+        );
+        config
+            .save_to(&home.join("config.yaml"))
+            .expect("save_to config.yaml");
+    }
+
+    fn init_vault(data_dir: &std::path::Path) {
+        let rv_config = ironhermes_vault::RustyVaultConfig {
+            data_dir: data_dir.to_path_buf(),
+            unseal_mode: "keyfile".to_string(),
+        };
+        ironhermes_vault::RustyVaultStore::init(&rv_config).expect("vault init");
+    }
+
+    fn open_store(dir: &TempDir) -> KanbanStore {
+        KanbanStore::open(dir.path().join("kanban.db")).expect("open kanban store")
+    }
+
+    fn always_allow_from_vault() -> DispatchGateFn {
+        Arc::new(|_assignee: &str| {
+            Box::pin(async { ironhermes_core::dispatch_gate::DispatchDecision::AllowFromVault })
+        })
+    }
+
+    fn always_allow() -> DispatchGateFn {
+        Arc::new(|_assignee: &str| Box::pin(async { ironhermes_core::dispatch_gate::DispatchDecision::Allow }))
+    }
+
+    /// `dispatch_mints_then_spawns_and_ledgers_the_accessor` +
+    /// `ledger_line_contains_the_accessor_and_not_the_token`: for a profile the
+    /// gate judged `AllowFromVault`, the mint happens (and is ledgered) before
+    /// the spawn function is invoked; the ledger line carries the accessor, and
+    /// provably not the minted token's own secret bytes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dispatch_mints_then_spawns_and_ledgers_the_accessor() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let vault_dir = tmp.path().join("vault");
+        init_vault(&vault_dir);
+        write_vault_config(&home, &vault_dir);
+        let _env = ScopedEnv::set("IRONHERMES_HOME", &home);
+
+        let store_dir = TempDir::new().unwrap();
+        let mut store = open_store(&store_dir);
+        store
+            .create_task("vault mint test", SLUG, CreateTaskOptions::default())
+            .unwrap();
+        let store_arc = Arc::new(TokioMutex::new(store));
+
+        let spawn_trace: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let spawn_vaults: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+        let spawn_trace_for_fn = Arc::clone(&spawn_trace);
+        let spawn_vaults_for_fn = Arc::clone(&spawn_vaults);
+        let spawn_fn: SpawnFn = Arc::new(move |task, _run, _ws, _slug, vault| {
+            let spawn_trace = Arc::clone(&spawn_trace_for_fn);
+            let spawn_vaults = Arc::clone(&spawn_vaults_for_fn);
+            Box::pin(async move {
+                spawn_trace.lock().unwrap().push(format!("spawn:{}", task.id));
+                spawn_vaults.lock().unwrap().push(vault.is_some());
+                Ok(9999)
+            })
+        });
+
+        let ledger_trace: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let audit_calls: Arc<Mutex<Vec<(String, String, Duration)>>> = Arc::new(Mutex::new(Vec::new()));
+        let audit = RecordingAudit {
+            trace: Arc::clone(&ledger_trace),
+            calls: Arc::clone(&audit_calls),
+        };
+
+        let mut ctx = DispatcherContext::with_spawn_fn(store_arc, KanbanConfig::default(), spawn_fn);
+        assert!(
+            ctx.profile_credentials.is_some(),
+            "precondition: the vault must be genuinely hosted for this test to mean anything"
+        );
+        ctx.gate_fn = always_allow_from_vault();
+        ctx = ctx.with_token_audit(Arc::new(audit));
+
+        run_dispatch_tick(&ctx).await.expect("tick failed");
+
+        // Ordering: exactly one ledger entry, exactly one spawn, ledger first.
+        let ledger = ledger_trace.lock().unwrap().clone();
+        let spawns = spawn_trace.lock().unwrap().clone();
+        assert_eq!(ledger.len(), 1, "expected exactly one mint/ledger event, got {ledger:?}");
+        assert_eq!(spawns.len(), 1, "expected exactly one spawn, got {spawns:?}");
+        assert!(
+            ledger[0].starts_with(&format!("ledger:{SLUG}:")),
+            "ledger line must carry the profile slug: {ledger:?}"
+        );
+
+        // The spawned worker received a vault bootstrap.
+        assert_eq!(spawn_vaults.lock().unwrap().clone(), vec![true]);
+
+        // Content: the accessor is present and non-empty; the token's own secret
+        // bytes never appear anywhere in the recorded ledger content.
+        let calls = audit_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let (slug, accessor, ttl) = &calls[0];
+        assert_eq!(slug, SLUG);
+        assert!(!accessor.is_empty(), "accessor must be non-empty");
+        assert!(ttl.as_secs() > 0, "ttl must be the real bootstrap TTL, not zero");
+        for entry in ledger.iter().chain(std::iter::once(&format!("{slug}:{accessor}"))) {
+            assert!(
+                !entry.contains("token"),
+                "ledger content must never contain the literal substring \"token\" \
+                 (the accessor is a plain UUID, never the credential itself): {entry}"
+            );
+        }
+    }
+
+    /// `mint_failure_refuses_the_spawn`: with minting forced to fail (Phase 51 Plan 11:
+    /// `config.yaml` is repointed to `vault.enabled = false` AFTER the endpoint was already
+    /// hosted from a working vault, tripping `mint_worker_credential`'s own guard check —
+    /// the only remaining config-driven failure point now that the mint goes through the
+    /// host's own `Core` rather than re-opening a store from config), the injected spawn
+    /// function is never called and the task is not marked running.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mint_failure_refuses_the_spawn() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let working_vault_dir = tmp.path().join("vault-working");
+        init_vault(&working_vault_dir);
+        write_vault_config(&home, &working_vault_dir);
+        let _env = ScopedEnv::set("IRONHERMES_HOME", &home);
+
+        let store_dir = TempDir::new().unwrap();
+        let mut store = open_store(&store_dir);
+        store
+            .create_task("mint failure test", SLUG, CreateTaskOptions::default())
+            .unwrap();
+        let store_arc = Arc::new(TokioMutex::new(store));
+
+        let spawn_calls: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let spawn_calls_for_fn = Arc::clone(&spawn_calls);
+        let spawn_fn: SpawnFn = Arc::new(move |_task, _run, _ws, _slug, _vault| {
+            let spawn_calls = Arc::clone(&spawn_calls_for_fn);
+            Box::pin(async move {
+                *spawn_calls.lock().unwrap() += 1;
+                Ok(9999)
+            })
+        });
+
+        let mut ctx = DispatcherContext::with_spawn_fn(store_arc.clone(), KanbanConfig::default(), spawn_fn);
+        assert!(
+            ctx.profile_credentials.is_some(),
+            "precondition: construction-time endpoint must be hosted from the working vault"
+        );
+        ctx.gate_fn = always_allow_from_vault();
+        let audit_calls: Arc<Mutex<Vec<(String, String, Duration)>>> = Arc::new(Mutex::new(Vec::new()));
+        let ledger_trace: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        ctx = ctx.with_token_audit(Arc::new(RecordingAudit {
+            trace: Arc::clone(&ledger_trace),
+            calls: Arc::clone(&audit_calls),
+        }));
+
+        // Phase 51 Plan 11 (CR-06 fix): `mint_worker_credential` no longer opens a second
+        // store from the freshly-loaded `Config::load()` — it mints through
+        // `ctx.profile_credentials`'s own already-open `Core`
+        // (`mint_profile_token_for_host`). Repointing `config.yaml`'s DATA DIR (the
+        // pre-Plan-11 failure injection) is therefore a no-op now: `Config::load()` still
+        // resolves `vault.enabled/backend`, both still true, and no NEW store is ever
+        // opened on this path. The mint's own guard check
+        // (`config.vault.enabled && config.vault.backend == "rusty-vault"`) is the only
+        // remaining config-driven failure point on this path, so flip THAT instead: repoint
+        // config.yaml to `vault.enabled = false`. `Config::load()` (inside
+        // `run_dispatch_tick_for_board`) sees this; the already-constructed
+        // `ctx.profile_credentials` handle above is unaffected (it was resolved once, at
+        // construction time, from the WORKING vault).
+        let mut disabled_vault_config = Config::default();
+        disabled_vault_config.vault.enabled = false;
+        disabled_vault_config.model.provider = PROVIDER.to_string();
+        disabled_vault_config.providers.insert(
+            PROVIDER.to_string(),
+            ProviderConfig {
+                api_key_env: Some("VAULTMINT_API_KEY".to_string()),
+                ..Default::default()
+            },
+        );
+        disabled_vault_config
+            .save_to(&home.join("config.yaml"))
+            .expect("save_to config.yaml");
+
+        run_dispatch_tick(&ctx).await.expect("tick failed");
+
+        assert_eq!(
+            *spawn_calls.lock().unwrap(),
+            0,
+            "a mint failure must leave the spawn function uncalled"
+        );
+        assert!(
+            audit_calls.lock().unwrap().is_empty(),
+            "a failed mint must never reach record_mint"
+        );
+
+        let store = store_arc.lock().await;
+        let tasks = store.list_tasks(crate::store::ListFilters::default()).unwrap();
+        let task = tasks.iter().find(|t| t.assignee == SLUG).unwrap();
+        assert_ne!(
+            task.status, "running",
+            "a task whose mint failed must not be left running with no credential"
+        );
+    }
+
+    /// `vault_backed_dispatch_without_an_audit_sink_refuses`: `AllowFromVault`
+    /// with `token_audit: None` on the context refuses with a named reason and
+    /// never calls the spawn function — an unavailable ledger does not become an
+    /// un-audited mint.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn vault_backed_dispatch_without_an_audit_sink_refuses() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let vault_dir = tmp.path().join("vault");
+        init_vault(&vault_dir);
+        write_vault_config(&home, &vault_dir);
+        let _env = ScopedEnv::set("IRONHERMES_HOME", &home);
+
+        let store_dir = TempDir::new().unwrap();
+        let mut store = open_store(&store_dir);
+        store
+            .create_task("no sink test", SLUG, CreateTaskOptions::default())
+            .unwrap();
+        let store_arc = Arc::new(TokioMutex::new(store));
+
+        let spawn_calls: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
+        let spawn_calls_for_fn = Arc::clone(&spawn_calls);
+        let spawn_fn: SpawnFn = Arc::new(move |_task, _run, _ws, _slug, _vault| {
+            let spawn_calls = Arc::clone(&spawn_calls_for_fn);
+            Box::pin(async move {
+                *spawn_calls.lock().unwrap() += 1;
+                Ok(9999)
+            })
+        });
+
+        let mut ctx = DispatcherContext::with_spawn_fn(store_arc.clone(), KanbanConfig::default(), spawn_fn);
+        assert!(ctx.profile_credentials.is_some(), "precondition: endpoint hosted");
+        assert!(ctx.token_audit.is_none(), "precondition: no sink wired (the default)");
+        ctx.gate_fn = always_allow_from_vault();
+
+        run_dispatch_tick(&ctx).await.expect("tick failed");
+
+        assert_eq!(
+            *spawn_calls.lock().unwrap(),
+            0,
+            "AllowFromVault with no audit sink must refuse, never spawn"
+        );
+
+        let store = store_arc.lock().await;
+        let tasks = store.list_tasks(crate::store::ListFilters::default()).unwrap();
+        let task = tasks.iter().find(|t| t.assignee == SLUG).unwrap();
+        assert_eq!(
+            task.status, "blocked",
+            "an unaudited-because-unwired vault dispatch must land terminal-blocked, \
+             not stay ready and re-attempt forever"
+        );
+    }
+
+    /// `dotenv_backed_profile_does_not_mint`: a profile the gate judged `Allow`
+    /// (dotenv-backed) produces no mint, no token variable, and no ledger line —
+    /// the vault path is not engaged for un-migrated profiles, even when a
+    /// working vault + audit sink ARE both wired on the context.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dotenv_backed_profile_does_not_mint() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let vault_dir = tmp.path().join("vault");
+        init_vault(&vault_dir);
+        write_vault_config(&home, &vault_dir);
+        let _env = ScopedEnv::set("IRONHERMES_HOME", &home);
+
+        let store_dir = TempDir::new().unwrap();
+        let mut store = open_store(&store_dir);
+        store
+            .create_task("dotenv path test", SLUG, CreateTaskOptions::default())
+            .unwrap();
+        let store_arc = Arc::new(TokioMutex::new(store));
+
+        let spawn_calls: Arc<Mutex<Vec<bool>>> = Arc::new(Mutex::new(Vec::new()));
+        let spawn_calls_for_fn = Arc::clone(&spawn_calls);
+        let spawn_fn: SpawnFn = Arc::new(move |_task, _run, _ws, _slug, vault| {
+            let spawn_calls = Arc::clone(&spawn_calls_for_fn);
+            Box::pin(async move {
+                spawn_calls.lock().unwrap().push(vault.is_some());
+                Ok(9999)
+            })
+        });
+
+        let ledger_trace: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let audit_calls: Arc<Mutex<Vec<(String, String, Duration)>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let mut ctx = DispatcherContext::with_spawn_fn(store_arc.clone(), KanbanConfig::default(), spawn_fn);
+        ctx.gate_fn = always_allow(); // plain Allow, not AllowFromVault
+        ctx = ctx.with_token_audit(Arc::new(RecordingAudit {
+            trace: Arc::clone(&ledger_trace),
+            calls: Arc::clone(&audit_calls),
+        }));
+
+        run_dispatch_tick(&ctx).await.expect("tick failed");
+
+        assert_eq!(
+            spawn_calls.lock().unwrap().clone(),
+            vec![false],
+            "an Allow (dotenv-backed) dispatch must spawn with vault: None"
+        );
+        assert!(
+            audit_calls.lock().unwrap().is_empty(),
+            "an Allow dispatch must never mint, even with a working vault + sink wired"
+        );
+        assert!(ledger_trace.lock().unwrap().is_empty());
+    }
 }

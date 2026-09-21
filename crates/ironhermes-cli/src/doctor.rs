@@ -22,9 +22,19 @@ use std::time::{Duration, SystemTime};
 /// Phase 41.3 Plan 09 (D-19): `async` because reporting web-tool provider
 /// coverage requires resolving the same env -> config -> vault credential
 /// snapshot the runtime resolves at startup (`ToolCredentials::resolve` is
-/// itself `async` — the vault's `SecretStore::get_secret` is async). Both
-/// call sites (`main.rs`, `setup.rs`) already run inside an async fn.
-pub async fn run_doctor_check() -> Result<()> {
+/// itself `async` — the vault's `SecretStore::get_secret` is async). This
+/// function's only call site is `main.rs`'s `Doctor` dispatch —
+/// `setup.rs::run_setup`'s own wizard-exit check (D-03) is a separate,
+/// lib-safe reimplementation of the same name in that file's own module
+/// scope (see its doc comment), not a call into this function.
+///
+/// Phase 53 Plan 03 (D-06): `browser` gates an OPT-IN browser backend
+/// diagnosis (`ironhermes doctor --browser`) — resolving the configured
+/// binary and running the render probe standalone. `false` (the default,
+/// and what plain `ironhermes doctor` always passes) performs no browser
+/// work at all: no binary resolution for the purpose of probing, no session
+/// spawn, no CDP round trip.
+pub async fn run_doctor_check(browser: bool) -> Result<()> {
     println!("{}", "IronHermes Doctor".bold().cyan());
     // Phase 24 D-16: show which profile this doctor run is inspecting.
     println!("Profile: {}", ironhermes_cli::status_cmd::current_profile());
@@ -135,10 +145,97 @@ pub async fn run_doctor_check() -> Result<()> {
     // disclosed credential is remediated by ROTATION, never by editing the file.
     print_profile_exposure_audit(&home);
 
+    // Phase 53 Plan 03 (D-06): opt-in only. The whole block is behind the
+    // flag — plain `ironhermes doctor` never resolves a browser binary for
+    // the purpose of probing, never spawns a session, never makes a CDP
+    // round trip.
+    if browser {
+        print_browser_diagnosis(&doctor_config).await;
+    }
+
     println!();
     println!("{}", "Run `ironhermes status` for more details.".dimmed());
 
     Ok(())
+}
+
+/// Phase 53 Plan 03 (Task 3, D-06): `ironhermes doctor --browser` — reports
+/// the configured backend, the resolved binary (if any), and the render
+/// probe's outcome. Goes through
+/// `ironhermes_tools::browser_session::diagnose`, which itself goes through
+/// `BrowserSession::spawn` — the SAME path the runtime uses, so there is no
+/// second copy of the probe logic here. Never returns an error — every
+/// outcome is a printed line, preserving `run_doctor_check`'s always-
+/// `Ok(())` invariant. Rendering is factored into [`render_browser_diagnosis`]
+/// (pure, no I/O) so the output content is unit-testable without a live CDP
+/// connection, following this file's `render_tool_provider_status` /
+/// `render_chain_validation` precedent.
+async fn print_browser_diagnosis(config: &Config) {
+    println!();
+    println!("{}", "Browser backend (--browser):".bold());
+
+    let diagnosis = ironhermes_tools::browser_session::diagnose(&config.browser).await;
+    for line in render_browser_diagnosis(&diagnosis) {
+        println!("{line}");
+    }
+}
+
+/// Pure rendering half of [`print_browser_diagnosis`]. See its doc for why
+/// this is split out.
+fn render_browser_diagnosis(
+    diagnosis: &ironhermes_tools::browser_session::BrowserDiagnosis,
+) -> Vec<String> {
+    use ironhermes_tools::browser_session::BrowserDiagnosisOutcome;
+
+    let mut lines = vec![format!("  Backend: {}", diagnosis.mode)];
+    lines.push(format!(
+        "  [{}] Binary resolved",
+        if diagnosis.binary_path.is_some() {
+            "OK".green().to_string()
+        } else {
+            "MISSING".yellow().to_string()
+        }
+    ));
+    if let Some(path) = &diagnosis.binary_path {
+        lines.push(format!("    {}", path.display()));
+    }
+
+    match &diagnosis.outcome {
+        BrowserDiagnosisOutcome::Ok => {
+            lines.push(format!(
+                "  [{}] Render support (screenshot + computed-style checks)",
+                "OK".green()
+            ));
+        }
+        BrowserDiagnosisOutcome::RenderUnsupported {
+            screenshot_ok,
+            hidden_reports_none,
+        } => {
+            // NOT the "MISSING" shape above (read as "could not run") — a
+            // render refusal IS the finding, not an absent check. Same
+            // idiom as print_profile_exposure_audit's "EXPOSED" line.
+            lines.push(format!(
+                "  [{}] Render support (screenshot_ok={screenshot_ok}, \
+                 hidden_reports_none={hidden_reports_none})",
+                "REFUSED".red().bold()
+            ));
+            lines.push(
+                "    This binary appears to have been built without `--features render` \
+                 (release archives publish this as the `-no-render` suffix) — layout is \
+                 absent, so every browser_* tool would return plausible but wrong answers \
+                 against it. Rebuild with `--features render` or point \
+                 browser.obscura_path/OBSCURA_PATH at a render-capable build."
+                    .to_string(),
+            );
+        }
+        BrowserDiagnosisOutcome::Failed(message) => {
+            lines.push(format!(
+                "  [{}] Browser session start ({message})",
+                "MISSING".yellow()
+            ));
+        }
+    }
+    lines
 }
 
 /// Report CR-03-window credential exposure across all profiles (WR-03).
@@ -1007,6 +1104,95 @@ mod tests {
         assert!(
             !joined.contains("stale"),
             "fresh-file lines must not say stale: {lines:?}"
+        );
+    }
+
+    // =========================================================================
+    // Phase 53 (Plan 03 Task 3, D-06): ironhermes doctor --browser
+    // =========================================================================
+
+    #[test]
+    fn doctor_with_the_browser_flag_reports_the_configured_backend() {
+        let diagnosis = ironhermes_tools::browser_session::BrowserDiagnosis {
+            backend: ironhermes_core::config::BrowserBackend::Obscura,
+            mode: "Obscura (local)",
+            binary_path: Some(std::path::PathBuf::from("/usr/local/bin/obscura")),
+            outcome: ironhermes_tools::browser_session::BrowserDiagnosisOutcome::Ok,
+        };
+        let joined = render_browser_diagnosis(&diagnosis).join("\n");
+        assert!(
+            joined.contains("Obscura (local)"),
+            "must name the configured backend, got:\n{joined}"
+        );
+        assert!(
+            joined.contains("/usr/local/bin/obscura"),
+            "must name the resolved binary path, got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn doctor_with_the_browser_flag_reports_no_binary_resolved() {
+        let diagnosis = ironhermes_tools::browser_session::BrowserDiagnosis {
+            backend: ironhermes_core::config::BrowserBackend::Obscura,
+            mode: "Obscura (local)",
+            binary_path: None,
+            outcome: ironhermes_tools::browser_session::BrowserDiagnosisOutcome::Failed(
+                "Obscura binary not found. Set OBSCURA_PATH or browser.obscura_path".to_string(),
+            ),
+        };
+        let joined = render_browser_diagnosis(&diagnosis).join("\n");
+        assert!(
+            joined.contains("MISSING"),
+            "no resolved binary must be surfaced as MISSING, got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn doctor_with_the_browser_flag_reports_a_render_refusal_by_name() {
+        use ironhermes_tools::browser_session::BrowserDiagnosisOutcome;
+        let diagnosis = ironhermes_tools::browser_session::BrowserDiagnosis {
+            backend: ironhermes_core::config::BrowserBackend::Obscura,
+            mode: "Obscura (local)",
+            binary_path: Some(std::path::PathBuf::from("/opt/obscura/obscura")),
+            outcome: BrowserDiagnosisOutcome::RenderUnsupported {
+                screenshot_ok: false,
+                hidden_reports_none: false,
+            },
+        };
+        let joined = render_browser_diagnosis(&diagnosis).join("\n");
+        assert!(
+            joined.contains("--features render"),
+            "a render refusal must name --features render, got:\n{joined}"
+        );
+        assert!(
+            joined.contains("REFUSED"),
+            "a render refusal is a finding, not a silent MISSING, got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn doctor_without_the_browser_flag_performs_no_browser_work() {
+        // The browser block must be gated tightly by `if browser {`, not
+        // merely reachable somewhere in the function — a source-shape proof
+        // rather than a timing-based one.
+        let source = include_str!("doctor.rs");
+        let needle = "pub async fn run_doctor_check(browser: bool) -> Result<()> {";
+        let start = source
+            .find(needle)
+            .expect("run_doctor_check must exist in this file");
+        let after_start = &source[start..];
+        let call_site = "print_browser_diagnosis(&doctor_config).await;";
+        let call_idx = after_start
+            .find(call_site)
+            .expect("print_browser_diagnosis call must exist");
+        let preceding = &after_start[..call_idx];
+        let guard_idx = preceding
+            .rfind("if browser {")
+            .expect("the call must be behind an `if browser {` guard");
+        assert!(
+            call_idx - guard_idx < 200,
+            "the browser block must tightly gate the call, not merely appear somewhere \
+             earlier in the function"
         );
     }
 }

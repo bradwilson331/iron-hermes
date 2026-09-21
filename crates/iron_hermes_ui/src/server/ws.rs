@@ -120,7 +120,7 @@ fn build_voice_status(
     // Precedent: toggle_skill (api.rs:412) uses Config::load() fresh.
     // T-36.17.10-03-02 mitigation: fall back to startup snapshot on parse error.
     let cfg =
-        ironhermes_core::config::Config::load().unwrap_or_else(|_| (*app_state.config).clone());
+        ironhermes_core::config::Config::load().unwrap_or_else(|_| (*app_state.config()).clone());
 
     let stt_provider = select_stt_provider(&cfg.stt);
     let stt_available = stt_provider.is_some();
@@ -368,6 +368,25 @@ fn open_web_trajectory_writer(
     }
 }
 
+/// Phase 49.7 Plan 05 (T-49.7-05-01, accepted web gap): renders
+/// `CommandResult::StartGoalLoop` as an honest not-configured sentence.
+///
+/// Deliberately takes `objective`/`budget` as parameters (rather than
+/// closing over nothing) so a test can assert the returned text never
+/// contains the caller's objective — this function's body is the ENTIRE
+/// arm; it constructs and returns one string, makes no call at all (no
+/// task spawn, no goal-loop entry point, no judge construction), matching
+/// `/cron`'s and `/blueprint run`'s already-shipped behavior on this
+/// surface (`iron_hermes_ui` wires no `CronJobReader`/`CronJobWriter`, so
+/// there is no goal-loop executor here to hand off to).
+fn goal_loop_not_available_on_web(objective: &str, budget: Option<u32>) -> String {
+    let _ = objective; // intentionally unused: never echoed back to the browser
+    let _ = budget;
+    "`/goal` isn't available on the web terminal yet — run it from the CLI or \
+     a connected chat platform (this server has no goal-loop executor wired)."
+        .to_string()
+}
+
 #[get("/api/ws/chat")]
 pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> {
     #[cfg(feature = "server")]
@@ -566,10 +585,10 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                             };
 
                                             let stt_registry = build_stt_registry(
-                                                &ww_app_state.config.stt,
+                                                &ww_app_state.config().stt,
                                             );
                                             let provider_name =
-                                                match select_stt_provider(&ww_app_state.config.stt) {
+                                                match select_stt_provider(&ww_app_state.config().stt) {
                                                     Some(n) => n,
                                                     None => {
                                                         warn!("wake-word-check: no STT provider; emitting no-match");
@@ -654,7 +673,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                             // fall back to server config when not set.
                                             let raw_phrase = ww_phrase_from_frame
                                                 .unwrap_or_else(|| {
-                                                    ww_app_state.config.voice.wake_word.phrase.clone()
+                                                    ww_app_state.config().voice.wake_word.phrase.clone()
                                                 });
                                             // T-36.17.9-04-02: length-guard phrase to 64 chars server-side.
                                             let phrase: String =
@@ -706,12 +725,12 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                         // This is cheap (two Arc::new) and avoids the need for
                                         // a separate stt_registry field on AppState.
                                         let stt_registry = build_stt_registry(
-                                            &app_state_stt.config.stt,
+                                            &app_state_stt.config().stt,
                                         );
 
                                         // D-06: select provider (explicit > groq > openai > None).
                                         let provider_name =
-                                            match select_stt_provider(&app_state_stt.config.stt) {
+                                            match select_stt_provider(&app_state_stt.config().stt) {
                                                 Some(n) => n,
                                                 None => {
                                                     warn!("audio-in: no STT provider configured; dropping frame");
@@ -1027,7 +1046,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                         );
                                         let ctx = attach_web_provider_resolver(
                                             ctx,
-                                            app_state.resolver.clone(),
+                                            app_state.resolver().clone(),
                                         );
 
                                         // Phase 39.1 Plan 02 (R39.1-08 / D-06): /new and /reset
@@ -1324,6 +1343,20 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                 // dispatch path ever returns this variant.
                                                 format!("Skill '{name}' activated.")
                                             }
+                                            // Phase 49.7 Plan 05 (T-49.7-05-01): EXPLICIT arm,
+                                            // placed BEFORE the terminal Debug wildcard below —
+                                            // same reasoning as `SkillsReload`/`SkillActivated`
+                                            // above. `iron_hermes_ui` wires no goal-loop executor
+                                            // in this phase (accepted web gap, Phase 49.7 Plan
+                                            // 05: no CronJobReader/CronJobWriter here either, the
+                                            // same pre-existing limitation `/cron` and
+                                            // `/blueprint run` already have on this surface). This
+                                            // arm's only job is to render an honest sentence
+                                            // instead of letting the wildcard Debug-format the
+                                            // variant (and the user's objective) into the browser.
+                                            CommandResult::StartGoalLoop { objective, budget } => {
+                                                goal_loop_not_available_on_web(&objective, budget)
+                                            }
                                             other => {
                                                 format!("{other:?}")
                                             }
@@ -1523,7 +1556,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                 // Precedent: toggle_skill (api.rs) uses Config::load() fresh.
                                 let auto_tts = ironhermes_core::config::Config::load()
                                     .map(|c| c.voice.auto_tts)
-                                    .unwrap_or_else(|_| app_state.config.voice.auto_tts);
+                                    .unwrap_or_else(|_| app_state.config().voice.auto_tts);
 
                                 // Phase 36.17.7 D-02-a: construct per-turn WebAudioDispatcher
                                 // and TTS wiring so TextToSpeechTool emits AudioOut WS frames.
@@ -1563,7 +1596,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                     .join("videos");
                                 // WR-01: use the configured inline cap; fall back to the
                                 // dispatcher's default const if the config value is 0 (unset).
-                                let video_size_cap = match app_state.config.video_gen.max_inline_bytes {
+                                let video_size_cap = match app_state.config().video_gen.max_inline_bytes {
                                     0 => crate::server::web_video_dispatcher::VIDEO_SIZE_CAP,
                                     cap => cap,
                                 };
@@ -1959,7 +1992,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                 ironhermes_core::config::Config::load()
                                                     .map(|c| c.voice.auto_tts)
                                                     .unwrap_or_else(|_| {
-                                                        app_state_s.config.voice.auto_tts
+                                                        app_state_s.config().voice.auto_tts
                                                     });
 
                                             let audio_tx = tx_s.clone();
@@ -2191,7 +2224,7 @@ pub async fn ws_chat(ws: WebSocketOptions) -> Result<Websocket<String, String>> 
                                                         let _slot_guard = SubagentCallbackSlotGuard { slot: app_state_drain.subagent_callback_slot.clone() };
                                                         let auto_tts_drain = ironhermes_core::config::Config::load()
                                                             .map(|c| c.voice.auto_tts)
-                                                            .unwrap_or_else(|_| app_state_drain.config.voice.auto_tts);
+                                                            .unwrap_or_else(|_| app_state_drain.config().voice.auto_tts);
                                                         let audio_tx_drain = tx_drain.clone();
                                                         let audio_cache_dir_drain = ironhermes_core::constants::get_hermes_home().join("audio_cache");
                                                         let web_audio_dispatcher_drain = std::sync::Arc::new(
@@ -3463,5 +3496,38 @@ mod web_core_handles_tests {
                  None guard; got: {rendered}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg(feature = "server")]
+mod goal_loop_web_rendering_tests {
+    //! Phase 49.7 Plan 05 (T-49.7-05-01) — behavior bullet 7: the web
+    //! surface renders `CommandResult::StartGoalLoop` as an explicit
+    //! not-available sentence and NEVER as a `Debug`-formatted enum. A
+    //! positive-only assertion (checking the sentence IS present) would
+    //! also pass against the `other => format!("{other:?}")` wildcard if
+    //! the explicit arm were ever removed — so this test asserts BOTH the
+    //! negative (no leak) and the positive (a real explanation) halves.
+    use super::goal_loop_not_available_on_web;
+
+    #[test]
+    fn goal_loop_not_available_on_web_never_leaks_variant_name_or_objective() {
+        let objective = "exfiltrate the on-disk API keys";
+        let rendered = goal_loop_not_available_on_web(objective, Some(7));
+
+        assert!(
+            !rendered.contains("StartGoalLoop"),
+            "must never Debug-format the variant name into the browser: {rendered}"
+        );
+        assert!(
+            !rendered.contains(objective),
+            "must never echo the caller's objective text into the browser: {rendered}"
+        );
+        assert!(
+            rendered.to_lowercase().contains("not available")
+                || rendered.to_lowercase().contains("isn't available"),
+            "must contain an explicit not-available phrase: {rendered}"
+        );
     }
 }

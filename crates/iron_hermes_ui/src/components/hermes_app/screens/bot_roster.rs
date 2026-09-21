@@ -78,8 +78,24 @@ pub mod group_settings;
 // same precedent `group_settings`/`delete_room_confirm` above already
 // established for this crate.
 pub mod mention_handoff;
+// Phase 52 Plan 09 (D-02): the "New conversation" confirmation modal — a
+// sibling file of `group_chat_workspace.rs` (where it is actually mounted,
+// from the room header's overflow control, next to `Edit members`/
+// `Delete room`). Rust's module system has no path that registers a
+// sibling file without a `mod` line in its parent module file — the same
+// structurally-unavoidable declaration `delete_room_confirm`/
+// `edit_members_modal`/`mention_handoff` above already needed.
+pub mod new_conversation_confirm;
 pub mod npub_row;
 pub mod routines;
+// Phase 52 Plan 06 (D-07/D-09/D-16): the shared team-composition controls
+// (`TeamPatternFields`, `LeaderRadioCell`) — a sibling file of
+// `create_room_modal.rs` and `edit_members_modal.rs` (where it is actually
+// mounted, once from each). Rust's module system has no path that
+// registers this file without a `mod` line in its parent, the same
+// structurally-unavoidable declaration `group_settings`/`mention_handoff`
+// above already needed.
+pub mod team_pattern_fields;
 
 // Under `--all-features`, `legacy-shell` swaps the root to WarpHermes,
 // leaving HermesApp (and therefore BotRoster) unreferenced — a binary
@@ -400,6 +416,29 @@ pub fn BotRoster(
     // ownership placement exactly (Signal state owned by the screen,
     // threaded down as plain props, never a context provider).
     let open_room: Signal<Option<String>> = use_signal(|| None);
+
+    // Phase 52.1 Plan 07 (D-13): the artifacts gallery's team backlink
+    // deep-link — see `PendingRoomOpenCtx`'s own doc comment (state.rs) for
+    // the full contract. Same read-act-clear shape as `kanban.rs`'s
+    // consuming effect (mirroring `schedules.rs`'s
+    // `ScheduleNamePrefillCtx` idiom): the clearing write lives INSIDE the
+    // populated-value branch only, so the effect's own re-trigger sees an
+    // already-`None` value and does nothing — never a
+    // read-plus-unconditional-write on the same signal. This does NOT
+    // convert `open_room` into a context provider — it stays the
+    // screen-owned, plain-prop-passed signal this file's own module doc
+    // above describes; the pending context is the handoff, not a
+    // replacement for local ownership.
+    let mut pending_room_open_ctx = use_context::<crate::state::PendingRoomOpenCtx>().0;
+    use_effect(move || {
+        let pending = pending_room_open_ctx.read().clone();
+        if let Some(room_id) = pending {
+            let mut target = open_room;
+            target.set(Some(room_id));
+            pending_room_open_ctx.set(None);
+        }
+    });
+
     let create_room_open: Signal<bool> = use_signal(|| false);
     let open_room_id: Option<String> = open_room.read().clone();
     // Phase 50.2 Plan 06 (D-21, UI-SPEC Navigation & Placement): the
@@ -953,6 +992,7 @@ mod roster_section_tests {
             preview: None,
             preview_at_ms: None,
             active_round: None,
+            pattern: None,
         }
     }
 

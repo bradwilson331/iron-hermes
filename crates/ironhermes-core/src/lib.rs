@@ -20,6 +20,7 @@ pub mod dotenv_write; // Phase 47.6 Plan 04 (D-06): single shared .env writer
 pub mod env_sanitize;
 pub mod error;
 pub mod gateway_status; // Phase 49.3 Plan 06 (D-08): versioned gateway heartbeat status schema
+pub mod judge; // Phase 49.7 Plan 02 (D-03): judge contract moved from ironhermes-kanban
 pub mod memory_provider;
 pub mod memory_store;
 pub mod model_metadata;
@@ -27,7 +28,9 @@ pub mod models_cache;
 pub mod pricing;
 pub mod pricing_cache;
 pub mod profile;
+pub mod profile_credentials; // Phase 51 Plan 06 (D-11/D-12/D-13): host facade for the per-profile credential endpoint
 pub mod provider;
+pub mod provider_env; // Phase 51 Plan 15 (CR-04): single shared provider->api-key-env-var resolver
 pub mod queue;
 pub mod session;
 pub mod skills;
@@ -69,10 +72,11 @@ pub use env_sanitize::build_terminal_safe_env;
 pub use error::{HermesError, Result};
 pub use memory_provider::{MemoryEntries, MemoryProvider};
 pub use memory_store::{MemoryStore, MemoryTarget};
-pub use model_metadata::{ModelCapabilities, ModelMetadata, ModelRegistry};
+pub use model_metadata::{ModelCapabilities, ModelMetadata, ModelRegistry, PartialModelMetadata};
 pub use models_cache::{
-    FetchResult, ModelsCache, ModelsCacheEntry, fetch_all, fetch_from_models_dev,
-    fetch_from_openrouter, normalize_model_id,
+    FetchResult, ModelsCache, ModelsCacheEntry, ProviderProbeOutcome, configured_id_drift,
+    fetch_all, fetch_from_models_dev, fetch_from_openrouter, fetch_from_provider,
+    normalize_model_id, parse_provider_models_response,
 };
 pub use pricing::{PricingEntry, PricingRegistry, compute_cost_micros};
 pub use pricing_cache::{PricingCache, PricingCacheEntry};

@@ -57,6 +57,8 @@ impl Tool for KanbanCompleteTool {
 
     fn description(&self) -> &str {
         "Mark a Kanban task as done. Requires at least one of `summary` or `result`. \
+         `result` is the task's work product and is published as an artifact when present \
+         (a file written into the workspace takes precedence over it). \
          Validates expected_run_id (stale-run rejection) and created_cards (phantom-id / \
          wrong-profile rejection). Both rejection types are returned as structured JSON \
          so the LLM can handle them without crashing the tool call."
@@ -79,7 +81,7 @@ impl Tool for KanbanCompleteTool {
                     },
                     "result": {
                         "type": "string",
-                        "description": "Structured result string (machine-readable output)."
+                        "description": "The work product itself — the full text of what the task produced, in markdown or plain text. When present it is published as an artifact (a file written into the workspace wins over this text). Omit this field when there is nothing to deliver."
                     },
                     "metadata": {
                         "type": "object",
@@ -186,15 +188,36 @@ impl Tool for KanbanCompleteTool {
                 // completing worker leaves one in the operator gallery whether or
                 // not the LLM chose to call the `artifact` tool. Best-effort —
                 // never blocks completion.
-                let task_title = store
-                    .get_task(&task_id)
-                    .map(|t| t.title)
+                //
+                // The task record is fetched once here and its `body` (the
+                // instruction text an operator's opt-out phrase would be in,
+                // D-12) and `assignee` (a pointer's producer name) are passed
+                // into the capture fn rather than re-fetched inside it.
+                let task_record = store.get_task(&task_id).ok();
+                let task_title = task_record
+                    .as_ref()
+                    .map(|t| t.title.clone())
+                    .unwrap_or_default();
+                let instruction_text = task_record
+                    .as_ref()
+                    .and_then(|t| t.body.clone())
+                    .filter(|b| !b.trim().is_empty())
+                    .unwrap_or_else(|| task_title.clone());
+                let assignee = task_record
+                    .as_ref()
+                    .map(|t| t.assignee.clone())
                     .unwrap_or_default();
                 let mut payload = json!({
                     "status": "ok",
                     "task_id": task_id,
                 });
-                if let Some(artifact_id) = capture_completion_artifact(&task_id, &task_title) {
+                if let Some(artifact_id) = capture_completion_artifact(
+                    &task_id,
+                    &task_title,
+                    result.as_deref(),
+                    &instruction_text,
+                    &assignee,
+                ) {
                     tracing::info!(
                         task_id = %task_id,
                         artifact_id = %artifact_id,
@@ -259,16 +282,10 @@ impl Tool for KanbanCompleteTool {
     }
 }
 
-/// Deliverable files the deterministic completion-capture publishes as
-/// artifacts, in priority order — the first existing match wins. Keyed on
-/// `index.html` (option a) because that is the de-facto filename kanban workers
-/// already emit for a standalone web page. Extend this list to capture more
-/// deliverable types later (e.g. `("README.md", SourceFormat::Markdown)`).
-const CAPTURE_CANDIDATES: &[(&str, ironhermes_artifacts::SourceFormat)] =
-    &[("index.html", ironhermes_artifacts::SourceFormat::Html)];
-
-/// Resolve the completing task's deliverable file + format. Searches, in
-/// priority order:
+/// Resolve the completing task's deliverable file + format. Tries, in
+/// priority order, each candidate root through the shared widened producer
+/// engine (`ironhermes_tools::chat_capture::locate_producer_deliverable`,
+/// D-01):
 ///  1. the worker's current directory — the dispatcher spawns the worker with
 ///     its CWD set to the *resolved* workspace (`worker_spawn.rs`
 ///     `.current_dir(&resolved_workspace)`), which honors the
@@ -280,6 +297,9 @@ const CAPTURE_CANDIDATES: &[(&str, ironhermes_artifacts::SourceFormat)] =
 ///     wrong, empty directory.
 ///  2. the home-relative scratch path (`kanban_workspace_for`) — a fallback for
 ///     non-worker callers and tests, where CWD is not the workspace.
+///
+/// `since: None` — kanban has no per-completion freshness bound, matching the
+/// legacy engine's behavior exactly.
 fn locate_deliverable(
     task_id: &str,
 ) -> Option<(std::path::PathBuf, ironhermes_artifacts::SourceFormat)> {
@@ -288,144 +308,118 @@ fn locate_deliverable(
         roots.push(cwd);
     }
     roots.push(crate::paths::kanban_workspace_for(task_id));
-    find_deliverable_in(&roots)
-}
-
-/// Pure root search for the task's deliverable. For each root, in order:
-///  1. an exact [`CAPTURE_CANDIDATES`] filename (e.g. `index.html`);
-///  2. otherwise the primary `*.html` file in that root — workers name the
-///     deliverable arbitrarily (`spider-man-poem.html`, not always
-///     `index.html`), so keying only on the canonical name silently misses them.
-///
-/// The first root that yields a match wins.
-fn find_deliverable_in(
-    roots: &[std::path::PathBuf],
-) -> Option<(std::path::PathBuf, ironhermes_artifacts::SourceFormat)> {
-    for root in roots {
-        // 1. Exact-name candidates (index.html; extend for other types later).
-        for (name, fmt) in CAPTURE_CANDIDATES {
-            let candidate = root.join(name);
-            if candidate.is_file() {
-                return Some((candidate, *fmt));
-            }
-        }
-        // 2. Fallback: the primary standalone HTML page under an arbitrary name.
-        if let Some(html) = primary_html_in(root) {
-            return Some((html, ironhermes_artifacts::SourceFormat::Html));
+    for root in &roots {
+        if let Some(found) = ironhermes_tools::chat_capture::locate_producer_deliverable(root, None)
+        {
+            return Some(found);
         }
     }
     None
 }
 
-/// The primary `*.html` file directly under `root` (non-recursive): the largest
-/// by size, ties broken by path for determinism. Size is a good "main page"
-/// heuristic — a scratch/test page is smaller than the actual deliverable.
-/// Returns `None` when the directory has no HTML file (or can't be read).
-fn primary_html_in(root: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut htmls: Vec<(u64, std::path::PathBuf)> = std::fs::read_dir(root)
-        .ok()?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            let is_html = path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("html"));
-            if is_html && path.is_file() {
-                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                Some((size, path))
-            } else {
-                None
-            }
-        })
-        .collect();
-    // Largest first; tie-break by path so the choice is deterministic.
-    htmls.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    htmls.into_iter().next().map(|(_, path)| path)
-}
-
 /// Deterministically publish a completing task's deliverable as an artifact so
 /// one appears in the operator gallery WITHOUT relying on the worker LLM to call
-/// the `artifact` tool (option a). Scans the task's scratch workspace for the
-/// first [`CAPTURE_CANDIDATES`] file; if present, publishes it to the artifact
-/// store — routed to the operator's root store + profile bucket by the same
-/// `IRONHERMES_ARTIFACTS_DB` / `IRONHERMES_ARTIFACTS_PROFILE` env the dispatcher
-/// sets for the `artifact` tool, so captured artifacts land in the same gallery.
+/// the `artifact` tool (D-01/D-06). Delegates to the shared producer engine
+/// (`ironhermes_tools::chat_capture::publish_producer_deliverable`): a file in
+/// the workspace wins (D-04); when no file exists, `result` (the tool's
+/// declared deliverable, D-05/D-06) publishes as Markdown when non-blank.
 /// Idempotent per task: a re-complete versions the task's existing artifact
-/// (looked up via `latest_for_source`) rather than creating a duplicate.
+/// rather than creating a duplicate.
 ///
-/// Best-effort: every failure path logs and returns `None` so a capture problem
-/// never blocks task completion. A task with no deliverable file (e.g. a pure
-/// code task) simply returns `None`. Returns the artifact id on success.
+/// `instruction_text` (the completing task's `body`, or its `title` when the
+/// body is absent — D-12) is checked via
+/// `ironhermes_tools::chat_capture::detect_turn_opt_out`. On the opt-out
+/// branch, any produced output (a workspace file, or declared `result` text)
+/// still gets a record — demoted to a pointer via
+/// `ironhermes_tools::chat_capture::publish_pointer_artifact` under the SAME
+/// `source_kind`/`source_ref` the full artifact would have used, naming
+/// `assignee` as the producer. Output that does not exist at all publishes
+/// nothing — there is no output to record.
+///
+/// Best-effort: every failure path is a `tracing::warn!` (inside the shared
+/// engine) plus a `None` return so a capture problem never blocks task
+/// completion. A task with no deliverable file and no `result` text simply
+/// returns `None`. Returns the artifact id on success.
 ///
 /// Caveat: artifacts are a single self-contained document under a strict sandbox
 /// CSP (D-02) — a deliverable that references external CSS/JS renders without
 /// them. Inlining assets at capture time is a future enhancement.
-fn capture_completion_artifact(task_id: &str, task_title: &str) -> Option<String> {
-    let (path, source_format) = locate_deliverable(task_id)?; // none → nothing to capture
-
-    let body = match std::fs::read_to_string(&path) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(
-                task_id = %task_id, path = %path.display(), error = %e,
-                "completion artifact capture: failed to read deliverable"
-            );
-            return None;
-        }
-    };
-
-    // Operator override (dispatcher-set) wins, else the canonical profile — the
-    // same resolution the `artifact` tool uses, so publish and list agree (D-04 /
-    // Option A).
-    let profile = std::env::var(ironhermes_core::ARTIFACTS_PROFILE_ENV)
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(ironhermes_core::current_profile);
-
-    let mut store = match ironhermes_artifacts::ArtifactStore::open_default() {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(
-                task_id = %task_id, error = %e,
-                "completion artifact capture: failed to open artifact store"
-            );
-            return None;
-        }
-    };
-
-    // Idempotent per task: version the task's existing artifact instead of
-    // creating a duplicate on a re-run / re-complete.
-    let update_id = store
-        .latest_for_source("kanban", task_id)
-        .ok()
-        .flatten()
-        .map(|summary| summary.id);
-
+fn capture_completion_artifact(
+    task_id: &str,
+    task_title: &str,
+    result: Option<&str>,
+    instruction_text: &str,
+    assignee: &str,
+) -> Option<String> {
     let title = if task_title.trim().is_empty() {
         format!("Task {task_id}")
     } else {
         task_title.to_string()
     };
 
-    match store.publish(ironhermes_artifacts::PublishInput {
-        profile,
-        update_id,
-        title: Some(title),
-        icon: None,
-        source_kind: Some("kanban".to_string()),
-        source_ref: Some(task_id.to_string()),
-        source_format,
-        body,
-    }) {
-        Ok(id) => Some(id),
-        Err(e) => {
-            tracing::warn!(
-                task_id = %task_id, error = %e,
-                "completion artifact capture: publish failed"
-            );
-            None
-        }
+    // A single locate call, reused by both branches below (D-04 file-wins
+    // ordering holds on the opt-out branch too).
+    let located = locate_deliverable(task_id);
+
+    if ironhermes_tools::chat_capture::detect_turn_opt_out(instruction_text) {
+        // D-12: the operator opted out — demote to a marked pointer rather
+        // than suppressing. Occupies the same source kind/ref the full
+        // artifact would have, so it versions in place on a later re-complete.
+        return match located {
+            Some((path, _)) => match std::fs::read(&path) {
+                Ok(bytes) => ironhermes_tools::chat_capture::publish_pointer_artifact(
+                    "kanban",
+                    task_id,
+                    &title,
+                    assignee,
+                    &path.to_string_lossy(),
+                    &bytes,
+                ),
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task_id, path = %path.display(), error = %e,
+                        "pointer capture: failed to read deliverable"
+                    );
+                    None
+                }
+            },
+            None => {
+                let fallback = result.map(str::trim).filter(|s| !s.is_empty());
+                match fallback {
+                    Some(text) => ironhermes_tools::chat_capture::publish_pointer_artifact(
+                        "kanban",
+                        task_id,
+                        &title,
+                        assignee,
+                        "declared result text (no file)",
+                        text.as_bytes(),
+                    ),
+                    None => None, // no output at all — nothing to record
+                }
+            }
+        };
     }
+
+    // The root of the first `locate_deliverable` root that holds a
+    // deliverable file wins (D-04 file-wins). When no root has a file,
+    // publish against the home-relative scratch root anyway — with no file
+    // present, `publish_producer_deliverable`'s internal scan finds nothing
+    // regardless of which root is passed, so it falls through to the
+    // `result` text (D-05/D-06).
+    let scan_root = located
+        .and_then(|(path, _)| path.parent().map(std::path::Path::to_path_buf))
+        .unwrap_or_else(|| crate::paths::kanban_workspace_for(task_id));
+
+    ironhermes_tools::chat_capture::publish_producer_deliverable(
+        ironhermes_tools::chat_capture::ProducerPublish {
+            scan_root: &scan_root,
+            since: None,
+            source_kind: "kanban",
+            source_ref: task_id,
+            title: &title,
+            fallback_body: result,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -495,8 +489,8 @@ mod tests {
         std::fs::create_dir_all(&ws).unwrap();
         std::fs::write(ws.join("index.html"), "<h1>Deliverable</h1>").unwrap();
 
-        let id =
-            capture_completion_artifact(task_id, "Animated Poem").expect("index.html is published");
+        let id = capture_completion_artifact(task_id, "Animated Poem", None, "build the thing", "test-bot")
+            .expect("index.html is published");
         assert!(!id.is_empty());
 
         let store = ironhermes_artifacts::ArtifactStore::open_default().unwrap();
@@ -508,14 +502,15 @@ mod tests {
         assert_eq!(summary.source_kind.as_deref(), Some("kanban"));
         assert_eq!(summary.source_ref.as_deref(), Some(task_id));
 
-        // A pure-code task (no candidate file) captures nothing.
+        // A pure-code task (no candidate file, no result) captures nothing.
         assert!(
-            capture_completion_artifact("t_nodeliverable9", "Backend wiring").is_none(),
-            "a task with no index.html must not produce an artifact"
+            capture_completion_artifact("t_nodeliverable9", "Backend wiring", None, "build the thing", "test-bot").is_none(),
+            "a task with no index.html and no result must not produce an artifact"
         );
 
         // Re-capture versions the SAME artifact (dedup by source), never a dupe.
-        let id2 = capture_completion_artifact(task_id, "Animated Poem v2").expect("re-publish");
+        let id2 = capture_completion_artifact(task_id, "Animated Poem v2", None, "build the thing", "test-bot")
+            .expect("re-publish");
         assert_eq!(id, id2, "re-capture must version the existing artifact");
 
         unsafe {
@@ -534,59 +529,415 @@ mod tests {
         }
     }
 
-    /// Regression (round 7): the deliverable is found under the FIRST root that
-    /// has it, so an empty/wrong root (e.g. the profile-home path when the
-    /// dispatcher redirected the real workspace elsewhere) is skipped in favour
-    /// of the root that actually holds `index.html` (the worker's CWD).
-    #[test]
-    fn find_deliverable_searches_roots_in_order() {
-        let empty = tempfile::tempdir().unwrap();
-        let real = tempfile::tempdir().unwrap();
-        std::fs::write(real.path().join("index.html"), "<h1>x</h1>").unwrap();
+    /// Test-only guard around `locate_deliverable`/`capture_completion_artifact`
+    /// tests that mutate process-global `IRONHERMES_HOME` and CWD: takes the
+    /// crate ENV_LOCK, captures the pre-test values, and restores both on drop
+    /// (including on an assertion panic mid-test — a bare "restore after the
+    /// asserts" block, the pre-existing style in this module, leaves the
+    /// process CWD mutated for every later test in the binary if an earlier
+    /// assertion panics first).
+    struct RootsEnvGuard {
+        _env_guard: std::sync::MutexGuard<'static, ()>,
+        prev_home: Option<String>,
+        prev_cwd: std::path::PathBuf,
+    }
 
-        let (path, fmt) =
-            find_deliverable_in(&[empty.path().to_path_buf(), real.path().to_path_buf()])
-                .expect("finds index.html in the second (non-empty) root");
+    impl RootsEnvGuard {
+        fn new(new_home: &std::path::Path, new_cwd: &std::path::Path) -> Self {
+            let env_guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let prev_home = std::env::var("IRONHERMES_HOME").ok();
+            let prev_cwd = std::env::current_dir().unwrap();
+            unsafe {
+                std::env::set_var("IRONHERMES_HOME", new_home);
+            }
+            std::env::set_current_dir(new_cwd).unwrap();
+            Self {
+                _env_guard: env_guard,
+                prev_home,
+                prev_cwd,
+            }
+        }
+    }
+
+    impl Drop for RootsEnvGuard {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.prev_cwd);
+            unsafe {
+                match &self.prev_home {
+                    Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+                    None => std::env::remove_var("IRONHERMES_HOME"),
+                }
+            }
+        }
+    }
+
+    /// Regression (round 7): the deliverable is found under the FIRST root that
+    /// has it, so an empty/wrong root (the worker's CWD, when it holds nothing)
+    /// is skipped in favour of the root that actually holds `index.html` (the
+    /// home-relative scratch workspace, `locate_deliverable`'s second root).
+    #[test]
+    fn locate_deliverable_searches_roots_in_order() {
+        let home = tempfile::tempdir().unwrap();
+        let empty_cwd = tempfile::tempdir().unwrap();
+        let _guard = RootsEnvGuard::new(home.path(), empty_cwd.path());
+
+        let task_id = "t_rootorder01";
+        let ws = crate::paths::kanban_workspace_for(task_id);
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("index.html"), "<h1>x</h1>").unwrap();
+
+        let (path, fmt) = locate_deliverable(task_id)
+            .expect("finds index.html in the second (home-relative) root when CWD is empty");
         assert!(path.ends_with("index.html"));
         assert_eq!(fmt, ironhermes_artifacts::SourceFormat::Html);
 
         // No candidate under any root → nothing to capture.
-        assert!(find_deliverable_in(&[empty.path().to_path_buf()]).is_none());
+        assert!(locate_deliverable("t_rootorder_nocandidate").is_none());
     }
 
-    /// Round 8: workers name the deliverable arbitrarily — capture the primary
-    /// `*.html` even when it isn't `index.html` (the Spider-Man case: the file
-    /// was `spider-man-poem.html`, so keying only on `index.html` missed it).
+    /// Round 8: workers name the deliverable arbitrarily — the widened engine
+    /// still captures the primary `*.html` even when it isn't `index.html`
+    /// (the Spider-Man case: the file was `spider-man-poem.html`, so keying
+    /// only on `index.html` missed it).
     #[test]
-    fn find_deliverable_captures_arbitrary_html_name() {
-        let ws = tempfile::tempdir().unwrap();
+    fn locate_deliverable_captures_arbitrary_html_name() {
+        let home = tempfile::tempdir().unwrap();
+        let empty_cwd = tempfile::tempdir().unwrap();
+        let _guard = RootsEnvGuard::new(home.path(), empty_cwd.path());
+
+        let task_id = "t_arbitraryname01";
+        let ws = crate::paths::kanban_workspace_for(task_id);
+        std::fs::create_dir_all(&ws).unwrap();
         std::fs::write(
-            ws.path().join("spider-man-poem.html"),
+            ws.join("spider-man-poem.html"),
             "<h1>web-slinger</h1>",
         )
         .unwrap();
-        std::fs::write(ws.path().join("README.md"), "# notes").unwrap();
-        let (path, fmt) = find_deliverable_in(&[ws.path().to_path_buf()])
-            .expect("captures the arbitrarily-named html deliverable");
+        std::fs::write(ws.join("README.md"), "# notes").unwrap();
+
+        let (path, fmt) = locate_deliverable(task_id)
+            .expect("captures the arbitrarily-named html file");
         assert_eq!(path.file_name().unwrap(), "spider-man-poem.html");
         assert_eq!(fmt, ironhermes_artifacts::SourceFormat::Html);
     }
 
     /// `index.html` (an exact candidate) wins over any other, larger `.html`.
     #[test]
-    fn find_deliverable_prefers_index_over_larger_html() {
-        let ws = tempfile::tempdir().unwrap();
-        std::fs::write(ws.path().join("index.html"), "<h1>x</h1>").unwrap();
+    fn locate_deliverable_prefers_index_over_larger_html() {
+        let home = tempfile::tempdir().unwrap();
+        let empty_cwd = tempfile::tempdir().unwrap();
+        let _guard = RootsEnvGuard::new(home.path(), empty_cwd.path());
+
+        let task_id = "t_indexpref01";
+        let ws = crate::paths::kanban_workspace_for(task_id);
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("index.html"), "<h1>x</h1>").unwrap();
         std::fs::write(
-            ws.path().join("aaa-big.html"),
+            ws.join("aaa-big.html"),
             "<h1>a much longer body than index</h1>",
         )
         .unwrap();
-        let (path, _) = find_deliverable_in(&[ws.path().to_path_buf()]).unwrap();
+
+        let (path, _) = locate_deliverable(task_id).unwrap();
         assert_eq!(
             path.file_name().unwrap(),
             "index.html",
             "an exact candidate must beat the largest-html fallback"
         );
+    }
+
+    /// End-to-end (Task 1, D-01/D-02): a `.py` file written into a MARKED
+    /// kanban scratch workspace and captured through the completion path
+    /// publishes an artifact whose rendered output is an escaped
+    /// plain-monospace code block.
+    #[test]
+    fn capture_completion_artifact_publishes_code_deliverable_as_escaped_code_block() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var("IRONHERMES_HOME").ok();
+        let prev_prof = std::env::var("IRONHERMES_ARTIFACTS_PROFILE").ok();
+        let prev_db = std::env::var("IRONHERMES_ARTIFACTS_DB").ok();
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", home.path());
+            std::env::remove_var("IRONHERMES_ARTIFACTS_PROFILE");
+            std::env::remove_var("IRONHERMES_ARTIFACTS_DB");
+        }
+
+        let task_id = "t_codecapturetest01";
+        let ws = crate::paths::kanban_workspace_for(task_id);
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(ws.join(ironhermes_tools::chat_capture::WORKSPACE_MARKER_DIR))
+            .unwrap();
+        let body = "print('<script>alert(1)</script>')";
+        std::fs::write(ws.join("report.py"), body).unwrap();
+
+        let id = capture_completion_artifact(task_id, "Code Task", None, "build the thing", "test-bot")
+            .expect("a code deliverable in a marked workspace must be published");
+
+        let store = ironhermes_artifacts::ArtifactStore::open_default().unwrap();
+        let html = store
+            .load_latest_html(&id)
+            .expect("rendered html must exist for the published artifact");
+        assert!(html.starts_with("<pre><code>"));
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(!html.contains("<script>"));
+
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+                None => std::env::remove_var("IRONHERMES_HOME"),
+            }
+            match prev_prof {
+                Some(v) => std::env::set_var("IRONHERMES_ARTIFACTS_PROFILE", v),
+                None => std::env::remove_var("IRONHERMES_ARTIFACTS_PROFILE"),
+            }
+            match prev_db {
+                Some(v) => std::env::set_var("IRONHERMES_ARTIFACTS_DB", v),
+                None => std::env::remove_var("IRONHERMES_ARTIFACTS_DB"),
+            }
+        }
+    }
+
+    /// Task 2 (D-04/D-06): with BOTH a deliverable file present and a
+    /// non-blank `result` argument, the published body is the FILE's
+    /// contents — `result` is ignored (file wins).
+    #[test]
+    fn capture_completion_artifact_prefers_file_over_result_text() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var("IRONHERMES_HOME").ok();
+        let prev_prof = std::env::var("IRONHERMES_ARTIFACTS_PROFILE").ok();
+        let prev_db = std::env::var("IRONHERMES_ARTIFACTS_DB").ok();
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", home.path());
+            std::env::remove_var("IRONHERMES_ARTIFACTS_PROFILE");
+            std::env::remove_var("IRONHERMES_ARTIFACTS_DB");
+        }
+
+        let task_id = "t_filewinsresult01";
+        let ws = crate::paths::kanban_workspace_for(task_id);
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(ws.join("index.html"), "<h1>from file</h1>").unwrap();
+
+        let id = capture_completion_artifact(task_id, "Task", Some("this text must be ignored"), "build the thing", "test-bot")
+            .expect("file must be published");
+        let store = ironhermes_artifacts::ArtifactStore::open_default().unwrap();
+        let html = store.load_latest_html(&id).unwrap();
+        assert!(html.contains("from file"));
+        assert!(!html.contains("this text must be ignored"));
+
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+                None => std::env::remove_var("IRONHERMES_HOME"),
+            }
+            match prev_prof {
+                Some(v) => std::env::set_var("IRONHERMES_ARTIFACTS_PROFILE", v),
+                None => std::env::remove_var("IRONHERMES_ARTIFACTS_PROFILE"),
+            }
+            match prev_db {
+                Some(v) => std::env::set_var("IRONHERMES_ARTIFACTS_DB", v),
+                None => std::env::remove_var("IRONHERMES_ARTIFACTS_DB"),
+            }
+        }
+    }
+
+    /// Task 2 (D-05/D-06): with no deliverable file and a non-blank
+    /// `result`, an artifact publishes with the markdown wire format and the
+    /// `result` text as its body.
+    #[test]
+    fn capture_completion_artifact_publishes_result_text_when_no_file() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var("IRONHERMES_HOME").ok();
+        let prev_prof = std::env::var("IRONHERMES_ARTIFACTS_PROFILE").ok();
+        let prev_db = std::env::var("IRONHERMES_ARTIFACTS_DB").ok();
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", home.path());
+            std::env::remove_var("IRONHERMES_ARTIFACTS_PROFILE");
+            std::env::remove_var("IRONHERMES_ARTIFACTS_DB");
+        }
+
+        let task_id = "t_resulttextnofile01";
+        let id = capture_completion_artifact(task_id, "Task", Some("declared result text"), "build the thing", "test-bot")
+            .expect("result text must be published as markdown when no file exists");
+        let store = ironhermes_artifacts::ArtifactStore::open_default().unwrap();
+        let summary = store
+            .latest_for_source("kanban", task_id)
+            .unwrap()
+            .expect("artifact recorded for the task");
+        assert_eq!(summary.id, id);
+        let html = store.load_latest_html(&id).unwrap();
+        assert!(html.contains("declared result text"));
+
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+                None => std::env::remove_var("IRONHERMES_HOME"),
+            }
+            match prev_prof {
+                Some(v) => std::env::set_var("IRONHERMES_ARTIFACTS_PROFILE", v),
+                None => std::env::remove_var("IRONHERMES_ARTIFACTS_PROFILE"),
+            }
+            match prev_db {
+                Some(v) => std::env::set_var("IRONHERMES_ARTIFACTS_DB", v),
+                None => std::env::remove_var("IRONHERMES_ARTIFACTS_DB"),
+            }
+        }
+    }
+
+    /// Task 2 (D-06): with no deliverable file and a `result` that is
+    /// absent, empty, or whitespace-only, nothing is published.
+    #[test]
+    fn capture_completion_artifact_publishes_nothing_for_blank_result_and_no_file() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var("IRONHERMES_HOME").ok();
+        let prev_prof = std::env::var("IRONHERMES_ARTIFACTS_PROFILE").ok();
+        let prev_db = std::env::var("IRONHERMES_ARTIFACTS_DB").ok();
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", home.path());
+            std::env::remove_var("IRONHERMES_ARTIFACTS_PROFILE");
+            std::env::remove_var("IRONHERMES_ARTIFACTS_DB");
+        }
+
+        assert!(
+            capture_completion_artifact("t_blankresult_none01", "Task", None, "build the thing", "test-bot").is_none(),
+            "no file and no result must publish nothing"
+        );
+        assert!(
+            capture_completion_artifact("t_blankresult_empty01", "Task", Some(""), "build the thing", "test-bot").is_none(),
+            "no file and an empty result must publish nothing"
+        );
+        assert!(
+            capture_completion_artifact("t_blankresult_ws01", "Task", Some("   \n\t  "), "build the thing", "test-bot").is_none(),
+            "no file and a whitespace-only result must publish nothing"
+        );
+
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+                None => std::env::remove_var("IRONHERMES_HOME"),
+            }
+            match prev_prof {
+                Some(v) => std::env::set_var("IRONHERMES_ARTIFACTS_PROFILE", v),
+                None => std::env::remove_var("IRONHERMES_ARTIFACTS_PROFILE"),
+            }
+            match prev_db {
+                Some(v) => std::env::set_var("IRONHERMES_ARTIFACTS_DB", v),
+                None => std::env::remove_var("IRONHERMES_ARTIFACTS_DB"),
+            }
+        }
+    }
+
+    /// Task 2 (D-12): a task whose instruction text opts out, and which wrote
+    /// a deliverable file, gets a marked, body-free pointer record — not
+    /// suppression — naming the task's assignee as the producer.
+    #[test]
+    fn capture_completion_artifact_writes_pointer_on_opt_out() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var("IRONHERMES_HOME").ok();
+        let prev_prof = std::env::var("IRONHERMES_ARTIFACTS_PROFILE").ok();
+        let prev_db = std::env::var("IRONHERMES_ARTIFACTS_DB").ok();
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", home.path());
+            std::env::remove_var("IRONHERMES_ARTIFACTS_PROFILE");
+            std::env::remove_var("IRONHERMES_ARTIFACTS_DB");
+        }
+
+        let task_id = "t_optoutpointer01";
+        let ws = crate::paths::kanban_workspace_for(task_id);
+        std::fs::create_dir_all(&ws).unwrap();
+        let deliverable_text = "THE DELIVERABLE'S OWN SECRET BODY, NEVER STORED IN A POINTER";
+        std::fs::write(ws.join("index.html"), deliverable_text).unwrap();
+
+        let id = capture_completion_artifact(
+            task_id,
+            "Task",
+            None,
+            "just show it inline, don't publish",
+            "alice-bot",
+        )
+        .expect("an opt-out with a produced deliverable must still write a pointer record");
+
+        let store = ironhermes_artifacts::ArtifactStore::open_default().unwrap();
+        let (fmt, body) = store.load_latest_source(&id).unwrap();
+        assert_eq!(fmt, ironhermes_artifacts::SourceFormat::Markdown);
+        assert!(
+            body.starts_with(ironhermes_tools::chat_capture::POINTER_ARTIFACT_MARKER),
+            "pointer body must carry the marker"
+        );
+        assert!(body.contains("alice-bot"), "pointer must name the assignee as producer");
+        assert!(
+            !body.contains(deliverable_text),
+            "the deliverable's own text must never appear in the stored pointer body"
+        );
+
+        // Same source kind/ref as the full artifact would have used.
+        let summary = store
+            .latest_for_source("kanban", task_id)
+            .unwrap()
+            .expect("pointer occupies the same source kind/ref key");
+        assert_eq!(summary.id, id);
+
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+                None => std::env::remove_var("IRONHERMES_HOME"),
+            }
+            match prev_prof {
+                Some(v) => std::env::set_var("IRONHERMES_ARTIFACTS_PROFILE", v),
+                None => std::env::remove_var("IRONHERMES_ARTIFACTS_PROFILE"),
+            }
+            match prev_db {
+                Some(v) => std::env::set_var("IRONHERMES_ARTIFACTS_DB", v),
+                None => std::env::remove_var("IRONHERMES_ARTIFACTS_DB"),
+            }
+        }
+    }
+
+    /// Task 2 (D-12): a task whose instruction text opts out and which
+    /// produced nothing at all (no file, no result) publishes nothing —
+    /// there is no output to record.
+    #[test]
+    fn capture_completion_artifact_writes_nothing_on_opt_out_with_no_output() {
+        let _guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let prev_home = std::env::var("IRONHERMES_HOME").ok();
+        let prev_prof = std::env::var("IRONHERMES_ARTIFACTS_PROFILE").ok();
+        let prev_db = std::env::var("IRONHERMES_ARTIFACTS_DB").ok();
+        unsafe {
+            std::env::set_var("IRONHERMES_HOME", home.path());
+            std::env::remove_var("IRONHERMES_ARTIFACTS_PROFILE");
+            std::env::remove_var("IRONHERMES_ARTIFACTS_DB");
+        }
+
+        assert!(
+            capture_completion_artifact(
+                "t_optoutnooutput01",
+                "Task",
+                None,
+                "no artifact please, just show it inline",
+                "alice-bot",
+            )
+            .is_none(),
+            "an opt-out with no deliverable at all must publish nothing"
+        );
+
+        unsafe {
+            match prev_home {
+                Some(v) => std::env::set_var("IRONHERMES_HOME", v),
+                None => std::env::remove_var("IRONHERMES_HOME"),
+            }
+            match prev_prof {
+                Some(v) => std::env::set_var("IRONHERMES_ARTIFACTS_PROFILE", v),
+                None => std::env::remove_var("IRONHERMES_ARTIFACTS_PROFILE"),
+            }
+            match prev_db {
+                Some(v) => std::env::set_var("IRONHERMES_ARTIFACTS_DB", v),
+                None => std::env::remove_var("IRONHERMES_ARTIFACTS_DB"),
+            }
+        }
     }
 }

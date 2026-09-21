@@ -41,7 +41,8 @@
 //! 04, D-21 re-derivation, RESEARCH Pitfall 4).** Upstream's 20-minute
 //! ceiling exists to extend a deadline while a session is *visibly still
 //! working* — a signal [`run_bot_handoff`] does not have, since it blocks
-//! until child exit or its own 180-second `BOT_HANDOFF_TIMEOUT_SECONDS`.
+//! until child exit or its own configurable `bot_handoff_timeout_seconds()`
+//! ceiling (default 600s; `web_ui.bot_handoff_timeout_seconds`).
 //! Porting the number without its poll/extend/harvest machinery would copy
 //! a constant away from the mechanism that gives it meaning. 180s stands as
 //! a genuine hard per-member cap, and a timed-out member's turn reads as
@@ -87,12 +88,77 @@ fn speaker_label(speaker: &GroupRoomSpeaker) -> String {
     }
 }
 
-/// Phase 50.2 Plan 02 (D-21): a room's per-member session title —
-/// upstream's own naming convention (`Group: <room name>`), ported verbatim.
-/// Pure, no I/O; `run_group_rounds_with_settings` is the sole caller.
+/// Phase 52 Plan 05 (D-02, Round 1 codex HIGH): the ONE character
+/// [`group_session_title`] appends before a conversation-epoch suffix — the
+/// reserved discriminator `ironhermes-cli`'s widened
+/// `validate_bot_session_title` also accepts. Deliberately chosen OUTSIDE
+/// `group_chat_store::validate_group_room_name`'s own charset (pinned by
+/// that module's `the_epoch_separator_is_rejected_by_the_room_name_validator`
+/// test): both validators otherwise accept the IDENTICAL
+/// `is_ascii_alphanumeric() || ' ' | '.' | '_' | '-'` set, so an in-charset
+/// separator would let two distinct `(room, epoch)` pairs collide onto one
+/// rendered title — room `standup` at epoch 2 and room `standup.2` at epoch
+/// 1 would both render `Group: standup.2` under a `.`-suffix design,
+/// silently merging two different rooms' child sessions. Because `#` can
+/// never appear in a room name, a room name contains zero separators and an
+/// epoch-N title contains exactly one, so the split stays unambiguous.
+///
+/// `ironhermes-cli` cannot import this crate's title producer (crate
+/// boundary — `main.rs`'s own `CONVERSATION_EPOCH_SEPARATOR` doc comment
+/// records the same reasoning from the other side), so each crate carries
+/// its own authoritative copy of this literal; the two are pinned equal only
+/// by each side's own tests, never by a shared symbol.
 #[cfg(feature = "server")]
-pub(crate) fn group_session_title(room_name: &str) -> String {
-    format!("Group: {room_name}")
+pub(crate) const CONVERSATION_EPOCH_SEPARATOR: char = '#';
+
+/// Phase 50.2 Plan 02 (D-21) / Phase 52 Plan 05 (D-02, child side): a room's
+/// per-member session title — upstream's own naming convention
+/// (`Group: <room name>`) at conversation epoch 1, ported verbatim; from
+/// epoch 2 on, discriminated by the room's own `conversation_epoch` so a
+/// "New conversation" reset gives every member's own CLI subprocess a
+/// BRAND NEW session to resume instead of the same title resolving to the
+/// same stale on-disk session forever. Pure, no I/O;
+/// `run_group_rounds_with_settings` is the sole production caller and
+/// passes `transcript.room.conversation_epoch`.
+///
+/// The title is no longer a pure function of the room name alone — it is a
+/// pure function of `(room_name, conversation_epoch)`. Epoch 1 renders the
+/// EXACT pre-phase string with no suffix of any kind, deliberately: every
+/// already-resumed CLI session was created under that bare title and must
+/// keep resolving to it, and the pre-Phase-52 fixtures asserting
+/// `Group: standup` must keep passing unmodified.
+///
+/// From epoch 2 on, the title is `Group: {room_name}{CONVERSATION_EPOCH_SEPARATOR}{epoch}`.
+/// The suffix's maximum length is bounded by `u32`'s decimal width (10
+/// digits) plus the one separator character — 11 characters — which is what
+/// keeps the composed name portion inside `ironhermes-cli`'s
+/// `BOT_SESSION_TITLE_NAME_MAX` (80): 64 (room-name cap) + 11 = 75.
+#[cfg(feature = "server")]
+pub(crate) fn group_session_title(room_name: &str, conversation_epoch: u32) -> String {
+    if conversation_epoch == 1 {
+        return format!("Group: {room_name}");
+    }
+    format!("Group: {room_name}{CONVERSATION_EPOCH_SEPARATOR}{conversation_epoch}")
+}
+
+/// Phase 52 Plan 05 (D-02, room side): the room-wide replay boundary — one
+/// past the index of the LATER of any `GroupRoomSpeaker::System` marker
+/// rows in `messages`, or `0` when the transcript carries no marker at all.
+/// `run_group_rounds_with_settings` initializes every peer member's
+/// starting watermark from this value instead of the literal `0`, so a
+/// drive that runs after `group_chat_store::reset_room_conversation_impl`
+/// never replays a message posted before the reset's marker row. Before any
+/// reset (no marker row exists), this returns `0` — byte-for-byte the
+/// pre-Phase-52 boundary — which is what keeps every room's behavior
+/// unaffected until the "New conversation" action is used at least once.
+/// Pure, no I/O.
+#[cfg(feature = "server")]
+pub(crate) fn conversation_start_index(messages: &[GroupRoomMessage]) -> usize {
+    messages
+        .iter()
+        .rposition(|m| matches!(m.from, GroupRoomSpeaker::System))
+        .map(|idx| idx + 1)
+        .unwrap_or(0)
 }
 
 /// Phase 50.2 Plan 01 (D-20/D-05) / Phase 50.2 Plan 02 (D-21) / Phase 50.2
@@ -501,7 +567,7 @@ pub(crate) async fn run_group_rounds(
 /// exists to extend a deadline while a session is *visibly still working* —
 /// a signal [`crate::server::cli_handoff::run_bot_handoff`] does not have,
 /// since it blocks until child exit or its own 180-second timeout
-/// (`BOT_HANDOFF_TIMEOUT_SECONDS`). Porting the number without its
+/// (`bot_handoff_timeout_seconds()`). Porting the number without its
 /// poll/extend/harvest machinery would copy a constant away from the
 /// mechanism that gives it meaning. 180s stands as a genuine hard
 /// per-member cap, and a timed-out member's [`BotHandoffError::Timeout`]
@@ -509,12 +575,18 @@ pub(crate) async fn run_group_rounds(
 /// a room error — consistent with upstream's own "a failed turn is a pass,
 /// never a room error."
 ///
-/// **Per-member watermarks are local to this one drive.** Every member
-/// starts this call's round 1 at watermark `0` (the full persisted room
-/// history, bounded by `settings.history_limit`) and advances only across
-/// THIS call's own rounds — no protocol or store field exists yet to carry
-/// a watermark across two separate operator-triggered drives, so that is
-/// out of this plan's scope, not a silent gap.
+/// **Per-member watermarks start at the room's conversation-start boundary,
+/// not always at `0` (Phase 52 Plan 05, D-02 room side — retires the 50.2
+/// deferral this paragraph used to record).** Every member starts this
+/// call's round 1 at [`conversation_start_index`] over the room's persisted
+/// messages — `0` for a room that has never been reset (byte-for-byte the
+/// pre-Phase-52 boundary), or one past the last
+/// `GroupRoomSpeaker::System` marker row for a room a
+/// `group_chat_store::reset_room_conversation_impl` call has reset. A
+/// watermark still advances only across THIS call's own rounds after that —
+/// no protocol or store field carries a PER-MEMBER watermark across two
+/// separate operator-triggered drives; only the room-wide reset boundary
+/// does.
 ///
 /// **The drive-wide message cap is checked at round boundaries, not
 /// mid-fan-out.** Upstream's own serial driver can check `posted` before
@@ -552,6 +624,7 @@ pub(crate) async fn run_group_rounds_with_settings(
         at_ms: now_ms(),
         round: 1,
         status: MemberTurnStatus::Replied,
+        team_row: None,
     };
     // Phase 50.2 Plan 13 (CR-02 fix): seeded here, before `operator_msg` is
     // moved into the persist closure below, so round 1's responders are
@@ -582,21 +655,50 @@ pub(crate) async fn run_group_rounds_with_settings(
     // behaviors coexist in one drive.
     let room_id_for_clear = room_id.to_string();
     let _ = tokio::task::spawn_blocking(move || {
-        crate::server::group_chat_store::set_room_needs_you_impl(&room_id_for_clear, false)
+        crate::server::group_chat_store::set_room_needs_you_impl(&room_id_for_clear, false, None)
     })
     .await;
 
     let room_name = transcript.room.name.clone();
     let members = transcript.room.members.clone();
-    // Phase 50.2 Plan 02 (D-21): every member turn in this room carries the
-    // SAME `Group: <room name>` session title across every round of this
-    // drive, so each bot resumes its own persistent per-room session
-    // rather than starting from a blank slate on every dispatch.
-    let session_title = group_session_title(&room_name);
+    // Phase 50.2 Plan 02 (D-21) / Phase 52 Plan 05 (D-02, child side): every
+    // member turn in this room carries the SAME session title across every
+    // round of this drive, so each bot resumes its own persistent per-room
+    // session rather than starting from a blank slate on every dispatch —
+    // discriminated by the room's conversation epoch, so a reset gives every
+    // member a BRAND NEW session to resume instead of the same stale one.
+    let session_title = group_session_title(&room_name, transcript.room.conversation_epoch);
     let history_limit = settings.history_limit as usize;
+    // Phase 52 Plan 05 (D-02, room side): initialized ONCE, above the
+    // team/peer fork below, from `conversation_start_index` rather than the
+    // pre-Phase-52 literal `0` — both the peer round loop (which reads this
+    // map right after the fork) and the team drive (which returns before
+    // ever reaching it) inherit this same room-wide replay boundary from
+    // this one site, never a second, branch-local computation. See
+    // `conversation_start_index`'s own doc and this fn's "Per-member
+    // watermarks" doc paragraph above.
+    let mut watermarks: std::collections::HashMap<String, usize> = members
+        .iter()
+        .map(|m| (m.clone(), conversation_start_index(&transcript.messages)))
+        .collect();
 
-    let mut watermarks: std::collections::HashMap<String, usize> =
-        members.iter().map(|m| (m.clone(), 0usize)).collect();
+    // Phase 52 (D-08/D-17): the single fork between team rooms and peer
+    // rooms. A room whose `pattern` is `Some` runs exactly ONE
+    // host-orchestrated leader-decompose/worker-dispatch/leader-synthesize
+    // cycle instead of the peer round loop below — this `if` guard is the
+    // ENTIRE D-17 compliance mechanism. Everything below it, for a `pattern:
+    // None` room, stays byte-for-byte as it was before this phase.
+    if transcript.room.pattern.is_some() {
+        return crate::server::group_team_api::run_team_drive(
+            room_id,
+            transcript,
+            settings,
+            registry,
+            session_title,
+        )
+        .await
+        .map_err(GroupChatError::from);
+    }
 
     let mut rounds_run = 0u32;
     let mut posted = 0u32; // drive-wide, declared OUTSIDE the round loop.
@@ -628,6 +730,7 @@ pub(crate) async fn run_group_rounds_with_settings(
                     at_ms: now_ms(),
                     round: round_number,
                     status: MemberTurnStatus::Replied,
+                    team_row: None,
                 })
                 .collect();
             prev_round_messages.extend(injected.iter().cloned());
@@ -664,6 +767,23 @@ pub(crate) async fn run_group_rounds_with_settings(
         for member in &responders {
             let watermark = *watermarks.get(member).unwrap_or(&0);
             let delta = member_delta(&transcript.messages, watermark);
+            // Phase 52 Plan 04 (D-10, Round 1 codex HIGH): filter through
+            // the SAME `is_replayable_team_row` predicate `team_replay_delta`
+            // uses, at THIS call site rather than inside `member_delta`
+            // itself — `member_delta`'s own body and contract stay
+            // untouched. Covers the demoted-room case: a room that ran a
+            // team drive and then had D-07 demotion clear its `pattern`
+            // falls back to THIS peer loop, and without this filter it
+            // would replay every stored `WorkerResult` row again on every
+            // subsequent turn — the exact leak D-10's arithmetic exists to
+            // prevent, reappearing after demotion. A no-op for every room
+            // that never had a `pattern`: `team_row` is `None` on every
+            // row such a room ever produces (D-17), so the filter drops
+            // nothing.
+            let delta: Vec<GroupRoomMessage> = delta
+                .into_iter()
+                .filter(crate::server::group_team_api::is_replayable_team_row)
+                .collect();
             let delta = trim_room_history(&delta, history_limit);
             let delta_lines: Vec<(String, String)> = delta
                 .iter()
@@ -733,6 +853,7 @@ pub(crate) async fn run_group_rounds_with_settings(
                         at_ms: now,
                         round: round_number,
                         status,
+                        team_row: None,
                     });
                 }
                 Err(err) => {
@@ -747,6 +868,7 @@ pub(crate) async fn run_group_rounds_with_settings(
                         at_ms: now,
                         round: round_number,
                         status: MemberTurnStatus::Failed { reason },
+                        team_row: None,
                     });
                 }
             }
@@ -772,7 +894,7 @@ pub(crate) async fn run_group_rounds_with_settings(
             needs_you = true;
             let room_id_for_flag = room_id.to_string();
             let _ = tokio::task::spawn_blocking(move || {
-                crate::server::group_chat_store::set_room_needs_you_impl(&room_id_for_flag, true)
+                crate::server::group_chat_store::set_room_needs_you_impl(&room_id_for_flag, true, None)
             })
             .await;
         }
@@ -922,6 +1044,14 @@ pub async fn dispatch_group_round(
 
 /// Phase 50.2 Plan 01: create a group-chat room. Follows the crate's
 /// four-step write protocol.
+///
+/// Phase 50.2 Plan 01: create a group-chat room. Follows the crate's
+/// four-step write protocol.
+///
+/// Phase 52 (D-09): forwards `req.team` straight through to
+/// [`crate::server::group_chat_store::create_room_with_team_impl`] — a room
+/// can be created directly as a team room, through the same persisted
+/// write path a plain peer room uses. Nothing else in this fn changes.
 #[server]
 pub async fn create_group_room(
     req: crate::protocol::CreateGroupRoomRequest,
@@ -934,7 +1064,11 @@ pub async fn create_group_room(
             .map_err(ServerFnError::new)?;
 
         tokio::task::spawn_blocking(move || {
-            crate::server::group_chat_store::create_room_impl(&req.name, &req.members)
+            crate::server::group_chat_store::create_room_with_team_impl(
+                &req.name,
+                &req.members,
+                req.team.as_ref(),
+            )
         })
         .await
         .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
@@ -1020,6 +1154,47 @@ pub async fn delete_group_room(room_id: String) -> Result<(), ServerFnError> {
     }
 }
 
+/// Phase 52 Plan 05 (D-02/D-17): the "New conversation" action — resets a
+/// room's conversational continuity for EVERY room, peer and team alike
+/// (D-17's single explicit exception to a `pattern: None` room otherwise
+/// keeping 50.2's behavior exactly). Follows the crate's four-step write
+/// protocol, identically to [`delete_group_room`] above.
+///
+/// **No child process, no child-session rewrite.** This fn is a
+/// `#[server]` round trip whose handler bumps one integer and appends one
+/// row on a `spawn_blocking` thread — it spawns no subprocess and rewrites
+/// no on-disk CLI session. The child-side break
+/// (`ironhermes-cli` resuming a DIFFERENT session next dispatch) is a
+/// DERIVED consequence, computed at the NEXT round drive when
+/// `group_session_title` renders a different title from the newly
+/// persisted epoch — not an effect of this fn's own execution.
+#[server]
+pub async fn reset_group_room_conversation(
+    room_id: String,
+) -> Result<crate::protocol::GroupRoom, ServerFnError> {
+    #[cfg(feature = "server")]
+    {
+        let config = ironhermes_core::config::Config::load()
+            .map_err(|e| ServerFnError::new(format!("Config load failed: {e}")))?;
+        crate::server::profile_api::check_profile_write_gate(&config)
+            .map_err(ServerFnError::new)?;
+
+        tokio::task::spawn_blocking(move || {
+            crate::server::group_chat_store::reset_room_conversation_impl(&room_id)
+        })
+        .await
+        .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
+        .map_err(|e| ServerFnError::new(e.to_string()))
+    }
+    #[cfg(not(feature = "server"))]
+    {
+        let _ = room_id;
+        Err(ServerFnError::new(
+            "reset_group_room_conversation unavailable without `server` feature",
+        ))
+    }
+}
+
 #[cfg(all(test, feature = "server"))]
 mod tests {
     use super::*;
@@ -1069,12 +1244,124 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // group_session_title (Phase 50.2 Plan 02)
+    // group_session_title / conversation_start_index (Phase 50.2 Plan 02 /
+    // Phase 52 Plan 05, D-02)
     // -------------------------------------------------------------------
 
     #[test]
-    fn group_session_title_formats_with_group_prefix() {
-        assert_eq!(group_session_title("standup"), "Group: standup");
+    fn group_session_title_at_epoch_one_is_byte_for_byte_the_pre_phase_shape() {
+        assert_eq!(group_session_title("standup", 1), "Group: standup");
+    }
+
+    #[test]
+    fn group_session_title_changes_when_the_conversation_epoch_advances() {
+        assert_ne!(
+            group_session_title("standup", 1),
+            group_session_title("standup", 2),
+            "advancing the conversation epoch must change the rendered title"
+        );
+        assert_eq!(group_session_title("standup", 2), "Group: standup#2");
+    }
+
+    #[test]
+    fn group_session_titles_cannot_collide_across_rooms_and_epochs() {
+        // Round 1 codex HIGH: under the original `.`-suffix design, room
+        // `standup` @ epoch 2 and room `standup.2` @ epoch 1 both rendered
+        // `Group: standup.2`. Named explicitly so a regression names
+        // itself rather than reporting a set-size mismatch.
+        assert_ne!(
+            group_session_title("standup", 2),
+            group_session_title("standup.2", 1),
+            "room `standup` @ epoch 2 must never collide with room `standup.2` @ epoch 1"
+        );
+
+        let names = ["standup", "standup.2", "standup.", "a_b", "a-b"];
+        let epochs = [1u32, 2, 3, 4];
+        let mut titles = std::collections::HashSet::new();
+        for name in names {
+            for epoch in epochs {
+                let title = group_session_title(name, epoch);
+                assert!(
+                    titles.insert(title.clone()),
+                    "duplicate title produced: {title:?} (name={name:?}, epoch={epoch})"
+                );
+            }
+        }
+    }
+
+    /// Phase 52 Plan 05 (D-02): a test-only port of
+    /// `ironhermes-cli::validate_bot_session_title`'s widened rules — the
+    /// two crates share no code (crate boundary), so this mirrors the SAME
+    /// "port the rules, don't import them" precedent that fn's own doc
+    /// comment already records for `validate_group_room_name`'s rules.
+    /// Must be kept in lockstep with `main.rs`'s real validator; any drift
+    /// is a plan-doc problem, not a runtime one, since production title
+    /// composition never calls this copy.
+    fn cli_validator_accepts(title: &str) -> bool {
+        const NAME_MAX: usize = 80;
+        let Some(name) = title.strip_prefix("Group: ") else {
+            return title == "Bot Chat";
+        };
+        if name.is_empty() || name.chars().count() > NAME_MAX {
+            return false;
+        }
+        let has_invalid_char = name
+            .chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-' | '#')));
+        if has_invalid_char {
+            return false;
+        }
+        !(name.contains("..") || name.contains('/') || name.contains('\\') || name.contains('$'))
+    }
+
+    #[test]
+    fn the_longest_constructible_discriminated_title_is_accepted_by_the_cli_validator() {
+        let name = "a".repeat(64);
+        let title = group_session_title(&name, u32::MAX);
+        assert!(
+            cli_validator_accepts(&title),
+            "the longest constructible discriminated title must be ACCEPTED, not merely \
+             measured for length: {title:?}"
+        );
+    }
+
+    #[test]
+    fn conversation_start_index_returns_the_position_after_the_last_system_marker() {
+        fn msg(from: GroupRoomSpeaker) -> GroupRoomMessage {
+            GroupRoomMessage {
+                from,
+                text: "x".to_string(),
+                at_ms: 0,
+                round: 0,
+                status: MemberTurnStatus::Replied,
+                team_row: None,
+            }
+        }
+
+        assert_eq!(
+            conversation_start_index(&[]),
+            0,
+            "an empty transcript has no marker, so the boundary is 0"
+        );
+
+        let no_marker = vec![
+            msg(GroupRoomSpeaker::Operator),
+            msg(GroupRoomSpeaker::Member("scout".to_string())),
+        ];
+        assert_eq!(conversation_start_index(&no_marker), 0);
+
+        let two_markers = vec![
+            msg(GroupRoomSpeaker::Operator),
+            msg(GroupRoomSpeaker::System), // index 1 — the earlier marker
+            msg(GroupRoomSpeaker::Member("scout".to_string())),
+            msg(GroupRoomSpeaker::System), // index 3 — the later marker
+            msg(GroupRoomSpeaker::Operator),
+        ];
+        assert_eq!(
+            conversation_start_index(&two_markers),
+            4,
+            "the boundary must be one past the LATER of the two markers, not the earlier"
+        );
     }
 
     // -------------------------------------------------------------------
@@ -1114,10 +1401,7 @@ mod tests {
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
         for name in ["scout", "zig", "badbot"] {
-            std::fs::create_dir_all(
-                crate::server::profile_api::profile_dir_for(name).join("workspace"),
-            )
-            .expect("mkdir workspace");
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
         }
         let stub = write_stub_script(
             dir.path(),
@@ -1184,10 +1468,7 @@ mod tests {
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
         for name in ["scout", "zig", "ada"] {
-            std::fs::create_dir_all(
-                crate::server::profile_api::profile_dir_for(name).join("workspace"),
-            )
-            .expect("mkdir workspace");
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
         }
         let stub = write_stub_script(dir.path(), "all-pass-stub.sh", "echo \"(pass)\"");
         let _bin_guard = ScopedEnv::set(
@@ -1220,10 +1501,7 @@ mod tests {
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
         for name in ["scout", "zig", "ada"] {
-            std::fs::create_dir_all(
-                crate::server::profile_api::profile_dir_for(name).join("workspace"),
-            )
-            .expect("mkdir workspace");
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
         }
         let stub = write_stub_script(dir.path(), "always-reply-stub.sh", "echo \"keep talking\"");
         let _bin_guard = ScopedEnv::set(
@@ -1268,10 +1546,7 @@ mod tests {
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
         for name in ["scout", "zig", "nova"] {
-            std::fs::create_dir_all(
-                crate::server::profile_api::profile_dir_for(name).join("workspace"),
-            )
-            .expect("mkdir workspace");
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
         }
         // `$2` is the profile name (build_bot_handoff_argv's `--profile
         // <name>` positional). scout mentions @nova; zig sleeps 1s so its
@@ -1384,10 +1659,7 @@ mod tests {
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
         for name in ["scout", "zig"] {
-            std::fs::create_dir_all(
-                crate::server::profile_api::profile_dir_for(name).join("workspace"),
-            )
-            .expect("mkdir workspace");
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
         }
         // Both bots reply with a distinct, non-pass, mention-free message —
         // WHICH of them actually runs round 1 is decided entirely by the
@@ -1492,10 +1764,7 @@ mod tests {
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
         for name in ["scout", "zig"] {
-            std::fs::create_dir_all(
-                crate::server::profile_api::profile_dir_for(name).join("workspace"),
-            )
-            .expect("mkdir workspace");
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
         }
         // Both bots sleep ~2s before replying — generous by an order of
         // magnitude relative to the enqueue below, which lands a few
@@ -1587,10 +1856,7 @@ mod tests {
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
         for name in ["scout", "zig"] {
-            std::fs::create_dir_all(
-                crate::server::profile_api::profile_dir_for(name).join("workspace"),
-            )
-            .expect("mkdir workspace");
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
         }
         let stub = write_stub_script(dir.path(), "no-steering-stub.sh", "echo \"(pass)\"");
         let _bin_guard = ScopedEnv::set(
@@ -1647,10 +1913,7 @@ mod tests {
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
         for name in ["scout", "zig"] {
-            std::fs::create_dir_all(
-                crate::server::profile_api::profile_dir_for(name).join("workspace"),
-            )
-            .expect("mkdir workspace");
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
         }
         // Config::load() reads <IRONHERMES_HOME>/config.yaml fresh from
         // disk (never a test-injected Config value) — write the
@@ -1783,10 +2046,7 @@ mod tests {
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
         for name in ["scout", "zig"] {
-            std::fs::create_dir_all(
-                crate::server::profile_api::profile_dir_for(name).join("workspace"),
-            )
-            .expect("mkdir workspace");
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
         }
         std::fs::write(
             dir.path().join("config.yaml"),
@@ -1889,10 +2149,7 @@ mod tests {
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
         for name in ["scout", "zig"] {
-            std::fs::create_dir_all(
-                crate::server::profile_api::profile_dir_for(name).join("workspace"),
-            )
-            .expect("mkdir workspace");
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
         }
         let stub = write_stub_script(dir.path(), "always-reply-stub.sh", "echo \"keep talking\"");
         let _bin_guard = ScopedEnv::set(
@@ -1940,10 +2197,7 @@ mod tests {
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
         for name in ["scout", "zig", "ada"] {
-            std::fs::create_dir_all(
-                crate::server::profile_api::profile_dir_for(name).join("workspace"),
-            )
-            .expect("mkdir workspace");
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
         }
         // 3 members. Round 1 always includes every member (the round's
         // starting message is the operator's single-element
@@ -2030,10 +2284,7 @@ mod tests {
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
         for name in ["scout", "zig", "ada"] {
-            std::fs::create_dir_all(
-                crate::server::profile_api::profile_dir_for(name).join("workspace"),
-            )
-            .expect("mkdir workspace");
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
         }
         let stub = write_stub_script(dir.path(), "always-reply-stub.sh", "echo \"keep talking\"");
         let _bin_guard = ScopedEnv::set(
@@ -2080,10 +2331,7 @@ mod tests {
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
         for name in ["scout", "zig"] {
-            std::fs::create_dir_all(
-                crate::server::profile_api::profile_dir_for(name).join("workspace"),
-            )
-            .expect("mkdir workspace");
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
         }
         let stub = write_stub_script(dir.path(), "always-reply-stub.sh", "echo \"keep talking\"");
         let _bin_guard = ScopedEnv::set(
@@ -2130,10 +2378,7 @@ mod tests {
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
         for name in ["scout", "zig"] {
-            std::fs::create_dir_all(
-                crate::server::profile_api::profile_dir_for(name).join("workspace"),
-            )
-            .expect("mkdir workspace");
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
         }
         let stub = write_stub_script(dir.path(), "all-pass-stub.sh", "echo \"(pass)\"");
         let _bin_guard = ScopedEnv::set(
@@ -2146,7 +2391,7 @@ mod tests {
             &["scout".to_string(), "zig".to_string()],
         )
         .expect("create_room_impl should succeed");
-        crate::server::group_chat_store::set_room_needs_you_impl(&room.id, true)
+        crate::server::group_chat_store::set_room_needs_you_impl(&room.id, true, None)
             .expect("set_room_needs_you_impl should succeed");
 
         run_group_rounds(&room.id, "operator kickoff")
@@ -2176,10 +2421,7 @@ mod tests {
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
         for name in ["scout", "zig"] {
-            std::fs::create_dir_all(
-                crate::server::profile_api::profile_dir_for(name).join("workspace"),
-            )
-            .expect("mkdir workspace");
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
         }
         let stub = write_stub_script(
             dir.path(),
@@ -2196,7 +2438,7 @@ mod tests {
             &["scout".to_string(), "zig".to_string()],
         )
         .expect("create_room_impl should succeed");
-        crate::server::group_chat_store::set_room_needs_you_impl(&room.id, true)
+        crate::server::group_chat_store::set_room_needs_you_impl(&room.id, true, None)
             .expect("set_room_needs_you_impl should succeed");
 
         let outcome = run_group_rounds(&room.id, "operator kickoff")
@@ -2226,10 +2468,7 @@ mod tests {
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
         for name in ["scout", "zig"] {
-            std::fs::create_dir_all(
-                crate::server::profile_api::profile_dir_for(name).join("workspace"),
-            )
-            .expect("mkdir workspace");
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
         }
         let capture_dir = dir.path().to_path_buf();
         // argv layout is `--profile <name> chat -q <message> --session
@@ -2298,10 +2537,7 @@ mod tests {
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
         for name in ["scout", "zig"] {
-            std::fs::create_dir_all(
-                crate::server::profile_api::profile_dir_for(name).join("workspace"),
-            )
-            .expect("mkdir workspace");
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
         }
         let argv_log_dir = dir.path().to_path_buf();
         let stub = write_stub_script(
@@ -2343,6 +2579,153 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // Phase 52 Plan 04 (D-10, Round 1 codex HIGH): the peer round loop's
+    // own `is_replayable_team_row` filter — the demoted-room case.
+    // -------------------------------------------------------------------
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_demoted_rooms_peer_prompt_contains_no_stored_worker_row_text() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set(
+            "IRONHERMES_HOME",
+            dir.path().to_str().expect("tempdir path must be utf8"),
+        );
+        for name in ["lead", "hand"] {
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
+        }
+
+        // Phase 1: run a real team drive so the room's transcript carries a
+        // persisted `WorkerResult` row with a sentinel summary.
+        let team_stub_body = r###"prompt="$5"
+case "$prompt" in
+  *"ROLE: LEADER-DECOMPOSE"*)
+    printf '%s' 'Plan.
+
+```json
+{"tasks": [{"worker": "hand", "summary": "s", "task": "t"}]}
+```'
+    ;;
+  *"ROLE: LEADER-SYNTHESIS"*)
+    printf '%s' 'Done.
+
+```json
+{"status": "complete", "message": "done"}
+```'
+    ;;
+  *)
+    printf '%s' 'Sub-task complete.
+
+```json
+{"status": "completed", "summary": "STORED-WORKER-ROW-SENTINEL", "detail": null}
+```'
+    ;;
+esac
+"###;
+        let team_stub = write_stub_script(dir.path(), "team-phase-stub.sh", team_stub_body);
+        let _bin_guard = ScopedEnv::set(
+            "IRONHERMES_WORKER_BIN",
+            team_stub.to_str().expect("utf8 stub path"),
+        );
+
+        let mut roles = std::collections::BTreeMap::new();
+        roles.insert("lead".to_string(), crate::protocol::MemberRole::Leader);
+        let room = crate::server::group_chat_store::create_team_room_for_test(
+            "Demote Room",
+            &["lead".to_string(), "hand".to_string()],
+            crate::protocol::TeamPattern::OrchestratorWorkers,
+            roles,
+        )
+        .expect("create_team_room_for_test should succeed");
+
+        run_group_rounds(&room.id, "please do the thing")
+            .await
+            .expect("the team drive must succeed");
+
+        // Phase 2: demote to a peer room (D-07) — an explicit `pattern:
+        // None` team-setup write, membership unchanged.
+        let setup = crate::protocol::GroupRoomTeamSetup {
+            pattern: None,
+            roles: std::collections::BTreeMap::new(),
+            max_cycles: None,
+            leader_prompt_override: None,
+            worker_prompt_override: None,
+        };
+        let demoted = crate::server::group_chat_store::update_room_team_impl(&room.id, &room.members, &setup)
+            .expect("demotion must succeed");
+        assert_eq!(demoted.pattern, None, "the room must now be a plain peer room");
+
+        // Phase 3: a NEW stub that captures each member's dispatched prompt
+        // — the peer round loop now drives this room.
+        let peer_stub_body = "capture_dir=$(dirname \"$0\")\nprintf '%s' \"$5\" > \"$capture_dir/captured-$2.txt\"\necho \"(pass)\"\n";
+        let peer_stub = write_stub_script(dir.path(), "peer-phase-stub.sh", peer_stub_body);
+        let _bin_guard_2 = ScopedEnv::set(
+            "IRONHERMES_WORKER_BIN",
+            peer_stub.to_str().expect("utf8 stub path"),
+        );
+
+        run_group_rounds(&room.id, "operator follow-up")
+            .await
+            .expect("the demoted room's peer drive must succeed");
+
+        let hand_prompt = std::fs::read_to_string(dir.path().join("captured-hand.txt"))
+            .expect("hand's dispatched prompt must have been captured");
+        assert!(
+            !hand_prompt.contains("STORED-WORKER-ROW-SENTINEL"),
+            "a demoted room's peer prompt must not replay stored worker row text: {hand_prompt}"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_never_team_rooms_peer_prompt_is_byte_for_byte_unchanged() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set(
+            "IRONHERMES_HOME",
+            dir.path().to_str().expect("tempdir path must be utf8"),
+        );
+        for name in ["scout", "zig"] {
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
+        }
+        // Replies "(pass)" so the round settles after round 1 — the
+        // captured file must hold round 1's own prompt (which contains
+        // the operator's kickoff message), not some later round's.
+        let stub_body = "capture_dir=$(dirname \"$0\")\nprintf '%s' \"$5\" > \"$capture_dir/captured-$2.txt\"\necho \"(pass)\"\n";
+        let stub = write_stub_script(dir.path(), "never-team-stub.sh", stub_body);
+        let _bin_guard = ScopedEnv::set(
+            "IRONHERMES_WORKER_BIN",
+            stub.to_str().expect("utf8 stub path"),
+        );
+
+        let room = crate::server::group_chat_store::create_room_impl(
+            "Ops Room",
+            &["scout".to_string(), "zig".to_string()],
+        )
+        .expect("create_room_impl should succeed");
+        assert_eq!(room.pattern, None, "a freshly created room must default to a peer room");
+
+        run_group_rounds(&room.id, "operator kickoff")
+            .await
+            .expect("run_group_rounds must succeed");
+
+        let transcript = crate::server::group_chat_store::load_room_impl(&room.id)
+            .expect("load_room_impl should succeed");
+        assert!(
+            transcript.messages.iter().all(|m| m.team_row.is_none()),
+            "every row in a never-team room's transcript must carry team_row: None"
+        );
+
+        // The is_replayable_team_row filter is a no-op here — scout's
+        // dispatched prompt must still contain the operator's own message,
+        // proving nothing was dropped.
+        let scout_prompt = std::fs::read_to_string(dir.path().join("captured-scout.txt"))
+            .expect("scout's dispatched prompt must have been captured");
+        assert!(scout_prompt.contains("operator kickoff"), "{scout_prompt}");
+    }
+
+    // -------------------------------------------------------------------
     // Phase 50.2 Plan 04 (D-21, D-03): the orchestration truth table,
     // transcribed as failing assertions (RED). Every test name is prefixed
     // `group_round_` so it stays reachable under this module's own
@@ -2359,6 +2742,7 @@ mod tests {
             at_ms: 0,
             round: 1,
             status,
+            team_row: None,
         }
     }
 
@@ -2542,6 +2926,7 @@ mod tests {
             at_ms: 0,
             round: 1,
             status: MemberTurnStatus::Replied,
+            team_row: None,
         }
     }
 
@@ -2776,10 +3161,7 @@ mod tests {
             dir.path().to_str().expect("tempdir path must be utf8"),
         );
         for name in ["scout", "zig"] {
-            std::fs::create_dir_all(
-                crate::server::profile_api::profile_dir_for(name).join("workspace"),
-            )
-            .expect("mkdir workspace");
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
         }
         // `$2` is the profile name. Both members sleep ~2s then echo a
         // distinct, non-pass reply, giving the poller a window to observe
@@ -2838,7 +3220,7 @@ mod tests {
             .expect("run_group_rounds_with_settings must succeed");
         assert_eq!(outcome.rounds_run, 1);
 
-        let expected_title = group_session_title("Ops Room");
+        let expected_title = group_session_title("Ops Room", 1);
         assert!(
             seen_session_ids.contains(&crate::server::cli_handoff::handoff_turn_session_id(
                 "scout",
@@ -2862,5 +3244,215 @@ mod tests {
             registry_for_poll.list_all().await.is_empty(),
             "G-50.2-2b: the registry must be empty once the drive resolves"
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 52 Plan 05 (D-02/D-17): a drive after a "New conversation"
+    // reset replays nothing from before the reset's marker row.
+    // -------------------------------------------------------------------
+
+    /// Same shape as `team_drive_tracer...`'s own `TEAM_STUB_BODY`
+    /// (`group_team_api.rs`), except it APPENDS every prompt it receives to
+    /// one shared capture file (`captured-all.txt`) instead of overwriting
+    /// a per-profile file — appending, plus a byte-offset checkpoint taken
+    /// between drives, is what lets a test distinguish "captured during
+    /// drive 1" from "captured during drive 2" without a second stub
+    /// binary or a second capture scheme.
+    const TEAM_RESET_STUB_BODY: &str = r###"capture_dir=$(dirname "$0")
+printf '%s\n===ENTRY-END===\n' "$5" >> "$capture_dir/captured-all.txt"
+prompt="$5"
+case "$prompt" in
+  *"ROLE: LEADER-DECOMPOSE"*)
+    printf '%s' 'Here is my plan.
+
+```json
+{"tasks": [{"worker": "hand", "summary": "do it", "task": "Do the sub-task."}]}
+```'
+    ;;
+  *"ROLE: LEADER-SYNTHESIS"*)
+    printf '%s' 'Synthesis complete.
+
+```json
+{"status": "complete", "message": "done"}
+```'
+    ;;
+  *)
+    printf '%s' 'Sub-task complete.
+
+```json
+{"status": "completed", "summary": "done", "detail": null}
+```'
+    ;;
+esac
+"###;
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_drive_after_a_reset_replays_no_message_from_before_the_marker() {
+        let _lock = crate::server::test_support::env_lock();
+        crate::server::handoff_steering::reset_steering_for_test();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set(
+            "IRONHERMES_HOME",
+            dir.path().to_str().expect("tempdir path must be utf8"),
+        );
+        for name in ["lead", "hand"] {
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
+        }
+        let stub = write_stub_script(dir.path(), "team-reset-stub.sh", TEAM_RESET_STUB_BODY);
+        let _bin_guard = ScopedEnv::set(
+            "IRONHERMES_WORKER_BIN",
+            stub.to_str().expect("utf8 stub path"),
+        );
+
+        let mut roles = std::collections::BTreeMap::new();
+        roles.insert("lead".to_string(), crate::protocol::MemberRole::Leader);
+        let room = crate::server::group_chat_store::create_team_room_for_test(
+            "Ops Room",
+            &["lead".to_string(), "hand".to_string()],
+            crate::protocol::TeamPattern::OrchestratorWorkers,
+            roles,
+        )
+        .expect("create_team_room_for_test should succeed");
+
+        run_group_rounds(&room.id, "DRIVE-ONE-SENTINEL-first-ask")
+            .await
+            .expect("first drive must succeed");
+
+        let capture_path = dir.path().join("captured-all.txt");
+        let checkpoint = std::fs::metadata(&capture_path)
+            .expect("the stub must have captured at least the first drive")
+            .len();
+
+        crate::server::group_chat_store::reset_room_conversation_impl(&room.id)
+            .expect("reset must succeed");
+
+        run_group_rounds(&room.id, "DRIVE-TWO-SENTINEL-second-ask")
+            .await
+            .expect("second drive must succeed");
+
+        let full = std::fs::read_to_string(&capture_path).expect("read capture file");
+        let after_reset = &full[checkpoint as usize..];
+        assert!(
+            after_reset.contains("DRIVE-TWO-SENTINEL-second-ask"),
+            "the second drive's own operator message must reach the members: {after_reset}"
+        );
+        assert!(
+            !after_reset.contains("DRIVE-ONE-SENTINEL-first-ask"),
+            "no prompt dispatched after the reset may carry the first drive's operator \
+             message text: {after_reset}"
+        );
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_peer_room_reset_also_breaks_the_replay() {
+        // D-17's single explicit exception: the "New conversation" action
+        // applies to a `pattern: None` room too, even though this phase's
+        // team work otherwise leaves a peer room's behavior byte-for-byte
+        // as 50.2 left it.
+        let _lock = crate::server::test_support::env_lock();
+        crate::server::handoff_steering::reset_steering_for_test();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set(
+            "IRONHERMES_HOME",
+            dir.path().to_str().expect("tempdir path must be utf8"),
+        );
+        for name in ["scout", "zig"] {
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
+        }
+        // Replies "(pass)" so every round settles immediately — one round
+        // per drive, and every prompt still gets captured before the reply
+        // is produced.
+        let stub_body = "capture_dir=$(dirname \"$0\")\n\
+            printf '%s\\n===ENTRY-END===\\n' \"$5\" >> \"$capture_dir/captured-all.txt\"\n\
+            echo \"(pass)\"\n";
+        let stub = write_stub_script(dir.path(), "peer-reset-stub.sh", stub_body);
+        let _bin_guard = ScopedEnv::set(
+            "IRONHERMES_WORKER_BIN",
+            stub.to_str().expect("utf8 stub path"),
+        );
+
+        let room = crate::server::group_chat_store::create_room_impl(
+            "Ops Room",
+            &["scout".to_string(), "zig".to_string()],
+        )
+        .expect("create_room_impl should succeed");
+        assert_eq!(room.pattern, None, "this test's room must be a peer room");
+
+        run_group_rounds(&room.id, "DRIVE-ONE-SENTINEL-first-ask")
+            .await
+            .expect("first drive must succeed");
+
+        let capture_path = dir.path().join("captured-all.txt");
+        let checkpoint = std::fs::metadata(&capture_path)
+            .expect("the stub must have captured at least the first drive")
+            .len();
+
+        crate::server::group_chat_store::reset_room_conversation_impl(&room.id)
+            .expect("reset must succeed");
+
+        run_group_rounds(&room.id, "DRIVE-TWO-SENTINEL-second-ask")
+            .await
+            .expect("second drive must succeed");
+
+        let full = std::fs::read_to_string(&capture_path).expect("read capture file");
+        let after_reset = &full[checkpoint as usize..];
+        assert!(
+            after_reset.contains("DRIVE-TWO-SENTINEL-second-ask"),
+            "the second drive's own operator message must reach the members: {after_reset}"
+        );
+        assert!(
+            !after_reset.contains("DRIVE-ONE-SENTINEL-first-ask"),
+            "no prompt dispatched after the reset may carry the first drive's operator \
+             message text: {after_reset}"
+        );
+    }
+
+    // Same shape as every other env-serialized async test in this module: the
+    // guard is `test_support::env_lock()`, a test-only mutex serializing
+    // env-var mutation, NOT a Dioxus signal borrow. The genuinely unsafe
+    // across-await types are enumerated in `crates/iron_hermes_ui/clippy.toml`
+    // (`GenerationalRef`/`GenerationalRefMut`/`WriteLock`) and none appear here.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn reset_group_room_conversation_is_refused_when_the_profile_write_gate_is_closed() {
+        let _lock = crate::server::test_support::env_lock();
+        crate::server::handoff_steering::reset_steering_for_test();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _home = ScopedEnv::set(
+            "IRONHERMES_HOME",
+            dir.path().to_str().expect("tempdir path must be utf8"),
+        );
+        for name in ["scout", "zig"] {
+            crate::server::profile_fixture::scaffold_dispatchable_profile(name);
+        }
+        // No config.yaml written — Config::load() falls back to defaults,
+        // and `security.web_config_write_enabled` defaults to `false`
+        // (`profile_api.rs`'s own `check_profile_write_gate` unit test
+        // pins this) — the gate is closed, fail-closed, like every sibling
+        // room-mutating `#[server]` fn.
+
+        let room = crate::server::group_chat_store::create_room_impl(
+            "Ops Room",
+            &["scout".to_string(), "zig".to_string()],
+        )
+        .expect("create_room_impl should succeed");
+
+        let err = reset_group_room_conversation(room.id.clone())
+            .await
+            .expect_err("reset must fail closed, like every sibling room-mutating #[server] fn");
+        assert!(
+            err.to_string().contains("Config writes are disabled"),
+            "the error must name the write gate: {err}"
+        );
+
+        let unchanged = crate::server::group_chat_store::load_room_impl(&room.id)
+            .expect("load_room_impl should succeed");
+        assert_eq!(
+            unchanged.room.conversation_epoch, 1,
+            "a fail-closed refusal must not mutate anything"
+        );
+        assert!(unchanged.messages.is_empty());
     }
 }

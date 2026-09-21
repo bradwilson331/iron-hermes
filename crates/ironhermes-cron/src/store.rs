@@ -109,6 +109,12 @@ pub struct NewJobSpec {
     pub enabled_toolsets: Option<Vec<String>>,
     pub workdir: Option<String>,
     pub continuity: bool,
+    /// Phase 49.7 Plan 01 (D-06 `--budget`): an explicit repeat count that
+    /// wins over the schedule-derived default in [`JobStore::add_job_spec`].
+    /// `None` (the default from [`NewJobSpec::new`]) leaves the existing
+    /// schedule-only behavior unchanged for every caller that doesn't set
+    /// it — `/loop`'s `create_raw_job` is the only caller that does.
+    pub repeat_times: Option<u32>,
 }
 
 impl NewJobSpec {
@@ -139,6 +145,7 @@ impl NewJobSpec {
             enabled_toolsets: None,
             workdir: None,
             continuity: false,
+            repeat_times: None,
         }
     }
 }
@@ -340,13 +347,21 @@ impl JobStore {
         let now = Utc::now();
         let next_run_at = compute_next_run(&spec.schedule, now)?;
 
-        // Auto-set repeat.times=Some(1) for Once kind
-        let repeat = match &spec.schedule {
-            ScheduleParsed::Once { .. } => RepeatConfig {
-                times: Some(1),
+        // Phase 49.7 Plan 01 (D-06 `--budget`): an explicit `repeat_times`
+        // wins over the schedule-derived default. Otherwise, auto-set
+        // repeat.times=Some(1) for Once kind, else the unbounded default.
+        let repeat = match spec.repeat_times {
+            Some(n) => RepeatConfig {
+                times: Some(n),
                 completed: 0,
             },
-            _ => RepeatConfig::default(),
+            None => match &spec.schedule {
+                ScheduleParsed::Once { .. } => RepeatConfig {
+                    times: Some(1),
+                    completed: 0,
+                },
+                _ => RepeatConfig::default(),
+            },
         };
 
         let job = CronJob {

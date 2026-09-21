@@ -15,16 +15,22 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
-use crate::browser_session::{BrowserSession, find_chromium_binary};
+use crate::browser_session::{
+    BrowserSession, configured_browser_engine_available, configured_engine_prerequisite,
+};
 use crate::registry::{Prerequisite, Tool};
 
 pub struct BrowserCloseTool {
     session: Arc<Mutex<Option<BrowserSession>>>,
+    config: Arc<ironhermes_core::config::Config>,
 }
 
 impl BrowserCloseTool {
-    pub fn new(session: Arc<Mutex<Option<BrowserSession>>>) -> Self {
-        Self { session }
+    pub fn new(
+        session: Arc<Mutex<Option<BrowserSession>>>,
+        config: Arc<ironhermes_core::config::Config>,
+    ) -> Self {
+        Self { session, config }
     }
 }
 
@@ -56,19 +62,11 @@ impl Tool for BrowserCloseTool {
     }
 
     fn is_available(&self) -> bool {
-        find_chromium_binary(None).is_some()
+        configured_browser_engine_available(&self.config.browser)
     }
 
     fn prerequisites(&self) -> Vec<Prerequisite> {
-        vec![Prerequisite {
-            kind: "binary_present".to_string(),
-            name: "chromium-or-chrome".to_string(),
-            description:
-                "Chromium or Google Chrome browser binary on PATH or at a standard install location"
-                    .to_string(),
-            required: true,
-            group: None,
-        }]
+        vec![configured_engine_prerequisite(&self.config.browser)]
     }
 
     async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
@@ -97,9 +95,13 @@ mod tests {
         Arc::new(Mutex::new(None))
     }
 
+    fn dummy_config() -> Arc<ironhermes_core::config::Config> {
+        Arc::new(ironhermes_core::config::Config::default())
+    }
+
     #[test]
     fn name_and_toolset_match_d04() {
-        let t = BrowserCloseTool::new(dummy_session());
+        let t = BrowserCloseTool::new(dummy_session(), dummy_config());
         assert_eq!(t.name(), "browser_close");
         assert_eq!(t.toolset(), "browser");
     }
@@ -109,7 +111,7 @@ mod tests {
     /// If this test fails, the description was accidentally reverted to jargon-only language.
     #[test]
     fn description_uses_explicit_close_verb_for_llm_mapping() {
-        let t = BrowserCloseTool::new(dummy_session());
+        let t = BrowserCloseTool::new(dummy_session(), dummy_config());
         let desc = t.description().to_lowercase();
         // Phase 25.1 GAP-5: model must be able to map "close the browser" → this tool.
         // The description MUST contain both 'close' and 'browser' as substrings so the
@@ -129,7 +131,7 @@ mod tests {
     #[tokio::test]
     async fn close_on_none_session_is_idempotent() {
         let session = dummy_session();
-        let t = BrowserCloseTool::new(session.clone());
+        let t = BrowserCloseTool::new(session.clone(), dummy_config());
         let result = t.execute(json!({})).await.unwrap();
         assert!(result.contains("\"closed\":true"));
         assert!(result.contains("\"was_active\":false"));

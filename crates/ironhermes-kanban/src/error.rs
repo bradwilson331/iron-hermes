@@ -71,6 +71,12 @@ pub enum KanbanError {
     #[error("unknown bundled skill: {0}")]
     UnknownSkill(String),
 
+    /// Judge builder/invocation failure (Phase 49.7 D-04). The judge
+    /// contract lives in `ironhermes-core`, not here, so `JudgeError` is a
+    /// foreign type converted like any other `#[from]` arm in this enum.
+    #[error("judge error: {0}")]
+    Judge(#[from] ironhermes_core::judge::JudgeError),
+
     /// Generic fallback for ad-hoc errors carried from `anyhow`.
     #[error("{0}")]
     Other(#[from] anyhow::Error),

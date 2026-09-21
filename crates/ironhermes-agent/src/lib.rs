@@ -13,6 +13,8 @@ pub mod context_loader;
 pub mod context_refs;
 pub mod engine_factory;
 pub mod error_classifier;
+pub mod goal_session_loop;
+pub mod judge_builder;
 pub mod memory;
 pub mod memory_context;
 pub mod memory_flush_handler;
@@ -39,9 +41,9 @@ pub use agent_runtime::{
 pub use agent_wiring::attach_context_engine;
 pub use anthropic_client::AnthropicClient;
 pub use any_client::{
-    AnyClient, AnyClientSummarizationHandle, AnyClientVisionHandle, build_client,
-    build_main_client, build_main_client_with_model, build_role_client,
-    wire_fallback_if_configured,
+    AnyClient, AnyClientSummarizationHandle, AnyClientVisionHandle, SharedClient,
+    SharedResolver, build_client, build_main_client, build_main_client_with_model,
+    build_role_client, wire_fallback_if_configured,
 };
 pub use app_runtime_factory::{
     AppRuntimeBundle, AppRuntimeFactoryInput, DelegateTaskWiring, build_app_runtime_bundle,

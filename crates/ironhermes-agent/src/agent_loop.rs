@@ -4177,6 +4177,116 @@ mod fallback_tests {
         );
     }
 
+    /// Phase 51 Plan 20 (G-51-7) Task 2(b) — failover composition control.
+    /// The vision label (Task 1) and the pre-existing failover relabel
+    /// (`with_fallback_named`, the Cause E fix) are "two variants of one
+    /// rule": the row names the client that ran. This proves the
+    /// composition — a run whose INITIAL `provider_name` has already been
+    /// set to a role-routed provider (as Task 1's vision label now does)
+    /// still relabels to the fallback's name when failover fires, and the
+    /// identity written BEFORE the relabel is the routed name, not main's.
+    ///
+    /// Instrument choice: manually simulates the exact sequence the `run()`
+    /// loop performs at the failover site (agent_loop.rs's
+    /// `fallback_client.take()` + `fallback_provider_name.take()` +
+    /// `provider_name` overwrite) — the same technique
+    /// `test_fallback_activated_prevents_refire` already uses for the
+    /// client swap above, since driving a real `run()` requires a live LLM
+    /// call this crate's unit tests do not have available.
+    #[test]
+    fn failover_relabel_wins_over_a_role_routed_initial_label() {
+        let primary = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://primary".to_string(),
+            "key1".to_string(),
+            "model1",
+        ));
+        let fallback = AnyClient::ChatCompletions(crate::client::LlmClient::new(
+            "http://fallback".to_string(),
+            "key2".to_string(),
+            "model2",
+        ));
+        let registry = Arc::new(RwLock::new(ironhermes_tools::ToolRegistry::new()));
+        let mut agent = AgentLoop::new(primary, registry, 10)
+            .with_fallback_named(fallback, "fallback-provider".to_string())
+            // Task 1's vision label: the turn's initial identity is already
+            // a role-routed provider, not main's — set the same way
+            // run_turn establishes turn_provider_name before AgentLoop::new.
+            .with_provider_name("vision-provider");
+
+        // The row written BEFORE failover fires must carry the routed name.
+        let pre_relabel_provider_name = agent.provider_name.clone();
+        assert_eq!(
+            pre_relabel_provider_name, "vision-provider",
+            "before failover fires, the identity must be the routed provider, not main's"
+        );
+
+        // Simulate exactly what the run() loop does at the failover site.
+        if let Some(fb) = agent.fallback_client.take() {
+            agent.client = fb;
+            if let Some(name) = agent.fallback_provider_name.take() {
+                agent.provider_name = name;
+            }
+            agent.fallback_activated = true;
+        }
+
+        assert_eq!(
+            agent.provider_name, "fallback-provider",
+            "the fallback relabel must win over the initial role-routed label — the \
+             row after failover must name the fallback, not the vision role"
+        );
+        assert_ne!(
+            agent.provider_name, pre_relabel_provider_name,
+            "the two rows (pre- and post-failover) must carry DIFFERENT provider \
+             names, proving the relabel actually fired rather than being a no-op"
+        );
+    }
+
+    /// Phase 51 Plan 20 (G-51-7) Task 2(c) — keyless-endpoint control. An
+    /// endpoint whose `api_key` is `None` must leave the api-key wiring
+    /// call unexecuted rather than hashing an empty string, preserving the
+    /// pre-Plan-20 `if let Some(..)` semantics under the new
+    /// `turn_api_key_for_usage` source. Proven at the level the existing
+    /// tests already reach: a resolver-level assertion that a vision
+    /// endpoint with no configured key resolves with `api_key: None`, plus
+    /// the source-level presence of the `if let Some(..)` conditional
+    /// guarding `with_api_key_for_usage_tracking(...)` — sufficient and
+    /// honest without manufacturing a harness to drive a real run_turn.
+    #[test]
+    fn keyless_vision_endpoint_resolves_with_no_api_key() {
+        let mut config = ironhermes_core::Config::default();
+        // No api_key/api_key_env configured for "openai" in this fixture —
+        // ProviderConfig::default() carries none, so the resolved endpoint's
+        // api_key is None.
+        config.model.roles.insert(
+            "vision".to_string(),
+            ironhermes_core::ModelRoleConfig {
+                provider: "openai".to_string(),
+                model: Some("gpt-4o-vision".to_string()),
+            },
+        );
+        let resolver = ironhermes_core::ProviderResolver::build(&config).expect("build");
+        let (name, ep) = resolver
+            .resolve_role_named("vision")
+            .expect("vision role must resolve");
+        assert_eq!(name, "openai");
+        assert!(
+            ep.api_key.is_none(),
+            "a vision endpoint configured with no api key must resolve with api_key: None, \
+             so turn_api_key_for_usage stays None and the wiring call is skipped"
+        );
+
+        // Source-level: the `if let Some(..)` conditional that skips the
+        // wiring call on a keyless endpoint must still exist. agent_loop.rs
+        // and agent_runtime.rs share a directory, so include_str! reaches
+        // the sibling file directly — no cross-crate helper needed.
+        let source = include_str!("agent_runtime.rs");
+        assert!(
+            source.contains("if let Some(ref key) = turn_api_key_for_usage {"),
+            "the api-key wiring call must remain conditional on turn_api_key_for_usage \
+             being Some — a keyless endpoint must not hash an empty string"
+        );
+    }
+
     #[test]
     fn test_classify_500_error() {
         let err = anyhow!("HTTP request failed with status: 500 Internal Server Error");

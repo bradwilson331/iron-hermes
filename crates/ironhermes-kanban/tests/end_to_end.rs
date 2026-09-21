@@ -94,7 +94,8 @@ async fn full_lifecycle_via_tools_layer() {
         move |task: ironhermes_kanban::types::Task,
               run: ironhermes_kanban::types::TaskRun,
               _ws: String,
-              _board_slug: String|
+              _board_slug: String,
+              _vault: Option<ironhermes_kanban::worker_spawn::WorkerVaultBootstrap>|
               -> std::pin::Pin<
             Box<dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>> + Send>,
         > {
@@ -331,5 +332,5 @@ async fn duplicate_completion_is_rejected() {
 /// these tests use synthetic assignees with no profile directory. The gate is
 /// covered against the REAL predicate in `tests/dispatch_gate_loop.rs`.
 fn allow_all_gate() -> ironhermes_kanban::dispatcher::DispatchGateFn {
-    std::sync::Arc::new(|_assignee: &str| ironhermes_core::dispatch_gate::DispatchDecision::Allow)
+    std::sync::Arc::new(|_assignee: &str| Box::pin(async { ironhermes_core::dispatch_gate::DispatchDecision::Allow }))
 }

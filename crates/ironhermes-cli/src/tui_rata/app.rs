@@ -2625,6 +2625,286 @@ impl App {
                 self.model_picker_filter.clear();
                 self.model_picker_selected = 0;
             }
+            // Phase 49.7 Plan 05 Task 3 (D-02/D-06/D-08): the real launch.
+            //
+            // Reuses the EXISTING single-turn StreamEvent channel/rendering
+            // path (`pending_rx` + `handle_stream_event`) instead of adding
+            // new App fields or touching event_loop.rs: the whole
+            // multi-turn goal loop is rendered as ONE long "turn" from the
+            // transcript's perspective — each per-turn output becomes a
+            // `StreamEvent::Delta`, and the loop's own terminal event
+            // becomes the single `StreamEvent::Finished` that commits the
+            // accumulated buffer as one assistant message (mirrors
+            // `commit_assistant_buffer`). `pending_tx` is deliberately left
+            // `None` (only `pending_rx` is set) so event_loop.rs's
+            // `if app.pending_tx.is_some() { spawn_turn(...) }` check never
+            // fires an ordinary single-message turn on top of this.
+            SlashOutcome::StartGoalLoop { objective, budget } => {
+                let config = self.agent_runtime.config().clone();
+                let kanban_config: ironhermes_kanban::KanbanConfig = if config.kanban.is_null() {
+                    ironhermes_kanban::KanbanConfig::default()
+                } else {
+                    serde_yaml::from_value(config.kanban.clone()).unwrap_or_default()
+                };
+                let judge_fn = match ironhermes_agent::judge_builder::build_runtime_judge_fn(
+                    &kanban_config.judge_model,
+                    &config,
+                ) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        let text =
+                            format!("Could not start /goal — judge model unavailable: {e:#}");
+                        let mut system = ChatMessage::user(&text);
+                        system.role = Role::System;
+                        self.history.push(system);
+                        self.scroll_to_bottom();
+                        return;
+                    }
+                };
+
+                // The user's objective becomes a real transcript entry —
+                // element 0 of Task 1's Vec<String> contract, and the first
+                // message the loop's own local history starts from.
+                self.history.push(user_message(objective.clone()));
+                self.scroll_to_bottom();
+
+                // ONE CancellationToken for the whole loop (D-09). Stored on
+                // `cancel_child` too so the EXISTING `/stop` arm
+                // (`if let Some(tok) = app.cancel_child.take() { tok.cancel(); }`)
+                // also reaches it, alongside the turn_registry.cancel_session
+                // call `/stop` already makes with this same `session_id`.
+                let loop_cancel = CancellationToken::new();
+                self.cancel_child = Some(loop_cancel.clone());
+
+                let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<StreamEvent>();
+                self.pending_rx = Some(rx);
+
+                let agent_runtime = self.agent_runtime.clone();
+                let turn_registry = self.turn_registry.clone();
+                let session_id = self.session_id.clone();
+                let local_history = Arc::new(Mutex::new(self.history.clone()));
+                let max_turns = budget;
+
+                // Gated terminal/execute_code intercepts — built ONCE,
+                // before spawning, mirroring `spawn_turn`'s own
+                // construction exactly (same builder functions, same
+                // TUI-overlay-first-then-legacy-CLI-fallback choice). A
+                // production `TurnRequest` site that leaves either
+                // intercept unset bypasses the D-08/D-10 guardrail+audit
+                // chokepoint — caught by
+                // `ironhermes-agent/tests/turn_request_gating_sweep.rs`,
+                // which is why both are wired here rather than left at
+                // `TurnRequest::default()`.
+                let yolo_now = self
+                    .yolo_enabled
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                let tui_gate: Option<Arc<dyn ironhermes_core::ApprovalGate>> =
+                    self.approval_tx.clone().map(|tx| {
+                        Arc::new(crate::tui_rata::approval_gate_tui::TuiApprovalGate::new(
+                            tx,
+                            self.approvals_store.clone(),
+                            self.yolo_enabled.clone(),
+                        )) as Arc<dyn ironhermes_core::ApprovalGate>
+                    });
+                let (terminal_intercept, execute_code_intercept) = match tui_gate {
+                    Some(gate) => (
+                        Some(
+                            crate::tui_rata::approval_gate_tui::build_tui_gated_terminal_intercept(
+                                agent_runtime.terminal_tool_arc(),
+                                agent_runtime.config().clone(),
+                                session_id.clone(),
+                                "tui",
+                                session_id.clone(),
+                                yolo_now,
+                                gate.clone(),
+                            ),
+                        ),
+                        Some(
+                            crate::tui_rata::approval_gate_tui::build_tui_gated_execute_code_intercept(
+                                agent_runtime.execute_code_tool_arc(),
+                                agent_runtime.config().clone(),
+                                session_id.clone(),
+                                "tui",
+                                session_id.clone(),
+                                yolo_now,
+                                gate,
+                            ),
+                        ),
+                    ),
+                    None => (
+                        Some(crate::approval_gate::build_gated_terminal_intercept(
+                            agent_runtime.terminal_tool_arc(),
+                            agent_runtime.config().clone(),
+                            session_id.clone(),
+                            "tui",
+                            session_id.clone(),
+                            yolo_now,
+                            self.approvals_store.clone(),
+                        )),
+                        Some(crate::approval_gate::build_gated_execute_code_intercept(
+                            agent_runtime.execute_code_tool_arc(),
+                            agent_runtime.config().clone(),
+                            session_id.clone(),
+                            "tui",
+                            session_id.clone(),
+                            yolo_now,
+                            self.approvals_store.clone(),
+                        )),
+                    ),
+                };
+
+                let turn_runner: ironhermes_agent::goal_session_loop::GoalTurnRunner = {
+                    let agent_runtime = agent_runtime.clone();
+                    let turn_registry = turn_registry.clone();
+                    let session_id = session_id.clone();
+                    let loop_cancel = loop_cancel.clone();
+                    let local_history = local_history.clone();
+                    let terminal_intercept = terminal_intercept.clone();
+                    let execute_code_intercept = execute_code_intercept.clone();
+                    Box::new(move |messages: Vec<String>| {
+                        let message_text = messages.last().cloned().unwrap_or_default();
+                        let agent_runtime = agent_runtime.clone();
+                        let turn_registry = turn_registry.clone();
+                        let session_id = session_id.clone();
+                        let loop_cancel = loop_cancel.clone();
+                        let local_history = local_history.clone();
+                        let terminal_intercept = terminal_intercept.clone();
+                        let execute_code_intercept = execute_code_intercept.clone();
+                        Box::pin(async move {
+                            // Register-before-spawn: THIS iteration's
+                            // TurnEntry, under the surrounding session's
+                            // real `session_id` (the same binding `/stop`
+                            // passes to `cancel_session`), RAII-deregistered.
+                            let turn_id = ironhermes_core::concurrency::TurnId::new_v4();
+                            turn_registry
+                                .register(ironhermes_core::concurrency::TurnEntry {
+                                    turn_id,
+                                    session_id: session_id.clone(),
+                                    surface: ironhermes_core::concurrency::Surface::Cli,
+                                    started_at: std::time::Instant::now(),
+                                    cancel: loop_cancel.clone(),
+                                })
+                                .await;
+                            struct DeregisterGuard {
+                                registry: Arc<ironhermes_core::concurrency::TurnRegistry>,
+                                turn_id: ironhermes_core::concurrency::TurnId,
+                            }
+                            impl Drop for DeregisterGuard {
+                                fn drop(&mut self) {
+                                    let registry = self.registry.clone();
+                                    let id = self.turn_id;
+                                    tokio::spawn(async move {
+                                        registry.deregister(id).await;
+                                    });
+                                }
+                            }
+                            let _guard = DeregisterGuard {
+                                registry: turn_registry.clone(),
+                                turn_id,
+                            };
+
+                            let req_messages = {
+                                let mut guard = local_history.lock().await;
+                                guard.push(ChatMessage::user(&message_text));
+                                guard.clone()
+                            };
+
+                            // Deviation (documented in SUMMARY): a bare
+                            // bare `TurnRequest` struct literal IS used here (Task
+                            // 2/3 acceptance escape hatch) because this
+                            // surface's ordinary `spawn_turn` builds its
+                            // `TurnRequest` from `App` fields this closure
+                            // does not borrow (streaming callbacks, TTS
+                            // wiring). `messages`, `session_id`,
+                            // `cancel_token`, `terminal_intercept` and
+                            // `execute_code_intercept` match `spawn_turn`'s
+                            // own values exactly — the security-relevant
+                            // D-08/D-10 chokepoint
+                            // (`turn_request_gating_sweep.rs`) is preserved.
+                            // `approval_gate` is correctly left `None` here
+                            // too: `spawn_turn`'s own TUI sites ALSO leave
+                            // it unset when a `TuiApprovalGate` is used,
+                            // because that gate is constructed INSIDE the
+                            // intercept closures above, not passed through
+                            // this field (see `turn_request_gating_sweep.rs`'s
+                            // own doc comment on why). The remaining omitted
+                            // fields (stream, tool_progress, tool_result,
+                            // tts_wiring, messaging_wiring, pressure_tracker)
+                            // are UX-only features a goal-loop turn does not
+                            // exercise on this pass.
+                            let request = ironhermes_agent::TurnRequest {
+                                messages: req_messages,
+                                session_id: session_id.clone(),
+                                cancel_token: Some(loop_cancel.clone()),
+                                terminal_intercept: terminal_intercept.clone(),
+                                execute_code_intercept: execute_code_intercept.clone(),
+                                ..Default::default()
+                            };
+                            let result = agent_runtime.run_turn(request).await?;
+                            if !result.appended.is_empty() {
+                                let mut guard = local_history.lock().await;
+                                guard.extend(result.appended.clone());
+                            }
+                            Ok(result.final_response.clone().unwrap_or_default())
+                        })
+                    })
+                };
+
+                tokio::spawn(async move {
+                    let _ = tx.send(StreamEvent::Started);
+                    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let loop_cancel_for_task = loop_cancel.clone();
+                    let session_id_for_task = session_id.clone();
+                    let render_tx = tx.clone();
+                    tokio::spawn(async move {
+                        while let Some(ev) = progress_rx.recv().await {
+                            match ev {
+                                ironhermes_agent::goal_session_loop::GoalProgress::TurnCompleted {
+                                    turn,
+                                    output,
+                                } => {
+                                    let _ = render_tx.send(StreamEvent::Delta(format!(
+                                        "\n[/goal turn {turn}] {output}\n"
+                                    )));
+                                }
+                                ironhermes_agent::goal_session_loop::GoalProgress::Finished(
+                                    reason,
+                                ) => {
+                                    let msg = match reason {
+                                        ironhermes_agent::goal_session_loop::GoalStopReason::JudgeMet { reason } => {
+                                            format!("\n/goal complete — judge: {reason}\n")
+                                        }
+                                        ironhermes_agent::goal_session_loop::GoalStopReason::BudgetExhausted => {
+                                            "\n/goal stopped — budget exhausted.\n".to_string()
+                                        }
+                                        ironhermes_agent::goal_session_loop::GoalStopReason::JudgeErrorStrikes { last_error } => {
+                                            format!(
+                                                "\n/goal stopped — judge unavailable: {last_error}\n"
+                                            )
+                                        }
+                                        ironhermes_agent::goal_session_loop::GoalStopReason::Cancelled => {
+                                            "\n/goal stopped — cancelled.\n".to_string()
+                                        }
+                                    };
+                                    let _ = render_tx.send(StreamEvent::Delta(msg));
+                                }
+                                _ => {}
+                            }
+                        }
+                    });
+                    let _ = ironhermes_agent::goal_session_loop::run_goal_session_loop(
+                        turn_runner,
+                        objective,
+                        session_id_for_task,
+                        max_turns,
+                        &judge_fn,
+                        loop_cancel_for_task,
+                        progress_tx,
+                    )
+                    .await;
+                    let _ = tx.send(StreamEvent::Finished { total_tokens: 0 });
+                });
+            }
         }
     }
 
@@ -3165,7 +3445,7 @@ impl App {
     /// (there is no TUI workspace redirect to mirror the web-chat layout — D-22).
     fn build_user_message_with_attachments(&mut self, text: &str) -> ChatMessage {
         let attachments_dir = ironhermes_core::session_attachments_dir(&self.session_id);
-        let queued: Vec<PendingAttachment> = self.pending_attachments.drain(..).collect();
+        let queued: Vec<PendingAttachment> = std::mem::take(&mut self.pending_attachments);
 
         let mut locals: Vec<ironhermes_gateway::multimodal::LocalAttachment> = Vec::new();
         for pending in &queued {

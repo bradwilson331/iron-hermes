@@ -1,14 +1,24 @@
 //! Phase 25.1 D-20: Three mandatory integration tests for the browser toolset.
+//! Phase 53 Plan 05 (D-08): the suite is now parameterized over backend
+//! (Chromium / Obscura) — each case is ONE shared body function, called once
+//! per backend, rather than a copied test. Each backend skips independently
+//! (D-22's existing idiom, extended); a machine with neither binary still
+//! goes fully green. This suite is validated against Obscura commit
+//! `727cc46` (the commit ADR-0005 pinned, and the one the operator's local
+//! `obscura` binary self-reports as `obscura 0.1.0-dev+727cc46`) — see
+//! `get_layout_metrics_still_returns_floats_upstream_727cc46` below, whose
+//! doc comment explains what re-pinning this suite to a newer commit means.
 //!
 //! Pattern: in-process ToolRegistry + chromiumoxide + wiremock-hosted local HTML.
-//! Skips (not fails) when chromium binary is unavailable (D-22).
+//! Skips (not fails) when a backend's binary is unavailable (D-22, extended to Obscura).
 //!
 //! Test invocation: option (c) — direct in-process tool invocation via ToolRegistry
 //! (no subprocess/LLM mocking required; tools are called with literal args).
 
 use std::sync::OnceLock;
 
-use ironhermes_tools::browser_session::{BrowserSession, find_chromium_binary};
+use ironhermes_core::config::BrowserBackend;
+use ironhermes_tools::browser_session::{BrowserSession, find_chromium_binary, find_obscura_binary};
 use ironhermes_tools::browser_vision::VisionClientHandle;
 use serde_json::json;
 use wiremock::matchers::{method, path};
@@ -68,45 +78,83 @@ fn chromium_available() -> bool {
     find_chromium_binary(None).is_some()
 }
 
+/// Phase 53 Plan 05: the Obscura twin of [`chromium_available`]. Resolves the
+/// binary the exact same way `BrowserSession::spawn`'s Obscura arm does
+/// (`find_obscura_binary`, which itself checks `OBSCURA_PATH` internally), so
+/// this test suite's notion of "present" cannot drift from the runtime's.
+/// Honours the same `IRONHERMES_BROWSER_TEST_DISABLE` escape hatch.
+fn obscura_available() -> bool {
+    if std::env::var("IRONHERMES_BROWSER_TEST_DISABLE").is_ok() {
+        return false;
+    }
+    find_obscura_binary(None).is_some()
+}
+
 // =============================================================================
 // Registry construction helper
 // =============================================================================
 
 type BrowserSessionArc = std::sync::Arc<tokio::sync::Mutex<Option<BrowserSession>>>;
 
-/// Build a ToolRegistry with all 11 browser tools registered.
+/// Build a ToolRegistry with all 11 browser tools registered, configured for
+/// the given backend.
 ///
 /// `vision_client` is wired into BrowserVisionTool. For tests 1 and 2, pass a
 /// `NoOpVisionHandle` (they never invoke browser_vision). For test 3, pass a
 /// real TestVisionHandle pointing at the aux wiremock server.
+///
+/// Phase 53 Plan 05: extended with a `backend` parameter rather than
+/// duplicated per-backend. The Chromium arm is byte-identical to pre-53 —
+/// its `no_sandbox`/`user_data_dir` fiddling is Chromium-only and the
+/// Obscura arm does not need it. The Obscura arm sets `backend` and
+/// `obscura_path` (resolved via the same `find_obscura_binary` the runtime
+/// uses) instead.
 fn make_browser_registry(
+    backend: BrowserBackend,
     resolver: std::sync::Arc<ironhermes_core::provider::ProviderResolver>,
     vision_client: std::sync::Arc<dyn VisionClientHandle>,
 ) -> (ironhermes_tools::ToolRegistry, BrowserSessionArc) {
     let session: BrowserSessionArc = std::sync::Arc::new(tokio::sync::Mutex::new(None));
     let mut registry = ironhermes_tools::ToolRegistry::new();
     let mut config = ironhermes_core::config::Config::default();
-    // CI (Ubuntu 23.10+) disables unprivileged user namespaces via AppArmor, which causes
-    // Chromium's zygote sandbox to abort (zygote_host_impl_linux.cc: "No usable sandbox!").
-    // Set no_sandbox=true when running under CI so Chromium can launch. This is test-only;
-    // the production default (no_sandbox: false) is never changed.
-    if std::env::var("CI").is_ok() {
-        config.browser.no_sandbox = true;
+    match backend {
+        BrowserBackend::Chromium => {
+            // CI (Ubuntu 23.10+) disables unprivileged user namespaces via AppArmor, which
+            // causes Chromium's zygote sandbox to abort (zygote_host_impl_linux.cc: "No
+            // usable sandbox!"). Set no_sandbox=true when running under CI so Chromium can
+            // launch. This is test-only; the production default (no_sandbox: false) is
+            // never changed.
+            if std::env::var("CI").is_ok() {
+                config.browser.no_sandbox = true;
+            }
+            // Per-invocation unique Chromium profile dir. Without this, every browser test
+            // shares the default `$IRONHERMES_HOME/browser-profile`, and nextest (which runs
+            // each test as a separate parallel PROCESS) makes two launches collide on
+            // Chrome's per-profile SingletonLock ("Failed to create .../SingletonLock: File
+            // exists"). Using an absolute path under the OS temp dir keyed by pid + an
+            // atomic counter guarantees uniqueness across BOTH processes and concurrent
+            // calls within one process. The path is a plain string (not a dropped TempDir),
+            // so it can never be deleted out from under chromium mid-test;
+            // BrowserSession::spawn create_dir_all's it on launch. Test-only — production
+            // still uses the default profile dir.
+            static PROFILE_SEQ: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(0);
+            let seq = PROFILE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let unique_profile = std::env::temp_dir()
+                .join(format!("ih-browser-test-{}-{}", std::process::id(), seq));
+            config.browser.user_data_dir = Some(unique_profile.to_string_lossy().into_owned());
+        }
+        BrowserBackend::Obscura => {
+            config.browser.backend = BrowserBackend::Obscura;
+            config.browser.obscura_path =
+                find_obscura_binary(None).map(|p| p.to_string_lossy().into_owned());
+            // D-04: Obscura's own SSRF guard denies loopback/private-network targets by
+            // default, and every fixture page in this suite is a wiremock server bound to
+            // 127.0.0.1. Test-only — production default (false) is never changed; the
+            // Plan 02 tracer test established this same workaround for the same reason.
+            config.browser.obscura_allow_private_network = true;
+        }
     }
-    // Per-invocation unique Chromium profile dir. Without this, every browser test
-    // shares the default `$IRONHERMES_HOME/browser-profile`, and nextest (which runs each
-    // test as a separate parallel PROCESS) makes two launches collide on Chrome's
-    // per-profile SingletonLock ("Failed to create .../SingletonLock: File exists").
-    // Using an absolute path under the OS temp dir keyed by pid + an atomic counter
-    // guarantees uniqueness across BOTH processes and concurrent calls within one
-    // process. The path is a plain string (not a dropped TempDir), so it can never be
-    // deleted out from under chromium mid-test; BrowserSession::spawn create_dir_all's
-    // it on launch. Test-only — production still uses the default profile dir.
-    static PROFILE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = PROFILE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let unique_profile =
-        std::env::temp_dir().join(format!("ih-browser-test-{}-{}", std::process::id(), seq));
-    config.browser.user_data_dir = Some(unique_profile.to_string_lossy().into_owned());
     let config = std::sync::Arc::new(config);
     registry.register_browser_tools_with_vision(session.clone(), resolver, vision_client, config);
     (registry, session)
@@ -125,14 +173,9 @@ async fn invoke(
 // Test 1: navigate + snapshot returns refs (D-10)
 // =============================================================================
 
-#[tokio::test(flavor = "multi_thread")]
-async fn browser_navigate_then_snapshot_returns_refs() {
-    let _g = env_lock().lock().await;
-    if !chromium_available() {
-        eprintln!("SKIP browser_navigate_then_snapshot_returns_refs: no chromium binary (D-22)");
-        return;
-    }
-
+/// Phase 53 Plan 05: shared body for [`browser_navigate_then_snapshot_returns_refs`],
+/// called once per backend by that test's wrapper.
+async fn browser_navigate_then_snapshot_returns_refs_body(backend: BrowserBackend) {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/test-page"))
@@ -154,7 +197,7 @@ async fn browser_navigate_then_snapshot_returns_refs() {
         ironhermes_core::ProviderResolver::build(&config).expect("resolver build"),
     );
     let noop = std::sync::Arc::new(ironhermes_tools::browser_vision::NoOpVisionHandle);
-    let (registry, session) = make_browser_registry(resolver, noop);
+    let (registry, session) = make_browser_registry(backend, resolver, noop);
 
     let nav_url = format!("{}/test-page", server.uri());
     let nav_result = invoke(&registry, "browser_navigate", json!({"url": nav_url}))
@@ -190,20 +233,33 @@ async fn browser_navigate_then_snapshot_returns_refs() {
     drop(session);
 }
 
+/// Phase 53 Plan 05: parameterized wrapper — calls the shared body once per
+/// backend, each independently skipped (D-22 idiom, extended to Obscura)
+/// rather than failing when that backend's binary is absent.
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_navigate_then_snapshot_returns_refs() {
+    let _g = env_lock().lock().await;
+    if chromium_available() {
+        browser_navigate_then_snapshot_returns_refs_body(BrowserBackend::Chromium).await;
+    } else {
+        eprintln!(
+            "SKIP browser_navigate_then_snapshot_returns_refs (chromium): no chromium binary (D-22)"
+        );
+    }
+    if obscura_available() {
+        browser_navigate_then_snapshot_returns_refs_body(BrowserBackend::Obscura).await;
+    } else {
+        eprintln!("SKIP browser_navigate_then_snapshot_returns_refs (obscura): no obscura binary");
+    }
+}
+
 // =============================================================================
 // Test 2: stale ref → element_stale envelope (D-11)
 // =============================================================================
 
-#[tokio::test(flavor = "multi_thread")]
-async fn browser_click_with_stale_ref_returns_structured_error() {
-    let _g = env_lock().lock().await;
-    if !chromium_available() {
-        eprintln!(
-            "SKIP browser_click_with_stale_ref_returns_structured_error: no chromium binary (D-22)"
-        );
-        return;
-    }
-
+/// Phase 53 Plan 05: shared body for [`browser_click_with_stale_ref_returns_structured_error`],
+/// called once per backend by that test's wrapper.
+async fn browser_click_with_stale_ref_returns_structured_error_body(backend: BrowserBackend) {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/page-a"))
@@ -229,7 +285,7 @@ async fn browser_click_with_stale_ref_returns_structured_error() {
         ironhermes_core::ProviderResolver::build(&config).expect("resolver build"),
     );
     let noop = std::sync::Arc::new(ironhermes_tools::browser_vision::NoOpVisionHandle);
-    let (registry, session) = make_browser_registry(resolver, noop);
+    let (registry, session) = make_browser_registry(backend, resolver, noop);
 
     // 1. Navigate to page-a, snapshot → extract ref of the button.
     let _ = invoke(
@@ -284,6 +340,29 @@ async fn browser_click_with_stale_ref_returns_structured_error() {
 
     let _ = invoke(&registry, "browser_close", json!({})).await;
     drop(session);
+}
+
+/// Phase 53 Plan 05: parameterized wrapper — calls the shared body once per
+/// backend, each independently skipped when that backend's binary is absent.
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_click_with_stale_ref_returns_structured_error() {
+    let _g = env_lock().lock().await;
+    if chromium_available() {
+        browser_click_with_stale_ref_returns_structured_error_body(BrowserBackend::Chromium).await;
+    } else {
+        eprintln!(
+            "SKIP browser_click_with_stale_ref_returns_structured_error (chromium): no chromium \
+             binary (D-22)"
+        );
+    }
+    if obscura_available() {
+        browser_click_with_stale_ref_returns_structured_error_body(BrowserBackend::Obscura).await;
+    } else {
+        eprintln!(
+            "SKIP browser_click_with_stale_ref_returns_structured_error (obscura): no obscura \
+             binary"
+        );
+    }
 }
 
 // =============================================================================
@@ -358,14 +437,12 @@ impl VisionClientHandle for ResolverVisionHandle {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn browser_vision_routes_to_auxiliary_vision_role() {
-    let _g = env_lock().lock().await;
-    if !chromium_available() {
-        eprintln!("SKIP browser_vision_routes_to_auxiliary_vision_role: no chromium binary (D-22)");
-        return;
-    }
-
+/// Phase 53 Plan 05: shared body for [`browser_vision_routes_to_auxiliary_vision_role`],
+/// called once per backend by that test's wrapper. The capture kind
+/// (full_page vs viewport) differs per backend, but this test only asserts
+/// on request ROUTING (which server received the call) and payload shape
+/// (base64/image_url present), both backend-independent.
+async fn browser_vision_routes_to_auxiliary_vision_role_body(backend: BrowserBackend) {
     // Two wiremock servers: main provider (must NOT receive the vision request)
     // and aux provider (MUST receive it — validates D-07 cascade).
     let main_server = MockServer::start().await;
@@ -455,7 +532,7 @@ async fn browser_vision_routes_to_auxiliary_vision_role() {
         resolver: resolver.clone(),
     });
 
-    let (registry, session) = make_browser_registry(resolver, vision_handle);
+    let (registry, session) = make_browser_registry(backend, resolver, vision_handle);
 
     // Navigate so there's a live page to screenshot.
     let _ = invoke(
@@ -504,4 +581,93 @@ async fn browser_vision_routes_to_auxiliary_vision_role() {
 
     let _ = invoke(&registry, "browser_close", json!({})).await;
     drop(session);
+}
+
+/// Phase 53 Plan 05: parameterized wrapper — calls the shared body once per
+/// backend, each independently skipped when that backend's binary is absent.
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_vision_routes_to_auxiliary_vision_role() {
+    let _g = env_lock().lock().await;
+    if chromium_available() {
+        browser_vision_routes_to_auxiliary_vision_role_body(BrowserBackend::Chromium).await;
+    } else {
+        eprintln!(
+            "SKIP browser_vision_routes_to_auxiliary_vision_role (chromium): no chromium binary \
+             (D-22)"
+        );
+    }
+    if obscura_available() {
+        browser_vision_routes_to_auxiliary_vision_role_body(BrowserBackend::Obscura).await;
+    } else {
+        eprintln!("SKIP browser_vision_routes_to_auxiliary_vision_role (obscura): no obscura binary");
+    }
+}
+
+// =============================================================================
+// Test 4: D-08's version-pinned upstream tripwire
+// =============================================================================
+
+/// Phase 53 Plan 05 (D-08): pins Obscura commit `727cc46` — the commit
+/// ADR-0005 pinned, and the exact commit the operator's local
+/// `/Users/you/code/obscura/target/release/obscura` binary self-reports
+/// (`obscura 0.1.0-dev+727cc46`). `Page.getLayoutMetrics` answers
+/// `clientWidth`/`clientHeight` as raw `f64` while `chromiumoxide_cdp`
+/// 0.9.1 types `LayoutViewport`'s fields as `i64`, so chromiumoxide's typed
+/// `Page::layout_metrics()` call rejects the reply during deserialization —
+/// this is the exact rejection point `browser_vision`'s Obscura
+/// viewport-only concession (Task 1's `wants_full_page`) exists to work
+/// around. No raw-websocket or new-dependency CDP client is needed: the
+/// already-present chromiumoxide 0.9.1's typed call is itself the signal.
+///
+/// Upstream `main` at `4b7028830` already carries a `coord_value()` helper
+/// that fixes the IDENTICAL bug class for a sibling method —
+/// `DOM.getBoxModel` / `DOM.getContentQuads` (issue #576, filed by this
+/// project, credited to "Hermes Agent" in its own fix commit) — but has NOT
+/// applied that treatment to `Page.getLayoutMetrics` as of that commit.
+/// Because `browser_click` drives content quads, a click failure observed
+/// against a binary at or after that fix may be the ALREADY-FIXED-upstream
+/// #576 bug rather than a defect in our code — a reader debugging a click
+/// failure needs that pointer, not a fresh investigation.
+///
+/// WHEN THIS TEST STARTS FAILING (i.e. `layout_metrics()` starts returning
+/// `Ok`): the upstream fix for THIS method has landed. Re-evaluate
+/// `browser_vision`'s viewport-only concession and Task 1's
+/// `wants_full_page`, and re-derive this whole comment against the new pin
+/// — do not just delete the failing assertion.
+///
+/// Skips (does not fail) when no Obscura binary resolves — the same
+/// discipline every other case in this file follows.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_layout_metrics_still_returns_floats_upstream_727cc46() {
+    let _g = env_lock().lock().await;
+    if !obscura_available() {
+        eprintln!(
+            "SKIP get_layout_metrics_still_returns_floats_upstream_727cc46: no obscura binary"
+        );
+        return;
+    }
+
+    let mut config = ironhermes_core::config::Config::default();
+    config.browser.backend = BrowserBackend::Obscura;
+    config.browser.obscura_path =
+        find_obscura_binary(None).map(|p| p.to_string_lossy().into_owned());
+
+    let session = BrowserSession::spawn(&config.browser)
+        .await
+        .expect("a render-capable obscura session should spawn for the tripwire test");
+
+    let result = session.page.layout_metrics().await;
+
+    assert!(
+        result.is_err(),
+        "Page.getLayoutMetrics is expected to still fail against Obscura commit 727cc46 \
+         (float clientWidth/clientHeight vs chromiumoxide_cdp 0.9.1's i64-typed \
+         LayoutViewport). If this now passes, the upstream fix for getLayoutMetrics has \
+         landed — revisit browser_vision's viewport-only concession (Task 1's \
+         wants_full_page) and this test's own doc comment; do NOT just delete this \
+         assertion. Got: {result:?}"
+    );
+
+    // Never leak the locally-spawned `obscura serve` process (T-53-05-03).
+    let _ = session.close().await;
 }

@@ -29,6 +29,52 @@ use super::format::{
 };
 
 // ---------------------------------------------------------------------------
+// Phase 51 Plan 07 (D-07): the real, trajectory-backed audit sink
+// ---------------------------------------------------------------------------
+
+/// Open the real, trajectory-backed audit sink for a vault-backed dispatch's mint
+/// ledger. NOT session-scoped (`cmd_dispatch`/`cmd_daemon` are not tied to any
+/// chat session) — lives at a fixed path under this process's own
+/// `$IRONHERMES_HOME/logs/kanban/vault-mint-ledger.jsonl`, mirroring the
+/// per-session `TrajectoryWriter::open` + `TrajectoryWriterHandleImpl::new`
+/// pattern `main.rs` already uses twice for session-scoped writers, and matching
+/// `ironhermes-gateway/src/runner.rs`'s identically-named helper exactly (same
+/// ledger path — both processes append to the SAME file). Returns `None` (never
+/// panics) on any I/O failure — a vault-backed dispatch then refuses to mint
+/// rather than minting un-audited (D-07's dispatcher-side refusal).
+fn open_vault_mint_audit_sink()
+-> Option<Arc<dyn ironhermes_core::profile_credentials::ProfileTokenAudit>> {
+    let path = ironhermes_core::get_hermes_home()
+        .join("logs")
+        .join("kanban")
+        .join("vault-mint-ledger.jsonl");
+    match ironhermes_trajectory::TrajectoryWriter::open(&path) {
+        Ok(w) => {
+            let arc_writer = Arc::new(std::sync::Mutex::new(w));
+            let writer_handle: Arc<dyn ironhermes_core::commands::context::TrajectoryWriterHandle> =
+                Arc::new(ironhermes_trajectory::TrajectoryWriterHandleImpl::new(
+                    arc_writer,
+                ));
+            Some(Arc::new(
+                ironhermes_core::profile_credentials::TrajectoryProfileTokenAudit::new(
+                    writer_handle,
+                ),
+            ))
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = %path.display(),
+                "Phase 51: failed to open vault-mint-ledger trajectory writer; \
+                 AllowFromVault dispatches will refuse to mint rather than \
+                 mint un-audited"
+            );
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helper: open the correct board store (board-aware, D-02 4-tier resolver)
 // ---------------------------------------------------------------------------
 
@@ -1120,7 +1166,7 @@ pub async fn cmd_dispatch(
     // `dispatch gate: ` reason so the operator can audit/undo exactly the
     // tasks this gate blocked. Swept across every board `run_dispatch_tick`
     // will itself sweep (see doc comment above).
-    let mut gate_blocked = super::dispatch_gate::refuse_undispatchable_ready_tasks(&mut store);
+    let mut gate_blocked = super::dispatch_gate::refuse_undispatchable_ready_tasks(&mut store).await;
     let mut swept_boards = vec!["default".to_string()];
     match ironhermes_kanban::paths::list_boards() {
         Ok(named) => swept_boards.extend(named),
@@ -1133,9 +1179,10 @@ pub async fn cmd_dispatch(
     for slug in swept_boards.iter().filter(|s| s.as_str() != "default") {
         match KanbanStore::open_for_board(slug) {
             Ok(mut named_store) => {
-                gate_blocked.extend(super::dispatch_gate::refuse_undispatchable_ready_tasks(
-                    &mut named_store,
-                ));
+                gate_blocked.extend(
+                    super::dispatch_gate::refuse_undispatchable_ready_tasks(&mut named_store)
+                        .await,
+                );
             }
             Err(e) => {
                 tracing::warn!("[kanban] dispatch gate skipping board '{slug}': {e}");
@@ -1149,8 +1196,29 @@ pub async fn cmd_dispatch(
         config.failure_limit = fl as u32;
     }
 
+    // Phase 51 Plan 19 (G-51-6): this verb exits before the workers it spawns have started —
+    // it cannot host the per-profile vault credential endpoint. Warn up front, even on a tick
+    // with no vault-backed task ready, so an operator sees the cause the moment they run the
+    // command rather than only after a task is refused.
+    if main_config.vault.enabled && main_config.vault.backend == "rusty-vault" {
+        eprintln!(
+            "note: {} — vault-backed tasks will be refused this tick; use `ironhermes kanban \
+             daemon --force` or the gateway-embedded dispatcher to dispatch them",
+            ironhermes_kanban::ONE_SHOT_HOST_REFUSAL_MARKER
+        );
+    }
+
     let store_arc = Arc::new(TokioMutex::new(store));
-    let ctx = DispatcherContext::new(store_arc, config);
+    // Phase 51 Plan 19 (G-51-6): this is a one-shot host — it exits before the workers it
+    // spawns have started, so it must not host the credential endpoint (see
+    // `DispatcherContext::new_one_shot`'s own doc). `cmd_daemon` below stays on the long-lived
+    // `DispatcherContext::new`.
+    let mut ctx = DispatcherContext::new_one_shot(store_arc, config);
+    // Phase 51 Plan 07 (D-07): supply the real, trajectory-backed audit sink —
+    // see `open_vault_mint_audit_sink`'s own doc comment.
+    if let Some(sink) = open_vault_mint_audit_sink() {
+        ctx = ctx.with_token_audit(sink);
+    }
 
     run_dispatch_tick(&ctx)
         .await
@@ -1497,7 +1565,13 @@ pub async fn cmd_daemon(
     }
 
     let store_arc = Arc::new(TokioMutex::new(store));
-    let ctx = Arc::new(DispatcherContext::new(store_arc, config));
+    let mut ctx = DispatcherContext::new(store_arc, config);
+    // Phase 51 Plan 07 (D-07): supply the real, trajectory-backed audit sink —
+    // see `open_vault_mint_audit_sink`'s own doc comment.
+    if let Some(sink) = open_vault_mint_audit_sink() {
+        ctx = ctx.with_token_audit(sink);
+    }
+    let ctx = Arc::new(ctx);
     let cancel = CancellationToken::new();
     let cancel_for_signal = cancel.clone();
 
@@ -1839,6 +1913,13 @@ fn build_runtime_decompose_fn(
 /// `build_runtime_judge_fn` so unit tests can assert which tier won without
 /// constructing or executing the closure.
 ///
+/// Phase 49.7 D-03: the implementation moved to
+/// `ironhermes_agent::judge_builder::resolve_judge_model_and_endpoint` so a
+/// crate with no `ironhermes-kanban` dependency (the session-level `/goal`
+/// loop) can build a judge without this crate's `KanbanConfig`. This wrapper
+/// exists solely to preserve the `&KanbanConfig`-taking signature its
+/// callers use, so `main.rs` and `judge_model_resolution.rs` stay edit-free.
+///
 /// Returns `Err` with an actionable message naming BOTH `kanban.judge_model`
 /// AND `auxiliary.kanban_judge` when no provider can produce an API key —
 /// mirrors the decomposer error pattern at commands.rs:1448-1454.
@@ -1857,16 +1938,17 @@ pub fn resolve_judge_model_and_endpoint(
     kanban_config: &KanbanConfig,
     main_config: &Config,
 ) -> anyhow::Result<(ironhermes_core::provider::ResolvedEndpoint, String)> {
-    resolve_judge_model_and_endpoint_with_env_overrides(
-        kanban_config,
+    ironhermes_agent::judge_builder::resolve_judge_model_and_endpoint(
+        &kanban_config.judge_model,
         main_config,
-        &std::collections::HashMap::new(),
     )
 }
 
 /// [`resolve_judge_model_and_endpoint`] with a profile-scoped API-key override
 /// map (Phase 47.4 D-14).
 ///
+/// Phase 49.7 D-03: delegates to
+/// `ironhermes_agent::judge_builder::resolve_judge_model_and_endpoint_with_env_overrides`.
 /// The web server resolves a judge cascade for an arbitrary kanban worker
 /// profile inside one running (multi-threaded) process, so the ordinary
 /// `ProviderResolver::build` — which reads keys from the *server process*
@@ -1875,21 +1957,40 @@ pub fn resolve_judge_model_and_endpoint(
 /// (populated by the caller from the target profile's `.env`) through to
 /// [`ironhermes_core::provider::ProviderResolver::build_with_env_overrides`]
 /// so the cascade, the `with_context` message, and the fail-closed
-/// empty-`api_key` bail all live in exactly one place — this function.
-/// `resolve_judge_model_and_endpoint` delegates here with an empty map, so
-/// its behavior for every existing caller is unchanged.
+/// empty-`api_key` bail all live in exactly one place, now in
+/// `ironhermes-agent`. `resolve_judge_model_and_endpoint` delegates here with
+/// an empty map, so its behavior for every existing caller is unchanged.
 ///
 /// Phase 47.4 Plan 17 (CR-01): this is the operator's own interactive
 /// resolution — `overrides` misses still fall back to the *process*
 /// environment. For any "what would the SCRUBBED spawned worker see?"
 /// question, use [`resolve_judge_model_and_endpoint_with_env_overrides_strict`]
 /// instead; this function's behavior for every existing caller is unchanged.
+///
+/// Phase 49.7 D-03 (deviation, Rule 3): before the lift, this function was
+/// reached inside the `ironhermes-cli` *binary* crate's own separate
+/// compilation (`main.rs`'s `mod kanban;`) only via the internal call chain
+/// `resolve_judge_model_and_endpoint` (`#[allow(dead_code)]`) ->
+/// `resolve_judge_model_and_endpoint_with_env_overrides` ->
+/// `resolve_judge_model_and_endpoint_with_env_scope` (private). Each wrapper
+/// now independently delegates straight to `ironhermes_agent::judge_builder`
+/// instead of chaining through its local siblings, so that internal path no
+/// longer exists and the bin crate's own compilation has no caller for this
+/// function. It stays `pub` and unremoved because `judge_model_resolution.rs`
+/// (a lib-crate test) and `iron_hermes_ui`'s `profile_verify_api.rs` both
+/// still call it — the `#[allow]` below documents the bin-vs-lib duplication
+/// this refactor exposed, not a real dead-code bug.
+#[allow(dead_code)]
 pub fn resolve_judge_model_and_endpoint_with_env_overrides(
     kanban_config: &KanbanConfig,
     main_config: &Config,
     overrides: &std::collections::HashMap<String, String>,
 ) -> anyhow::Result<(ironhermes_core::provider::ResolvedEndpoint, String)> {
-    resolve_judge_model_and_endpoint_with_env_scope(kanban_config, main_config, overrides, true)
+    ironhermes_agent::judge_builder::resolve_judge_model_and_endpoint_with_env_overrides(
+        &kanban_config.judge_model,
+        main_config,
+        overrides,
+    )
 }
 
 /// [`resolve_judge_model_and_endpoint_with_env_overrides`] with the
@@ -1897,80 +1998,42 @@ pub fn resolve_judge_model_and_endpoint_with_env_overrides(
 /// `overrides` is the entire world, mirroring
 /// [`ironhermes_core::provider::ProviderResolver::build_with_env_overrides_strict`].
 ///
+/// Phase 49.7 D-03: delegates to
+/// `ironhermes_agent::judge_builder::resolve_judge_model_and_endpoint_with_env_overrides_strict`.
 /// Answers "what would the SCRUBBED spawned worker see?" — the question
 /// VERIFY (`iron_hermes_ui`'s `build_probe_setup`) needs answered. A
 /// judge-tier key present only in the *server process* environment (e.g. the
 /// ROOT `.env` `main.rs` loads at startup) must never make this resolve `Ok`
-/// for a DIFFERENT profile being probed.
+/// for a DIFFERENT profile being probed. The `_strict` distinction (process
+/// environment as fallback vs. overrides-are-the-whole-world) is unchanged
+/// by the lift and still load-bearing for VERIFY's probe question.
+///
+/// Phase 49.7 D-03 (deviation, Rule 3): same bin-crate dead-code exposure as
+/// [`resolve_judge_model_and_endpoint_with_env_overrides`] above — the
+/// delegating-wrapper refactor removed the internal call chain that
+/// previously kept this function reachable within `main.rs`'s own `mod
+/// kanban;` compilation. Stays `pub` and unremoved: `profile_verify_api.rs`
+/// calls it directly.
+#[allow(dead_code)]
 pub fn resolve_judge_model_and_endpoint_with_env_overrides_strict(
     kanban_config: &KanbanConfig,
     main_config: &Config,
     overrides: &std::collections::HashMap<String, String>,
 ) -> anyhow::Result<(ironhermes_core::provider::ResolvedEndpoint, String)> {
-    resolve_judge_model_and_endpoint_with_env_scope(kanban_config, main_config, overrides, false)
-}
-
-/// Shared body for [`resolve_judge_model_and_endpoint_with_env_overrides`]
-/// and its `_strict` sibling (Phase 47.4 Plan 17, CR-01) — the three-tier
-/// cascade, the `with_context` message, and the fail-closed empty-`api_key`
-/// bail live in exactly this one place. `allow_process_env` selects between
-/// [`ironhermes_core::provider::ProviderResolver::build_with_env_overrides`]
-/// and its `_strict` sibling, mirroring `build_with_env_scope`'s own shape
-/// (`ironhermes-core/src/provider.rs:244`).
-fn resolve_judge_model_and_endpoint_with_env_scope(
-    kanban_config: &KanbanConfig,
-    main_config: &Config,
-    overrides: &std::collections::HashMap<String, String>,
-    allow_process_env: bool,
-) -> anyhow::Result<(ironhermes_core::provider::ResolvedEndpoint, String)> {
-    use ironhermes_core::models_cache::ModelsCache;
-    use ironhermes_core::provider::ProviderResolver;
-
-    let registry = if allow_process_env {
-        ProviderResolver::build_with_env_overrides(main_config, ModelsCache::load(), overrides)
-    } else {
-        ProviderResolver::build_with_env_overrides_strict(main_config, ModelsCache::load(), overrides)
-    }
-    .with_context(|| {
-        "judge model not configured — set `kanban.judge_model` in config.yaml \
-     OR `auxiliary.kanban_judge` OR ensure `model.default` is set with a \
-     valid provider"
-    })?;
-
-    // Resolve endpoint + model per the three-tier cascade.
-    let (endpoint, resolved_model) = if !kanban_config.judge_model.is_empty() {
-        // Tier 1: kanban.judge_model is set — use main provider with this model.
-        let ep = registry.resolve_for_main().clone();
-        let model = kanban_config.judge_model.clone();
-        (ep, model)
-    } else if let Some(ep) = registry.resolve_role("kanban_judge") {
-        // Tier 2: model.roles["kanban_judge"] resolves (carries endpoint + model).
-        let model = ep.default_model.clone();
-        (ep, model)
-    } else {
-        // Tier 3: fall back to main provider's default model.
-        let ep = registry.resolve_for_main().clone();
-        let model = ep.default_model.clone();
-        (ep, model)
-    };
-
-    // CR-03 mirror (commands.rs:1442-1454): fail closed when no API key is
-    // resolvable — surface the actionable message rather than silently
-    // calling chat_completion with an empty Bearer token.
-    let api_key = endpoint.api_key.clone().unwrap_or_default();
-    if api_key.is_empty() {
-        anyhow::bail!(
-            "judge model not configured — set `kanban.judge_model` in \
-             config.yaml OR `auxiliary.kanban_judge` OR ensure `model.default` \
-             is set with a valid API key (endpoint: {})",
-            endpoint.base_url
-        );
-    }
-
-    Ok((endpoint, resolved_model))
+    ironhermes_agent::judge_builder::resolve_judge_model_and_endpoint_with_env_overrides_strict(
+        &kanban_config.judge_model,
+        main_config,
+        overrides,
+    )
 }
 
 /// Build the production `JudgeFn` from operator config (D-05).
+///
+/// Phase 49.7 D-03: the implementation moved to
+/// `ironhermes_agent::judge_builder::build_runtime_judge_fn` so a crate with
+/// no `ironhermes-kanban` dependency (the session-level `/goal` loop) can
+/// build a judge without this crate's `KanbanConfig`. This wrapper exists
+/// solely to preserve the `&KanbanConfig`-taking signature its callers use.
 ///
 /// The resulting closure builds a static, trusted system prompt asking the
 /// judge to return `{verdict: "met"|"not_met", reason: "..."}` JSON, sends
@@ -1990,22 +2053,19 @@ pub fn build_runtime_judge_fn(
     kanban_config: &KanbanConfig,
     main_config: &Config,
 ) -> anyhow::Result<ironhermes_kanban::JudgeFn> {
-    build_runtime_judge_fn_with_env_overrides(
-        kanban_config,
-        main_config,
-        &std::collections::HashMap::new(),
-    )
+    ironhermes_agent::judge_builder::build_runtime_judge_fn(&kanban_config.judge_model, main_config)
 }
 
 /// [`build_runtime_judge_fn`] with a profile-scoped API-key override map
 /// (Phase 47.4 D-14).
 ///
+/// Phase 49.7 D-03: delegates to
+/// `ironhermes_agent::judge_builder::build_runtime_judge_fn_with_env_overrides`.
 /// Builds the same `JudgeFn` closure — trusted static system prompt,
 /// `LlmClient` call, and fail-closed JSON verdict parsing — against a
 /// specific kanban worker profile's key material instead of the server
 /// process's own environment. `build_runtime_judge_fn` delegates here with
-/// an empty map. Stays in `ironhermes-cli` (not `ironhermes-kanban`) per the
-/// locked crate-isolation fence in `ironhermes-kanban/src/judge.rs`.
+/// an empty map.
 ///
 /// Phase 47.4 Plan 17 (CR-01): this is the operator's own interactive
 /// resolution — it resolves through
@@ -2013,12 +2073,29 @@ pub fn build_runtime_judge_fn(
 /// to the process environment. For any "what would the SCRUBBED spawned
 /// worker see?" question, use
 /// [`build_runtime_judge_fn_with_env_overrides_strict`] instead.
+///
+/// Phase 49.7 D-03 (deviation, Rule 3): before the lift, this function was
+/// reached inside the `ironhermes-cli` *binary* crate's own separate
+/// compilation (`main.rs`'s `mod kanban;`) only via the internal call chain
+/// `build_runtime_judge_fn` -> `build_runtime_judge_fn_with_env_overrides` ->
+/// `build_runtime_judge_fn_with_env_scope` (private). Each wrapper now
+/// independently delegates straight to `ironhermes_agent::judge_builder`
+/// instead of chaining through its local siblings, so that internal path no
+/// longer exists and the bin crate's own compilation has no caller for this
+/// function. It stays `pub` and unremoved because `judge_model_resolution.rs`
+/// (a lib-crate test) calls it directly — the `#[allow]` below documents the
+/// bin-vs-lib duplication this refactor exposed, not a real dead-code bug.
+#[allow(dead_code)]
 pub fn build_runtime_judge_fn_with_env_overrides(
     kanban_config: &KanbanConfig,
     main_config: &Config,
     overrides: &std::collections::HashMap<String, String>,
 ) -> anyhow::Result<ironhermes_kanban::JudgeFn> {
-    build_runtime_judge_fn_with_env_scope(kanban_config, main_config, overrides, true)
+    ironhermes_agent::judge_builder::build_runtime_judge_fn_with_env_overrides(
+        &kanban_config.judge_model,
+        main_config,
+        overrides,
+    )
 }
 
 /// [`build_runtime_judge_fn_with_env_overrides`] with the process-environment
@@ -2026,11 +2103,15 @@ pub fn build_runtime_judge_fn_with_env_overrides(
 /// [`resolve_judge_model_and_endpoint_with_env_overrides_strict`], so
 /// `overrides` (the target profile's own `.env`) is the entire world.
 ///
+/// Phase 49.7 D-03: delegates to
+/// `ironhermes_agent::judge_builder::build_runtime_judge_fn_with_env_overrides_strict`.
 /// Answers "what would the SCRUBBED spawned worker see?" — the question
 /// VERIFY (`iron_hermes_ui`'s `build_probe_setup`) needs answered. A
 /// judge-tier key present only in the *server process* environment must
 /// never let this build a closure the spawned worker's scrubbed environment
-/// (`.env_clear()` + profile `.env`) could not itself build.
+/// (`.env_clear()` + profile `.env`) could not itself build. The `_strict`
+/// distinction is unchanged by the lift and still load-bearing for VERIFY's
+/// probe question.
 ///
 /// Phase 47.4 (D-14 precedent, `resolve_judge_model_and_endpoint` above):
 /// `ironhermes-cli` is a *binary* crate that declares its own `mod kanban;`
@@ -2048,134 +2129,11 @@ pub fn build_runtime_judge_fn_with_env_overrides_strict(
     main_config: &Config,
     overrides: &std::collections::HashMap<String, String>,
 ) -> anyhow::Result<ironhermes_kanban::JudgeFn> {
-    build_runtime_judge_fn_with_env_scope(kanban_config, main_config, overrides, false)
-}
-
-/// Shared body for [`build_runtime_judge_fn_with_env_overrides`] and its
-/// `_strict` sibling (Phase 47.4 Plan 17, CR-01) — the `JudgeFn` closure
-/// construction (trusted static system prompt, `LlmClient` call, fail-closed
-/// JSON verdict parsing) lives in exactly this one place. `allow_process_env`
-/// selects between [`resolve_judge_model_and_endpoint_with_env_overrides`]
-/// and its `_strict` sibling for the underlying cascade resolution.
-fn build_runtime_judge_fn_with_env_scope(
-    kanban_config: &KanbanConfig,
-    main_config: &Config,
-    overrides: &std::collections::HashMap<String, String>,
-    allow_process_env: bool,
-) -> anyhow::Result<ironhermes_kanban::JudgeFn> {
-    use ironhermes_agent::client::LlmClient;
-    use ironhermes_core::ChatMessage;
-    use ironhermes_kanban::{JudgeOutput, JudgeRequest, JudgeVerdict};
-
-    let (endpoint, resolved_model) = if allow_process_env {
-        resolve_judge_model_and_endpoint_with_env_overrides(kanban_config, main_config, overrides)?
-    } else {
-        resolve_judge_model_and_endpoint_with_env_overrides_strict(kanban_config, main_config, overrides)?
-    };
-
-    let base_url = endpoint.base_url.clone();
-    let api_key = endpoint.api_key.clone().unwrap_or_default();
-    let model_for_closure: String = resolved_model;
-
-    let judge_fn: ironhermes_kanban::JudgeFn = Arc::new(move |req: JudgeRequest| {
-        let base_url = base_url.clone();
-        let api_key = api_key.clone();
-        let model = model_for_closure.clone();
-
-        Box::pin(async move {
-            let client = LlmClient::new(&base_url, &api_key, &model);
-
-            // System prompt: TRUSTED, static. The judge evaluates worker
-            // output against `title + body` (= literal acceptance criteria,
-            // CONTEXT.md D-01). Response shape is fixed JSON so Plan 04's
-            // loop wrapper can dispatch on `verdict` without LLM-side prose
-            // creep. T-36.3.7.12-03-T03: even on a successful prompt
-            // injection in `body`, the response space is still constrained
-            // to the JSON parser below.
-            let system_prompt = "You evaluate whether worker output meets the acceptance criteria in \
-                 title + body. Respond with JSON: \
-                 {\"verdict\": \"met\" | \"not_met\", \"reason\": \"<short explanation>\"}.";
-
-            let user_prompt = format!(
-                "Title: {}\n\nAcceptance criteria (body):\n{}\n\nWorker output:\n{}",
-                req.title, req.body, req.worker_turn_output,
-            );
-
-            let messages = vec![
-                ChatMessage::system(system_prompt),
-                ChatMessage::user(&user_prompt),
-            ];
-
-            let response = client
-                .chat_completion(&messages, None, None, Some(1024), Some(0.0), None)
-                .await
-                .map_err(|e| ironhermes_kanban::KanbanError::Other(anyhow::anyhow!("{}", e)))?;
-
-            // Extract text content from the first choice — same pattern as
-            // build_runtime_decompose_fn at commands.rs:1507-1514.
-            let raw_text = response
-                .choices
-                .first()
-                .and_then(|c| c.message.content.as_ref())
-                .and_then(|mc| mc.as_text())
-                .unwrap_or("")
-                .trim()
-                .to_string();
-
-            // 200-char char-boundary-safe preview (T-36.3.7.12-03-I01 V8
-            // bounded-disclosure mitigation).
-            let preview: String = raw_text.chars().take(200).collect();
-
-            // Parse JSON — fail-closed on malformed body.
-            let parsed: serde_json::Value = serde_json::from_str(&raw_text).map_err(|e| {
-                ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
-                    "judge response not JSON: {} (raw: {})",
-                    e,
-                    preview
-                ))
-            })?;
-
-            // Required `verdict` string field — fail-closed on absence.
-            let verdict_str = parsed
-                .get("verdict")
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
-                        "judge response missing 'verdict' field (raw: {})",
-                        preview
-                    ))
-                })?;
-
-            // Case-sensitive match against the two locked literals
-            // (T-36.3.7.12-03-T02 mitigation).
-            let verdict = match verdict_str {
-                "met" => JudgeVerdict::Met,
-                "not_met" => JudgeVerdict::NotMet,
-                other => {
-                    return Err(ironhermes_kanban::KanbanError::Other(anyhow::anyhow!(
-                        "judge verdict not in {{met,not_met}}: {} (raw: {})",
-                        other,
-                        preview
-                    )));
-                }
-            };
-
-            // Reason field is optional; empty string when absent.
-            let reason = parsed
-                .get("reason")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            // turn is informational on the closure side — the wrapper that
-            // emits judge_verdict events uses req.turn directly.
-            let _ = req.turn;
-
-            Ok(JudgeOutput { verdict, reason })
-        })
-    });
-
-    Ok(judge_fn)
+    ironhermes_agent::judge_builder::build_runtime_judge_fn_with_env_overrides_strict(
+        &kanban_config.judge_model,
+        main_config,
+        overrides,
+    )
 }
 
 /// `hermes kanban decompose [<id>] [--all] [--tenant T] [--json] [--board <slug>]`

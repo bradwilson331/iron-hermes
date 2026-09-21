@@ -42,8 +42,8 @@ use std::sync::Mutex;
 
 #[cfg(feature = "server")]
 use crate::protocol::{
-    GroupChatSettings, GroupRoom, GroupRoomMessage, GroupRoomSummary, GroupRoomTranscript,
-    MemberTurnStatus,
+    GroupChatSettings, GroupRoom, GroupRoomMessage, GroupRoomSummary, GroupRoomTeamSetup,
+    GroupRoomTranscript, MemberRole, MemberTurnStatus,
 };
 
 // Phase 50.2 Plan 11 (G-3): the room preview line is PERSISTED
@@ -90,6 +90,52 @@ pub(crate) enum GroupChatError {
     MemberNotFound { name: String },
     RoomNotFound { id: String },
     StoreIo { reason: String },
+    /// Phase 52 (Round 1 codex MEDIUM): the landing point for
+    /// `impl From<TeamDriveError> for GroupChatError` — `code` is a
+    /// host-owned discriminant string (`"leader-contract"`, `"no-leader"`,
+    /// `"task-targets"`, …), never a formatted error. `run_team_drive` and
+    /// its callers must never route a `TeamDriveError` through `StoreIo`'s
+    /// `format!("{e}")` shape — that would reopen the T-52-02 leak the
+    /// moment `TeamDriveError` carries a parse failure.
+    TeamDriveFailed { code: &'static str },
+    /// Phase 52 (D-06/D-07/D-09): `validate_team_room_shape`'s shape-rule
+    /// rejection — `reason` names WHICH shape rule failed
+    /// (`pattern.is_some()` without a Leader entry, a Leader entry without
+    /// `pattern`, or more than one Leader entry) and carries no filesystem
+    /// path or model-produced byte (CR-05/CR-06 discipline).
+    TeamShapeInvalid { reason: String },
+    /// Phase 52 (D-07, Round 1 codex MEDIUM): a team setup designates a
+    /// leader who is not present in the incoming member list — distinct
+    /// from D-07's demotion (removing the CURRENTLY PERSISTED leader from
+    /// membership), which `normalize_team_setup_for_write` handles before
+    /// this validator ever runs.
+    LeaderNotAMember { name: String },
+    /// Phase 52 (D-14, Round 1 codex HIGH): a per-room `max_cycles`
+    /// override outside `protocol::TEAM_CYCLE_MIN..=TEAM_CYCLE_MAX`.
+    TeamCyclesOutOfRange { value: u32 },
+    /// Phase 52 Plan 05 (D-02, Round 1 codex HIGH): a conversation reset was
+    /// requested while a round drive is currently in flight for this room.
+    /// Retryable — the drive that holds the room's slot will eventually
+    /// finish and release it, and a reset that never mutated anything is
+    /// safe to retry as many times as needed.
+    ResetRefusedDriveInFlight,
+    /// Phase 52 Plan 05 (D-02, Round 1 codex HIGH): the reset's transcript
+    /// write (the AUTHORITATIVE copy — `run_group_rounds_with_settings`
+    /// reads `transcript.room.conversation_epoch`, never the index copy)
+    /// succeeded, but the subsequent index projection write failed. The
+    /// reset HAS LANDED; only the roster's index copy is stale. Distinct
+    /// from `StoreIo` deliberately — a caller must NOT retry this outcome,
+    /// because a retry would bump the epoch a second time and orphan
+    /// another session for nothing. The next successful write through any
+    /// store path repairs the stale projection on its own.
+    IndexProjectionStale,
+    /// Phase 52 Plan 05 (D-02, Round 1 codex suggestion): the room's
+    /// `conversation_epoch` is already `u32::MAX` — advancing it further
+    /// would require a saturating add, which would silently report success
+    /// while producing the SAME title (and therefore reusing the SAME
+    /// child session) as the un-reset room, a false clean slate. The epoch
+    /// and transcript are left completely unchanged when this is returned.
+    ConversationEpochExhausted,
 }
 
 #[cfg(feature = "server")]
@@ -107,6 +153,29 @@ impl std::fmt::Display for GroupChatError {
             Self::MemberNotFound { name } => write!(f, "\"{name}\" is not a known bot"),
             Self::RoomNotFound { id } => write!(f, "room \"{id}\" was not found"),
             Self::StoreIo { reason } => write!(f, "group-chat store error: {reason}"),
+            Self::TeamDriveFailed { code } => write!(f, "team drive failed: {code}"),
+            Self::TeamShapeInvalid { reason } => write!(f, "team room shape invalid: {reason}"),
+            Self::LeaderNotAMember { name } => {
+                write!(f, "\"{name}\" is designated leader but is not a room member")
+            }
+            Self::TeamCyclesOutOfRange { value } => write!(
+                f,
+                "max_cycles {value} is out of range [{}, {}]",
+                crate::protocol::TEAM_CYCLE_MIN,
+                crate::protocol::TEAM_CYCLE_MAX
+            ),
+            Self::ResetRefusedDriveInFlight => write!(
+                f,
+                "a round drive is currently in flight for this room — the reset was refused, retry once it finishes"
+            ),
+            Self::IndexProjectionStale => write!(
+                f,
+                "the conversation reset landed, but the room list's cached copy is stale — it will refresh on the next reload"
+            ),
+            Self::ConversationEpochExhausted => write!(
+                f,
+                "this room has already reset the maximum number of times and cannot reset again"
+            ),
         }
     }
 }
@@ -352,15 +421,35 @@ fn write_room_preview(transcript: &mut GroupRoomTranscript) {
 /// site. De-duplicates `members` case-sensitively, preserving first-seen
 /// order, BEFORE checking the count — so a caller-supplied duplicate never
 /// spuriously trips the upper bound. Then checks the de-duplicated count
-/// against [`GroupChatSettings::default`]'s `[min_members, max_members]`
-/// bound, returning [`GroupChatError::MemberCountOutOfRange`]. Then
-/// validates each name through
-/// `ironhermes_core::profile::validate_profile_name` plus a
+/// against the `[min_members, max_members]` bound (see below),
+/// returning [`GroupChatError::MemberCountOutOfRange`]. Then validates each
+/// name through `ironhermes_core::profile::validate_profile_name` plus a
 /// `crate::server::profile_api::profile_dir_for(...).is_dir()` existence
 /// check, returning [`GroupChatError::MemberNotFound`] for either failure.
-/// Performs NO locking and NO I/O beyond the directory-existence probe —
-/// exactly like the block it replaces, which always ran before the lock was
-/// taken.
+///
+/// Phase 52 (D-18): the `[min_members, max_members]` bound is read through
+/// [`crate::server::group_settings_api::load_group_settings_impl`] — the
+/// OPERATOR-PERSISTED record, the same one
+/// [`crate::server::group_chat_api::group_chat_settings_for_drive`] reads
+/// for the round driver's own bounds. Before this fix the bound was
+/// hardcoded to [`GroupChatSettings::default`], so a room could be created
+/// against a bound the driver was not actually enforcing. A settings-file
+/// read failure (missing OR corrupt) falls back to
+/// [`GroupChatSettings::default`] — the same "a corrupted settings file
+/// must never prevent a room from running" policy
+/// `group_chat_settings_for_drive`'s own doc comment records, cited here by
+/// name so the two fallbacks are visibly the same policy, not two
+/// independently-invented ones.
+///
+/// Performs ONE settings-file read and NO locking of its own —
+/// `load_group_settings_impl` reads `group-chat-settings.json` directly, it
+/// does not take the settings store's own mutex for a read. The read
+/// happens BEFORE either caller (`create_room_impl`/
+/// `create_room_with_team_impl` and [`update_room_members_impl`]) acquires
+/// [`GROUP_CHAT_LOCK`] — both call this fn above their own
+/// `let _guard = GROUP_CHAT_LOCK.lock()` line — so this store's chat lock
+/// is never nested inside (or around) the settings store's own mutex,
+/// which only ever guards a settings SAVE.
 #[cfg(feature = "server")]
 pub(crate) fn validate_room_members(members: &[String]) -> Result<Vec<String>, GroupChatError> {
     let mut deduped: Vec<String> = Vec::with_capacity(members.len());
@@ -370,7 +459,10 @@ pub(crate) fn validate_room_members(members: &[String]) -> Result<Vec<String>, G
         }
     }
 
-    let settings = GroupChatSettings::default();
+    // Phase 52 (D-18): read the operator-persisted record rather than the
+    // hardcoded default. See this fn's doc comment for the fallback policy.
+    let settings = crate::server::group_settings_api::load_group_settings_impl()
+        .unwrap_or_else(|_| GroupChatSettings::default());
     if deduped.len() < settings.min_members as usize || deduped.len() > settings.max_members as usize {
         return Err(GroupChatError::MemberCountOutOfRange {
             count: deduped.len(),
@@ -394,18 +486,70 @@ pub(crate) fn validate_room_members(members: &[String]) -> Result<Vec<String>, G
     Ok(validated_members)
 }
 
-/// Phase 50.2 Plan 01: create a room. Validates the name (own validator,
-/// never `validate_profile_name`) and the members through
-/// [`validate_room_members`] — the count against
-/// [`GroupChatSettings::default`]'s `[min_members, max_members]` bound, and
-/// every member name against `ironhermes_core::profile::validate_profile_name`
-/// plus an on-disk existence check (a room member must be a real bot). Locks
-/// once for the whole create sequence: index-duplicate check, transcript
-/// write, index write.
+/// Phase 50.2 Plan 01: create a plain peer room. Validates the name (own
+/// validator, never `validate_profile_name`) and the members through
+/// [`validate_room_members`] — the count against the operator-persisted
+/// `[min_members, max_members]` bound (D-18), and every member name against
+/// `ironhermes_core::profile::validate_profile_name` plus an on-disk
+/// existence check (a room member must be a real bot).
+///
+/// Phase 52 (D-09): a thin wrapper over [`create_room_with_team_impl`] with
+/// `team: None` — kept as its own fn, rather than folding its ~35 existing
+/// call sites across this crate into the team-aware signature, because
+/// every one of those call sites creates a plain peer room and a bare
+/// `None` third argument at each would carry no information. The two fns
+/// share one write path; this one is byte-for-byte what it was before this
+/// phase. `#[allow(dead_code)]`: every remaining call site is this crate's
+/// own test suite (`create_group_room`, the one production caller, now
+/// calls `create_room_with_team_impl` directly to forward `req.team`) —
+/// same precedent `VerifyOutcome`/`CloneFromChoice::Import`
+/// (`protocol.rs`) and this file's own `set_room_needs_you_impl` already
+/// set for a fn with no production call site yet.
 #[cfg(feature = "server")]
+#[allow(dead_code)]
 pub(crate) fn create_room_impl(name: &str, members: &[String]) -> Result<GroupRoom, GroupChatError> {
+    create_room_with_team_impl(name, members, None)
+}
+
+/// Phase 52 (D-09): create a room, optionally AS a team room, in the same
+/// write path [`create_room_impl`] uses for a plain peer room — D-09's
+/// "same persisted write path, no schema migration" requirement. When
+/// `team` is `Some`, the setup is validated through
+/// [`validate_team_room_shape`] (against the validated member list) BEFORE
+/// the lock is taken — at creation there is no CURRENT room, so
+/// [`normalize_team_setup_for_write`]'s demotion step does not apply; a
+/// setup that designates a leader absent from the member list is rejected
+/// outright, never silently dropped. Locks once for the whole create
+/// sequence: index-duplicate check, transcript write, index write.
+#[cfg(feature = "server")]
+pub(crate) fn create_room_with_team_impl(
+    name: &str,
+    members: &[String],
+    team: Option<&GroupRoomTeamSetup>,
+) -> Result<GroupRoom, GroupChatError> {
     let validated_name = validate_group_room_name(name)?;
     let validated_members = validate_room_members(members)?;
+
+    let (pattern, roles, max_cycles, leader_prompt_override, worker_prompt_override) = match team {
+        Some(setup) => {
+            validate_team_room_shape(
+                &setup.pattern,
+                &setup.roles,
+                &validated_members,
+                setup.max_cycles,
+            )?;
+            (
+                setup.pattern.clone(),
+                setup.roles.clone(),
+                setup.max_cycles,
+                setup.leader_prompt_override.clone(),
+                setup.worker_prompt_override.clone(),
+            )
+        }
+        // Phase 52: no team setup submitted — a freshly created room is a
+        // plain peer room, byte-for-byte Plan 02's hardcoded literal.
+        None => (None, BTreeMap::new(), None, None, None),
+    };
 
     let slug = slugify_room_name(&validated_name);
 
@@ -423,10 +567,17 @@ pub(crate) fn create_room_impl(name: &str, members: &[String]) -> Result<GroupRo
         members: validated_members,
         group: None,
         needs_you: false,
+        needs_you_reason: None,
         preview: None,
         preview_at_ms: None,
         created_at_ms: now,
         updated_at_ms: now,
+        pattern,
+        roles,
+        max_cycles,
+        leader_prompt_override,
+        worker_prompt_override,
+        conversation_epoch: 1,
     };
 
     write_transcript(
@@ -437,6 +588,42 @@ pub(crate) fn create_room_impl(name: &str, members: &[String]) -> Result<GroupRo
         },
     )?;
     index.insert(slug, room.clone());
+    write_room_index(&index)?;
+
+    Ok(room)
+}
+
+/// Phase 52: test-only room constructor that also sets `pattern`/`roles` —
+/// the `#[server]` surface for enabling a team pattern on an existing room
+/// is Plan 03's job, so this tracer's own tests need a direct way to get a
+/// team room onto disk. `#[cfg(test)]` (not gated inside `mod tests`) so it
+/// is crate-visible to `group_team_api.rs`'s own test module during
+/// `cargo test`, mirroring Wave 0's `stub_script_fixture` precedent for
+/// crate-visible test-only infra. Follows the same
+/// lock→load→mutate→write-detail→write-index sequence every other mutator
+/// in this module uses.
+#[cfg(all(test, feature = "server"))]
+pub(crate) fn create_team_room_for_test(
+    name: &str,
+    members: &[String],
+    pattern: crate::protocol::TeamPattern,
+    roles: BTreeMap<String, crate::protocol::MemberRole>,
+) -> Result<GroupRoom, GroupChatError> {
+    let mut room = create_room_impl(name, members)?;
+
+    let _guard = GROUP_CHAT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    room.pattern = Some(pattern);
+    room.roles = roles;
+
+    write_transcript(
+        &room.id,
+        &GroupRoomTranscript {
+            room: room.clone(),
+            messages: Vec::new(),
+        },
+    )?;
+    let mut index = load_room_index()?;
+    index.insert(room.id.clone(), room.clone());
     write_room_index(&index)?;
 
     Ok(room)
@@ -462,6 +649,10 @@ pub(crate) fn list_rooms_impl() -> Result<Vec<GroupRoomSummary>, GroupChatError>
             preview: room.preview,
             preview_at_ms: room.preview_at_ms,
             active_round: None,
+            // Phase 52 (D-06/D-01, same reachability class as `group`
+            // above): without this the roster row can never see a room's
+            // team status no matter what the store holds.
+            pattern: room.pattern,
         })
         .collect())
 }
@@ -540,23 +731,40 @@ pub(crate) fn delete_room_impl(room_id: &str) -> Result<(), GroupChatError> {
 }
 
 /// Phase 50.2 Plan 01: set (or clear) a room's `needs_you` escalation flag.
-/// `pub(crate)`, impl-layer only for this plan — plan 04 wires this through
-/// a `#[server]` fn once the needs-you trigger logic lands; kept here now so
-/// the store's fn set matches the plan's full contract from the start
-/// (mirrors `VerifyOutcome`'s "future plan consumes this" precedent in
-/// `protocol.rs`). `#[allow(dead_code)]`: exercised by this plan's own test
-/// module only (`set_room_needs_you_impl_toggles_the_flag`) — no production
-/// call site until plan 04 wires one, same precedent `VerifyOutcome` and
-/// `CloneFromChoice::Import` already set in `protocol.rs`.
+///
+/// Phase 52 (Round 1 codex MEDIUM): widened to carry an optional `reason`
+/// alongside the flag — raising the flag stores the reason, clearing it
+/// clears the reason, in the same write. Today `needs_you` had nowhere to
+/// say WHY it was raised, and UI-SPEC contracts two distinct advisory
+/// sentences (cycle exhaustion, leader-contract failure) the badge alone
+/// cannot carry. Every EXISTING call site passes `None`, preserving current
+/// behaviour exactly — the two production call sites in
+/// `group_chat_api.rs` (the operator-message clear and the mention-
+/// triggered raise, `score.needs_you && !needs_you`) have no contracted
+/// sentence to offer, and inventing one here would put un-contracted copy
+/// on a peer-room path. Plan 04 is the only future caller that ever passes
+/// `Some`.
+///
+/// **Caller audit (re-run, do not trust a stated count):**
+/// `grep -rn 'set_room_needs_you_impl(' crates/ --include='*.rs'` finds
+/// this definition plus 7 call sites: 2 production in `group_chat_api.rs`
+/// (the clear and the raise) and 5 in this crate's own tests
+/// (`group_chat_api.rs` x2, `group_chat_store.rs` x3, including this fn's
+/// own `set_room_needs_you_impl_toggles_the_flag`). Every one of them
+/// passes `None`.
 #[cfg(feature = "server")]
-#[allow(dead_code)]
-pub(crate) fn set_room_needs_you_impl(room_id: &str, needs_you: bool) -> Result<(), GroupChatError> {
+pub(crate) fn set_room_needs_you_impl(
+    room_id: &str,
+    needs_you: bool,
+    reason: Option<String>,
+) -> Result<(), GroupChatError> {
     let _guard = GROUP_CHAT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
     let mut transcript = load_transcript(room_id)?.ok_or_else(|| GroupChatError::RoomNotFound {
         id: room_id.to_string(),
     })?;
     transcript.room.needs_you = needs_you;
+    transcript.room.needs_you_reason = reason;
     transcript.room.updated_at_ms = now_ms();
     write_transcript(room_id, &transcript)?;
 
@@ -565,6 +773,124 @@ pub(crate) fn set_room_needs_you_impl(room_id: &str, needs_you: bool) -> Result<
     write_room_index(&index)?;
 
     Ok(())
+}
+
+/// Phase 52 (D-06/D-07/D-09, RESEARCH Pitfall 5): the SINGLE enforcement
+/// point for the team-room shape invariant — creation
+/// ([`create_room_with_team_impl`]), conversion and demotion
+/// ([`update_room_team_impl`], [`update_room_members_impl`]) all call this
+/// before persisting, so a room the team driver cannot dispatch from can
+/// never be WRITTEN (reading an already-violating record must still
+/// succeed — see those two fns' doc comments). Pure: takes no lock and
+/// performs no I/O, so it is safe to call from inside `GROUP_CHAT_LOCK`
+/// once a caller has already loaded the current room.
+///
+/// Two independent rules:
+/// - **Shape.** `pattern.is_some()` must equal "`roles` contains exactly
+///   one `Leader` entry." A `Leader` entry naming a name absent from
+///   `members` is [`GroupChatError::LeaderNotAMember`]. Two `Leader`
+///   entries, a `Leader` with no `pattern`, or a `pattern` with no
+///   `Leader`, is [`GroupChatError::TeamShapeInvalid`].
+/// - **Budget (D-14, Round 1 codex HIGH).** `max_cycles` must be `None`,
+///   or `Some(n)` with `n` inside
+///   `protocol::TEAM_CYCLE_MIN..=protocol::TEAM_CYCLE_MAX`, otherwise
+///   [`GroupChatError::TeamCyclesOutOfRange`]. This is NOT redundant with
+///   [`crate::server::group_settings_api::clamp_group_settings`] — that fn
+///   has exactly one caller, `save_group_settings_impl`, on the APP-WIDE
+///   settings save path; no room write path reaches it, so without this
+///   check a per-room `max_cycles` override — D-14's primary cost lever —
+///   would have no authoritative validation anywhere.
+#[cfg(feature = "server")]
+pub(crate) fn validate_team_room_shape(
+    pattern: &Option<crate::protocol::TeamPattern>,
+    roles: &BTreeMap<String, MemberRole>,
+    members: &[String],
+    max_cycles: Option<u32>,
+) -> Result<(), GroupChatError> {
+    let leaders: Vec<&String> = roles
+        .iter()
+        .filter(|(_, role)| matches!(role, MemberRole::Leader))
+        .map(|(name, _)| name)
+        .collect();
+
+    match (pattern.is_some(), leaders.len()) {
+        (true, 1) => {
+            let leader_name = leaders[0];
+            if !members.iter().any(|m| m == leader_name) {
+                return Err(GroupChatError::LeaderNotAMember {
+                    name: leader_name.clone(),
+                });
+            }
+        }
+        (true, 0) => {
+            return Err(GroupChatError::TeamShapeInvalid {
+                reason: "pattern is set but roles has no Leader entry".to_string(),
+            });
+        }
+        (false, 0) => {}
+        // (true, 2+) and (false, 1+) both land here: either more than one
+        // Leader entry, or a Leader entry with no pattern set.
+        _ => {
+            return Err(GroupChatError::TeamShapeInvalid {
+                reason: "roles' Leader entries and pattern disagree: exactly one Leader \
+                         entry is required when, and only when, pattern is set"
+                    .to_string(),
+            });
+        }
+    }
+
+    if let Some(n) = max_cycles {
+        if !(crate::protocol::TEAM_CYCLE_MIN..=crate::protocol::TEAM_CYCLE_MAX).contains(&n) {
+            return Err(GroupChatError::TeamCyclesOutOfRange { value: n });
+        }
+    }
+
+    Ok(())
+}
+
+/// Phase 52 (D-07, Round 1 codex MEDIUM): the state-dependent half of D-07's
+/// demotion rule, kept separate from the pure [`validate_team_room_shape`]
+/// because it needs the CURRENT persisted room — only available once a
+/// caller has loaded the transcript under [`GROUP_CHAT_LOCK`]. Applies
+/// demotion in exactly ONE case: the room currently HAS a persisted
+/// `Leader` entry, and that persisted leader's name is absent from the
+/// incoming `members` list. In that case, it returns a setup with `roles`
+/// cleared and `pattern` set to `None` (D-07's "unrepresentable state the
+/// driver hits at dispatch time" cannot be persisted). In every OTHER
+/// case — including when `setup` itself DESIGNATES a leader absent from
+/// `members`, while the room's CURRENT leader is still present — `setup`
+/// is returned unchanged, so [`validate_team_room_shape`] rejects that case
+/// as [`GroupChatError::LeaderNotAMember`] rather than it being silently
+/// normalized into a demotion. Without this split, a setup naming a
+/// never-a-member leader would be indistinguishable from an operator who
+/// removed the real leader from membership, turning an explicit validation
+/// error into a silent scope change. Pure: takes no lock and performs no
+/// I/O.
+#[cfg(feature = "server")]
+pub(crate) fn normalize_team_setup_for_write(
+    current: &GroupRoom,
+    members: &[String],
+    setup: &GroupRoomTeamSetup,
+) -> GroupRoomTeamSetup {
+    let current_leader = current
+        .roles
+        .iter()
+        .find(|(_, role)| matches!(role, MemberRole::Leader))
+        .map(|(name, _)| name.clone());
+
+    if let Some(leader) = current_leader {
+        if !members.iter().any(|m| m == &leader) {
+            return GroupRoomTeamSetup {
+                pattern: None,
+                roles: BTreeMap::new(),
+                max_cycles: setup.max_cycles,
+                leader_prompt_override: setup.leader_prompt_override.clone(),
+                worker_prompt_override: setup.worker_prompt_override.clone(),
+            };
+        }
+    }
+
+    setup.clone()
 }
 
 /// Phase 50.2 Plan 15 (G-50.2-2a): change an EXISTING room's membership —
@@ -578,10 +904,18 @@ pub(crate) fn set_room_needs_you_impl(room_id: &str, needs_you: bool) -> Result<
 /// the two would make those two read paths disagree about who is in the
 /// room. Validates through [`validate_room_members`] BEFORE the lock is
 /// taken, so a rejected update never reaches either write and both
-/// persisted copies stay byte-for-byte as they were. Touches only `members`
-/// and `updated_at_ms` — `needs_you`, `preview`, `preview_at_ms`,
-/// `created_at_ms`, `group`, `id`, `name` and the whole message transcript
-/// all survive untouched.
+/// persisted copies stay byte-for-byte as they were.
+///
+/// Phase 52 (D-07): also runs [`normalize_team_setup_for_write`] then
+/// [`validate_team_room_shape`], INSIDE the lock, against a setup derived
+/// from the room's OWN current team fields (this call never carries a
+/// submitted team setup — [`update_room_team_impl`] is that surface) — so a
+/// membership edit that drops the persisted leader demotes the room to a
+/// peer room in the SAME write, and a caller cannot hand-craft a way past
+/// the invariant by using this fn instead of `update_room_team_impl`.
+/// Leaving `pattern` `Some` with no leader would be the unrepresentable
+/// state the driver hits at dispatch time — D-07's stated reason. A
+/// rejection returns before any mutation, so `members` stays unchanged too.
 #[cfg(feature = "server")]
 pub(crate) fn update_room_members_impl(
     room_id: &str,
@@ -594,13 +928,201 @@ pub(crate) fn update_room_members_impl(
     let mut transcript = load_transcript(room_id)?.ok_or_else(|| GroupChatError::RoomNotFound {
         id: room_id.to_string(),
     })?;
+
+    let current_setup = GroupRoomTeamSetup {
+        pattern: transcript.room.pattern.clone(),
+        roles: transcript.room.roles.clone(),
+        max_cycles: transcript.room.max_cycles,
+        leader_prompt_override: transcript.room.leader_prompt_override.clone(),
+        worker_prompt_override: transcript.room.worker_prompt_override.clone(),
+    };
+    let normalized =
+        normalize_team_setup_for_write(&transcript.room, &validated_members, &current_setup);
+    validate_team_room_shape(
+        &normalized.pattern,
+        &normalized.roles,
+        &validated_members,
+        normalized.max_cycles,
+    )?;
+
     transcript.room.members = validated_members;
+    transcript.room.pattern = normalized.pattern;
+    transcript.room.roles = normalized.roles;
+    transcript.room.max_cycles = normalized.max_cycles;
+    transcript.room.leader_prompt_override = normalized.leader_prompt_override;
+    transcript.room.worker_prompt_override = normalized.worker_prompt_override;
     transcript.room.updated_at_ms = now_ms();
     write_transcript(room_id, &transcript)?;
 
     let mut index = load_room_index()?;
     index.insert(room_id.to_string(), transcript.room.clone());
     write_room_index(&index)?;
+
+    Ok(transcript.room)
+}
+
+/// Phase 52 (D-06/D-07/D-09): change an EXISTING room's membership AND team
+/// composition in ONE write — the `#[server]` counterpart of
+/// [`crate::protocol::UpdateGroupRoomTeamRequest`]'s doc comment: membership
+/// and team composition ride together so the edit modal cannot half-save.
+/// Mirrors [`update_room_members_impl`]'s structure exactly: validates
+/// through [`validate_room_members`] BEFORE the lock, then takes
+/// [`GROUP_CHAT_LOCK`] once, loads the transcript, runs
+/// [`normalize_team_setup_for_write`] against the loaded room (applying
+/// D-07's demotion if the room's CURRENT persisted leader is absent from
+/// the incoming member list) then [`validate_team_room_shape`] on the
+/// result — and only if that passes, applies members AND the team fields
+/// together, bumps `updated_at_ms`, writes the transcript, then the index.
+/// A rejection returns before any mutation, so persisted members are
+/// unchanged too. The normalization and validation run inside the lock
+/// because they depend on the loaded room; both are pure and lock-free, so
+/// no second lock is taken and no lock ordering is introduced.
+#[cfg(feature = "server")]
+pub(crate) fn update_room_team_impl(
+    room_id: &str,
+    members: &[String],
+    setup: &GroupRoomTeamSetup,
+) -> Result<GroupRoom, GroupChatError> {
+    let validated_members = validate_room_members(members)?;
+
+    let _guard = GROUP_CHAT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let mut transcript = load_transcript(room_id)?.ok_or_else(|| GroupChatError::RoomNotFound {
+        id: room_id.to_string(),
+    })?;
+
+    let normalized = normalize_team_setup_for_write(&transcript.room, &validated_members, setup);
+    validate_team_room_shape(
+        &normalized.pattern,
+        &normalized.roles,
+        &validated_members,
+        normalized.max_cycles,
+    )?;
+
+    transcript.room.members = validated_members;
+    transcript.room.pattern = normalized.pattern;
+    transcript.room.roles = normalized.roles;
+    transcript.room.max_cycles = normalized.max_cycles;
+    transcript.room.leader_prompt_override = normalized.leader_prompt_override;
+    transcript.room.worker_prompt_override = normalized.worker_prompt_override;
+    transcript.room.updated_at_ms = now_ms();
+    write_transcript(room_id, &transcript)?;
+
+    let mut index = load_room_index()?;
+    index.insert(room_id.to_string(), transcript.room.clone());
+    write_room_index(&index)?;
+
+    Ok(transcript.room)
+}
+
+/// Phase 52 Plan 05 (D-02, Round 1 codex HIGH): the fixed, host-owned text
+/// of the marker row a "New conversation" reset appends. This is the FIRST
+/// writer of `GroupRoomSpeaker::System` in the codebase — that variant was
+/// reserved with no writer since Phase 50.2 Plan 01.
+#[cfg(feature = "server")]
+pub(crate) const CONVERSATION_RESET_MARKER_TEXT: &str =
+    "Conversation reset — earlier messages are no longer replayed to members.";
+
+/// Phase 52 Plan 05 (D-02/D-17): the "New conversation" action's store
+/// implementation — resets a room's conversational continuity WITHOUT
+/// touching `pattern`, `roles`, membership, or any other room field (D-15).
+/// The room-side and child-side breaks D-02 exists to fix are NOT two
+/// independent mechanisms that can diverge: this fn bumps
+/// `conversation_epoch` and appends one marker row in a SINGLE
+/// `write_transcript` call, and the child-side break — every member's own
+/// CLI subprocess resuming a DIFFERENT session — is a DERIVED consequence,
+/// computed at the NEXT round drive when `group_chat_api::group_session_title`
+/// renders a different title from the newly persisted epoch. Applies to
+/// EVERY room, peer and team alike (D-17).
+///
+/// **Coordinates with drive ownership BEFORE anything else (Round 1 codex
+/// HIGH).** A drive holds its `transcript` and `session_title` as locals
+/// across every await and persists rows by re-loading under
+/// `GROUP_CHAT_LOCK` and appending — so a reset that only took that lock
+/// could not stop an in-flight drive from landing rows AFTER this reset's
+/// own marker row, which `group_chat_api::conversation_start_index` would
+/// then read as being INSIDE the new conversation, silently
+/// re-contaminating it. `handoff_steering::try_acquire_room_drive` is
+/// acquired FIRST, before `GROUP_CHAT_LOCK`, and held for the WHOLE reset —
+/// a busy room returns [`GroupChatError::ResetRefusedDriveInFlight`] with
+/// NOTHING mutated, and holding the guard across the whole reset also means
+/// a drive cannot start mid-reset.
+///
+/// Then the room's queued pre-reset steering messages are drained and
+/// DISCARDED (`handoff_steering::drain_room_steering`) — those messages
+/// were queued against the conversation being ended, so carrying them into
+/// the new one would be the exact carryover D-02 exists to break, and
+/// leaving them queued would replay them into a conversation they were
+/// never written for.
+///
+/// **The epoch advances via `checked_add`, never `saturating_add` (Round 1
+/// codex suggestion).** A saturating add at `u32::MAX` is a silent no-op —
+/// it would report a successful clean slate while producing the SAME title
+/// and reusing the SAME child session. `None` returns
+/// [`GroupChatError::ConversationEpochExhausted`] with the transcript
+/// completely unchanged.
+///
+/// **Names the two-file write window honestly (Round 1 codex HIGH) rather
+/// than asserting it away.** `write_transcript` and the index refresh below
+/// are two separate `write_json_atomic` calls, atomic individually and NOT
+/// jointly — mirroring [`update_room_members_impl`]'s own lock→load→
+/// mutate→write-transcript→write-index sequence. The transcript is the
+/// AUTHORITATIVE copy: `run_group_rounds_with_settings` reads
+/// `transcript.room.conversation_epoch`, never the index copy. If
+/// `write_transcript` fails, nothing has changed and the ordinary
+/// [`GroupChatError::StoreIo`] is correct and retryable. If it SUCCEEDS and
+/// the index load or write fails afterward, the reset HAS LANDED and only
+/// the roster's projection is stale — [`GroupChatError::IndexProjectionStale`]
+/// is returned instead of `StoreIo`, so a caller never retries a landed
+/// reset into a second, orphaning epoch bump. The next successful write
+/// through any store path repairs the stale index projection on its own.
+#[cfg(feature = "server")]
+pub(crate) fn reset_room_conversation_impl(room_id: &str) -> Result<GroupRoom, GroupChatError> {
+    let Some(_drive_guard) = crate::server::handoff_steering::try_acquire_room_drive(room_id)
+    else {
+        return Err(GroupChatError::ResetRefusedDriveInFlight);
+    };
+
+    // Those messages were queued against the conversation being ended;
+    // carrying them into the new one is the same carryover D-02 exists to
+    // break. Discarded, not replayed.
+    let _ = crate::server::handoff_steering::drain_room_steering(room_id);
+
+    let _guard = GROUP_CHAT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let mut transcript = load_transcript(room_id)?.ok_or_else(|| GroupChatError::RoomNotFound {
+        id: room_id.to_string(),
+    })?;
+
+    let Some(next_epoch) = transcript.room.conversation_epoch.checked_add(1) else {
+        return Err(GroupChatError::ConversationEpochExhausted);
+    };
+    transcript.room.conversation_epoch = next_epoch;
+    transcript.messages.push(GroupRoomMessage {
+        from: crate::protocol::GroupRoomSpeaker::System,
+        text: CONVERSATION_RESET_MARKER_TEXT.to_string(),
+        at_ms: now_ms(),
+        round: 0,
+        status: MemberTurnStatus::Replied,
+        team_row: None,
+    });
+    transcript.room.updated_at_ms = now_ms();
+
+    // The transcript write is the reset's ONE authoritative commit point —
+    // a failure here means nothing changed at all.
+    write_transcript(room_id, &transcript)?;
+
+    // From here on, the reset has LANDED. A failure in either of these two
+    // steps is reported as IndexProjectionStale, never StoreIo, precisely
+    // so a caller never retries into a second epoch bump.
+    let mut index = match load_room_index() {
+        Ok(index) => index,
+        Err(_) => return Err(GroupChatError::IndexProjectionStale),
+    };
+    index.insert(room_id.to_string(), transcript.room.clone());
+    if write_room_index(&index).is_err() {
+        return Err(GroupChatError::IndexProjectionStale);
+    }
 
     Ok(transcript.room)
 }
@@ -653,6 +1175,148 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
+    // Phase 52 Plan 01 (Wave 0, RESEARCH Pitfall 2): pre-Phase-52 JSON
+    // fixtures, captured under the CURRENT struct definitions before any
+    // serde-default field is added. `include_str!` follows the static-asset
+    // precedent already used in `chat_attachments_api.rs`/`mcp_admin_api.rs`
+    // (self-source scans, not fixture data, but the same "compile a tracked
+    // file into the test binary" idiom).
+    // -------------------------------------------------------------------
+
+    /// Phase 52 Plan 01: the room INDEX MAP shape `load_room_index`
+    /// deserializes (`BTreeMap<String, GroupRoom>`) — the on-disk
+    /// `group-rooms.json` shape, captured before any Phase 52 field exists.
+    const PRE52_GROUP_ROOMS_FIXTURE: &str =
+        include_str!("fixtures/pre52_group_rooms.json");
+
+    /// Phase 52 Plan 01: one full `GroupRoomTranscript` (`room` plus a
+    /// non-empty `messages` array) — the per-room sidecar shape
+    /// `load_transcript` deserializes. Carries an Operator row, a `Member`
+    /// row, and a `Failed { reason }` row so Plan 02's `GroupRoomMessage`
+    /// extension has real old-data input for every persisted variant shape.
+    const PRE52_GROUP_ROOM_TRANSCRIPT_FIXTURE: &str =
+        include_str!("fixtures/pre52_group_room_transcript.json");
+
+    /// Phase 52 Plan 01: one `GroupChatSettings` at its pre-Phase-52
+    /// `Default` values, captured before D-14's `max_cycles`/
+    /// `max_workers_per_delegation` fields exist.
+    const PRE52_GROUP_CHAT_SETTINGS_FIXTURE: &str =
+        include_str!("fixtures/pre52_group_chat_settings.json");
+
+    /// Phase 52 Plan 02 Task 3: this test's pre-schema form
+    /// (`pre52_group_rooms_index_fixture_is_field_for_field_todays_index_shape`)
+    /// was green at Plan 01's base commit, BEFORE any Phase 52 field
+    /// existed. Task 2 added six new `GroupRoom` fields, which broke that
+    /// field-for-field-equality assertion by construction (today's struct
+    /// now serializes MORE keys than the untouched fixture carries) — this
+    /// is RESEARCH Pitfall 2's "old data, new code" case: the fixture must
+    /// still DESERIALIZE (not round-trip byte-identically) and every new
+    /// field must land on its documented serde default. Every pre-existing
+    /// field assertion is kept so a field that silently changed meaning
+    /// would also be caught.
+    #[test]
+    fn pre52_group_rooms_index_fixture_still_deserializes_after_the_phase_52_fields() {
+        let parsed: BTreeMap<String, GroupRoom> =
+            serde_json::from_str(PRE52_GROUP_ROOMS_FIXTURE)
+                .expect("pre52 group-rooms fixture must still deserialize under today's GroupRoom shape");
+        let room = parsed.get("standup").expect("fixture must carry a \"standup\" room");
+
+        // Pre-existing fields must keep their captured values.
+        assert_eq!(room.id, "standup");
+        assert_eq!(room.name, "standup");
+        assert_eq!(room.members, vec!["alpha".to_string(), "beta".to_string()]);
+        assert_eq!(room.group, None);
+        assert!(!room.needs_you);
+        assert_eq!(room.preview.as_deref(), Some("kickoff"));
+        assert_eq!(room.preview_at_ms, Some(1757000000000));
+        assert_eq!(room.created_at_ms, 1756900000000);
+        assert_eq!(room.updated_at_ms, 1757000000000);
+
+        // Every Phase 52 field must land on its documented serde default.
+        assert_eq!(room.pattern, None);
+        assert!(room.roles.is_empty());
+        assert_eq!(room.max_cycles, None);
+        assert_eq!(room.leader_prompt_override, None);
+        assert_eq!(room.worker_prompt_override, None);
+        assert_eq!(room.conversation_epoch, 1);
+    }
+
+    /// Phase 52 Plan 02 Task 3: post-schema twin of
+    /// `pre52_group_room_transcript_fixture_is_field_for_field_todays_transcript_shape`
+    /// — same "still deserializes, defaults land" contract as the index
+    /// test above, plus the specific old-data case `GroupRoomMessage.team_row`
+    /// creates: all three pre-Phase-52 messages must still load, each with
+    /// `team_row: None`.
+    #[test]
+    fn pre52_group_room_transcript_fixture_still_deserializes_after_the_phase_52_fields() {
+        let parsed: GroupRoomTranscript =
+            serde_json::from_str(PRE52_GROUP_ROOM_TRANSCRIPT_FIXTURE).expect(
+                "pre52 group-room-transcript fixture must still deserialize under today's GroupRoomTranscript shape",
+            );
+
+        let room = &parsed.room;
+        assert_eq!(room.id, "standup");
+        assert_eq!(room.members, vec!["alpha".to_string(), "beta".to_string()]);
+        assert_eq!(room.group, None);
+        assert!(!room.needs_you);
+        assert_eq!(room.preview.as_deref(), Some("kickoff"));
+        assert_eq!(room.preview_at_ms, Some(1757000000000));
+        assert_eq!(room.created_at_ms, 1756900000000);
+        assert_eq!(room.updated_at_ms, 1757000000000);
+        assert_eq!(room.pattern, None);
+        assert!(room.roles.is_empty());
+        assert_eq!(room.max_cycles, None);
+        assert_eq!(room.leader_prompt_override, None);
+        assert_eq!(room.worker_prompt_override, None);
+        assert_eq!(room.conversation_epoch, 1);
+
+        assert_eq!(parsed.messages.len(), 3, "all three pre-Phase-52 messages must still load");
+        for msg in &parsed.messages {
+            assert_eq!(msg.team_row, None, "an old-data message must default team_row to None");
+        }
+        assert_eq!(parsed.messages[0].from, crate::protocol::GroupRoomSpeaker::Operator);
+        assert_eq!(parsed.messages[0].text, "morning, what's the status?");
+        assert_eq!(
+            parsed.messages[1].from,
+            crate::protocol::GroupRoomSpeaker::Member("alpha".to_string())
+        );
+        assert_eq!(parsed.messages[1].status, MemberTurnStatus::Passed);
+        assert_eq!(
+            parsed.messages[2].from,
+            crate::protocol::GroupRoomSpeaker::Member("beta".to_string())
+        );
+        assert_eq!(
+            parsed.messages[2].status,
+            MemberTurnStatus::Failed {
+                reason: "timeout after 180s".to_string()
+            }
+        );
+    }
+
+    /// Phase 52 Plan 02 Task 3: post-schema twin of
+    /// `pre52_group_chat_settings_fixture_is_field_for_field_todays_settings_shape`
+    /// — same "still deserializes, defaults land" contract. The five
+    /// pre-existing tunables keep their captured (D-21 default) values; the
+    /// two new Phase 52 tunables must land on their documented serde
+    /// defaults, `TEAM_CYCLE_MIN` and `TEAM_WORKERS_MAX`.
+    #[test]
+    fn pre52_group_chat_settings_fixture_still_deserializes_after_the_phase_52_fields() {
+        let parsed: GroupChatSettings =
+            serde_json::from_str(PRE52_GROUP_CHAT_SETTINGS_FIXTURE).expect(
+                "pre52 group-chat-settings fixture must still deserialize under today's GroupChatSettings shape",
+            );
+
+        assert_eq!(parsed.max_rounds, 3);
+        assert_eq!(parsed.max_messages, 10);
+        assert_eq!(parsed.history_limit, 24);
+        assert_eq!(parsed.min_members, 2);
+        assert_eq!(parsed.max_members, 6);
+
+        assert_eq!(parsed.max_cycles, crate::protocol::TEAM_CYCLE_MIN);
+        assert_eq!(parsed.max_workers_per_delegation, crate::protocol::TEAM_WORKERS_MAX);
+    }
+
+    // -------------------------------------------------------------------
     // validate_group_room_name
     // -------------------------------------------------------------------
 
@@ -700,6 +1364,22 @@ mod tests {
         assert!(matches!(err, GroupChatError::RoomNameRejected { .. }));
     }
 
+    #[test]
+    fn the_epoch_separator_is_rejected_by_the_room_name_validator() {
+        // Phase 52 Plan 05 (D-02, Round 1 codex HIGH): the paired half of
+        // the whole collision-freedom argument — a room name must NEVER be
+        // able to contain `group_chat_api::CONVERSATION_EPOCH_SEPARATOR`
+        // (`#`), because an epoch-discriminated session title's uniqueness
+        // depends entirely on a room name containing zero separators. This
+        // is the one test in the crate enforcing that disjointness; nothing
+        // else does.
+        let err = validate_group_room_name("standup#2").unwrap_err();
+        assert!(
+            matches!(err, GroupChatError::RoomNameRejected { .. }),
+            "a room name containing the reserved epoch separator must be rejected"
+        );
+    }
+
     // -------------------------------------------------------------------
     // store round-trip + member-count bounds
     // -------------------------------------------------------------------
@@ -726,6 +1406,7 @@ mod tests {
             at_ms: 1,
             round: 1,
             status: MemberTurnStatus::Replied,
+            team_row: None,
         }];
         append_room_messages_impl(&room.id, messages)
             .expect("append_room_messages_impl should succeed");
@@ -806,11 +1487,11 @@ mod tests {
             .expect("create_room_impl should succeed");
         assert!(!room.needs_you);
 
-        set_room_needs_you_impl(&room.id, true).expect("set needs_you true");
+        set_room_needs_you_impl(&room.id, true, None).expect("set needs_you true");
         let loaded = load_room_impl(&room.id).expect("load after set");
         assert!(loaded.room.needs_you);
 
-        set_room_needs_you_impl(&room.id, false).expect("set needs_you false");
+        set_room_needs_you_impl(&room.id, false, None).expect("set needs_you false");
         let loaded = load_room_impl(&room.id).expect("load after clear");
         assert!(!loaded.room.needs_you);
     }
@@ -923,6 +1604,7 @@ mod tests {
             at_ms: 1,
             round: 1,
             status: MemberTurnStatus::Replied,
+            team_row: None,
         }];
         append_room_messages_impl(&room.id, messages)
             .expect("append_room_messages_impl should succeed");
@@ -948,6 +1630,7 @@ mod tests {
             at_ms: 1,
             round: 1,
             status: MemberTurnStatus::Replied,
+            team_row: None,
         }];
         append_room_messages_impl(&room.id, messages)
             .expect("append_room_messages_impl should succeed");
@@ -984,6 +1667,7 @@ mod tests {
             at_ms: 1,
             round: 1,
             status: MemberTurnStatus::Replied,
+            team_row: None,
         }];
         append_room_messages_impl(&room.id, messages)
             .expect("append_room_messages_impl should succeed");
@@ -1149,13 +1833,14 @@ mod tests {
 
         let room = create_room_impl("Ops Room", &["scout".to_string(), "zig".to_string()])
             .expect("create_room_impl should succeed");
-        set_room_needs_you_impl(&room.id, true).expect("set needs_you true");
+        set_room_needs_you_impl(&room.id, true, None).expect("set needs_you true");
         let messages = vec![GroupRoomMessage {
             from: crate::protocol::GroupRoomSpeaker::Member("zig".to_string()),
             text: "shipped the tracer".to_string(),
             at_ms: 1,
             round: 1,
             status: MemberTurnStatus::Replied,
+            team_row: None,
         }];
         append_room_messages_impl(&room.id, messages)
             .expect("append_room_messages_impl should succeed");
@@ -1224,6 +1909,11 @@ mod tests {
         let _lock = crate::server::test_support::env_lock();
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
+        // Phase 52 (D-18): no settings file is persisted in this test, so
+        // `validate_room_members` reads through to the fallback default —
+        // this is now the FALLBACK path, not a hardcoded one; see the two
+        // tests below for the persisted-record path this fn now also
+        // exercises.
         let settings = GroupChatSettings::default();
         let members: Vec<String> = (0..(settings.max_members as usize + 1))
             .map(|i| format!("bot{i}"))
@@ -1237,10 +1927,734 @@ mod tests {
             GroupChatError::MemberCountOutOfRange { max, .. } => {
                 assert_eq!(
                     max, settings.max_members,
-                    "G-50.2-2a: the reported max must equal GroupChatSettings::default()'s value"
+                    "G-50.2-2a/D-18: with no settings file present, the reported max must \
+                     equal the fallback GroupChatSettings::default()'s value — this fn \
+                     remains the only bound source"
                 );
             }
             other => panic!("expected MemberCountOutOfRange, got {other:?}"),
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 52 Plan 03, Task 1 (D-18): validate_room_members reads the
+    // persisted settings record.
+    // -------------------------------------------------------------------
+
+    fn write_group_chat_settings(dir: &tempfile::TempDir, settings: &GroupChatSettings) {
+        let path = crate::server::group_settings_api::group_settings_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir settings parent");
+        }
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(settings).expect("serialize settings"),
+        )
+        .expect("write group-chat-settings.json");
+        let _ = dir;
+    }
+
+    #[test]
+    fn validate_room_members_honours_a_persisted_non_default_max_members() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        let persisted = GroupChatSettings {
+            min_members: 2,
+            max_members: 3,
+            ..GroupChatSettings::default()
+        };
+        write_group_chat_settings(&dir, &persisted);
+
+        let members: Vec<String> = ["bot0", "bot1", "bot2", "bot3"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        for m in &members {
+            scaffold_profile(m);
+        }
+
+        let err = validate_room_members(&members).unwrap_err();
+        match err {
+            GroupChatError::MemberCountOutOfRange { max, .. } => {
+                assert_eq!(
+                    max, 3,
+                    "D-18: the reported max must be the PERSISTED record's max_members (3), \
+                     not GroupChatSettings::default()'s (6)"
+                );
+            }
+            other => panic!("expected MemberCountOutOfRange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_room_members_falls_back_to_defaults_when_the_settings_file_is_corrupt() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        let path = crate::server::group_settings_api::group_settings_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir settings parent");
+        }
+        std::fs::write(&path, b"not valid json {{{").expect("write corrupt settings file");
+
+        let two_members: Vec<String> = ["bot0", "bot1"].iter().map(|s| s.to_string()).collect();
+        for m in &two_members {
+            scaffold_profile(m);
+        }
+        assert!(
+            validate_room_members(&two_members).is_ok(),
+            "D-18: a corrupted settings file must never prevent a room from running — a \
+             2-member list must be accepted under the fallback default's min_members (2)"
+        );
+
+        let seven_members: Vec<String> = (0..7).map(|i| format!("bot{i}")).collect();
+        for m in &seven_members {
+            scaffold_profile(m);
+        }
+        let err = validate_room_members(&seven_members).unwrap_err();
+        match err {
+            GroupChatError::MemberCountOutOfRange { max, .. } => {
+                assert_eq!(
+                    max, 6,
+                    "D-18: a corrupted settings file falls back to the shipped default's \
+                     max_members (6)"
+                );
+            }
+            other => panic!("expected MemberCountOutOfRange, got {other:?}"),
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Phase 52 Plan 03, Task 2 (D-06/D-07/D-09): the team-shape invariant
+    // and the store write paths that enforce it.
+    // -------------------------------------------------------------------
+
+    fn leader_role(name: &str) -> BTreeMap<String, MemberRole> {
+        let mut roles = BTreeMap::new();
+        roles.insert(name.to_string(), MemberRole::Leader);
+        roles
+    }
+
+    fn team_setup(
+        pattern: Option<crate::protocol::TeamPattern>,
+        roles: BTreeMap<String, MemberRole>,
+        max_cycles: Option<u32>,
+    ) -> GroupRoomTeamSetup {
+        GroupRoomTeamSetup {
+            pattern,
+            roles,
+            max_cycles,
+            leader_prompt_override: None,
+            worker_prompt_override: None,
+        }
+    }
+
+    #[test]
+    fn a_team_room_cannot_be_persisted_with_pattern_set_and_no_leader() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile("alpha");
+        scaffold_profile("beta");
+
+        let room = create_room_impl("Ops Room", &["alpha".to_string(), "beta".to_string()])
+            .expect("create_room_impl should succeed");
+
+        let setup = team_setup(
+            Some(crate::protocol::TeamPattern::OrchestratorWorkers),
+            BTreeMap::new(),
+            None,
+        );
+        let err = update_room_team_impl(&room.id, &room.members, &setup).unwrap_err();
+        assert!(
+            matches!(err, GroupChatError::TeamShapeInvalid { .. }),
+            "pattern set with no Leader entry must be TeamShapeInvalid, got {err:?}"
+        );
+
+        let reloaded = load_room_impl(&room.id).expect("load after rejected update");
+        assert_eq!(
+            reloaded.room.pattern, None,
+            "a rejected shape update must leave the persisted room untouched"
+        );
+    }
+
+    #[test]
+    fn a_team_room_cannot_be_persisted_with_a_leader_who_is_not_a_member() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile("alpha");
+        scaffold_profile("beta");
+        scaffold_profile("zulu");
+
+        let room = create_room_impl("Ops Room", &["alpha".to_string(), "beta".to_string()])
+            .expect("create_room_impl should succeed");
+
+        let setup = team_setup(
+            Some(crate::protocol::TeamPattern::OrchestratorWorkers),
+            leader_role("zulu"),
+            None,
+        );
+        let err = update_room_team_impl(&room.id, &room.members, &setup).unwrap_err();
+        assert!(
+            matches!(err, GroupChatError::LeaderNotAMember { ref name } if name == "zulu"),
+            "a Leader entry naming a non-member must be LeaderNotAMember, got {err:?}"
+        );
+
+        let reloaded = load_room_impl(&room.id).expect("load after rejected update");
+        assert_eq!(
+            reloaded.room.pattern, None,
+            "a rejected shape update must leave the persisted room untouched"
+        );
+    }
+
+    #[test]
+    fn a_team_room_setup_with_a_leader_role_but_no_pattern_or_two_leaders_is_rejected() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile("alpha");
+        scaffold_profile("beta");
+
+        let room = create_room_impl("Ops Room", &["alpha".to_string(), "beta".to_string()])
+            .expect("create_room_impl should succeed");
+
+        // Mirror case: a Leader entry with no pattern set is dead role
+        // metadata that must not be allowed to accumulate.
+        let setup = team_setup(None, leader_role("alpha"), None);
+        let err = update_room_team_impl(&room.id, &room.members, &setup).unwrap_err();
+        assert!(
+            matches!(err, GroupChatError::TeamShapeInvalid { .. }),
+            "a Leader entry with no pattern must be TeamShapeInvalid, got {err:?}"
+        );
+
+        // Two Leader entries: D-06 ships exactly one Leader arm this phase.
+        let mut two_leaders = BTreeMap::new();
+        two_leaders.insert("alpha".to_string(), MemberRole::Leader);
+        two_leaders.insert("beta".to_string(), MemberRole::Leader);
+        let setup = team_setup(
+            Some(crate::protocol::TeamPattern::OrchestratorWorkers),
+            two_leaders,
+            None,
+        );
+        let err = update_room_team_impl(&room.id, &room.members, &setup).unwrap_err();
+        assert!(
+            matches!(err, GroupChatError::TeamShapeInvalid { .. }),
+            "two Leader entries must be TeamShapeInvalid, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn removing_the_designated_leader_clears_both_the_role_entry_and_the_pattern() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile("alpha");
+        scaffold_profile("beta");
+        scaffold_profile("gamma");
+
+        let room = create_team_room_for_test(
+            "Ops Room",
+            &["alpha".to_string(), "beta".to_string()],
+            crate::protocol::TeamPattern::OrchestratorWorkers,
+            leader_role("alpha"),
+        )
+        .expect("create_team_room_for_test should succeed");
+
+        let updated =
+            update_room_members_impl(&room.id, &["beta".to_string(), "gamma".to_string()])
+                .expect("dropping the leader from membership must be accepted, not rejected");
+
+        assert_eq!(
+            updated.pattern, None,
+            "D-07: removing the persisted leader from membership must demote pattern to None"
+        );
+        assert!(
+            updated.roles.is_empty(),
+            "D-07: removing the persisted leader from membership must clear the roles map"
+        );
+        assert_eq!(
+            updated.members,
+            vec!["beta".to_string(), "gamma".to_string()]
+        );
+
+        let reloaded = load_room_impl(&room.id).expect("load after demotion");
+        assert_eq!(reloaded.room.pattern, None);
+        assert!(reloaded.room.roles.is_empty());
+    }
+
+    #[test]
+    fn submitting_a_newly_invalid_leader_is_rejected_rather_than_silently_demoted() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile("alpha");
+        scaffold_profile("beta");
+        scaffold_profile("zulu");
+
+        let room = create_team_room_for_test(
+            "Ops Room",
+            &["alpha".to_string(), "beta".to_string()],
+            crate::protocol::TeamPattern::OrchestratorWorkers,
+            leader_role("alpha"),
+        )
+        .expect("create_team_room_for_test should succeed");
+
+        // The persisted leader (alpha) is STILL in the incoming member
+        // list, but the submitted setup designates zulu — never a member —
+        // as leader. This must be rejected, not normalized into a
+        // demotion: normalize_team_setup_for_write only reacts to the
+        // CURRENT persisted leader's absence from `members`, and alpha is
+        // present.
+        let setup = team_setup(
+            Some(crate::protocol::TeamPattern::OrchestratorWorkers),
+            leader_role("zulu"),
+            None,
+        );
+        let err = update_room_team_impl(&room.id, &room.members, &setup).unwrap_err();
+        assert!(
+            matches!(err, GroupChatError::LeaderNotAMember { ref name } if name == "zulu"),
+            "a newly-invalid leader must be rejected as LeaderNotAMember, got {err:?}"
+        );
+
+        let reloaded = load_room_impl(&room.id).expect("load after rejected update");
+        assert_eq!(
+            reloaded.room.pattern,
+            Some(crate::protocol::TeamPattern::OrchestratorWorkers),
+            "a rejected leader change must leave the room a team room, not demote it"
+        );
+        assert_eq!(
+            reloaded.room.roles.get("alpha"),
+            Some(&MemberRole::Leader),
+            "the original leader (alpha) must still be in place"
+        );
+    }
+
+    #[test]
+    fn converting_a_peer_room_to_a_team_room_persists_pattern_and_leader_together() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile("alpha");
+        scaffold_profile("beta");
+
+        let room = create_room_impl("Ops Room", &["alpha".to_string(), "beta".to_string()])
+            .expect("create_room_impl should succeed");
+        assert_eq!(room.pattern, None, "must start as a plain peer room");
+
+        let setup = team_setup(
+            Some(crate::protocol::TeamPattern::OrchestratorWorkers),
+            leader_role("alpha"),
+            None,
+        );
+        let updated = update_room_team_impl(&room.id, &room.members, &setup)
+            .expect("converting a valid peer room to a team room must succeed");
+
+        assert_eq!(
+            updated.pattern,
+            Some(crate::protocol::TeamPattern::OrchestratorWorkers)
+        );
+        assert_eq!(updated.roles.get("alpha"), Some(&MemberRole::Leader));
+        assert_eq!(
+            updated.members, room.members,
+            "D-09: conversion must leave membership untouched"
+        );
+    }
+
+    #[test]
+    fn a_room_max_cycles_override_outside_the_team_cycle_range_is_rejected_on_create() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile("alpha");
+        scaffold_profile("beta");
+        let members = vec!["alpha".to_string(), "beta".to_string()];
+
+        for bad in [0u32, 6u32] {
+            let setup = team_setup(
+                Some(crate::protocol::TeamPattern::OrchestratorWorkers),
+                leader_role("alpha"),
+                Some(bad),
+            );
+            let err = create_room_with_team_impl("Cycle Room", &members, Some(&setup)).unwrap_err();
+            assert!(
+                matches!(err, GroupChatError::TeamCyclesOutOfRange { value } if value == bad),
+                "max_cycles {bad} must be rejected on create, got {err:?}"
+            );
+        }
+
+        for good in [1u32, 5u32] {
+            let setup = team_setup(
+                Some(crate::protocol::TeamPattern::OrchestratorWorkers),
+                leader_role("alpha"),
+                Some(good),
+            );
+            create_room_with_team_impl(&format!("Cycle Room {good}"), &members, Some(&setup))
+                .unwrap_or_else(|e| panic!("max_cycles {good} must be accepted on create: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn a_room_max_cycles_override_outside_the_team_cycle_range_is_rejected_on_update() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile("alpha");
+        scaffold_profile("beta");
+
+        let room = create_team_room_for_test(
+            "Ops Room",
+            &["alpha".to_string(), "beta".to_string()],
+            crate::protocol::TeamPattern::OrchestratorWorkers,
+            leader_role("alpha"),
+        )
+        .expect("create_team_room_for_test should succeed");
+
+        for bad in [0u32, 6u32] {
+            let setup = team_setup(
+                Some(crate::protocol::TeamPattern::OrchestratorWorkers),
+                leader_role("alpha"),
+                Some(bad),
+            );
+            let err = update_room_team_impl(&room.id, &room.members, &setup).unwrap_err();
+            assert!(
+                matches!(err, GroupChatError::TeamCyclesOutOfRange { value } if value == bad),
+                "max_cycles {bad} must be rejected on update, got {err:?}"
+            );
+        }
+
+        let reloaded = load_room_impl(&room.id).expect("load after rejected updates");
+        assert_eq!(
+            reloaded.room.max_cycles, None,
+            "a rejected max_cycles update must leave the persisted room unchanged"
+        );
+    }
+
+    #[test]
+    fn a_room_max_cycles_override_of_none_is_accepted_and_means_inherit() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile("alpha");
+        scaffold_profile("beta");
+        let members = vec!["alpha".to_string(), "beta".to_string()];
+
+        let setup = team_setup(
+            Some(crate::protocol::TeamPattern::OrchestratorWorkers),
+            leader_role("alpha"),
+            None,
+        );
+        let room = create_room_with_team_impl("Inherit Room", &members, Some(&setup))
+            .expect("max_cycles None must be accepted on create");
+        assert_eq!(
+            room.max_cycles, None,
+            "None must not be confused with 0 — it means inherit the app-wide default"
+        );
+    }
+
+    #[test]
+    fn creating_a_room_with_a_team_setup_persists_pattern_roles_and_max_cycles() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile("alpha");
+        scaffold_profile("beta");
+        let members = vec!["alpha".to_string(), "beta".to_string()];
+
+        let setup = GroupRoomTeamSetup {
+            pattern: Some(crate::protocol::TeamPattern::OrchestratorWorkers),
+            roles: leader_role("alpha"),
+            max_cycles: Some(3),
+            leader_prompt_override: Some("custom leader prompt".to_string()),
+            worker_prompt_override: Some("custom worker prompt".to_string()),
+        };
+        let room = create_room_with_team_impl("Team Room", &members, Some(&setup))
+            .expect("a valid team setup must be accepted on create");
+
+        assert_eq!(
+            room.pattern,
+            Some(crate::protocol::TeamPattern::OrchestratorWorkers)
+        );
+        assert_eq!(room.roles.get("alpha"), Some(&MemberRole::Leader));
+        assert_eq!(room.max_cycles, Some(3));
+        assert_eq!(
+            room.leader_prompt_override.as_deref(),
+            Some("custom leader prompt")
+        );
+        assert_eq!(
+            room.worker_prompt_override.as_deref(),
+            Some("custom worker prompt")
+        );
+
+        let reloaded = load_room_impl(&room.id).expect("load transcript copy");
+        assert_eq!(reloaded.room.pattern, room.pattern);
+        assert_eq!(reloaded.room.roles, room.roles);
+        assert_eq!(reloaded.room.max_cycles, room.max_cycles);
+
+        let index = list_rooms_impl().expect("list_rooms_impl should succeed");
+        let summary = index
+            .iter()
+            .find(|r| r.id == room.id)
+            .expect("the new room must be in the index copy");
+        assert_eq!(summary.pattern, room.pattern, "index copy must agree too");
+    }
+
+    #[test]
+    fn list_rooms_impl_projects_pattern_onto_the_room_summary() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile("alpha");
+        scaffold_profile("beta");
+
+        let team_room = create_team_room_for_test(
+            "Team Room",
+            &["alpha".to_string(), "beta".to_string()],
+            crate::protocol::TeamPattern::OrchestratorWorkers,
+            leader_role("alpha"),
+        )
+        .expect("create_team_room_for_test should succeed");
+        let peer_room = create_room_impl("Peer Room", &["alpha".to_string(), "beta".to_string()])
+            .expect("create_room_impl should succeed");
+
+        let summaries = list_rooms_impl().expect("list_rooms_impl should succeed");
+        let team_summary = summaries
+            .iter()
+            .find(|r| r.id == team_room.id)
+            .expect("team room must be listed");
+        let peer_summary = summaries
+            .iter()
+            .find(|r| r.id == peer_room.id)
+            .expect("peer room must be listed");
+
+        assert_eq!(
+            team_summary.pattern,
+            Some(crate::protocol::TeamPattern::OrchestratorWorkers),
+            "a team room's summary must carry pattern Some"
+        );
+        assert_eq!(
+            peer_summary.pattern, None,
+            "a peer room's summary must carry pattern None"
+        );
+    }
+
+    #[test]
+    fn a_room_index_record_with_pattern_and_no_leader_still_loads() {
+        let _lock = crate::server::test_support::env_lock();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile("alpha");
+        scaffold_profile("beta");
+
+        let room = create_room_impl("Ops Room", &["alpha".to_string(), "beta".to_string()])
+            .expect("create_room_impl should succeed");
+
+        // Hand-corrupt the persisted record the way a pre-demotion write or
+        // a hand edit could: pattern set, roles empty — the exact shape
+        // validate_team_room_shape refuses to WRITE. Reads must still
+        // succeed; the invariant guards writes only.
+        let mut transcript = load_transcript(&room.id)
+            .expect("load_transcript should succeed")
+            .expect("transcript must exist");
+        transcript.room.pattern = Some(crate::protocol::TeamPattern::OrchestratorWorkers);
+        write_transcript(&room.id, &transcript).expect("write corrupted transcript");
+
+        let mut index = load_room_index().expect("load_room_index should succeed");
+        index.insert(room.id.clone(), transcript.room.clone());
+        write_room_index(&index).expect("write corrupted index");
+
+        let loaded = load_room_impl(&room.id).expect("a violating record must still load, not error");
+        assert_eq!(
+            loaded.room.pattern,
+            Some(crate::protocol::TeamPattern::OrchestratorWorkers)
+        );
+        assert!(loaded.room.roles.is_empty());
+
+        let summaries = list_rooms_impl().expect("a violating record must still list, not panic");
+        let summary = summaries
+            .iter()
+            .find(|r| r.id == room.id)
+            .expect("the violating room must still be listed");
+        assert_eq!(
+            summary.pattern,
+            Some(crate::protocol::TeamPattern::OrchestratorWorkers)
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // reset_room_conversation_impl (Phase 52 Plan 05, D-02/D-17)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn a_reset_bumps_the_epoch_and_appends_the_marker_row_in_one_transcript_write() {
+        let _lock = crate::server::test_support::env_lock();
+        crate::server::handoff_steering::reset_steering_for_test();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile("scout");
+        scaffold_profile("zig");
+
+        let room = create_room_impl("Ops Room", &["scout".to_string(), "zig".to_string()])
+            .expect("create_room_impl should succeed");
+        assert_eq!(room.conversation_epoch, 1);
+
+        let reset = reset_room_conversation_impl(&room.id).expect("reset must succeed");
+        assert_eq!(reset.conversation_epoch, 2, "epoch must bump by exactly one");
+
+        let loaded = load_room_impl(&room.id).expect("load_room_impl should succeed");
+        assert_eq!(
+            loaded.room.conversation_epoch, 2,
+            "one reload must show both the incremented epoch and the appended row"
+        );
+        let last = loaded.messages.last().expect("transcript must carry the marker row");
+        assert_eq!(last.from, crate::protocol::GroupRoomSpeaker::System);
+        assert_eq!(last.text, CONVERSATION_RESET_MARKER_TEXT);
+    }
+
+    #[test]
+    fn a_reset_leaves_pattern_roles_and_membership_untouched() {
+        let _lock = crate::server::test_support::env_lock();
+        crate::server::handoff_steering::reset_steering_for_test();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile("scout");
+        scaffold_profile("zig");
+
+        let mut roles = BTreeMap::new();
+        roles.insert("scout".to_string(), MemberRole::Leader);
+        let room = create_team_room_for_test(
+            "Ops Room",
+            &["scout".to_string(), "zig".to_string()],
+            crate::protocol::TeamPattern::OrchestratorWorkers,
+            roles,
+        )
+        .expect("create_team_room_for_test should succeed");
+
+        let before = load_room_impl(&room.id).expect("load before reset");
+        let reset = reset_room_conversation_impl(&room.id).expect("reset must succeed");
+
+        assert_eq!(reset.pattern, before.room.pattern, "pattern must survive untouched");
+        assert_eq!(reset.roles, before.room.roles, "roles must survive untouched");
+        assert_eq!(reset.max_cycles, before.room.max_cycles, "max_cycles must survive untouched");
+        assert_eq!(reset.members, before.room.members, "members must survive untouched");
+        assert_eq!(
+            reset.leader_prompt_override, before.room.leader_prompt_override,
+            "leader_prompt_override must survive untouched"
+        );
+        assert_eq!(
+            reset.worker_prompt_override, before.room.worker_prompt_override,
+            "worker_prompt_override must survive untouched"
+        );
+    }
+
+    #[test]
+    fn a_reset_is_refused_while_a_drive_is_in_flight_for_that_room() {
+        let _lock = crate::server::test_support::env_lock();
+        crate::server::handoff_steering::reset_steering_for_test();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile("scout");
+        scaffold_profile("zig");
+
+        let room = create_room_impl("Ops Room", &["scout".to_string(), "zig".to_string()])
+            .expect("create_room_impl should succeed");
+
+        let drive_guard = crate::server::handoff_steering::try_acquire_room_drive(&room.id)
+            .expect("room must be idle at the start");
+
+        let err = reset_room_conversation_impl(&room.id).expect_err("must refuse while busy");
+        assert_eq!(err, GroupChatError::ResetRefusedDriveInFlight);
+
+        let unchanged = load_room_impl(&room.id).expect("load after refused reset");
+        assert_eq!(
+            unchanged.room.conversation_epoch, 1,
+            "a refused reset must not mutate the epoch"
+        );
+        assert!(
+            unchanged.messages.is_empty(),
+            "a refused reset must not append a marker row"
+        );
+
+        drop(drive_guard);
+        let reset = reset_room_conversation_impl(&room.id)
+            .expect("reset must succeed once the drive guard is dropped");
+        assert_eq!(reset.conversation_epoch, 2);
+    }
+
+    #[test]
+    fn a_reset_discards_the_rooms_queued_pre_reset_steering_messages() {
+        let _lock = crate::server::test_support::env_lock();
+        crate::server::handoff_steering::reset_steering_for_test();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile("scout");
+        scaffold_profile("zig");
+
+        let room = create_room_impl("Ops Room", &["scout".to_string(), "zig".to_string()])
+            .expect("create_room_impl should succeed");
+
+        crate::server::handoff_steering::enqueue_room_steering(&room.id, "also check the logs")
+            .expect("queue first steering message");
+        crate::server::handoff_steering::enqueue_room_steering(&room.id, "and ping ops")
+            .expect("queue second steering message");
+        assert_eq!(crate::server::handoff_steering::room_steering_depth(&room.id), 2);
+
+        reset_room_conversation_impl(&room.id).expect("reset must succeed");
+
+        assert_eq!(
+            crate::server::handoff_steering::room_steering_depth(&room.id),
+            0,
+            "a reset must discard, not carry forward, the room's queued steering messages"
+        );
+        let loaded = load_room_impl(&room.id).expect("load after reset");
+        assert!(
+            !loaded
+                .messages
+                .iter()
+                .any(|m| matches!(m.from, crate::protocol::GroupRoomSpeaker::Operator)),
+            "no Operator row must be appended for the discarded steering messages"
+        );
+    }
+
+    #[test]
+    fn an_epoch_at_u32_max_is_refused_rather_than_saturating_into_a_false_clean_slate() {
+        let _lock = crate::server::test_support::env_lock();
+        crate::server::handoff_steering::reset_steering_for_test();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = home(&dir);
+        scaffold_profile("scout");
+        scaffold_profile("zig");
+
+        let room = create_room_impl("Ops Room", &["scout".to_string(), "zig".to_string()])
+            .expect("create_room_impl should succeed");
+
+        // Hand-set the room to the maximum epoch — the one state
+        // reset_room_conversation_impl must refuse to advance past, same
+        // "hand-corrupt the persisted record" technique this module's own
+        // `a_room_index_record_with_pattern_and_no_leader_still_loads` uses.
+        let mut transcript = load_transcript(&room.id)
+            .expect("load_transcript should succeed")
+            .expect("transcript must exist");
+        transcript.room.conversation_epoch = u32::MAX;
+        write_transcript(&room.id, &transcript).expect("write max-epoch transcript");
+        let mut index = load_room_index().expect("load_room_index should succeed");
+        index.insert(room.id.clone(), transcript.room.clone());
+        write_room_index(&index).expect("write max-epoch index");
+
+        let err = reset_room_conversation_impl(&room.id).expect_err("must refuse at u32::MAX");
+        assert_eq!(err, GroupChatError::ConversationEpochExhausted);
+
+        let unchanged = load_room_impl(&room.id).expect("load after refused reset");
+        assert_eq!(
+            unchanged.room.conversation_epoch,
+            u32::MAX,
+            "a saturating add would silently report success while reusing the same title \
+             and child session — refusal must leave the epoch exactly where it was"
+        );
+        assert!(
+            unchanged.messages.is_empty(),
+            "no marker row must be appended when the reset is refused"
+        );
     }
 }

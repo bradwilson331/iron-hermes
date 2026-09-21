@@ -238,15 +238,73 @@ pub struct CronJobSpec {
 /// ironhermes-core, so a trait referencing `JobStore` cannot live there).
 /// The concrete implementation `CronJobWriterImpl` lives in ironhermes-cron.
 ///
-/// Deliberately narrow: creation from a compiled-in blueprint is the only
-/// operation exposed. A general `create_job(arbitrary fields)` method would
+/// Deliberately narrow: creation from a compiled-in blueprint, or from a
+/// raw `/loop` cadence + prompt (Phase 49.7 Plan 01), are the only two
+/// operations exposed. A general `create_job(arbitrary fields)` method would
 /// hand every present and future slash command the ability to set `script`
 /// and `workdir`, which is exactly the capability this phase keeps off the
-/// chat surface (T-49.5-05-02).
+/// chat surface (T-49.5-05-02 / T-49.7-01-02).
+///
+/// `list_jobs_for_chat`/`stop_job_for_chat` (Phase 49.7 Plan 04, D-06/D-09/D-10)
+/// live on the WRITER, not on [`CronJobReader`], even though listing reads
+/// rather than writes: `CronJobWriter` is wired at both
+/// `ironhermes-gateway/src/handler.rs:900` and
+/// `ironhermes-cli/src/tui_rata/commands.rs:777`, while `CronJobReader` is
+/// wired at exactly one site — `tui_rata/commands.rs:766`, CLI only. `/loop`
+/// is `PlatformFilter::Universal` per D-07, so hanging its management verbs
+/// off the reader would make them resolvable-but-dead on every messaging
+/// platform — the failure class this project has already been bitten by.
+/// Both methods take `chat_id` as a required argument rather than reading
+/// an ambient value: the caller supplies the asking chat's identity, and
+/// the impl — not the handler — decides the match, so a second caller of
+/// this seam cannot bypass the check (T-49.7-04-01).
 pub trait CronJobWriter: Send + Sync {
     /// Fill `spec.blueprint_key` with `spec.values` and persist the result
     /// as a new cron job. Returns the new job's id on success.
     fn create_job_from_blueprint(&self, spec: CronJobSpec) -> Result<String, String>;
+
+    /// Create a recurring job directly from a `/loop`-parsed cadence and
+    /// prompt, bypassing the blueprint catalog. `RawJobSpec` exposes only
+    /// prompt, cadence, budget, toolsets and origin — no `script`, `workdir`,
+    /// `no_agent` or `base_url` — so the raw-create path exposes strictly
+    /// fewer capabilities than `CronJob` itself has fields for
+    /// (T-49.7-01-02). Returns the new job's id on success.
+    fn create_raw_job(&self, spec: RawJobSpec) -> Result<String, String>;
+
+    /// Render the jobs originating from `chat_id` as text for `/loop list`
+    /// (Phase 49.7 Plan 04, D-10). Filters on `JobOrigin.chat_id` equality;
+    /// a job with no origin belongs to no chat and is never included.
+    /// Always `Ok` — an empty result set renders an explicit empty-state
+    /// sentence rather than an empty string.
+    fn list_jobs_for_chat(&self, chat_id: &str) -> Result<String, String>;
+
+    /// Stop (pause) the job `id_or_name` on behalf of `chat_id` for
+    /// `/loop stop <id>` (Phase 49.7 Plan 04, D-09/D-10). Returns `Err` with
+    /// the SAME message whether the job does not exist, has no origin, or
+    /// belongs to a different chat — enumeration must not be cheaper than
+    /// guessing (T-49.7-04-02).
+    fn stop_job_for_chat(&self, chat_id: &str, id_or_name: &str) -> Result<String, String>;
+}
+
+/// The wire shape [`CronJobWriter::create_raw_job`] receives: a raw cadence
+/// string plus prompt parsed from `/loop <cadence> <prompt> [--budget N]
+/// [--tools a,b]`, plus the originating chat's identity so the created job
+/// can be delivered back to it.
+///
+/// Origin is carried as three flat `Option<String>` fields rather than
+/// `ironhermes_cron::JobOrigin` because `ironhermes-core` cannot depend on
+/// `ironhermes-cron` (the circular-dep constraint this trait's own doc
+/// comment names) — mirrors `SubscriptionView`'s flat-boundary convention
+/// at context.rs:333.
+#[derive(Debug, Clone)]
+pub struct RawJobSpec {
+    pub prompt: String,
+    pub cadence: String,
+    pub budget: Option<u32>,
+    pub tools: Option<Vec<String>>,
+    pub origin_platform: Option<String>,
+    pub origin_chat_id: Option<String>,
+    pub origin_thread_id: Option<String>,
 }
 
 // =============================================================================

@@ -769,6 +769,34 @@ pub struct SubagentEventsContext(pub Signal<u64>);
 pub struct ScheduleNamePrefillCtx(pub Signal<Option<String>>);
 
 // ---------------------------------------------------------------------------
+// Phase 52.1 Plan 07 (D-13): kanban artifact-backlink deep-link seam. The
+// artifacts gallery row's kanban backlink button has no prop chain to the
+// Kanban screen — its click needs to carry a task id across a screen switch,
+// same shape as `ScheduleNamePrefillCtx` above. `PendingKanbanTaskCtx` sets
+// `Some(task_id)` and flips `active_screen` to `Screen::Kanban` in the same
+// click; `ScreenKanban` reads it in an effect, opens that task's detail
+// drawer, then clears it back to `None` so a later visit does not reopen it.
+// Same `Clone, Copy`-only newtype discipline as `ScheduleNamePrefillCtx` —
+// forces disambiguation from any other `Signal<Option<String>>` provider.
+#[allow(dead_code)] // context-provider newtype; consumed via use_context::<PendingKanbanTaskCtx>() in ScreenKanban
+#[derive(Clone, Copy)]
+pub struct PendingKanbanTaskCtx(pub Signal<Option<String>>);
+
+// ---------------------------------------------------------------------------
+// Phase 52.1 Plan 07 (D-13): team artifact-backlink deep-link seam. The
+// artifacts gallery row's team backlink button has no prop chain to the bot
+// roster's locally-owned open-room signal — its click needs to carry a
+// group-room id across a screen switch, same shape as `PendingKanbanTaskCtx`
+// above. `PendingRoomOpenCtx` sets `Some(room_id)` and flips `active_screen`
+// to `Screen::Agents` in the same click; `BotRoster` reads it in an effect,
+// opens that room, then clears it back to `None` so a later visit does not
+// reopen it. Same `Clone, Copy`-only newtype discipline as the other pending
+// deep-link contexts above.
+#[allow(dead_code)] // context-provider newtype; consumed via use_context::<PendingRoomOpenCtx>() in BotRoster
+#[derive(Clone, Copy)]
+pub struct PendingRoomOpenCtx(pub Signal<Option<String>>);
+
+// ---------------------------------------------------------------------------
 // Phase 46.6 Plan 05 (D-07): selected-artifact context — the gallery writes
 // the clicked row's `ArtifactInfo` here before switching `active_screen` to
 // `Screen::ArtifactViewer`; the viewer reads it to render its chrome + iframe
@@ -780,6 +808,25 @@ pub struct ScheduleNamePrefillCtx(pub Signal<Option<String>>);
 // context-provider newtype; consumed via use_context::<SelectedArtifactCtx>() in ScreenArtifacts / ArtifactViewer
 #[derive(Clone, Copy)]
 pub struct SelectedArtifactCtx(pub Signal<Option<crate::server::api::ArtifactInfo>>);
+
+// ---------------------------------------------------------------------------
+// Phase 50.4 Plan 01 follow-up (team-lead, 2026-09-08): the "apply config
+// now" pending-change flag. Originally a screen-LOCAL `use_signal` declared
+// inside `providers.rs` (`apply_banner_visible`) — hoisted here so ANY
+// screen that changes `config.model`/`config.providers` (Providers' own
+// SAVE PROVIDER, and the Models screen's Default-model cascade ASSIGN) can
+// flag a pending change, and ANY screen hosting `ApplyConfigBanner` renders
+// the same banner off the same source. A screen-local signal (a) cleared
+// itself on navigating away from Providers and back even though the config
+// change it was flagging was still unapplied, and (b) gave the Models
+// screen's Default-model save — the ONLY control that changes the active
+// provider — no way to raise the banner at all. Same B-03 disambiguation
+// discipline as the other `*Ctx` types above; provided at the HermesApp
+// root only (Dioxus context-panic rule: child providers panic
+// ancestor/sibling consumers — see MEMORY.md).
+#[allow(dead_code)] // context-provider newtype; consumed via use_context::<ApplyConfigPendingCtx>() in ScreenProviders / ScreenModels
+#[derive(Clone, Copy)]
+pub struct ApplyConfigPendingCtx(pub Signal<bool>);
 
 #[cfg(test)]
 mod tests {

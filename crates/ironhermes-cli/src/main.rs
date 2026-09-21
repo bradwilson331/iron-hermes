@@ -61,12 +61,14 @@ mod memory_cmd;
 mod memory_setup;
 mod models_cmd;
 mod preflight;
+mod profile_migrate;
 mod provider_cmd;
 mod setup;
 mod toolset_cmd;
 mod tui;
 mod vault_cmd;
 mod web_cmd;
+mod worker_bootstrap;
 
 /// Process-global serialization lock for tests that mutate the shared
 /// `IRONHERMES_HOME` env var. All env-mutating tests across the bin's module
@@ -204,7 +206,15 @@ enum Commands {
     /// Phase 21.7 Plan 09 (D-18..D-22): `--all`, `--deep`, `--json` flags.
     Status(ironhermes_cli::status_cmd::StatusArgs),
     /// Check configuration and dependencies
-    Doctor,
+    Doctor {
+        /// Phase 53 Plan 03 (D-06): also run the configured browser backend's
+        /// render probe standalone and report the outcome (backend, resolved
+        /// binary path, and whether the build can lay out a page). Opt-in —
+        /// a browser spawn plus a CDP round trip is not something plain
+        /// `ironhermes doctor` should pay for.
+        #[arg(long)]
+        browser: bool,
+    },
     /// Show version information
     Version,
     /// Start the Telegram gateway bot
@@ -248,6 +258,9 @@ enum Commands {
     ///   unlock          Unseal an initialized vault
     ///   set <key>       Store a secret value under <key> (masked prompt, never argv)
     ///   list [--prefix] List secret key NAMES only, optionally prefix-filtered
+    ///   migrate-profile <slug> [--dry-run]  Migrate one kanban worker profile's
+    ///                   credential into the vault (Phase 51, D-04) — distinct
+    ///                   from `migrate` above, which stays root-scoped
     Vault {
         #[command(subcommand)]
         command: vault_cmd::VaultCommands,
@@ -1801,11 +1814,56 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Phase 51 Plan 07 (D-11/D-14/D-15): bootstrap a kanban worker's provider
+    // credential over the vault socket BEFORE the profile `.env` load below — see
+    // worker_bootstrap.rs's module doc for why this ordering is load-bearing
+    // (dotenvy::from_path never overwrites an already-set process variable, so
+    // installing the vault credential here means it wins on a name collision).
+    // A no-op (Ok(BootstrapOutcome::NotApplicable)) for every non-kanban-worker
+    // invocation and every un-migrated profile — today's behavior, byte-identical.
+    // A failure here exits BEFORE dotenvy ever runs, which is what makes D-14's
+    // "no fallback to .env on a vault read failure" true structurally rather than
+    // by convention.
+    worker_bootstrap::bootstrap_worker_credential(active_profile.as_deref())
+        .await
+        .context("worker vault credential bootstrap failed")?;
+
     // Load .env file — runs AFTER resolve_and_set_profile so it reads .env
     // from the profile-scoped home (Config::env_path() calls get_hermes_home()).
     let env_path = Config::env_path();
     if env_path.exists() {
         dotenvy::from_path(&env_path).ok();
+    }
+
+    // TEST-ONLY (Phase 51 Plan 07, gated behind `test-oracles` — Phase 51 Plan
+    // 12 / CR-02): a real-subprocess integration test cannot observe a
+    // resolved credential's VALUE without either printing the secret itself
+    // (unacceptable) or a hook like this one. This block does NOT exist in a
+    // default build — it is compiled in only when the `ironhermes-cli/
+    // test-oracles` Cargo feature is enabled (see Cargo.toml's feature
+    // comment for why that feature must never be enabled for a distributed
+    // build). When compiled in and `IRONHERMES_TEST_PRINT_ENV_VAR_SHA256=
+    // <VAR_NAME>` is set, print a SHA-256 hex digest of that env var's
+    // CURRENT value (i.e. after both the vault bootstrap above and the
+    // dotenv load above) to stderr and exit immediately — never the raw
+    // value. `crates/ironhermes-cli/tests/worker_vault_bootstrap.rs` is the
+    // sole consumer: it compares this hash against the SHA-256 of the value
+    // it independently knows was written to the vault (or to the profile's
+    // `.env`), which is what lets that test prove "the resolved value
+    // matches" and "the vault's value was not overwritten by a stale `.env`
+    // value" without ever asserting on — or this binary ever emitting — the
+    // secret bytes themselves.
+    #[cfg(feature = "test-oracles")]
+    if let Ok(var_name) = std::env::var("IRONHERMES_TEST_PRINT_ENV_VAR_SHA256") {
+        use sha2::{Digest, Sha256};
+        let digest = std::env::var(&var_name)
+            .ok()
+            .map(|v| format!("{:x}", Sha256::digest(v.as_bytes())));
+        eprintln!(
+            "IRONHERMES_TEST_ENV_VAR_SHA256={}",
+            digest.as_deref().unwrap_or("ABSENT")
+        );
+        std::process::exit(0);
     }
 
     // D-21: Create ~/.ironhermes/ (or ~/.ironhermes/profiles/<name>/) subdirs
@@ -1952,7 +2010,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Some(Commands::Status(args)) => ironhermes_cli::status_cmd::run_status(args).await,
-        Some(Commands::Doctor) => doctor::run_doctor_check().await,
+        Some(Commands::Doctor { browser }) => doctor::run_doctor_check(browser).await,
         Some(Commands::Version) => cmd_version(),
         Some(Commands::Chat {
             ref message,
@@ -2304,7 +2362,7 @@ fn cmd_version() -> Result<()> {
         env!("CARGO_PKG_VERSION")
     );
     println!("The self-improving AI agent, rewritten in Rust");
-    println!("Created by Nous Research");
+    println!("Created by Wilson Tech");
     Ok(())
 }
 
@@ -2328,6 +2386,30 @@ fn resolve_and_set_profile(cli: &Cli) -> Result<Option<String>> {
         .join(".ironhermes")
         .join(ironhermes_core::PROFILES_SUBDIR)
         .join(&validated);
+
+    // Phase 51 UAT F-04 fix (commit 1): stash the pre-pivot home BEFORE
+    // overwriting IRONHERMES_HOME below, so `resolve_vault_config` can
+    // resolve the vault `data_dir` sentinel against the operator's ROOT home
+    // rather than this profile's — there is only ever ONE vault. Guarded on
+    // "not already set" (checked, not assumed): a worker that itself spawns
+    // a sub-worker (recursive kanban dispatch) inherits an already-stashed
+    // IRONHERMES_ROOT_HOME via `worker_spawn.rs`'s SAFE_SYSTEM_VARS
+    // allowlist, and must preserve that ORIGINAL root rather than
+    // re-stashing its own already-pivoted IRONHERMES_HOME, which would
+    // silently reintroduce F-04 one level down.
+    let root_already_stashed = std::env::var(ironhermes_core::IRONHERMES_ROOT_HOME_ENV)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    if !root_already_stashed {
+        let pre_pivot_home = ironhermes_core::get_hermes_home();
+        // SAFETY: see the identical justification on the IRONHERMES_HOME
+        // set_var immediately below — called once at process start, before
+        // any threads are spawned that read either variable.
+        unsafe {
+            std::env::set_var(ironhermes_core::IRONHERMES_ROOT_HOME_ENV, &pre_pivot_home);
+        }
+    }
+
     // SAFETY: called once at process start, before any threads are spawned
     // that read IRONHERMES_HOME. Mirrors the unsafe-set_var pattern
     // established by Phase 21.6 (cron tests) and consumed by every Phase
@@ -2383,21 +2465,65 @@ fn ensure_home_dirs() -> Result<()> {
 /// rule, so it carries unchanged into this crate's own resume path.
 const BOT_SESSION_HISTORY_LIMIT: usize = 24;
 
+/// Phase 52 Plan 05 (D-02, child side): the maximum length of the `<name>`
+/// portion of a `Group: <name>` session title. 64 characters is
+/// `iron_hermes_ui`'s `validate_group_room_name`'s own room-name cap —
+/// unwidened, unchanged, and never will be — and the remaining 16 are
+/// reserved for the host-generated conversation-epoch discriminator a room's
+/// "New conversation" reset appends: its longest possible form is
+/// `CONVERSATION_EPOCH_SEPARATOR` plus the decimal digits of a `u32`
+/// (`u32::MAX` is 10 digits), 11 characters at most, so 75 total, under 80.
+/// Before Phase 52 this bound and the room-name cap were numerically equal
+/// (both 64), leaving a maximum-length room ZERO headroom for any suffix at
+/// all (RESEARCH Pitfall 1) — appending even a one-character marker to such
+/// a room's title was rejected outright.
+const BOT_SESSION_TITLE_NAME_MAX: usize = 80;
+
+/// Phase 52 Plan 05 (D-02, child side / Round 1 codex HIGH): the ONE
+/// character this crate's title validator accepts beyond
+/// `validate_group_room_name`'s own charset, deliberately chosen OUTSIDE
+/// that charset — `iron_hermes_ui::server::group_chat_store`'s
+/// `the_epoch_separator_is_rejected_by_the_room_name_validator` test pins
+/// this from the producing crate's own side. Both validators otherwise
+/// accept the IDENTICAL `is_ascii_alphanumeric() || ' ' | '.' | '_' | '-'`
+/// set, so an in-charset separator would let two distinct `(room, epoch)`
+/// pairs collide onto one rendered title — room `standup` at epoch 2 and
+/// room `standup.2` at epoch 1 would both render `Group: standup.2` under a
+/// `.`-suffix design, silently merging two different rooms' child sessions.
+/// Because `#` can never appear in a room name, a room name contains zero
+/// separators and an epoch-N title contains exactly one, so the split stays
+/// unambiguous and no epoch-1 title can ever equal any epoch-N title.
+///
+/// This crate cannot import `iron_hermes_ui`'s title producer
+/// (`group_session_title`, crate boundary — the same reason
+/// `validate_group_room_name`'s rules are ported above rather than reused),
+/// so this is this crate's OWN authoritative copy of the separator; the
+/// producer side asserts against the same literal independently.
+const CONVERSATION_EPOCH_SEPARATOR: char = '#';
+
 /// Phase 50.2 Plan 02 (D-21 / RESEARCH Security V3): the two accepted shapes
 /// for a bot-scoped session title — the literal `Bot Chat` (the roster
 /// composer's one-shot sends) or `Group: <name>` (a room's per-member
 /// session), where `<name>` must satisfy the same character rules
 /// `iron_hermes_ui::server::group_chat_store::validate_group_room_name`
-/// enforces. That function is `pub(crate)` inside a different crate and
-/// cannot be imported, so its rules are ported here rather than reused.
-/// Anything else is rejected BEFORE it ever reaches `get_session_by_title` —
-/// this is the one gate that stops an arbitrary operator-supplied title from
-/// colliding with (or hijacking) an unrelated session by title string alone.
-/// Returns the trimmed, canonical title on success; the rejection message
-/// names the two accepted shapes and never echoes the rejected input back.
+/// enforces, PLUS the one reserved `CONVERSATION_EPOCH_SEPARATOR` character
+/// (Phase 52 Plan 05, D-02). That function is `pub(crate)` inside a
+/// different crate and cannot be imported, so its rules are ported here
+/// rather than reused. Anything else is rejected BEFORE it ever reaches
+/// `get_session_by_title` — this is the one gate that stops an arbitrary
+/// operator-supplied title from colliding with (or hijacking) an unrelated
+/// session by title string alone. Returns the trimmed, canonical title on
+/// success; the rejection message names the two accepted shapes and never
+/// echoes the rejected input back.
+///
+/// Phase 52 Plan 05: the name-length bound widened from 64 to
+/// `BOT_SESSION_TITLE_NAME_MAX` (80, see that const's doc for the budget),
+/// and the charset predicate widened by exactly the one separator character
+/// above — nothing else. All four path-traversal rejections below stay
+/// byte-identical to their pre-Phase-52 form.
 fn validate_bot_session_title(title: &str) -> Result<String, String> {
     const REJECTION: &str = "session title must be exactly \"Bot Chat\" or \"Group: <name>\" \
-        (name: 1-64 chars, letters/digits/space/dot/underscore/hyphen only, no path-traversal shapes)";
+        (name: 1-80 chars, letters/digits/space/dot/underscore/hyphen/# only, no path-traversal shapes)";
     let trimmed = title.trim();
     if trimmed == "Bot Chat" {
         return Ok(trimmed.to_string());
@@ -2406,12 +2532,13 @@ fn validate_bot_session_title(title: &str) -> Result<String, String> {
         return Err(REJECTION.to_string());
     };
     let name = name.trim();
-    if name.is_empty() || name.chars().count() > 64 {
+    if name.is_empty() || name.chars().count() > BOT_SESSION_TITLE_NAME_MAX {
         return Err(REJECTION.to_string());
     }
-    let has_invalid_char = name
-        .chars()
-        .any(|c| !(c.is_ascii_alphanumeric() || matches!(c, ' ' | '.' | '_' | '-')));
+    let has_invalid_char = name.chars().any(|c| {
+        !(c.is_ascii_alphanumeric()
+            || matches!(c, ' ' | '.' | '_' | '-' | CONVERSATION_EPOCH_SEPARATOR))
+    });
     if has_invalid_char {
         return Err(REJECTION.to_string());
     }
@@ -5365,9 +5492,29 @@ async fn build_client(cli: &Cli) -> Result<(AnyClient, Config, ProviderResolver)
     // keyless. Routing through the shared `ironhermes_core::resolve_vault_config`
     // fills the empty `rusty_vault.data_dir` sentinel so a DEFAULT-configured vault
     // opens the same on-disk location `vault init` wrote to (G-46.8-1 fix).
-    if config.vault.enabled {
+    //
+    // Phase 51 WR-08 (re-keyed in Phase 51-13, Task 2): this is the actual
+    // kanban-worker code path (`run_single` -> `build_client`, invoked by a
+    // worker's `chat -q "..."` spawn shape). This guard used to key off "did
+    // this process bootstrap ANY provider over the socket" and skip opening the
+    // store entirely whenever it had — which meant a worker that genuinely
+    // needed a SECOND vault-backed provider never even reached
+    // `apply_vault_fallback`'s (now-correct) per-provider loop. Re-keyed onto
+    // the question that actually matters: are there any endpoints still
+    // without a key at all? If none, there is nothing for the vault to fill,
+    // and skipping the open is a pure optimization that also keeps F-04's
+    // never-touch-the-vault-file property for the common single-provider
+    // worker. If some remain, open the store and let `apply_vault_fallback`'s
+    // per-provider loop decide which ones it can fill.
+    if config.vault.enabled && resolver.has_keyless_endpoint() {
         let store = ironhermes_vault::open_store(&ironhermes_core::resolve_vault_config(&config))?;
         resolver.apply_vault_fallback(&*store).await?;
+    } else if config.vault.enabled {
+        tracing::debug!(
+            event = "vault_open_skipped_no_keyless_endpoints",
+            "every configured endpoint already has an api key — nothing for the vault \
+             to fill, so the store is never opened (Phase 51 WR-08 re-keyed guard)"
+        );
     }
 
     // Provider/model resolution (Phase 26 SC-3 fix):
@@ -6332,6 +6479,116 @@ mod session_title_tests {
     }
 
     // -----------------------------------------------------------------
+    // validate_bot_session_title — Phase 52 Plan 05 (D-02) widening
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn validate_bot_session_title_accepts_an_epoch_discriminated_group_title() {
+        assert_eq!(
+            validate_bot_session_title("Group: standup#2")
+                .expect("a name followed by the separator and digits must be accepted"),
+            "Group: standup#2"
+        );
+    }
+
+    #[test]
+    fn validate_bot_session_title_accepts_the_longest_constructible_discriminated_title() {
+        let name = format!("{}{}{}", "a".repeat(64), CONVERSATION_EPOCH_SEPARATOR, u32::MAX);
+        let title = format!("Group: {name}");
+        assert_eq!(
+            validate_bot_session_title(&title).expect(
+                "a 64-char room name plus the separator plus u32::MAX's digits must be ACCEPTED, \
+                 not merely short enough"
+            ),
+            title
+        );
+    }
+
+    #[test]
+    fn validate_bot_session_title_accepts_a_discriminated_title_whose_room_name_ends_in_a_dot() {
+        // `standup.` is a valid room name (a single trailing dot is
+        // in-charset and is not `..`). Under the old `.`-suffix design its
+        // epoch-2 title was `Group: standup..2`, rejected outright by the
+        // `..` traversal check below regardless of length headroom (Round 1
+        // codex HIGH). The reserved-separator design must not reproduce
+        // this: `standup.#2` contains no `..`.
+        let title = "Group: standup.#2";
+        assert_eq!(
+            validate_bot_session_title(title)
+                .expect("a room name ending in a dot must still be accepted at epoch 2"),
+            title
+        );
+    }
+
+    #[test]
+    fn validate_bot_session_title_still_rejects_a_name_over_the_widened_bound() {
+        let over = "a".repeat(BOT_SESSION_TITLE_NAME_MAX + 1);
+        assert!(validate_bot_session_title(&format!("Group: {over}")).is_err());
+    }
+
+    #[test]
+    fn validate_bot_session_title_still_rejects_path_traversal_shapes_at_the_widened_length() {
+        let pad = "a".repeat(60);
+        for shape in [
+            format!("{pad}..{pad}"),
+            format!("{pad}/{pad}"),
+            format!("{pad}\\{pad}"),
+            format!("{pad}${pad}"),
+        ] {
+            let title = format!("Group: {shape}");
+            assert!(
+                validate_bot_session_title(&title).is_err(),
+                "expected rejection for a long traversal-shaped name: {shape:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_bot_session_title_still_rejects_traversal_shapes_alongside_the_epoch_separator() {
+        let pad = "a".repeat(60);
+        for shape in [
+            format!("{pad}..{pad}{CONVERSATION_EPOCH_SEPARATOR}2"),
+            format!("{pad}/{pad}{CONVERSATION_EPOCH_SEPARATOR}2"),
+            format!("{pad}\\{pad}{CONVERSATION_EPOCH_SEPARATOR}2"),
+            format!("{pad}${pad}{CONVERSATION_EPOCH_SEPARATOR}2"),
+            // Phase 52-10 Task 3 (T-52-04, Round 1 mutation table): the four
+            // shapes above are each 120+ chars, so BOT_SESSION_TITLE_NAME_MAX
+            // (80) rejects every one of them on LENGTH alone before the
+            // traversal check (`name.contains("..")`, the only one of its
+            // four sub-conditions that is charset-legal — `/`, `\`, `$` are
+            // all independently caught by the charset check above, since
+            // none is in the allowed set) is ever reached. This shape is
+            // short and charset-legal except for the `..` substring, so only
+            // the traversal check itself can reject it — written to prove
+            // the check is genuinely reachable, not merely implied by the
+            // longer shapes' redundant length failure.
+            format!("aa..bb{CONVERSATION_EPOCH_SEPARATOR}2"),
+        ] {
+            let title = format!("Group: {shape}");
+            assert!(
+                validate_bot_session_title(&title).is_err(),
+                "the widened charset must not have opened a bypass in combination \
+                 with the separator: {shape:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_bot_session_title_still_rejects_an_out_of_charset_character_at_the_widened_length() {
+        let pad = "a".repeat(60);
+        let title = format!("Group: {pad}%{pad}");
+        assert!(validate_bot_session_title(&title).is_err());
+    }
+
+    #[test]
+    fn validate_bot_session_title_still_accepts_the_bare_bot_chat_title() {
+        assert_eq!(
+            validate_bot_session_title("Bot Chat").expect("literal Bot Chat must be accepted"),
+            "Bot Chat"
+        );
+    }
+
+    // -----------------------------------------------------------------
     // resolve_or_create_titled_session
     // -----------------------------------------------------------------
 
@@ -6385,6 +6642,50 @@ mod session_title_tests {
         assert_ne!(
             id1, id2,
             "a different title must resolve to a DIFFERENT session id"
+        );
+    }
+
+    #[test]
+    fn resolve_or_create_titled_session_gives_a_fresh_empty_session_for_the_next_epoch() {
+        // Phase 52 Plan 05 (D-02, Round 1 codex MEDIUM): the end-to-end
+        // SQLite assertion — not just a title-string comparison. Resolving
+        // epoch 1's title, writing a message into it, then resolving epoch
+        // 2's title for the SAME room must return a DIFFERENT session with
+        // NO messages, proving a "New conversation" reset actually gives
+        // every member's own CLI subprocess a brand-new session to resume.
+        let _lock = crate::test_env_lock();
+        let (_tmp, store) = temp_store();
+
+        let (epoch1_id, resumed1) =
+            resolve_or_create_titled_session(&store, Some("gpt"), None, Some("Group: standup"))
+                .unwrap();
+        assert!(!resumed1, "first resolve of epoch 1's title must create, not resume");
+        store
+            .lock()
+            .unwrap()
+            .add_message(&epoch1_id, &ChatMessage::user("epoch 1 message"))
+            .expect("seed a message into epoch 1's session");
+
+        let (epoch2_id, resumed2) = resolve_or_create_titled_session(
+            &store,
+            Some("gpt"),
+            None,
+            Some("Group: standup#2"),
+        )
+        .unwrap();
+        assert!(
+            !resumed2,
+            "the epoch-2 title must resolve to a BRAND NEW session, never a resume"
+        );
+        assert_ne!(
+            epoch1_id, epoch2_id,
+            "epoch 1 and epoch 2 of the same room must resolve to DIFFERENT session ids"
+        );
+
+        let epoch2_messages = store.lock().unwrap().get_messages(&epoch2_id).unwrap();
+        assert!(
+            epoch2_messages.is_empty(),
+            "a fresh epoch-2 session must carry no messages carried over from epoch 1"
         );
     }
 

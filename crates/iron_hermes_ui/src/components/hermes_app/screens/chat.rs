@@ -2028,8 +2028,20 @@ pub fn ScreenChat(is_active: bool) -> Element {
                                                             icon: None,
                                                             source_kind: Some("chat".to_string()),
                                                             source_ref: None,
+                                                            // Synthetic chip-open value — the
+                                                            // viewer route renders via
+                                                            // load_latest_html regardless of
+                                                            // format, and this ArtifactInfo
+                                                            // never reaches the gallery's
+                                                            // download-name helper.
+                                                            source_format: "html".to_string(),
                                                             updated_at: String::new(),
                                                             archived: false,
+                                                            // Phase 52.1 Plan 06 (D-15): inert for
+                                                            // the same reason source_format above
+                                                            // is inert — this synthetic value never
+                                                            // reaches the gallery row.
+                                                            producer: None,
                                                         }));
                                                         active_screen.set(crate::state::Screen::ArtifactViewer);
                                                     },

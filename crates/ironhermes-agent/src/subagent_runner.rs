@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent_loop::AgentLoop;
-use crate::any_client::{AnyClient, wire_fallback_if_configured};
+use crate::any_client::{AnyClient, SharedClient, SharedResolver, wire_fallback_if_configured};
 use crate::budget::BudgetHandle;
 use crate::subagent_registry::{RegistrationGuard, SubagentInfo, SubagentRegistry};
 use crate::transcript::{TranscriptLine, TranscriptWriter, transcript_path_for};
@@ -28,9 +28,19 @@ use crate::transcript::{TranscriptLine, TranscriptWriter, transcript_path_for};
 /// (D-23/D-24) via the ProviderResolver.
 pub struct AgentSubagentRunner {
     /// Parent's client, used when no model override is specified.
-    client: AnyClient,
-    /// Provider resolver for constructing override clients.
-    resolver: ProviderResolver,
+    ///
+    /// Phase 50.4 (D-14, wave 2): a shared, swappable handle rather than a
+    /// plain owned `AnyClient`. `new` wraps its plain-value argument into a
+    /// fresh private handle so the CLI's construction site
+    /// (`tui_rata/event_loop.rs`, no apply-now affordance) stays
+    /// byte-identical; `with_shared_handles` replaces it with the caller's
+    /// handle so a web caller's delegated turns follow
+    /// `AgentRuntime::reload_config_and_resolver`'s swaps instead of serving
+    /// a boot-time snapshot for the runner's whole lifetime.
+    client: SharedClient,
+    /// Provider resolver for constructing override clients. Same hot-swap
+    /// shape as `client` above.
+    resolver: SharedResolver,
     /// Retained budget field (D-04 / Plan 35-02 field-kept decision).
     ///
     /// Each child loop is given a FRESH `BudgetHandle::new(max_iterations)` —
@@ -75,14 +85,58 @@ impl AgentSubagentRunner {
         budget: Option<BudgetHandle>,
     ) -> Self {
         Self {
-            client,
-            resolver,
+            // Phase 50.4 (D-14, wave 2): wrap the plain-value arguments into
+            // fresh, PRIVATE handles — no other holder shares them, so this
+            // runner behaves exactly as it did before the field retype unless
+            // `with_shared_handles` is called to replace them.
+            client: Arc::new(std::sync::RwLock::new(client)),
+            resolver: Arc::new(std::sync::RwLock::new(Arc::new(resolver))),
             budget,
             subagent_registry: None,
             hermes_home: None,
             session_id: None,
             current_depth: 0,
             caller_subagent_id: None,
+        }
+    }
+
+    /// Phase 50.4 (D-14, wave 2): replace the private handles `new` wrapped
+    /// its arguments in with the caller's SHARED handles — the same handle
+    /// objects `AgentRuntime::reload_config_and_resolver` writes. After this
+    /// call, a delegated child agent spawned by `run_child` resolves its
+    /// provider and its fallback client from whatever `AgentRuntime`
+    /// currently holds, not a boot-time snapshot.
+    ///
+    /// Deliberately does NOT add a `reload` method to this runner instead:
+    /// sharing the handle means there is nothing for the runner to keep in
+    /// sync — a second reload entry point would be a second thing to forget
+    /// on the next provider swap.
+    pub fn with_shared_handles(mut self, client: SharedClient, resolver: SharedResolver) -> Self {
+        self.client = client;
+        self.resolver = resolver;
+        self
+    }
+
+    /// Test-only: snapshot the resolver currently visible through the
+    /// shared handle. `pub(crate)` (not module-private) so cross-module
+    /// tests in `agent_runtime.rs` — which build the full `AgentRuntime` +
+    /// reload scenario this runner is meant to share handles with — can
+    /// observe what the runner actually sees without driving `run_child`.
+    #[cfg(test)]
+    pub(crate) fn resolver_snapshot_for_test(&self) -> Arc<ProviderResolver> {
+        match self.resolver.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Test-only: snapshot the client currently visible through the shared
+    /// handle. Same rationale as [`Self::resolver_snapshot_for_test`].
+    #[cfg(test)]
+    pub(crate) fn client_snapshot_for_test(&self) -> AnyClient {
+        match self.client.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
         }
     }
 
@@ -232,12 +286,23 @@ impl SubagentRunner for AgentSubagentRunner {
         tool_progress: Option<ironhermes_tools::delegate_task::ChildToolProgressCallback>,
         stale_warn_seconds: u64,
     ) -> anyhow::Result<Option<String>> {
-        // D-23/D-24: construct child client with model override if specified
+        // D-23/D-24: construct child client with model override if specified.
+        // Phase 50.4 (D-14, wave 2): read the resolver/client through their
+        // shared handles into owned locals — a per-call read, not a
+        // construction-time snapshot — so a reload observed by the shared
+        // handle is picked up by the very next delegated turn.
         let child_client = if let Some(model) = model_override {
-            let endpoint = self.resolver.resolve_for_main();
+            let resolver = match self.resolver.read() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            };
+            let endpoint = resolver.resolve_for_main();
             AnyClient::from_endpoint_with_model(endpoint, model)?
         } else {
-            self.client.clone()
+            match self.client.read() {
+                Ok(guard) => guard.clone(),
+                Err(poisoned) => poisoned.into_inner().clone(),
+            }
         };
 
         // Plan 21.7-07 (D-03 / D-04 / D-05 / D-07):
@@ -297,8 +362,15 @@ impl SubagentRunner for AgentSubagentRunner {
         // sites; the registry reads it via SubagentInfo.activity_last for live
         // staleness derivation (no push updates, no periodic polling).
         let mut agent = AgentLoop::new(child_client, registry, max_iterations);
-        // Wire fallback so subagent retries on primary model failure (PROV-07 / phase 27.1.4.1)
-        agent = wire_fallback_if_configured(agent, &self.resolver); // chains .with_fallback() via the shared helper — PROV-07
+        // Wire fallback so subagent retries on primary model failure (PROV-07 / phase 27.1.4.1).
+        // Phase 50.4 (D-14, wave 2): read into an owned local, then pass a
+        // reference to that local — never a reference derived from a guard
+        // held across this call.
+        let resolver_for_fallback = match self.resolver.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        };
+        agent = wire_fallback_if_configured(agent, &resolver_for_fallback); // chains .with_fallback() via the shared helper — PROV-07
         // D-21: Forward cancel token to child AgentLoop
         if let Some(ref token) = cancel_token {
             agent = agent.with_cancellation_token(token.clone());
@@ -523,6 +595,40 @@ mod tests {
         assert!(
             root_info.parent_id.is_none(),
             "root runner (caller_subagent_id=None) must produce SubagentInfo.parent_id=None"
+        );
+    }
+
+    /// Phase 50.4 (D-14, wave 2), Test 2: a runner built with the plain
+    /// `new(client, resolver, budget)` form and NO `with_shared_handles`
+    /// call — the `tui_rata` CLI shape — resolves the provider it was
+    /// handed, unaffected by the field retype. This is the compatibility
+    /// case proving `new`'s internal wrapping is real rather than a stub
+    /// that only works when the builder is called.
+    #[test]
+    fn subagent_runner_constructed_without_shared_handles_keeps_its_own() {
+        use crate::client::LlmClient;
+        let config = ironhermes_core::Config::default();
+        let resolver = ironhermes_core::ProviderResolver::build(&config)
+            .expect("default Config should produce a valid resolver");
+        let expected_provider = resolver.main_provider().to_string();
+        let client = AnyClient::ChatCompletions(LlmClient::new(
+            "https://cli-example.test",
+            "cli-key",
+            "cli-model",
+        ));
+        let runner = AgentSubagentRunner::new(client, resolver, None);
+
+        assert_eq!(
+            runner.resolver_snapshot_for_test().main_provider(),
+            expected_provider,
+            "a runner constructed without with_shared_handles must resolve the provider \
+             it was handed at construction"
+        );
+        assert_eq!(
+            runner.client_snapshot_for_test().base_url(),
+            "https://cli-example.test",
+            "a runner constructed without with_shared_handles must serve the client \
+             it was handed at construction"
         );
     }
 }

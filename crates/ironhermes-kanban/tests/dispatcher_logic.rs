@@ -60,7 +60,7 @@ fn open_store(dir: &TempDir) -> KanbanStore {
 /// The gate itself is covered against the REAL predicate, through the real
 /// dispatch loop, in `tests/dispatch_gate_loop.rs`.
 fn allow_all_gate() -> ironhermes_kanban::dispatcher::DispatchGateFn {
-    Arc::new(|_assignee: &str| ironhermes_core::dispatch_gate::DispatchDecision::Allow)
+    Arc::new(|_assignee: &str| Box::pin(async { ironhermes_core::dispatch_gate::DispatchDecision::Allow }))
 }
 
 fn make_ctx_failing_spawn(
@@ -71,7 +71,8 @@ fn make_ctx_failing_spawn(
         |_task: ironhermes_kanban::types::Task,
          _run: ironhermes_kanban::types::TaskRun,
          _ws: String,
-         _board_slug: String|
+         _board_slug: String,
+         _vault: Option<ironhermes_kanban::worker_spawn::WorkerVaultBootstrap>|
          -> std::pin::Pin<
             Box<dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>> + Send>,
         > {
@@ -94,7 +95,8 @@ fn make_ctx_ok_spawn(
         move |_task: ironhermes_kanban::types::Task,
               _run: ironhermes_kanban::types::TaskRun,
               _ws: String,
-              _board_slug: String|
+              _board_slug: String,
+              _vault: Option<ironhermes_kanban::worker_spawn::WorkerVaultBootstrap>|
               -> std::pin::Pin<
             Box<dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>> + Send>,
         > { Box::pin(async move { Ok(fake_pid) }) },
@@ -125,7 +127,8 @@ async fn configured_default_workdir_is_passed_to_worker() {
         move |_task: ironhermes_kanban::types::Task,
               _run: ironhermes_kanban::types::TaskRun,
               workspace: String,
-              _board_slug: String|
+              _board_slug: String,
+              _vault: Option<ironhermes_kanban::worker_spawn::WorkerVaultBootstrap>|
               -> std::pin::Pin<
             Box<dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>> + Send>,
         > {
@@ -1606,7 +1609,8 @@ fn make_ctx_auto_decompose(
         |_task: ironhermes_kanban::types::Task,
          _run: ironhermes_kanban::types::TaskRun,
          _ws: String,
-         _board_slug: String|
+         _board_slug: String,
+         _vault: Option<ironhermes_kanban::worker_spawn::WorkerVaultBootstrap>|
          -> std::pin::Pin<
             Box<dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>> + Send>,
         > {
@@ -1887,7 +1891,8 @@ async fn goal_mode_no_dispatcher_change() {
         move |task: ironhermes_kanban::types::Task,
               _run: ironhermes_kanban::types::TaskRun,
               _ws: String,
-              _board_slug: String|
+              _board_slug: String,
+              _vault: Option<ironhermes_kanban::worker_spawn::WorkerVaultBootstrap>|
               -> std::pin::Pin<
             Box<dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>> + Send>,
         > {
@@ -2487,5 +2492,92 @@ async fn bad_workspace_path_yields_spawn_failed() {
     assert!(
         !std::path::Path::new("relative").exists(),
         "resolve_workspace_dir's guard must reject before any directory creation is attempted"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase 51 Task 2 (D-14) — the per-assignee gate cache still evaluates once
+// per tick after the async restructure.
+// ---------------------------------------------------------------------------
+
+/// Build a `DispatchGateFn` that always returns `Allow` but increments
+/// `counter` on every invocation — lets a test assert exactly how many times
+/// the gate was actually evaluated, the same style as
+/// `make_counting_decompose_fn` above.
+fn make_counting_allow_gate(counter: Arc<AtomicUsize>) -> ironhermes_kanban::dispatcher::DispatchGateFn {
+    Arc::new(move |_assignee: &str| {
+        let counter = Arc::clone(&counter);
+        Box::pin(async move {
+            counter.fetch_add(1, Ordering::SeqCst);
+            ironhermes_core::dispatch_gate::DispatchDecision::Allow
+        })
+    })
+}
+
+/// T-51-26: restructuring the `.or_insert_with` gate cache into an explicit
+/// check-then-await-then-insert (required because the closure could not
+/// `.await`) must not lose the one-evaluation-per-assignee-per-tick property
+/// — losing it turns a board of N tasks for the same profile into N vault
+/// opens per tick, which is both slow and a much noisier audit trail.
+#[tokio::test]
+async fn gate_cache_evaluates_once_per_assignee_per_tick_even_though_it_now_awaits() {
+    let dir = TempDir::new().unwrap();
+    let store_arc = Arc::new(TokioMutex::new(open_store(&dir)));
+
+    // Three ready tasks, all assigned to the SAME profile — a single tick
+    // must evaluate the gate for "alice" exactly once, not three times.
+    {
+        let mut store = store_arc.lock().await;
+        for i in 0..3 {
+            store
+                .create_task(
+                    &format!("shared-assignee task {i}"),
+                    "alice",
+                    CreateTaskOptions::default(),
+                )
+                .unwrap();
+        }
+    }
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let spawn_fn = Arc::new(
+        |_task: ironhermes_kanban::types::Task,
+         _run: ironhermes_kanban::types::TaskRun,
+         _ws: String,
+         _board_slug: String,
+         _vault: Option<ironhermes_kanban::worker_spawn::WorkerVaultBootstrap>|
+         -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = ironhermes_kanban::error::Result<u32>> + Send>,
+        > { Box::pin(async move { Ok(9001) }) },
+    );
+    let ctx = Arc::new(
+        DispatcherContext::with_spawn_fn(store_arc.clone(), KanbanConfig::default(), spawn_fn)
+            .with_gate_fn(make_counting_allow_gate(Arc::clone(&counter))),
+    );
+
+    run_dispatch_tick(&ctx).await.expect("tick failed");
+
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "the gate must be evaluated exactly once per assignee per tick, even for 3 ready \
+         tasks sharing the same assignee — a per-task evaluation would read 3, proving the \
+         cache-miss restructure lost its memoization"
+    );
+
+    // All three tasks should have been claimed and spawned (Allow, not
+    // Refuse) — the cache returning the SAME cached decision to every task
+    // after the first evaluation.
+    let store = store_arc.lock().await;
+    let tasks = store
+        .list_tasks(ListFilters {
+            status: Some("running".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(
+        tasks.len(),
+        3,
+        "all 3 tasks sharing the cached-Allow assignee must have been claimed"
     );
 }

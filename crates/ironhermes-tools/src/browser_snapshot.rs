@@ -14,7 +14,9 @@ use serde_json::json;
 use tokio::sync::Mutex;
 use tracing::debug;
 
-use crate::browser_session::{BrowserSession, find_chromium_binary};
+use crate::browser_session::{
+    BrowserSession, configured_browser_engine_available, configured_engine_prerequisite,
+};
 use crate::registry::{Prerequisite, Tool};
 
 /// JS injected into the page to walk the DOM, assign refs, and decorate elements.
@@ -134,11 +136,15 @@ const SNAPSHOT_WALKER_JS: &str = r#"
 
 pub struct BrowserSnapshotTool {
     session: Arc<Mutex<Option<BrowserSession>>>,
+    config: Arc<ironhermes_core::config::Config>,
 }
 
 impl BrowserSnapshotTool {
-    pub fn new(session: Arc<Mutex<Option<BrowserSession>>>) -> Self {
-        Self { session }
+    pub fn new(
+        session: Arc<Mutex<Option<BrowserSession>>>,
+        config: Arc<ironhermes_core::config::Config>,
+    ) -> Self {
+        Self { session, config }
     }
 }
 
@@ -172,19 +178,11 @@ impl Tool for BrowserSnapshotTool {
     }
 
     fn is_available(&self) -> bool {
-        find_chromium_binary(None).is_some()
+        configured_browser_engine_available(&self.config.browser)
     }
 
     fn prerequisites(&self) -> Vec<Prerequisite> {
-        vec![Prerequisite {
-            kind: "binary_present".to_string(),
-            name: "chromium-or-chrome".to_string(),
-            description:
-                "Chromium or Google Chrome browser binary on PATH or at a standard install location"
-                    .to_string(),
-            required: true,
-            group: None,
-        }]
+        vec![configured_engine_prerequisite(&self.config.browser)]
     }
 
     async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<String> {
@@ -267,9 +265,13 @@ mod tests {
         Arc::new(Mutex::new(None))
     }
 
+    fn dummy_config() -> Arc<ironhermes_core::config::Config> {
+        Arc::new(ironhermes_core::config::Config::default())
+    }
+
     #[test]
     fn name_and_toolset_match_d04() {
-        let t = BrowserSnapshotTool::new(dummy_session());
+        let t = BrowserSnapshotTool::new(dummy_session(), dummy_config());
         assert_eq!(t.name(), "browser_snapshot");
         assert_eq!(t.toolset(), "browser");
     }

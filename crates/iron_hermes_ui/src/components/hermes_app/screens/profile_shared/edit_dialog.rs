@@ -42,9 +42,11 @@ use super::advanced::AdvancedProfilePane;
 use super::create_dialog::render_verify_doctor_block;
 use super::secrets_source_picker::{SecretsSourcePicker, VAULT_REASON_BUILD_LACKS_FEATURE};
 use super::ProfileDialogContext;
+use crate::components::hermes_app::screens::apply_config_banner::ApplyConfigBanner;
 use crate::components::hermes_app::screens::bot_roster::delete_confirm::DeleteBotConfirm;
 use crate::components::hermes_app::screens::bot_roster::npub_row::BotNpubRow;
 use crate::components::hermes_app::screens::bot_roster::routines::BotRoutinesSection;
+use crate::components::hermes_app::screens::model_picker::ModelPickerField;
 use crate::components::hermes_app::widgets::avatar_picker::AvatarPicker;
 use crate::protocol::{
     BotAvatarDescriptor, DuplicateProfileRequest, KeyMode, KeyRow, KeyStatus,
@@ -244,6 +246,12 @@ pub fn ProfileDetailDrawer(
     // Provider/Model working copy (D-04), seeded from the loaded detail.
     let mut provider_wc: Signal<String> = use_signal(String::new);
     let mut model_wc: Signal<String> = use_signal(String::new);
+    // Phase 50.5 (D-17/D-19): the value `model_wc` was seeded with when the
+    // detail record loaded — set ONLY alongside `model_wc` in the
+    // fetch-on-change effect below, never on every keystroke, so
+    // `ModelPickerField`'s `seeded` prop stays the seed rather than always
+    // equalling the live typed value.
+    let mut model_seed: Signal<String> = use_signal(String::new);
 
     // Phase 50.1 Plan 04 (D-12): avatar working copy, seeded from the
     // bot-meta store on profile-id change (fetch-on-change effect below).
@@ -267,6 +275,15 @@ pub fn ProfileDetailDrawer(
     let mut saving: Signal<bool> = use_signal(|| false);
     let mut save_error: Signal<Option<String>> = use_signal(|| None);
     let mut save_hint: Signal<Option<String>> = use_signal(|| None);
+
+    // Phase 50.4 Plan 05 (D-11 remaining scope, team-lead follow-up note):
+    // the SAME root-provided `ApplyConfigPendingCtx` Providers and Models
+    // consume — reading it via `use_context` (never a drawer-local signal,
+    // never a child-level `use_context_provider`, which panics the sibling
+    // Providers/Models consumers under this crate's context-panic rule).
+    // Raised after a successful Section-5 SAVE below, same trigger shape as
+    // the other two surfaces.
+    let mut apply_config_pending = use_context::<crate::state::ApplyConfigPendingCtx>().0;
 
     // Phase 49.4.1 (D-01/D-05): Secrets Source working copy + SYNC action
     // state — registered unconditionally alongside the drawer's other
@@ -355,20 +372,13 @@ pub fn ProfileDetailDrawer(
         }
     });
 
-    // Phase 49.4 hotfix: stable unique `<datalist>` id per drawer instance
-    // (same idiom as `models.rs`'s `ProviderModelCascade`) so the MODEL picker
-    // below is a filterable input + capped datalist rather than a native
-    // `<select>` holding every option — a provider like OpenRouter exposes
-    // 300+ models, and building that many `<option>` nodes on the
-    // single-threaded WASM client froze the screen when the drawer opened.
-    let model_list_id = use_hook(|| {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static DRAWER_MODEL_SEQ: AtomicU64 = AtomicU64::new(0);
-        format!(
-            "drawer-models-{}",
-            DRAWER_MODEL_SEQ.fetch_add(1, Ordering::Relaxed)
-        )
-    });
+    // Phase 50.4 Plan 05 (D-06): the stable unique `<datalist>` id this
+    // drawer generated (`model_list_id`) is REMOVED — `ModelPickerField`
+    // (Plan 03) replaces the native `<input list>` + `<datalist>` render
+    // target below with its own popup, so no per-instance datalist id is
+    // needed anymore. Removed unconditionally at the top level of the
+    // component body (not from inside a branch), so the hook count stays
+    // identical across every render of this component instance.
 
     // Fetch-on-change: resolves the E5/loading backstop. Resets to
     // Loading synchronously on a profile-id change, THEN issues the new
@@ -399,6 +409,7 @@ pub fn ProfileDetailDrawer(
                         Ok(detail) => {
                             provider_wc.set(detail.provider.clone().unwrap_or_default());
                             model_wc.set(detail.model_default.clone().unwrap_or_default());
+                            model_seed.set(detail.model_default.clone().unwrap_or_default());
                             // Phase 49.4.1 (D-01/D-05): seed the picker from
                             // the profile's remembered source; an absent or
                             // unrecognised value pre-selects Root .env, the
@@ -529,6 +540,13 @@ pub fn ProfileDetailDrawer(
                     saving_sig.set(false);
                     save_hint_sig.set(Some("Saved.".to_string()));
                     on_profile_updated.call(());
+                    // Phase 50.4 Plan 05 (D-11): same process-level
+                    // apply_config_now trigger Providers and Models raise
+                    // after their own save — the drawer edits a profile's
+                    // provider/model assignment while APPLY NOW reloads the
+                    // running server's config; this is the locked D-11
+                    // behaviour, not an oversight.
+                    apply_config_pending.set(true);
                     if let Ok(detail) = fetch_profile_detail(profile_name).await {
                         load_state_sig.set(DetailLoadState::Loaded(detail));
                     }
@@ -762,28 +780,32 @@ pub fn ProfileDetailDrawer(
                     } else {
                         Some(model_val.as_str())
                     };
+                    // Phase 50.5 (D-17/D-19): the text filter and cap moved
+                    // into `ModelPickerField` itself — `model_options` is now
+                    // passed through FULL, unfiltered, uncapped.
                     let model_options = crate::components::hermes_app::screens::models::compute_model_options(
                         model_snapshot.as_ref(),
                         assigned_model_ref,
                     );
-                    // Phase 49.4 hotfix: cap the datalist to at most
-                    // MODEL_DATALIST_CAP matches for the currently-typed text so
-                    // a 300+-model provider never materializes hundreds of DOM
-                    // `<option>` nodes at once. The assigned model is always kept
-                    // in `model_options` (compute_model_options prepends it), so
-                    // an empty filter still surfaces the current value.
-                    const MODEL_DATALIST_CAP: usize = 50;
-                    let model_filter = model_val.trim().to_ascii_lowercase();
-                    let datalist_options: Vec<String> = model_options
-                        .iter()
-                        .filter(|id| {
-                            model_filter.is_empty()
-                                || id.to_ascii_lowercase().contains(&model_filter)
-                        })
-                        .take(MODEL_DATALIST_CAP)
-                        .cloned()
-                        .collect();
-                    let model_total = model_options.len();
+                    let model_seed_val = model_seed.read().clone();
+
+                    // Phase 50.5 (D-11): drift note — same pure fn Models and
+                    // Providers use. `is_missing: false` (the drawer has no
+                    // MISSING pill to defer to). The window field itself is
+                    // explicitly out of scope here (UI-SPEC §2's drawer
+                    // ruling, D-15's host list) — note only.
+                    let served_ids: Vec<String> = model_snapshot
+                        .as_ref()
+                        .map(|s| s.models.clone())
+                        .unwrap_or_default();
+                    let drift = crate::components::hermes_app::screens::models::drift_note(
+                        &served_ids,
+                        &model_val,
+                        &provider_val,
+                        fell_back,
+                        models_loading,
+                        false,
+                    );
 
                     // ---- Section 3: Keys ----
                     let keys = detail.keys.clone();
@@ -849,32 +871,21 @@ pub fn ProfileDetailDrawer(
                                 }
                             }
                             label { class: "kn-modal-label", "MODEL" }
-                            input {
-                                class: "voice-settings-select",
-                                style: "overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
-                                list: "{model_list_id}",
-                                value: "{model_val}",
-                                placeholder: "— select a model —",
+                            ModelPickerField {
+                                value: model_wc,
+                                all_options: model_options.clone(),
+                                seeded: model_seed_val.clone(),
                                 disabled: !write_enabled || models_loading,
-                                oninput: move |evt| {
-                                    model_wc.set(evt.value());
-                                    save_hint.set(None);
-                                },
-                            }
-                            datalist { id: "{model_list_id}",
-                                for id in datalist_options.iter() {
-                                    option { key: "{id}", value: "{id}" }
-                                }
-                            }
-                            if model_total > datalist_options.len() {
-                                div { class: "kn-modal-hint--info",
-                                    "{datalist_options.len()}/{model_total} — type to filter"
-                                }
+                                placeholder: "— select a model —".to_string(),
+                                title: String::new(),
                             }
                             if fell_back && !models_loading {
                                 div { class: "kn-modal-hint--info",
                                     "This provider exposes no model list — showing the full catalog."
                                 }
+                            }
+                            if let Some((ref body, ref title)) = drift {
+                                div { class: "kn-modal-hint--drift", title: "{title}", "{body}" }
                             }
                             if !write_enabled {
                                 div { class: "kn-modal-hint--info", "Config writes are disabled." }
@@ -1021,6 +1032,14 @@ pub fn ProfileDetailDrawer(
                             if let Some(err) = save_error.read().clone() {
                                 div { class: "kn-modal-error", "{err}" }
                             }
+                        }
+
+                        // Phase 50.4 Plan 05 (D-11): the SAME shared
+                        // apply-config banner Providers and Models mount —
+                        // identical copy and APPLY NOW CTA, raised after a
+                        // successful SAVE above.
+                        ApplyConfigBanner {
+                            visible: apply_config_pending,
                         }
 
                         // Phase 50.1 Plan 02 Task 3 (D-10 extension, UI-SPEC

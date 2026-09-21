@@ -19,10 +19,40 @@ memory-sqlite = ["ironhermes-agent/memory-sqlite"]
 memory-duckdb = ["ironhermes-agent/memory-duckdb"]
 memory-grafeo = ["ironhermes-agent/memory-grafeo"]
 test-support = ["ironhermes-agent/test-support"]
+# Phase 51 Plan 12 (CR-02): compiles the test-only IRONHERMES_TEST_PRINT_ENV_VAR_SHA256
+# observation hook into `main.rs` — on request it prints a SHA-256 digest of ANY named
+# environment variable's value to stderr and exits. Absent this feature, that hook does not
+# exist in the binary at all. MUST NEVER be enabled for a distributed build: it is a free
+# offline confirmation oracle for a guessed/low-entropy secret, and its silent `exit(0)`
+# would let a no-op worker report success. Not in any default set and not implied by any
+# other feature. Consumer: `crates/ironhermes-cli/tests/worker_vault_bootstrap.rs`.
+test-oracles = []
 # Phase 46.8 Plan 05 (D-10): thread the rusty-vault backend into the CLI's
 # `vault init`/`unlock` handlers (vault_cmd.rs). Off by default — same
 # zero-behavioral-change posture as `ironhermes-vault`'s own feature.
-rusty-vault = ["ironhermes-vault/rusty-vault"]
+#
+# Phase 51 UAT gap-closure (post-07): this forward was INCOMPLETE for
+# ~6 plans. `ironhermes-core::dispatch_gate`'s vault branch and
+# `ironhermes-kanban`'s dispatcher-side wiring are ALSO gated behind their
+# OWN `rusty-vault` features (`ironhermes-core/Cargo.toml`,
+# `ironhermes-kanban/Cargo.toml`) — forwarding only to `ironhermes-vault`
+# left `ironhermes vault init/unlock/set/list` working (they call
+# `ironhermes-vault` directly) while the REAL production path (the gateway-
+# hosted dispatcher, which calls `ironhermes_core::dispatch_gate::
+# evaluate_profile_dispatch`) silently compiled the feature-absent arm —
+# "vault backend unavailable — the `rusty-vault` feature was not compiled
+# in" even with a genuinely reachable, unsealed vault. `--all-features` on
+# `ironhermes-core`/`ironhermes-kanban` directly cannot catch this: it
+# proves the branch compiles WITHIN those crates, not that the feature
+# reaches them THROUGH this crate's own binary. See
+# `tests/rusty_vault_feature_reaches_dispatch_gate.rs` for the regression
+# gate that would have caught this, and `51-07-SUMMARY.md` for the full
+# incident record.
+rusty-vault = [
+    "ironhermes-vault/rusty-vault",
+    "ironhermes-core/rusty-vault",
+    "ironhermes-kanban/rusty-vault",
+]
 # Phase 47.6 Plan 04 (D-06/D-07): thread the Buzz (Nostr) platform adapter's
 # identity module into the CLI's `buzz` noun (buzz_cmd.rs). Off by default —
 # same zero-behavioral-change posture as `ironhermes-gateway`'s own feature.
@@ -56,6 +86,9 @@ serde_yaml = { workspace = true }
 toml = { workspace = true }
 async-trait = { workspace = true }
 anyhow = { workspace = true }
+# Phase 51 Plan 07 (D-11): named error variants for the worker vault bootstrap
+# (worker_bootstrap.rs) — same workspace-pinned version every other crate uses.
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tokio-stream = { workspace = true }

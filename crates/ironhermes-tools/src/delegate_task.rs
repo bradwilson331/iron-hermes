@@ -356,6 +356,375 @@ impl ArtifactCaptureSink for DelegateGenCaptureSink {
     }
 }
 
+/// Best-effort dual-location capture of a delegated child's FILE deliverable
+/// (D-04, Phase 52.1 Plan 04) — the third producer path onto the shared
+/// [`crate::chat_capture`] engine, alongside kanban and team-drive.
+///
+/// A terminal-tool write lands in `child_dir` — the child's own isolated
+/// temp directory, unambiguously this child's output; a file-tool write
+/// lands in the shared PARENT process working directory, which every
+/// sibling spawn and the operator's own project also share. `child_dir` is
+/// scanned first for exactly that reason: a candidate found there needs no
+/// tiebreak against a sibling's write. Both roots are scanned via
+/// [`crate::chat_capture::publish_producer_deliverable`] with `since` bound
+/// to `spawn_start` — never `None` — which is what makes scanning the
+/// uncontrolled parent working directory safe at all: a file that predates
+/// this spawn is never mistaken for this child's work (T-52.1-11).
+///
+/// A free function, not an [`ArtifactCaptureSink`] impl — that trait's
+/// single-media-path signature cannot express a dual-location scan. Same
+/// best-effort discipline as [`DelegateGenCaptureSink`] above: every failure
+/// path is a `tracing::warn!` plus a `None` return, never an error
+/// propagated to the caller — a capture failure must never fail the
+/// subagent's own already-successful turn (T-52.1-13).
+///
+/// `instruction_text` (the delegated goal/task text, Phase 52.1 Plan 08
+/// D-12) is checked via `crate::chat_capture::detect_turn_opt_out`. On the
+/// opt-out branch, a file the child produced still gets a record — demoted
+/// to a pointer via `crate::chat_capture::publish_pointer_artifact` under
+/// the SAME `source_kind`/`source_ref` the full artifact would have used,
+/// with the delegating agent's own current profile as the producer. A child
+/// that produced no file at all publishes nothing — there is no output to
+/// record.
+pub(crate) fn capture_child_deliverable(
+    child_dir: &std::path::Path,
+    spawn_start: std::time::SystemTime,
+    child_id: &str,
+    task_summary: &str,
+    instruction_text: &str,
+) -> Option<String> {
+    let title = if task_summary.trim().is_empty() {
+        format!("delegate task {child_id}")
+    } else {
+        task_summary.to_string()
+    };
+
+    // Ordered root list: child_dir (isolated, unambiguous) first, then the
+    // parent process CWD (shared — safe only because `since` bounds it).
+    let mut roots: Vec<std::path::PathBuf> = vec![child_dir.to_path_buf()];
+    match std::env::current_dir() {
+        Ok(cwd) => roots.push(cwd),
+        Err(e) => {
+            tracing::warn!(
+                target: "ironhermes_tools::delegate_task",
+                child_id,
+                error = %e,
+                "delegate child capture: failed to resolve parent working directory; scanning the child's temp dir only"
+            );
+        }
+    }
+
+    if crate::chat_capture::detect_turn_opt_out(instruction_text) {
+        // D-12: the operator opted out — demote to a marked pointer rather
+        // than suppressing. Occupies the same source kind/ref the full
+        // artifact would have.
+        for root in &roots {
+            if let Some((path, _)) =
+                crate::chat_capture::locate_producer_deliverable(root, Some(spawn_start))
+            {
+                return match std::fs::read(&path) {
+                    Ok(bytes) => crate::chat_capture::publish_pointer_artifact(
+                        "delegate",
+                        child_id,
+                        &title,
+                        &ironhermes_core::current_profile(),
+                        &path.to_string_lossy(),
+                        &bytes,
+                    ),
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "ironhermes_tools::delegate_task",
+                            child_id, path = %path.display(), error = %e,
+                            "pointer capture: failed to read deliverable"
+                        );
+                        None
+                    }
+                };
+            }
+        }
+        return None; // nothing produced at all — nothing to record
+    }
+
+    for root in &roots {
+        if let Some(id) =
+            crate::chat_capture::publish_producer_deliverable(crate::chat_capture::ProducerPublish {
+                scan_root: root,
+                since: Some(spawn_start),
+                source_kind: "delegate",
+                source_ref: child_id,
+                title: &title,
+                fallback_body: None,
+            })
+        {
+            return Some(id);
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod capture_child_deliverable_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    /// Holds the crate's `ENV_LOCK` for the test's duration and points
+    /// `IRONHERMES_ARTIFACTS_DB` at a fresh temp DB; when `cwd` is `Some`,
+    /// also sets the process CWD to a controlled tempdir, restoring both on
+    /// `Drop` (even on a mid-assertion panic). `capture_child_deliverable`'s
+    /// second scan root is the REAL process `current_dir()` — without this
+    /// guard a test would scan this crate's own uncontrolled source tree.
+    struct CaptureTestGuard {
+        _lock: tokio::sync::MutexGuard<'static, ()>,
+        _db_dir: tempfile::TempDir,
+        original_cwd: Option<std::path::PathBuf>,
+    }
+
+    impl CaptureTestGuard {
+        fn new(cwd: Option<&std::path::Path>) -> Self {
+            let lock = crate::ENV_LOCK.blocking_lock();
+            let db_dir = tempfile::tempdir().unwrap();
+            let db_path = db_dir.path().join("artifacts.db");
+            unsafe {
+                std::env::set_var(ironhermes_artifacts::ARTIFACTS_DB_ENV, &db_path);
+            }
+            let original_cwd = cwd.map(|new_cwd| {
+                let original = std::env::current_dir().unwrap();
+                std::env::set_current_dir(new_cwd).unwrap();
+                original
+            });
+            Self {
+                _lock: lock,
+                _db_dir: db_dir,
+                original_cwd,
+            }
+        }
+    }
+
+    impl Drop for CaptureTestGuard {
+        fn drop(&mut self) {
+            if let Some(original) = self.original_cwd.take() {
+                let _ = std::env::set_current_dir(original);
+            }
+            unsafe {
+                std::env::remove_var(ironhermes_artifacts::ARTIFACTS_DB_ENV);
+            }
+        }
+    }
+
+    /// Behavior 1: child dir has a fresh file, parent working dir is empty —
+    /// the child dir's file is published.
+    #[test]
+    fn child_dir_file_publishes_when_parent_empty() {
+        let parent = tempfile::tempdir().unwrap();
+        let _guard = CaptureTestGuard::new(Some(parent.path()));
+
+        let child_dir = tempfile::tempdir().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let spawn_start = SystemTime::now();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(child_dir.path().join("out.py"), "print('child')").unwrap();
+
+        let id = capture_child_deliverable(child_dir.path(), spawn_start, "child-1", "do the thing", "do the thing")
+            .expect("child dir file must publish");
+
+        let store = ironhermes_artifacts::ArtifactStore::open_default().unwrap();
+        let summary = store
+            .latest_for_source("delegate", "child-1")
+            .unwrap()
+            .expect("artifact recorded");
+        assert_eq!(summary.id, id);
+    }
+
+    /// Behavior 2: child dir is empty, parent working dir has a fresh file —
+    /// the parent working dir's file is published.
+    #[test]
+    fn parent_dir_file_publishes_when_child_dir_empty() {
+        let parent = tempfile::tempdir().unwrap();
+        let _guard = CaptureTestGuard::new(Some(parent.path()));
+
+        let child_dir = tempfile::tempdir().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let spawn_start = SystemTime::now();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(parent.path().join("out.py"), "print('parent')").unwrap();
+
+        let id = capture_child_deliverable(child_dir.path(), spawn_start, "child-2", "task 2", "task 2")
+            .expect("parent working dir file must publish when child dir is empty");
+
+        let store = ironhermes_artifacts::ArtifactStore::open_default().unwrap();
+        let summary = store
+            .latest_for_source("delegate", "child-2")
+            .unwrap()
+            .expect("artifact recorded");
+        assert_eq!(summary.id, id);
+    }
+
+    /// Behavior 3: both locations hold a fresh candidate — the child dir's
+    /// candidate wins (asserted on the published BODY, not merely an id).
+    #[test]
+    fn child_dir_wins_when_both_fresh() {
+        let parent = tempfile::tempdir().unwrap();
+        let _guard = CaptureTestGuard::new(Some(parent.path()));
+
+        let child_dir = tempfile::tempdir().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let spawn_start = SystemTime::now();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(parent.path().join("parent.py"), "print('parent')").unwrap();
+        std::fs::write(child_dir.path().join("child.py"), "print('child')").unwrap();
+
+        let id = capture_child_deliverable(child_dir.path(), spawn_start, "child-3", "task 3", "task 3")
+            .expect("a candidate must publish");
+
+        let store = ironhermes_artifacts::ArtifactStore::open_default().unwrap();
+        let (_, body) = store.load_latest_source(&id).unwrap();
+        assert_eq!(
+            body, "print('child')",
+            "when both roots hold a fresh candidate, the child dir's must win"
+        );
+    }
+
+    /// Behavior 4: the parent working dir holds only a file whose mtime
+    /// predates the spawn start — nothing publishes.
+    #[test]
+    fn stale_parent_file_publishes_nothing() {
+        let parent = tempfile::tempdir().unwrap();
+        std::fs::write(parent.path().join("old.py"), "print('old')").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let spawn_start = SystemTime::now();
+
+        let _guard = CaptureTestGuard::new(Some(parent.path()));
+        let child_dir = tempfile::tempdir().unwrap();
+
+        let result = capture_child_deliverable(child_dir.path(), spawn_start, "child-4", "task 4", "task 4");
+        assert!(
+            result.is_none(),
+            "a file predating spawn_start must never publish"
+        );
+    }
+
+    /// Behavior 5: the artifact store cannot be opened — `None`, no panic,
+    /// no propagated error. Forced by pointing `IRONHERMES_ARTIFACTS_DB` at
+    /// a path that is itself an existing directory, which SQLite cannot
+    /// open as a database file.
+    #[test]
+    fn store_open_failure_returns_none_not_panic() {
+        let _lock = crate::ENV_LOCK.blocking_lock();
+        let dir = tempfile::tempdir().unwrap();
+        let bogus_db_path = dir.path().join("not-a-file");
+        std::fs::create_dir_all(&bogus_db_path).unwrap();
+        unsafe {
+            std::env::set_var(ironhermes_artifacts::ARTIFACTS_DB_ENV, &bogus_db_path);
+        }
+
+        let child_dir = tempfile::tempdir().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let spawn_start = SystemTime::now();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(child_dir.path().join("out.py"), "print('x')").unwrap();
+
+        let result = capture_child_deliverable(child_dir.path(), spawn_start, "child-5", "task 5", "task 5");
+        assert!(result.is_none(), "a store that cannot open must yield None, not a panic");
+
+        unsafe {
+            std::env::remove_var(ironhermes_artifacts::ARTIFACTS_DB_ENV);
+        }
+    }
+
+    /// Behavior 6: the published row carries `source_kind = "delegate"` and
+    /// the per-spawn `child_id` as `source_ref`, so two concurrent siblings
+    /// never collide on one artifact.
+    #[test]
+    fn published_row_carries_delegate_kind_and_per_spawn_source_ref() {
+        let parent = tempfile::tempdir().unwrap();
+        let _guard = CaptureTestGuard::new(Some(parent.path()));
+
+        let child_dir = tempfile::tempdir().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let spawn_start = SystemTime::now();
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(child_dir.path().join("out.py"), "print('x')").unwrap();
+
+        let id = capture_child_deliverable(child_dir.path(), spawn_start, "unique-child-id-6", "task 6", "task 6")
+            .expect("must publish");
+
+        let store = ironhermes_artifacts::ArtifactStore::open_default().unwrap();
+        let summary = store
+            .latest_for_source("delegate", "unique-child-id-6")
+            .unwrap()
+            .expect("row keyed by (delegate, child_id) must exist");
+        assert_eq!(summary.id, id);
+        assert_eq!(summary.source_kind.as_deref(), Some("delegate"));
+        assert_eq!(summary.source_ref.as_deref(), Some("unique-child-id-6"));
+    }
+
+    /// Phase 52.1 Plan 08 (D-12): a delegated child whose goal text opts out,
+    /// and which wrote a file, gets a marked, body-free pointer record — not
+    /// suppression — keyed exactly where the full artifact would have gone.
+    #[test]
+    fn capture_child_deliverable_writes_pointer_on_opt_out() {
+        let parent = tempfile::tempdir().unwrap();
+        let _guard = CaptureTestGuard::new(Some(parent.path()));
+
+        let child_dir = tempfile::tempdir().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let spawn_start = SystemTime::now();
+        std::thread::sleep(Duration::from_millis(20));
+        let deliverable_text = "THE CHILD'S OWN SECRET DELIVERABLE, NEVER STORED IN A POINTER";
+        std::fs::write(child_dir.path().join("out.py"), deliverable_text).unwrap();
+
+        let id = capture_child_deliverable(
+            child_dir.path(),
+            spawn_start,
+            "opt-out-child-1",
+            "task 7",
+            "just show it inline, don't publish",
+        )
+        .expect("an opt-out with a produced file must still write a pointer record");
+
+        let store = ironhermes_artifacts::ArtifactStore::open_default().unwrap();
+        let (fmt, body) = store.load_latest_source(&id).unwrap();
+        assert_eq!(fmt, ironhermes_artifacts::SourceFormat::Markdown);
+        assert!(body.starts_with(crate::chat_capture::POINTER_ARTIFACT_MARKER));
+        assert!(
+            !body.contains(deliverable_text),
+            "the child's own deliverable text must never appear in the stored pointer body"
+        );
+
+        let summary = store
+            .latest_for_source("delegate", "opt-out-child-1")
+            .unwrap()
+            .expect("pointer occupies the same source kind/ref key");
+        assert_eq!(summary.id, id);
+    }
+
+    /// Phase 52.1 Plan 08 (D-12): a delegated child whose goal text opts out
+    /// and produced no file at all publishes nothing — there is no output
+    /// to record.
+    #[test]
+    fn capture_child_deliverable_writes_nothing_on_opt_out_with_no_output() {
+        let parent = tempfile::tempdir().unwrap();
+        let _guard = CaptureTestGuard::new(Some(parent.path()));
+
+        let child_dir = tempfile::tempdir().unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        let spawn_start = SystemTime::now();
+
+        let result = capture_child_deliverable(
+            child_dir.path(),
+            spawn_start,
+            "opt-out-child-2",
+            "task 8",
+            "no artifact, just show it inline",
+        );
+        assert!(
+            result.is_none(),
+            "an opt-out with no produced file at all must publish nothing"
+        );
+    }
+}
+
 /// Tool that delegates a focused task to a child agent with restricted tools.
 pub struct DelegateTaskTool {
     runner: Arc<dyn SubagentRunner>,
@@ -605,27 +974,39 @@ impl DelegateTaskTool {
             let batch_task_key_for_spawn = batch_task_key.clone();
 
             let handle = tokio::spawn(async move {
+                // Truncated task summary for progress events and, below,
+                // capture titling — char-boundary safe. Computed
+                // unconditionally so Task 3's capture call has it even when
+                // no progress_cb is wired.
+                let task_summary = if goal.len() > 50 {
+                    let mut end = 50;
+                    while !goal.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    goal[..end].to_string()
+                } else {
+                    goal.clone()
+                };
+
                 // D-19: Emit Started progress event
                 if let Some(ref cb) = progress_cb {
-                    let summary = if goal.len() > 50 {
-                        let mut end = 50;
-                        while !goal.is_char_boundary(end) {
-                            end -= 1;
-                        }
-                        &goal[..end]
-                    } else {
-                        &goal
-                    };
                     cb(
                         index,
                         SubagentProgress::Started {
-                            task_summary: summary.to_string(),
+                            task_summary: task_summary.clone(),
                         },
                     );
                 }
 
                 // Each task gets its own temp dir for isolation
                 let child_dir = tempfile::TempDir::new()?;
+
+                // Phase 52.1 Plan 04 (D-04): a fresh per-spawn identifier for
+                // this batch child's capture source reference. The
+                // index-derived `batch_task_key` is NOT unique across batch
+                // invocations — reusing it would make two different batch
+                // runs version each other's artifact.
+                let capture_child_id = uuid::Uuid::new_v4().to_string();
 
                 // Acquire semaphore (shared across all batch tasks + single tasks)
                 let _permit = semaphore
@@ -667,6 +1048,11 @@ impl DelegateTaskTool {
                 // underlying token via `CancellationToken::clone()`.
                 let timeout_cancel = child_cancel_token.clone();
 
+                // Phase 52.1 Plan 04 (D-04): one binding per spawned task —
+                // not shared across the batch, or a later sibling's
+                // freshness bound would exclude an earlier sibling's file.
+                let spawn_start = std::time::SystemTime::now();
+
                 let result = tokio::time::timeout(
                     Duration::from_secs(per_task_timeout_secs),
                     runner.run_child(
@@ -680,6 +1066,27 @@ impl DelegateTaskTool {
                     ),
                 )
                 .await;
+
+                // Phase 52.1 Plan 04 (D-04): best-effort capture, INSIDE this
+                // spawn closure — the temp dir is created inside it and
+                // deleted when the closure returns, so a capture placed in
+                // the outer result-collection loop scans a directory that no
+                // longer exists (RESEARCH.md Pitfall 1).
+                if let Some(artifact_id) = capture_child_deliverable(
+                    child_dir.path(),
+                    spawn_start,
+                    &capture_child_id,
+                    &task_summary,
+                    &goal,
+                ) {
+                    tracing::info!(
+                        target: "ironhermes_tools::delegate_task",
+                        artifact_id = %artifact_id,
+                        child_id = %capture_child_id,
+                        batch_index = index,
+                        "delegate child deliverable captured as artifact"
+                    );
+                }
 
                 let response = match result {
                     Ok(Ok(resp)) => resp.unwrap_or_else(|| "(no response)".to_string()),
@@ -1239,6 +1646,10 @@ impl Tool for DelegateTaskTool {
         // has no batch index to reuse (single-task mode), so a uuid scopes
         // the per-child cap to just this one spawn.
         let child_id = uuid::Uuid::new_v4().to_string();
+        // Phase 52.1 Plan 04 (D-04): clone before `for_child` moves `child_id`
+        // into the gen-wiring builder — the capture call site below needs its
+        // own stable copy of the same per-spawn identifier.
+        let capture_child_id = child_id.clone();
         let child_gen_wiring = self.gen_wiring.as_ref().map(|w| w.for_child(child_id));
         let child_registry = build_child_registry(
             &allowed_tools,
@@ -1272,21 +1683,26 @@ impl Tool for DelegateTaskTool {
                 .map(|parent_token| parent_token.child_token())
         };
 
+        // Truncated task summary for progress events and, below, capture
+        // titling — char-boundary safe. Computed unconditionally (not just
+        // inside the progress_callback branch) so Task 2's capture call has
+        // it even when no progress callback is wired.
+        let task_summary = if task.len() > 50 {
+            let mut end = 50;
+            while !task.is_char_boundary(end) {
+                end -= 1;
+            }
+            task[..end].to_string()
+        } else {
+            task.to_string()
+        };
+
         // D-19: Emit Started progress event
         if let Some(ref cb) = self.progress_callback {
-            let summary = if task.len() > 50 {
-                let mut end = 50;
-                while !task.is_char_boundary(end) {
-                    end -= 1;
-                }
-                &task[..end]
-            } else {
-                task
-            };
             cb(
                 0,
                 SubagentProgress::Started {
-                    task_summary: summary.to_string(),
+                    task_summary: task_summary.clone(),
                 },
             );
         }
@@ -1349,6 +1765,11 @@ impl Tool for DelegateTaskTool {
         // child keeps running past the deadline despite our Err return.
         let timeout_cancel = child_cancel_token.clone();
 
+        // Phase 52.1 Plan 04 (D-04): captured before the child can write
+        // anything — a file the child writes after this point must never
+        // read as stale.
+        let spawn_start = std::time::SystemTime::now();
+
         // Run child agent with timeout (D-08) and model override (D-23)
         let result = tokio::time::timeout(
             Duration::from_secs(effective_timeout_secs),
@@ -1363,6 +1784,28 @@ impl Tool for DelegateTaskTool {
             ),
         )
         .await;
+
+        // Phase 52.1 Plan 04 (D-04): best-effort capture of this child's file
+        // deliverable. MUST run here — `child_dir` (TempDir) is still alive
+        // (its binding does not drop until this function returns) and this
+        // is before the response match arms below, some of which return
+        // early. RESEARCH.md Pitfall 1: a capture placed after those arms,
+        // or after `child_dir` goes out of scope, scans a directory that no
+        // longer exists and silently finds nothing.
+        if let Some(artifact_id) = capture_child_deliverable(
+            child_dir.path(),
+            spawn_start,
+            &capture_child_id,
+            &task_summary,
+            task,
+        ) {
+            tracing::info!(
+                target: "ironhermes_tools::delegate_task",
+                artifact_id = %artifact_id,
+                child_id = %capture_child_id,
+                "delegate child deliverable captured as artifact"
+            );
+        }
 
         // D-19: Emit Completed progress event
         if let Some(ref cb) = self.progress_callback {
@@ -1777,6 +2220,84 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, "mock child response");
+    }
+
+    /// Phase 52.1 Plan 04 (D-04) — Task 2. Exercises the REAL ordering this
+    /// plan depends on, not the capture helper in isolation: a `SubagentRunner`
+    /// that writes through the ACTUAL `terminal` tool registered by
+    /// `execute()` — whose cwd is production-wired to the isolated child
+    /// `TempDir` — proves the write-then-capture race is won in the real
+    /// spawn path, not just in a fixture that hands the helper a directory it
+    /// built itself and never reproduces the teardown timing.
+    #[tokio::test]
+    async fn single_delegate_spawn_captures_child_dir_deliverable() {
+        let _lock = crate::ENV_LOCK.lock().await;
+        let db_dir = tempfile::tempdir().unwrap();
+        let db_path = db_dir.path().join("artifacts.db");
+        unsafe {
+            std::env::set_var(ironhermes_artifacts::ARTIFACTS_DB_ENV, &db_path);
+        }
+
+        struct TerminalWriteRunner;
+        #[async_trait]
+        impl SubagentRunner for TerminalWriteRunner {
+            async fn run_child(
+                &self,
+                registry: Arc<RwLock<ToolRegistry>>,
+                _system_prompt: String,
+                _max_iterations: usize,
+                _model_override: Option<&str>,
+                _cancel_token: Option<CancellationToken>,
+                _tool_progress: Option<ChildToolProgressCallback>,
+                _stale_warn_seconds: u64,
+            ) -> anyhow::Result<Option<String>> {
+                // Writes through the terminal tool — the exact channel
+                // RESEARCH.md Pitfall 1 identifies: it lands in the
+                // per-spawn temp dir, deleted the instant this future
+                // returns, unless the capture hook runs before that.
+                let reg = registry.read().await;
+                reg.execute_tool(
+                    "terminal",
+                    json!({"command": "printf 'print(1)' > out.py"}),
+                )
+                .await?;
+                Ok(Some("done".to_string()))
+            }
+        }
+
+        let tool = DelegateTaskTool::new(
+            Arc::new(TerminalWriteRunner),
+            Arc::new(Semaphore::new(3)),
+            None,
+            SubagentConfig::default(),
+            None,
+        );
+
+        tool.execute(json!({"task": "write a python file"}))
+            .await
+            .unwrap();
+
+        let profile = ironhermes_core::current_profile();
+        let store = ironhermes_artifacts::ArtifactStore::open_default().unwrap();
+        let rows = store.list_for_profile_filtered(&profile, true).unwrap();
+        let delegate_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r.source_kind.as_deref() == Some("delegate"))
+            .collect();
+        assert_eq!(
+            delegate_rows.len(),
+            1,
+            "exactly one delegate artifact must be published; got {delegate_rows:?}"
+        );
+        let (_, body) = store.load_latest_source(&delegate_rows[0].id).unwrap();
+        assert_eq!(
+            body, "print(1)",
+            "published body must be the child dir's file content"
+        );
+
+        unsafe {
+            std::env::remove_var(ironhermes_artifacts::ARTIFACTS_DB_ENV);
+        }
     }
 
     #[tokio::test]
@@ -2293,6 +2814,145 @@ mod tests {
         );
         assert!(result.contains("Task A"), "should contain goal A result");
         assert!(result.contains("Task B"), "should contain goal B result");
+    }
+
+    /// Phase 52.1 Plan 04 (D-04) — Task 3. Two batch siblings, driven
+    /// directly through `capture_child_deliverable` with two different temp
+    /// dirs and two different per-spawn identifiers, must publish two
+    /// DISTINCT artifacts rather than one versioning the other — proving the
+    /// batch path's per-spawn UUID (not the index-derived `batch_task_key`,
+    /// which is NOT unique across batch invocations) is what backs
+    /// `source_ref`.
+    #[test]
+    fn batch_delegate_spawns_capture_under_distinct_source_refs() {
+        let _lock = crate::ENV_LOCK.blocking_lock();
+        let db_dir = tempfile::tempdir().unwrap();
+        let db_path = db_dir.path().join("artifacts.db");
+        unsafe {
+            std::env::set_var(ironhermes_artifacts::ARTIFACTS_DB_ENV, &db_path);
+        }
+
+        let child_dir_a = tempfile::tempdir().unwrap();
+        let child_dir_b = tempfile::tempdir().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let spawn_start = std::time::SystemTime::now();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(child_dir_a.path().join("a.py"), "print('a')").unwrap();
+        std::fs::write(child_dir_b.path().join("b.py"), "print('b')").unwrap();
+
+        let id_a =
+            capture_child_deliverable(child_dir_a.path(), spawn_start, "batch-sibling-a", "task a", "task a")
+                .expect("sibling a must publish");
+        let id_b =
+            capture_child_deliverable(child_dir_b.path(), spawn_start, "batch-sibling-b", "task b", "task b")
+                .expect("sibling b must publish");
+
+        assert_ne!(
+            id_a, id_b,
+            "two concurrent batch siblings must never version each other's artifact"
+        );
+
+        unsafe {
+            std::env::remove_var(ironhermes_artifacts::ARTIFACTS_DB_ENV);
+        }
+    }
+
+    /// Phase 52.1 Plan 04 (D-04) — Task 3. The real-ordering companion to
+    /// Task 2's single-task test: drives `execute()` in BATCH mode with a
+    /// `SubagentRunner` that writes through the REAL `terminal` tool inside
+    /// each spawned child's own temp dir, proving the capture call placed
+    /// INSIDE the `tokio::spawn` closure (not the outer result-collection
+    /// loop) wins the write-then-teardown race for every batch sibling, not
+    /// just a fixture-built directory the helper is handed directly.
+    #[tokio::test]
+    async fn batch_delegate_spawn_captures_real_terminal_write_before_teardown() {
+        let _lock = crate::ENV_LOCK.lock().await;
+        let db_dir = tempfile::tempdir().unwrap();
+        let db_path = db_dir.path().join("artifacts.db");
+        unsafe {
+            std::env::set_var(ironhermes_artifacts::ARTIFACTS_DB_ENV, &db_path);
+        }
+
+        struct BatchTerminalWriteRunner;
+        #[async_trait]
+        impl SubagentRunner for BatchTerminalWriteRunner {
+            async fn run_child(
+                &self,
+                registry: Arc<RwLock<ToolRegistry>>,
+                system_prompt: String,
+                _max_iterations: usize,
+                _model_override: Option<&str>,
+                _cancel_token: Option<CancellationToken>,
+                _tool_progress: Option<ChildToolProgressCallback>,
+                _stale_warn_seconds: u64,
+            ) -> anyhow::Result<Option<String>> {
+                let content = if system_prompt.contains("first task") {
+                    "first output"
+                } else {
+                    "second output"
+                };
+                let reg = registry.read().await;
+                reg.execute_tool(
+                    "terminal",
+                    json!({"command": format!("printf '{content}' > out.py")}),
+                )
+                .await?;
+                Ok(Some("done".to_string()))
+            }
+        }
+
+        let tool = DelegateTaskTool::new(
+            Arc::new(BatchTerminalWriteRunner),
+            Arc::new(Semaphore::new(3)),
+            None,
+            SubagentConfig::default(),
+            None,
+        );
+
+        tool.execute(json!({
+            "tasks": [
+                { "goal": "first task" },
+                { "goal": "second task" }
+            ]
+        }))
+        .await
+        .unwrap();
+
+        let profile = ironhermes_core::current_profile();
+        let store = ironhermes_artifacts::ArtifactStore::open_default().unwrap();
+        let rows = store.list_for_profile_filtered(&profile, true).unwrap();
+        let delegate_rows: Vec<_> = rows
+            .iter()
+            .filter(|r| r.source_kind.as_deref() == Some("delegate"))
+            .collect();
+        assert_eq!(
+            delegate_rows.len(),
+            2,
+            "each batch sibling must publish its own artifact; got {delegate_rows:?}"
+        );
+
+        let source_refs: std::collections::HashSet<_> = delegate_rows
+            .iter()
+            .filter_map(|r| r.source_ref.clone())
+            .collect();
+        assert_eq!(
+            source_refs.len(),
+            2,
+            "the two batch siblings must never share a source_ref"
+        );
+
+        let bodies: std::collections::HashSet<String> = delegate_rows
+            .iter()
+            .map(|r| store.load_latest_source(&r.id).unwrap().1)
+            .collect();
+        assert!(
+            bodies.contains("first output") && bodies.contains("second output"),
+            "both batch siblings' own file writes must have been captured; got {bodies:?}"
+        );
+
+        unsafe {
+            std::env::remove_var(ironhermes_artifacts::ARTIFACTS_DB_ENV);
+        }
     }
 
     #[tokio::test]

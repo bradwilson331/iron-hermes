@@ -231,6 +231,40 @@ pub fn parse_realtime_event(event_type: &str) -> Option<VoiceModeState> {
     }
 }
 
+// ── Pure, target-independent RTCDataChannel size guard (natively testable) ───
+//
+// avatar-not-hearing-voice follow-up (.planning/debug/avatar-not-hearing-voice.md):
+// `bd26a0c7c` added `instructions`+`tools` to the session.update built here,
+// which measured 480,128 bytes live — 1.83x Chrome's own 262,144-byte SCTP
+// maxMessageSize — so `RTCDataChannel.send()` rejected the whole message with
+// an opaque `TypeError`, silently dropping the VAD/barge-in/transcription
+// config that rode along with it. `instructions`/`tools` have since moved to
+// `issue_realtime_token`'s request (server/api.rs), so this payload should now
+// always be small — this guard is the regression backstop that would have
+// caught that commit, and the reason a future regression fails LOUD instead of
+// silent.
+
+/// Chrome's own SCTP default (256 KiB). Deliberately NOT the RFC 8841 fallback
+/// (65536), which only applies when the remote SDP omits `a=max-message-size`
+/// and is smaller still — using it here would make this guard fire on payloads
+/// Chrome actually accepts. The live negotiated `pc.sctp.maxMessageSize` is
+/// still read and logged separately at send time (see the `onopen` closure
+/// below); this constant is the natively-testable, conservative floor.
+pub const RTC_DATA_CHANNEL_SIZE_LIMIT_BYTES: usize = 262_144;
+
+/// Pure size-check: `Ok(())` when `payload` fits under
+/// `RTC_DATA_CHANNEL_SIZE_LIMIT_BYTES`, else `Err(actual_len)` so callers can
+/// warn/refuse BEFORE ever calling `RTCDataChannel::send()` — which otherwise
+/// fails with an opaque `TypeError` and no upstream signal about why.
+pub fn check_data_channel_payload_size(payload: &str) -> Result<(), usize> {
+    let len = payload.len();
+    if len > RTC_DATA_CHANNEL_SIZE_LIMIT_BYTES {
+        Err(len)
+    } else {
+        Ok(())
+    }
+}
+
 // ── Teardown (idempotent — None slot is a no-op) ─────────────────────────────
 
 /// Release all held browser resources for the realtime session.
@@ -966,7 +1000,50 @@ pub async fn start_realtime_session(
         // ignored by the GA server, so VAD ran on defaults with no noise reduction
         // — the cause of the background-noise over-sensitivity.
         let session_update = format!(r#"{{"type":"session.update","session":{session_cfg}}}"#);
+        // DIAGNOSTIC (Avatar-mode regression follow-up): a `session.update` that
+        // exceeds the SCTP transport's negotiated maxMessageSize is rejected
+        // outright by RTCDataChannel.send(), so the whole session runs on server
+        // defaults. Log the payload size next to the actual enforced limit —
+        // per RFC 8841 the limit defaults to 65536 when the remote SDP omits
+        // `a=max-message-size`, which is far lower than Chrome's own 262144.
+        // web-sys 0.3.94 exposes no RtcSctpTransport binding, so read
+        // `pc.sctp.maxMessageSize` reflectively — no new feature or dependency.
+        let pc_for_open = pc.clone();
         let onopen = wasm_bindgen::closure::Closure::<dyn FnMut()>::wrap(Box::new(move || {
+            let limit = js_sys::Reflect::get(&pc_for_open, &"sctp".into())
+                .ok()
+                .and_then(|sctp| js_sys::Reflect::get(&sctp, &"maxMessageSize".into()).ok())
+                .and_then(|v| v.as_f64())
+                .unwrap_or(f64::NAN);
+            web_sys::console::log_1(
+                &format!(
+                    "[realtime_session] session.update payload={} bytes, sctp maxMessageSize={} \
+                     (over limit: {})",
+                    session_update.len(),
+                    limit,
+                    (session_update.len() as f64) > limit
+                )
+                .into(),
+            );
+            // Regression guard (avatar-not-hearing-voice follow-up): fail LOUD and
+            // BEFORE attempting the send when the payload cannot possibly fit,
+            // rather than letting RTCDataChannel::send() reject it with an opaque
+            // TypeError and no upstream signal about why. RTC_DATA_CHANNEL_SIZE_LIMIT_BYTES
+            // is a fixed, natively-testable floor (Chrome's own SCTP default); the
+            // negotiated `limit` above is the live value used for the raw diagnostic
+            // log only.
+            if let Err(actual_len) = check_data_channel_payload_size(&session_update) {
+                web_sys::console::error_1(
+                    &format!(
+                        "[realtime_session] session.update payload ({actual_len} bytes) exceeds \
+                         the {RTC_DATA_CHANNEL_SIZE_LIMIT_BYTES}-byte RTCDataChannel size guard — \
+                         refusing to send. VAD/barge-in/noise-reduction/transcription config will \
+                         NOT reach the provider this session."
+                    )
+                    .into(),
+                );
+                return;
+            }
             if let Err(e) = dc_for_open.send_with_str(&session_update) {
                 web_sys::console::warn_1(
                     &format!("[realtime_session] session.update send failed: {e:?}").into(),
@@ -1429,6 +1506,99 @@ mod tests {
             parse_realtime_event("conversation.item.input_audio_transcription.completed"),
             None,
             "transcript persistence must not cause an orb state transition"
+        );
+    }
+
+    // ── Native unit tests for the RTCDataChannel size guard ──────────────────
+    // avatar-not-hearing-voice follow-up: regression guard for bd26a0c7c, which
+    // added instructions+tools to the data-channel session.update and pushed it
+    // to 480,128 measured bytes (1.83x the 262,144-byte limit).
+
+    use super::{RTC_DATA_CHANNEL_SIZE_LIMIT_BYTES, check_data_channel_payload_size};
+
+    #[test]
+    fn size_guard_accepts_small_audio_only_payload() {
+        // Representative of the POST-fix data-channel session.update: a small
+        // audio/VAD-only object (no instructions, no tools).
+        let payload = serde_json::json!({
+            "type": "session.update",
+            "session": {
+                "type": "realtime",
+                "audio": {
+                    "input": {
+                        "noise_reduction": {"type": "far_field"},
+                        "turn_detection": {
+                            "type": "semantic_vad",
+                            "create_response": true,
+                            "interrupt_response": true
+                        },
+                        "transcription": {"model": "gpt-4o-mini-transcribe"}
+                    }
+                }
+            }
+        })
+        .to_string();
+        assert!(
+            check_data_channel_payload_size(&payload).is_ok(),
+            "a small audio/VAD-only payload must pass the size guard"
+        );
+    }
+
+    #[test]
+    fn size_guard_rejects_pre_fix_instructions_and_tools_shape() {
+        // Regression lock: reconstructs the PRE-FIX shape that bd26a0c7c
+        // introduced (instructions + tools embedded directly in the
+        // data-channel session.update). Byte counts mirror the live MEASURED
+        // reading in .planning/debug/avatar-not-hearing-voice.md
+        // (instructions_bytes=440628, tools_bytes=37341, total=480128) closely
+        // enough to guarantee this test fails post-fix code from ever
+        // regressing back to that shape.
+        let oversized_instructions = "x".repeat(440_628);
+        let oversized_tool = serde_json::json!({
+            "type": "function",
+            "name": "x",
+            "description": "x".repeat(900),
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        });
+        let oversized_tools: Vec<serde_json::Value> =
+            std::iter::repeat_n(oversized_tool, 35).collect();
+        let pre_fix_payload = serde_json::json!({
+            "type": "session.update",
+            "session": {
+                "type": "realtime",
+                "instructions": oversized_instructions,
+                "tools": oversized_tools,
+                "tool_choice": "auto",
+                "audio": {"input": {}}
+            }
+        })
+        .to_string();
+        assert!(
+            check_data_channel_payload_size(&pre_fix_payload).is_err(),
+            "the guard must flag the pre-fix instructions+tools-in-DC-message shape as oversized"
+        );
+    }
+
+    #[test]
+    fn size_guard_boundary_at_limit_is_ok() {
+        // Boundary neighbor N: exactly at the limit must still pass.
+        let payload = "x".repeat(RTC_DATA_CHANNEL_SIZE_LIMIT_BYTES);
+        assert!(
+            check_data_channel_payload_size(&payload).is_ok(),
+            "a payload exactly at the limit must be accepted"
+        );
+    }
+
+    #[test]
+    fn size_guard_boundary_over_limit_by_one_is_err() {
+        // Boundary neighbor N+1: one byte over the limit must fail, and the
+        // returned length must be the actual payload length.
+        let payload = "x".repeat(RTC_DATA_CHANNEL_SIZE_LIMIT_BYTES + 1);
+        let result = check_data_channel_payload_size(&payload);
+        assert_eq!(
+            result,
+            Err(RTC_DATA_CHANNEL_SIZE_LIMIT_BYTES + 1),
+            "one byte over the limit must be rejected with the exact length"
         );
     }
 }

@@ -74,20 +74,43 @@
 //! dependency boundary, and the "this one does a real network call"
 //! property, visible at the file level.
 //!
-//! ## Why the disk checks run inside `spawn_blocking` and the network call
-//! does not
+//! ## Why the disk checks run inside `spawn_blocking` (twice) and the
+//! network call does not (updated Phase 51 Plan 17, CR-05)
 //!
 //! Dioxus fullstack polls each websocket server-fn invocation inside a
 //! per-connection task context where the ordinary in-place-blocking bridge
 //! (`tokio::task`'s helper for calling blocking code from an async context)
 //! is unsafe to reach for — it can panic there even though the surrounding
 //! runtime is multi-threaded, and the runtime flavor alone does not predict
-//! it. `verify_profile` avoids that hazard entirely by structure, not by a
-//! bridge: the three synchronous disk checks AND the synchronous judge-fn
-//! construction (no `.await` inside either) run inside `spawn_blocking`,
-//! while the actual network probe call is awaited directly in this fn's own
-//! async body once `spawn_blocking` has returned. No sync-to-async bridge is
-//! ever needed.
+//! it. Through Phase 47.4, `verify_profile` avoided that hazard entirely by
+//! structure, not by a bridge: the three synchronous disk checks AND the
+//! synchronous judge-fn construction (no `.await` inside either) ran inside
+//! ONE `spawn_blocking`, while the actual network probe call was awaited
+//! directly in `verify_profile`'s own async body once `spawn_blocking` had
+//! returned.
+//!
+//! Phase 51 (D-14) added a vault-aware dispatch-gate check in the MIDDLE of
+//! that single synchronous block —
+//! `ironhermes_core::dispatch_gate::evaluate_profile_dispatch` now awaits
+//! `ProfileSecretStore`'s vault branch, which a `spawn_blocking` closure
+//! cannot do without reaching for the very in-place-blocking bridge this
+//! module exists to avoid. The fix that landed alongside that change made
+//! `build_probe_setup` `async` and dropped `spawn_blocking` ENTIRELY — which
+//! also moved the disk checks and the judge-fn construction onto the
+//! calling Dioxus server-fn task, the same class of regression Plan 17
+//! (CR-05) closes elsewhere in this phase.
+//!
+//! Plan 17 restores the blocking-pool placement by splitting
+//! `build_probe_setup` into three stages instead of two: a first
+//! `spawn_blocking` for the disk checks and the profile's own
+//! `config.yaml` load (returning a `PreGate` short-circuit-or-continue
+//! value, mirroring `profile_api.rs::list_profiles`' `ProfileDiskRow`
+//! seam), the genuinely-async gate check awaited in between, and a second
+//! `spawn_blocking` for the post-gate `KanbanConfig` build, `.env` read, and
+//! judge-fn construction. `build_probe_setup` is still `async` overall
+//! (`verify_profile` still awaits it directly, never wraps it in
+//! `spawn_blocking` itself) — only its INTERNALS are back on the blocking
+//! pool. No sync-to-async bridge is used anywhere in this file.
 //!
 //! ## What this file never does
 //!
@@ -243,39 +266,92 @@ enum ProbeSetup {
     },
 }
 
+/// Phase 51 Plan 17 (CR-05, second half): the pre-gate disk-only outputs
+/// `build_probe_setup`'s first `spawn_blocking` closure hands to the
+/// (now-async) gate check — mirrors `list_profiles`' `ProfileDiskRow` seam.
+/// `Done` short-circuits before the gate is even reached (the disk checks
+/// failed, or the profile's own `config.yaml` didn't load); `Loaded` carries
+/// what both the gate check and the post-gate judge-fn construction need.
+#[cfg(feature = "server")]
+enum PreGate {
+    Done(ProbeSetup),
+    Loaded {
+        report: VerifyReport,
+        // Boxed: `Config` is large enough (~3.7KB) that an unboxed field here
+        // would make every `PreGate` value pay for it, including the common
+        // `Done` short-circuit path that never needs a `Config` at all
+        // (clippy::large_enum_variant).
+        profile_config: Box<ironhermes_core::config::Config>,
+    },
+}
+
 /// Phase 47.4 Plan 06 (D-09 / D-14): the synchronous half of `verify_profile`
 /// — disk checks, then (only if they pass) building a judge closure scoped
 /// to THIS profile's own `config.yaml` + `.env`, never the root profile's.
-/// Runs entirely inside `spawn_blocking`; performs no network I/O itself
-/// (building a judge closure resolves the provider cascade but does not call
-/// it).
+/// Performs no network I/O itself (building a judge closure resolves the
+/// provider cascade but does not call it).
+///
+/// Phase 51 Plan 17 (CR-05, second half): restores the `spawn_blocking`
+/// split `897add029` deleted when the gate check in the middle of this fn's
+/// body became `async`. Since the gate can no longer run inside a single
+/// synchronous closure, the fn is split into THREE stages instead of two:
+/// a `spawn_blocking` for the pre-gate disk checks + config load, the
+/// genuinely-async gate check awaited in between, and a second
+/// `spawn_blocking` for the post-gate kanban-config + judge-fn construction.
+/// This is the SAME "disk work inside, gate call outside" shape
+/// `list_profiles` uses — split into two blocking segments here only
+/// because the gate sits in the MIDDLE of what was previously one
+/// synchronous block, not at its end. Its handful of test call sites stay
+/// `#[tokio::test]`/`.await`ed — this fn is still `async` overall, only its
+/// INTERNALS are re-split.
 #[cfg(feature = "server")]
-fn build_probe_setup(name: &str) -> Result<ProbeSetup, String> {
-    let mut report = run_disk_checks(name);
-    if !report.dir_ok || !report.config_ok {
-        let summary = if !report.dir_ok {
-            "profile directory does not exist".to_string()
-        } else {
-            "config.yaml is missing, malformed, or has no model.default set".to_string()
-        };
-        report.outcome = VerifyOutcome::Failure { summary };
-        return Ok(ProbeSetup::ShortCircuit(report));
-    }
-
-    // Both the profile's own Config and its KanbanConfig must come from the
-    // PROFILE, never the root — using the root config here would
-    // reintroduce exactly the false-confidence bug D-09 exists to prevent.
-    let profile_dir = crate::server::profile_api::profile_dir_for(name);
-    let config_path = profile_dir.join("config.yaml");
-    let profile_config = match ironhermes_core::config::Config::load_from(&config_path) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            report.outcome = VerifyOutcome::Failure {
-                summary: format!("load profile config.yaml: {e}"),
+async fn build_probe_setup(name: &str) -> Result<ProbeSetup, String> {
+    let name_for_pre_gate = name.to_string();
+    let pre_gate = tokio::task::spawn_blocking(move || -> PreGate {
+        let name = name_for_pre_gate.as_str();
+        let mut report = run_disk_checks(name);
+        if !report.dir_ok || !report.config_ok {
+            let summary = if !report.dir_ok {
+                "profile directory does not exist".to_string()
+            } else {
+                "config.yaml is missing, malformed, or has no model.default set".to_string()
             };
-            return Ok(ProbeSetup::ShortCircuit(report));
+            report.outcome = VerifyOutcome::Failure { summary };
+            return PreGate::Done(ProbeSetup::ShortCircuit(report));
         }
+
+        // Both the profile's own Config and its KanbanConfig must come from
+        // the PROFILE, never the root — using the root config here would
+        // reintroduce exactly the false-confidence bug D-09 exists to
+        // prevent.
+        let profile_dir = crate::server::profile_api::profile_dir_for(name);
+        let config_path = profile_dir.join("config.yaml");
+        let profile_config = match ironhermes_core::config::Config::load_from(&config_path) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                report.outcome = VerifyOutcome::Failure {
+                    summary: format!("load profile config.yaml: {e}"),
+                };
+                return PreGate::Done(ProbeSetup::ShortCircuit(report));
+            }
+        };
+
+        PreGate::Loaded {
+            report,
+            profile_config: Box::new(profile_config),
+        }
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking join: {e}"))?;
+
+    let (mut report, profile_config) = match pre_gate {
+        PreGate::Done(setup) => return Ok(setup),
+        PreGate::Loaded {
+            report,
+            profile_config,
+        } => (report, profile_config),
     };
+
     // Phase 47.4 Plan 11 (GAP-1 corollary hole): `bdev01`'s
     // `model.roles.kanban_judge` resolves to `openrouter`, for which that
     // profile DOES have a key, so
@@ -289,57 +365,72 @@ fn build_probe_setup(name: &str) -> Result<ProbeSetup, String> {
     // built or any network call is attempted, whenever the profile's MAIN
     // provider has no resolvable key — independent of whether some OTHER
     // role happens to have one.
+    //
+    // Phase 51 (D-14): the ONE genuinely-async step, awaited here — outside
+    // both `spawn_blocking` calls, per this plan's own restored split. An
+    // `AllowFromVault` decision correctly does NOT short-circuit here,
+    // since it is not a `Refuse`.
     if let ironhermes_core::dispatch_gate::DispatchDecision::Refuse { reason } =
-        ironhermes_core::dispatch_gate::evaluate_profile_dispatch(name)
+        ironhermes_core::dispatch_gate::evaluate_profile_dispatch(name).await
     {
         report.outcome = VerifyOutcome::Failure { summary: reason };
         return Ok(ProbeSetup::ShortCircuit(report));
     }
 
-    let kanban_config = ironhermes_cli::kanban::commands::load_kanban_config(&profile_config);
+    // Post-gate: kanban config + judge-fn construction — synchronous disk
+    // work again, back on the blocking pool.
+    let name_for_post_gate = name.to_string();
+    tokio::task::spawn_blocking(move || -> Result<ProbeSetup, String> {
+        let name = name_for_post_gate.as_str();
+        let mut report = report;
+        let profile_dir = crate::server::profile_api::profile_dir_for(name);
+        let kanban_config = ironhermes_cli::kanban::commands::load_kanban_config(&profile_config);
 
-    let env_path = profile_dir.join(".env");
-    let overrides = match crate::server::profile_api::read_env_keys(&env_path) {
-        Ok(m) => m,
-        Err(e) => {
-            report.outcome = VerifyOutcome::Failure {
-                summary: format!("read profile .env: {e}"),
-            };
-            return Ok(ProbeSetup::ShortCircuit(report));
-        }
-    };
+        let env_path = profile_dir.join(".env");
+        let overrides = match crate::server::profile_api::read_env_keys(&env_path) {
+            Ok(m) => m,
+            Err(e) => {
+                report.outcome = VerifyOutcome::Failure {
+                    summary: format!("read profile .env: {e}"),
+                };
+                return Ok(ProbeSetup::ShortCircuit(report));
+            }
+        };
 
-    // Resolved separately from the closure construction below purely so the
-    // resolved key value is available to scrub from any later provider
-    // error text — this does not perform a network call, it re-runs the
-    // same cheap, local three-tier cascade the closure construction below
-    // also runs.
-    let secret =
-        ironhermes_cli::kanban::commands::resolve_judge_model_and_endpoint_with_env_overrides_strict(
+        // Resolved separately from the closure construction below purely so
+        // the resolved key value is available to scrub from any later
+        // provider error text — this does not perform a network call, it
+        // re-runs the same cheap, local three-tier cascade the closure
+        // construction below also runs.
+        let secret =
+            ironhermes_cli::kanban::commands::resolve_judge_model_and_endpoint_with_env_overrides_strict(
+                &kanban_config,
+                &profile_config,
+                &overrides,
+            )
+            .ok()
+            .and_then(|(endpoint, _model)| endpoint.api_key.clone());
+
+        match ironhermes_cli::kanban::commands::build_runtime_judge_fn_with_env_overrides_strict(
             &kanban_config,
             &profile_config,
             &overrides,
-        )
-        .ok()
-        .and_then(|(endpoint, _model)| endpoint.api_key.clone());
-
-    match ironhermes_cli::kanban::commands::build_runtime_judge_fn_with_env_overrides_strict(
-        &kanban_config,
-        &profile_config,
-        &overrides,
-    ) {
-        Ok(judge_fn) => Ok(ProbeSetup::Ready {
-            report,
-            judge_fn,
-            secret,
-        }),
-        Err(e) => {
-            // A build error (including the fail-closed no-API-key bail) is a
-            // true, useful Failure result, not an infrastructure error.
-            report.outcome = classify_probe_result(Err(e.to_string()), false, secret.as_deref());
-            Ok(ProbeSetup::ShortCircuit(report))
+        ) {
+            Ok(judge_fn) => Ok(ProbeSetup::Ready {
+                report,
+                judge_fn,
+                secret,
+            }),
+            Err(e) => {
+                // A build error (including the fail-closed no-API-key bail) is a
+                // true, useful Failure result, not an infrastructure error.
+                report.outcome = classify_probe_result(Err(e.to_string()), false, secret.as_deref());
+                Ok(ProbeSetup::ShortCircuit(report))
+            }
         }
-    }
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking join: {e}"))?
 }
 
 /// Phase 47.4 Plan 06 (D-09): a tiny fixed probe request. Title/body/worker
@@ -381,11 +472,11 @@ pub async fn verify_profile(name: String) -> Result<VerifyReport, ServerFnError>
         ironhermes_core::profile::validate_profile_name(&name)
             .map_err(|e| ServerFnError::new(format!("invalid profile name: {e}")))?;
 
-        let name_for_blocking = name.clone();
-        let setup = tokio::task::spawn_blocking(move || build_probe_setup(&name_for_blocking))
-            .await
-            .map_err(|e| ServerFnError::new(format!("spawn_blocking join: {e}")))?
-            .map_err(ServerFnError::new)?;
+        // Phase 51 (D-14): `build_probe_setup` is now `async` (it awaits the
+        // vault-aware dispatch gate), so it can no longer run inside a
+        // `spawn_blocking` closure without a forbidden blocking bridge — awaited
+        // directly instead.
+        let setup = build_probe_setup(&name).await.map_err(ServerFnError::new)?;
 
         match setup {
             ProbeSetup::ShortCircuit(report) => Ok(report),
@@ -694,8 +785,8 @@ mod profile_verify_disk_checks_tests {
     // when a DIFFERENT role (kanban_judge) resolves fine.
     // -------------------------------------------------------------------
 
-    #[test]
-    fn verify_short_circuits_to_failure_when_main_provider_key_missing_despite_judge_role() {
+    #[tokio::test]
+    async fn verify_short_circuits_to_failure_when_main_provider_key_missing_despite_judge_role() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         let name = "bdev01-verify-shape";
@@ -733,7 +824,9 @@ mod profile_verify_disk_checks_tests {
             .expect("write .env");
         set_mode_0600(&env_path);
 
-        let setup = build_probe_setup(name).expect("build_probe_setup should not error");
+        let setup = build_probe_setup(name)
+            .await
+            .expect("build_probe_setup should not error");
         match setup {
             ProbeSetup::ShortCircuit(report) => match report.outcome {
                 VerifyOutcome::Failure { summary } => {
@@ -766,8 +859,8 @@ mod profile_verify_disk_checks_tests {
     // scrubbed` (`ironhermes-kanban/tests/dispatch_gate_loop.rs`).
     // -------------------------------------------------------------------
 
-    #[test]
-    fn verify_reports_failure_when_judge_role_key_exists_only_in_the_server_process_env() {
+    #[tokio::test]
+    async fn verify_reports_failure_when_judge_role_key_exists_only_in_the_server_process_env() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         let name = "cr01-process-env-only";
@@ -808,7 +901,9 @@ mod profile_verify_disk_checks_tests {
         let openrouter_process_secret = "sk-OpenrouterProcessEnvOnlyFixtureP9wY2mK6vT4b"; // secret-scan:allow
         let _key_guard = ScopedEnv::set("OPENROUTER_API_KEY", openrouter_process_secret);
 
-        let setup = build_probe_setup(name).expect("build_probe_setup should not error");
+        let setup = build_probe_setup(name)
+            .await
+            .expect("build_probe_setup should not error");
         match setup {
             ProbeSetup::ShortCircuit(report) => match report.outcome {
                 VerifyOutcome::Failure { summary } => {
@@ -836,8 +931,8 @@ mod profile_verify_disk_checks_tests {
         }
     }
 
-    #[test]
-    fn verify_stays_ready_when_the_judge_role_key_is_in_the_profiles_own_env() {
+    #[tokio::test]
+    async fn verify_stays_ready_when_the_judge_role_key_is_in_the_profiles_own_env() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _guard = home(&dir);
         let name = "cr01-profile-owns-both-keys";
@@ -874,7 +969,9 @@ mod profile_verify_disk_checks_tests {
 
         // No network call is made — this test asserts only which
         // `ProbeSetup` variant was returned.
-        let setup = build_probe_setup(name).expect("build_probe_setup should not error");
+        let setup = build_probe_setup(name)
+            .await
+            .expect("build_probe_setup should not error");
         match setup {
             ProbeSetup::Ready { .. } => {}
             ProbeSetup::ShortCircuit(report) => panic!(

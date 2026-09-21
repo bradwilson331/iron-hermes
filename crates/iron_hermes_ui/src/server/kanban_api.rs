@@ -1178,7 +1178,7 @@ pub async fn run_decompose_or_specify(
         // decomposer.rs:161 (`specify_triage_task`) are invoked below via a
         // DecomposeFn built on demand from `state.resolver` (D-06).
         let state = crate::server::state::global_app_state();
-        let kanban_config = load_kanban_config(&state.config);
+        let kanban_config = load_kanban_config(&state.config());
 
         let store = KanbanStore::open_from_env_or_board(board.as_deref())
             .map_err(|e| ServerFnError::new(format!("open_from_env_or_board({:?}): {e}", board)))?;
@@ -1187,7 +1187,7 @@ pub async fn run_decompose_or_specify(
         // D-06: built on demand, fail-soft — never an AppState field, never
         // constructed at boot. A missing/invalid model becomes the D-05
         // NotWired branch below, not an Err.
-        let decompose_fn = match build_decompose_fn(&kanban_config, &state.resolver) {
+        let decompose_fn = match build_decompose_fn(&kanban_config, &state.resolver()) {
             Ok(f) => f,
             Err(e) => {
                 return Ok(DecomposeResult::NotWired {

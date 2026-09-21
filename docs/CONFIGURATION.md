@@ -172,7 +172,7 @@ providers:
 | `autonomous` | Autonomous (yolo) mode — skip dangerous-command approval prompts |
 | `concurrency` | Per-session and process-wide caps for concurrent in-flight agent turns (Phase 39.1) |
 | `auxiliary` | Auxiliary model routing for helper tasks |
-| `browser` | Browser automation settings |
+| `browser` | Browser automation settings — Chromium by default, Obscura opt-in second backend (see [Browser](#browser-browser)) |
 | `extract` | Web extraction (web_extract tool) tuning |
 | `image_gen` | Text→image (`image_gen`): per-mode `{provider, model}` (venice default), per-session cap, poll timeout |
 | `video_gen` | Text/image/video→video (`video_generate`/`video_animate`/`video_to_video`): per-mode `{provider, model}`, caps, resolution/aspect, progress ping |
@@ -729,11 +729,57 @@ Uses slack-morphism 2.22.0 Socket Mode (WebSocket, no public HTTP endpoint requi
 | `skills.enabled` | `true` | Master enable switch for the skills subsystem |
 | `skills.extra_paths` | `[]` | Additional skill scan paths (appended after defaults) |
 | `skills.credential_dir` | `null` | Root directory for skill credentials (null = `$HERMES_HOME/credentials`) |
+| `skills.catalog_priority_root_count` | `2` | How many leading scan roots render in full in the prompt catalog; skills from later roots collapse to one counted pointer line |
 
 Default skill scan paths (in priority order):
 1. `<cwd>/.ironhermes/skills/`
 2. `~/.ironhermes/skills/` (or `$IRONHERMES_HOME/skills/`)
 3. `~/.agents/skills/`
+
+`extra_paths` are appended after these three.
+
+#### Catalog root tiering (`skills.catalog_priority_root_count`)
+
+The `## Available Skills` prompt section renders a `- name: description` line per
+skill. That cost is paid on **every turn of every surface** (text chat and realtime
+voice alike), so an unbounded catalog is an unbounded per-turn tax: on a machine where
+`~/.agents/skills/` had grown to 1,039 skills, the rendered catalog measured **440,628
+bytes** (~110K tokens) per turn.
+
+`catalog_priority_root_count` bounds it. Skills from the first N scan roots render in
+full; skills from every later root collapse into a single line stating the exact elided
+count and pointing at the `skills` tool:
+
+```
+- 1035 further skills are available from additional configured skill directories
+  (not listed above to keep this catalog small) — call the skills tool with action
+  "list" to see all of them, then action "activate" with the skill name to use one.
+```
+
+The default of `2` covers roots 1 and 2 — your curated project-local and user skills —
+and tiers root 3 (`~/.agents/skills/`, a shared cross-tool directory) plus anything in
+`extra_paths`.
+
+**Tiered skills are not disabled.** They are fully loaded, resolvable by name, and
+reachable via `skills` → `list` / `activate`. Only the pre-rendered catalog text
+changes.
+
+> **Tradeoff worth knowing.** The agent no longer *sees* tiered skill descriptions, so
+> it will not spontaneously reach for one — you name it, or it calls `list` first. The
+> counted pointer line exists precisely so the agent knows they exist rather than
+> concluding they do not.
+
+The knob is a **position** in the search-path list, not a name — no directory is
+hardcoded, so behavior stays correct if `extra_paths` grows or the defaults change.
+
+```yaml
+skills:
+  # Also render ~/.agents/skills/ in full (restores pre-tiering behavior):
+  catalog_priority_root_count: 3
+```
+
+Set it to a value at or above the total number of scan roots to disable tiering
+entirely.
 
 ### Delegation (`delegation:`)
 
@@ -783,6 +829,57 @@ Default skill scan paths (in priority order):
 | `browser.chromium_path` | `null` | Explicit chromium binary path (null = autodiscover) |
 | `browser.timeout_seconds` | `30` | Per-operation timeout in seconds |
 | `browser.user_data_dir` | `null` | Persistent browser profile directory (null = `$HERMES_HOME/browser-profile`) |
+| `browser.backend` | `chromium` | Which CDP engine to drive: `chromium` (default, never auto-replaced) or `obscura` (Phase 53, opt-in second backend) |
+| `browser.cdp_url` | `null` | Remote CDP endpoint to connect to instead of spawning a local process. Consulted ONLY when `backend: obscura`; inert (with one logged warning) under `backend: chromium` |
+| `browser.obscura_path` | `null` | Explicit Obscura binary path (null = `OBSCURA_PATH` env var, then PATH) |
+| `browser.obscura_port` | `null` | Pin the local `obscura serve` listen port (null = OS-assigned ephemeral port, allocated fresh per spawn) |
+| `browser.obscura_stealth` | `false` | Pass `--stealth` to a locally-spawned `obscura serve` |
+| `browser.obscura_allow_private_network` | `false` | Pass `--allow-private-network` through to Obscura's own SSRF guard (deny-by-default: loopback, RFC1918, link-local). Obscura-scoped only — the Chromium path's reachability rules are unchanged |
+
+See [Browser backend](#browser-backend) below for the operational rules a table row can't carry: the `--features render` build requirement, remote-mode ownership, and the `backend`-is-authoritative rule.
+
+### Browser backend
+
+Chromium is the default engine and is **never auto-replaced** — no code path
+auto-selects Obscura by autodiscovery, binary probing, or fallback when
+Chromium is missing. `browser.backend` is **authoritative**: a
+`browser.cdp_url` set while `browser.backend: chromium` is **inert**, not an
+engine swap — the session starts Chromium exactly as it does today and logs
+one warning naming the ignored setting. Set `browser.backend: obscura` to
+opt in.
+
+An Obscura binary built **without** `--features render` still serves CDP and
+still evaluates JavaScript, so it looks healthy — but it has no layout.
+Author CSS never reaches computed style, a long document reports itself as
+viewport height, and the snapshot walker returns invisible (`display:none`)
+elements as live refs — all without ever raising an error. IronHermes
+refuses to start a session against such a build rather than running against
+it, with no config escape hatch, ever. This is easy to hit by accident: the
+official Obscura release archives publish `-no-render` variants right
+alongside the default-named ones for every platform. Run
+`ironhermes doctor --browser` to see which case a given `obscura` binary is
+in before pointing a live session at it.
+
+Setting `browser.cdp_url` under `browser.backend: obscura` connects to a
+server this process did not start and will not stop — this is how one
+Obscura server is shared across sessions, or scaled independently of the
+agent, without IronHermes owning its lifecycle.
+
+`browser.obscura_allow_private_network` defaults to `false`, denying
+loopback, RFC1918, and link-local targets by passing straight through to
+Obscura's own SSRF guard. The Chromium path's reachability rules are
+**unchanged** by this setting, so the two backends deny different things —
+this asymmetry is deliberate and recorded here, not an oversight.
+
+`browser_vision` requests a full-page screenshot on Chromium and a
+viewport-only screenshot on Obscura, because Obscura's `Page.getLayoutMetrics`
+answers `clientWidth`/`clientHeight` as floats against a CDP schema that
+types those fields as integers, so the reply is rejected before anything
+paints. The tool's own output always says which capture actually ran — a
+machine-readable `capture` field (`full_page` or `viewport`) in its JSON
+envelope, and, on the Obscura (viewport) path, a prefix sentence in the
+`analysis` text itself, since the calling model never sees the screenshot
+image — only that prose.
 
 ### Web Extract (`extract:`)
 
@@ -869,13 +966,29 @@ tools:
 
 **A sealed or unreachable vault stops the agent from starting.** This is deliberate, not a bug: when `vault.enabled: true`, tool-credential resolution treats a sealed, locked, or corrupt vault the same way `ProviderResolver`'s inference-key vault fallback already does (D-07) — a loud startup error, not a silently degraded, keyless agent. The accepted consequence is that an operator who enables the vault but never intended to use a vault-backed *tool* credential that session can still be stopped from booting by it. `ironhermes doctor` is the one place that condition can be diagnosed **without** booting the agent — it resolves the identical env → config → vault snapshot the runtime does, and on a sealed/unreachable vault it renders a failed check naming the backend and keeps going (never dies on the exact condition it exists to diagnose, and never prints any part of a credential — only env-var names, tiers, and counts).
 
-### Kanban Worker Profile Credentials (`profiles/<name>/.env`)
+### Kanban Worker Profile Credentials (`profiles/<name>/.env` or the vault)
 
-A kanban worker profile keeps its provider key in its own `.env` at
-`$IRONHERMES_HOME/profiles/<name>/.env`, mode `0600`. This is the **only** channel by
-which a dispatched worker obtains a credential: workers are spawned with
-`.env_clear()` plus a 7-variable allowlist that deliberately excludes every
-`*_API_KEY` and `*_SECRET`, so the worker bootstraps its own key by reading that file.
+A kanban worker profile's provider credential lives in one of two places:
+
+- **The default, and the only channel for a profile that has not been migrated:** its
+  own `.env` at `$IRONHERMES_HOME/profiles/<name>/.env`, mode `0600`. Workers are
+  spawned with `.env_clear()` plus a 7-entry ambient allowlist —
+  `PATH`, `HOME`, `USER`, `LANG`, `TERM`, `RUST_LOG`, `IRONHERMES_HOME` — that
+  deliberately excludes every `*_API_KEY` and `*_SECRET`, so the worker bootstraps
+  its own key by reading that file. `IRONHERMES_WORKER_BIN` and `IRONHERMES_ROOT_HOME`
+  still reach the worker, but never through this ambient list: both are computed by
+  the spawning process itself and emitted explicitly, for the same reason a
+  credential is excluded from it — a value that selects which binary is exec'd or
+  which vault data dir is opened is the same category as a credential under the rule
+  this allowlist enforces. A test
+  (`crates/ironhermes-kanban/tests/worker_spawn_vault_env.rs::safe_system_vars_matches_the_operator_doc_membership_claim`)
+  asserts this exact count and membership against the shipped `SAFE_SYSTEM_VARS`
+  constant, so this paragraph and the constant fail together if they ever diverge.
+  This is unchanged for every install where the vault is disabled or the
+  `rusty-vault` feature is not compiled in.
+- **Opt-in, per profile:** the vault, at `secret/profiles/<name>/<provider>`. See
+  [Migrating a profile's credential into the vault](#migrating-a-profiles-credential-into-the-vault)
+  below.
 
 **Values are single-quoted, and the writer verifies its own output.** Every value is
 written strong-quoted, and the renderer parses its rendered bytes back through the real
@@ -926,6 +1039,80 @@ check compares against the root `.env` only, and a profile with a still-live `${
 is reported under that heading and skipped for the value comparison (reading it would
 itself resolve the substitution) — fix the live vector and re-run to get the second
 pass.
+
+#### Migrating a profile's credential into the vault
+
+`ironhermes vault migrate-profile <slug> [--dry-run]` moves ONE profile's provider
+credential from its `.env` into the vault at `secret/profiles/<slug>/<provider>`. This
+is a **different command** from `ironhermes vault migrate` (root-scoped, provider API
+keys only) — that command is unchanged and never touches a profile `.env`.
+
+```
+ironhermes vault migrate-profile my-worker            # migrate
+ironhermes vault migrate-profile my-worker --dry-run   # report only, write nothing
+```
+
+**What the worker receives.** A migrated profile's worker never sees the raw credential
+in its spawn environment. It receives a short-TTL, bootstrap-only token — minted fresh
+by the runtime at dispatch time, `renewable: false` — and a local socket path, and reads
+its own credential over that socket exactly once, seconds after spawn. The token's TTL
+is a fixed 60s: generous margin over the worst-case spawn-to-bootstrap window (including
+a macOS Gatekeeper first-launch stall on a freshly built binary), not a session-length
+lease. There is deliberately no re-mint path — a worker that somehow needed to re-read
+after that window cannot. This is narrower than sizing the TTL to the task's own
+duration (which this system leaves unbounded), chosen because the worker's entire
+credential bootstrap is one read, immediately after spawn.
+
+**Ordered flow, safe by ordering.** The vault must be reachable and unsealed BEFORE
+anything is written — a sealed, uninitialized, or unreachable vault aborts with no
+backup, no vault entry, and no `.env` change at all. Only then: a `0600` timestamped
+backup of the FULL original `.env` is written, then the value is written to the vault,
+then — only once that write has succeeded — the key's own line is scrubbed and every
+other line in the file is left byte-for-byte unchanged. The backup path is printed;
+delete it once you've confirmed the profile resolves correctly from the vault.
+**Rollback is manual, by design** — copy the backup back over the profile's `.env`.
+Nothing here deletes the backup or reverts the vault entry automatically.
+
+**If the vault write succeeds but the `.env` rewrite then fails** (a permissions problem
+is the usual cause), the migration reports the credential is now in **two places**: live
+in the vault, and still plaintext in the unscrubbed `.env`. This is verbatim what
+`ironhermes vault migrate-profile`'s own failure message says — it names the backup
+path and gives the two concrete recovery steps: (1) verify the credential resolves
+correctly from the vault for this profile, then (2) remove the plaintext line from the
+`.env` by hand. Nothing is destroyed in this case — the exposure is that the plaintext
+copy persists until you act on it.
+
+**Provider names are not newly constrained by this migration.** A custom provider name
+with uppercase letters or underscores (`My_Provider`, `local_llama`) migrates exactly as
+configured. The only names refused are ones containing a path separator (`/` or `\`),
+the traversal token `..`, a percent sign (`%`), a control character, leading or trailing
+whitespace, an empty name, or a name longer than 128 bytes — no real provider name
+should hit any of those.
+
+**If dispatch refuses, one of these three reasons says why** (verbatim from the
+dispatch gate, except for the bracketed names):
+
+| Reason (verbatim, names bracketed) | Meaning |
+|---|---|
+| `profile "<name>" is configured for provider "<provider>" but no key for that provider resolves from its .env` | Not migrated, and the vault was never consulted (disabled, or a non-`rusty-vault` backend). Add the key to the profile's `.env`, or migrate it. |
+| `profile "<name>" is configured for provider "<provider>" but its vault-backed credential resolution is unreachable (<detail>)` | The vault itself is down — sealed, uninitialized, or otherwise unreachable. Fix the vault; this is NOT a "never migrated" problem. |
+| `profile "<name>" has no key for provider "<provider>" in its .env, and the vault holds no secret for that provider at secret/profiles/<name>/<provider> — run \`ironhermes vault migrate-profile <name>\` or add the key to its .env` | The vault IS reachable, but this profile was never migrated for this provider. Run the migration. |
+
+An operator who cannot tell these apart risks the wrong response — rotating a
+credential that was never exposed, when the real problem is a sealed vault or a profile
+that simply hasn't been migrated yet.
+
+**The vault path is entirely opt-in.** The default install (`vault.enabled: false`) is
+unchanged; everything above only applies to a profile you have explicitly migrated, in a
+deployment that has explicitly enabled the vault.
+
+**Deferred, on record: the two known false negatives in the exposure detector above
+(`profile_audit.rs`'s WR-03 detector) are not fixed independently of this migration.**
+The migration reads every profile `.env` it touches directly (never through the
+substituting parser that produced the exposure this detector looks for), which subsumes
+the same read the detector performs. If the vault-backed credential path is ever
+abandoned, those two false negatives must be fixed on their own — they are not a side
+effect of anything else in this phase.
 
 ### Autonomous Mode (`autonomous:`)
 
@@ -1076,6 +1263,17 @@ tools:
       enabled: false   # opt-in required
     browser:
       enabled: false   # opt-in required
+```
+
+To point the browser toolset at Obscura instead of Chromium once the toolset
+above is enabled, add a `browser:` block (see [Browser](#browser-browser)):
+
+```yaml
+# browser:
+#   backend: obscura                       # chromium (default) | obscura
+#   obscura_path: /path/to/obscura         # or set the OBSCURA_PATH env var
+#   # obscura_stealth: false
+#   # obscura_allow_private_network: false # deny-by-default SSRF guard passthrough
 ```
 
 ### Vault (`vault:`)

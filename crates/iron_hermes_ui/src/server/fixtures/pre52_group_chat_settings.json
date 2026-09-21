@@ -1,0 +1,7 @@
+{
+  "max_rounds": 3,
+  "max_messages": 10,
+  "history_limit": 24,
+  "min_members": 2,
+  "max_members": 6
+}

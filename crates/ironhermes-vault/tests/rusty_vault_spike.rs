@@ -1,5 +1,5 @@
-//! Phase 46.8 Plan 02 — Wave-0 spike proving the REAL `rusty_vault` =0.2.1 embedding API
-//! (RESEARCH Open Question 1) before `RustyVaultStore` is implemented in Plan 03.
+//! Phase 46.8 Plan 02's original Wave-0 spike, re-proven against `rusty_vault` **0.3.1**
+//! (git rev `0922e6d5e6fbe6fd2d909863eca6d583623f4ad7`, Phase 51 Plan 01 — D-01/D-02/D-03).
 //!
 //! D-15: this test embeds NO real secret — only a throwaway placeholder key/value pair
 //! (`secret/providers/spike-key` -> a dummy string). The `tempfile::TempDir` data dir is
@@ -7,65 +7,93 @@
 //!
 //! Feature-gated: only compiles/runs with `--features rusty-vault` (default build never
 //! touches this file or the `rusty_vault`/openssl dependency tree — D-10).
+//!
+//! # Observed `Core` construction sequence (Assumption A1 — SETTLED, not inferred)
+//!
+//! At the pinned rev, `Core` has **no** `Core::new(...)`-then-manual-field-literal shape and
+//! **no** `Core::config(...)` call at all (`fn config(` does not exist anywhere in the 0.3.1
+//! source). The real, confirmed sequence:
+//! 1. Build the `file` physical backend via `storage::new_backend("file", &conf)`.
+//! 2. `Core::new(backend)` — this constructor builds its OWN `AESGCMBarrier` from the same
+//!    backend internally (it absorbs exactly what the 0.2.1 adapter used to build by hand:
+//!    `barrier_aes_gcm::AESGCMBarrier::new(backend.clone())`), plus a fresh `Router` and
+//!    `MountsRouter`. No separate barrier construction is needed or possible from outside.
+//! 3. `.wrap()` — **mandatory, not optional**. It moves the `Core` into an `Arc` and wires
+//!    `Core::self_ptr` (a `Weak<Core>` back-reference) via an `unsafe` raw-pointer round trip.
+//!    `Core::post_unseal()` (invoked from inside every `unseal()` call) does
+//!    `self.self_ptr.upgrade().unwrap()` unconditionally to hand the mounts router a strong
+//!    `Arc<Core>` — calling `init`/`unseal` on a bare, un-wrapped `Core` panics there. There is
+//!    no external lock: `Core`'s fields are `ArcSwap`/`ArcSwapOption` throughout, so the type
+//!    this crate holds is a plain `Arc<Core>`, not `Arc<RwLock<Core>>`.
+//! 4. `inited`, `init`, and `unseal` are now `async fn` (0.2.1 had them sync); `sealed()` stays
+//!    a plain sync `fn`. No explicit `mount()` call for `"secret/"` is needed or possible —
+//!    it is still a DEFAULT `kv` mount, seeded by `post_unseal()`'s `mounts_router.load_or_default`
+//!    the first time `unseal()` succeeds (confirmed again below, unchanged from 0.2.1).
+//!
+//! **`Core::new(backend).wrap()` alone is NOT sufficient — observed by running it, not
+//! inferred.** It leaves `Core::module_manager` empty, so the very first `init()` fails with
+//! `ErrCoreLogicalBackendNoExist` (no `"kv"` logical-backend factory registered for the default
+//! `"secret/"` mount to use). The step `Core::config(...)` used to perform is
+//! `ModuleManager::set_default_modules` (registers Kv + System) plus registering `AuthModule`
+//! (needed for `TokenStore`, which every `client_token` check goes through) — and upstream's own
+//! top-level constructor, `rusty_vault::RustyVault::new(backend, config)` (`src/lib.rs:92-147`),
+//! already does this plus the crate's other built-in feature modules, in the crate's own
+//! canonical order. This spike (and the production adapter) therefore call
+//! `RustyVault::new(backend, None)` and extract its `Arc<Core>` via `rv.core.load_full()` rather
+//! than hand-reimplementing the wiring.
+//!
+//! # Observed `Send` outcome for `Core::handle_request`'s future (Assumption A2 — SETTLED)
+//!
+//! `handle_request_future_send_outcome` below applies `fn assert_send<T: Send>(_: T) {}` to
+//! the literal future `Core::handle_request` returns. **It compiles — the future IS `Send`.**
+//! `self.handlers.load()` returns an `arc_swap::Guard`, held across the internal `.await`
+//! points exactly where 0.2.1 held a `std::sync::RwLockReadGuard` (which made 0.2.1's future
+//! non-`Send`) — but `Guard<T, DefaultStrategy>` is itself `Send`, so this specific blocker is
+//! gone at 0.3.1.
+//!
+//! **CHOSEN STRATEGY — retained `spawn_blocking` + `Handle::block_on` bridge, not a direct
+//! `.await`.** Even though the future is provably `Send` now, `crates/ironhermes-vault/src/
+//! rusty_vault_store.rs`'s `run_request` keeps the exact same blocking-pool bridge it used
+//! against 0.2.1. Rationale (recorded here because Plans 02, 03, 04, 06 and 09 build `Core`
+//! fixtures against whichever answer this file records): the bridge is a *correct superset*
+//! regardless of the `Send` answer, this plan is explicitly scoped to prove EXISTING behavior
+//! unchanged rather than introduce a new async shape, and `tokio::task::block_in_place` — the
+//! one alternative that would let `run_request` skip `spawn_blocking` — is prohibited outright
+//! (it panics inside `iron_hermes_ui`'s per-connection `LocalSet`). A later phase may
+//! reconsider simplifying `run_request` to a direct `.await` now that `Send` is proven, but
+//! that is a deliberate follow-on change, not a byproduct of this migration.
 #![cfg(feature = "rusty-vault")]
 
-use std::{
-    collections::HashMap,
-    path::Path,
-    sync::{Arc, RwLock},
-};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use rusty_vault::{
+    RustyVault,
     core::{Core, SealConfig},
     logical::{Operation, Request},
-    storage::{self, barrier_aes_gcm},
+    storage,
 };
 use serde_json::{Value, json};
 
-/// Construct a fresh, sealed `Core` wired to a `file`-backed physical storage rooted at
-/// `data_dir`, with an AES-GCM encryption barrier over it.
-///
-/// CORRECTED vs RESEARCH's Code-Examples sketch: `Core` has no `Core::new(...)`
-/// constructor and no free-standing `Config`-driven builder for embedded/library mode.
-/// The real, confirmed pattern (mirrors the crate's own `#[cfg(test)]`-only
-/// `test_utils::test_rusty_vault_core_new`, which is NOT visible to downstream crates
-/// since it's gated behind `#[cfg(test)]` in `rusty_vault`'s own `lib.rs` — hence this
-/// local reimplementation) is: build the physical backend + barrier by hand, then
-/// construct `Core { physical, barrier, ..Default::default() }`.
-fn new_core(data_dir: &Path) -> Arc<RwLock<Core>> {
+/// Construct a fresh, sealed `Arc<Core>` wired to a `file`-backed physical storage rooted at
+/// `data_dir`. Mirrors `rusty_vault_store.rs::new_core` exactly (see that file's module doc and
+/// this file's module doc §3a for the full rationale — bare `Core::new(backend).wrap()` leaves
+/// `module_manager` empty and the first `init()` fails) — kept as a local reimplementation here
+/// rather than importing the crate internal, matching this file's role as an independent proof
+/// against the raw upstream API.
+fn new_core(data_dir: &Path) -> Arc<Core> {
     let mut conf: HashMap<String, Value> = HashMap::new();
     conf.insert(
         "path".to_string(),
         Value::String(data_dir.to_string_lossy().into_owned()),
     );
     let backend = storage::new_backend("file", &conf).expect("construct file physical backend");
-    let barrier = barrier_aes_gcm::AESGCMBarrier::new(Arc::clone(&backend));
-    Arc::new(RwLock::new(Core {
-        physical: backend,
-        barrier: Arc::new(barrier),
-        ..Default::default()
-    }))
+    let rv = RustyVault::new(backend, None).expect("construct rusty_vault core");
+    rv.core.load_full()
 }
 
-/// Build a `secret/<rest>` read or write `Request` against the mounted `kv` backend.
-///
-/// CORRECTED vs RESEARCH's sketch: there is no `Core::handle_request`-adjacent
-/// "handle_request against a mounted path" helper to guess at — the real, confirmed
-/// shape is `Request::new(<FULL path including the mount prefix, e.g.
-/// "secret/providers/spike-key">)` with `.operation` set, and for writes `.body` set to
-/// the raw `Map<String, Value>` payload (the `kv` module's `handle_write` reads
-/// `req.body` verbatim, NOT `req.data` — `req.data` is reserved for schema-validated
-/// path fields like `ttl`). `Core::handle_request` internally routes via the mount
-/// table and strips the mount prefix before invoking the backend.
-///
-/// SECOND CORRECTION vs RESEARCH's sketch: every request (even a purely embedded,
-/// no-HTTP-server call) MUST carry a valid `client_token`. After the first
-/// `unseal()`, `post_unseal()` -> `AuthModule::init()` registers `TokenStore` as an
-/// additional `Core.handlers` entry (`core.add_handler(token_store)`); its `pre_route`
-/// hook rejects any request with an empty `client_token` with
-/// `RvError::ErrRequestClientTokenMissing` (confirmed by running this spike without a
-/// token first). The root token returned in `InitResult::root_token` from `init()` is
-/// the correct token for this single-operator embedded posture (D-05) — pass it here.
+/// Build a `secret/<rest>` read or write `Request` against the mounted `kv` backend. Unchanged
+/// from the 0.2.1 spike — `Request`/`Operation`'s shape and the "every request needs
+/// `client_token`" requirement (`TokenStore::pre_route` rejects an empty token) did not move.
 fn write_request(path: &str, value: &str, root_token: &str) -> Request {
     let mut req = Request::new(path);
     req.operation = Operation::Write;
@@ -86,88 +114,71 @@ fn read_request(path: &str, root_token: &str) -> Request {
     req
 }
 
-// THIRD CORRECTION vs RESEARCH's sketch: `Core::handle_request` is `async fn(&self, ...)`
-// but the crate's own reference call site (`http/logical.rs`: `core.read()?.handle_request(&mut
-// r).await?`) holds a `std::sync::RwLockReadGuard` across that `.await` — this is the
-// crate's own confirmed API shape, not a workaround we invented. No genuine executor
-// yield occurs inside `handle_request` for the `file`/mock backends used here (all I/O
-// is synchronous), so this is safe in practice; `clippy::await_holding_lock` cannot see
-// that statically. Plan 03's `RustyVaultStore` will need the same allow (or an
-// equivalent `spawn_blocking` wrapper) wherever it calls `Core::handle_request`.
-#[allow(clippy::await_holding_lock)]
+fn delete_request(path: &str, root_token: &str) -> Request {
+    let mut req = Request::new(path);
+    req.operation = Operation::Delete;
+    req.client_token = root_token.to_string();
+    req
+}
+
+fn list_request(path: &str, root_token: &str) -> Request {
+    let mut req = Request::new(path);
+    req.operation = Operation::List;
+    req.client_token = root_token.to_string();
+    req
+}
+
 #[tokio::test]
-async fn init_unseal_mount_put_get_round_trip_and_reload_persists() {
+async fn init_unseal_mount_put_get_delete_list_round_trip_and_reload_persists() {
     let tmp = tempfile::tempdir().expect("create temp vault data dir");
 
-    // --- init -> unseal (single-operator posture, D-05/RESEARCH Pitfall 6: shares=1,
-    // threshold=1 so unseal() returns Ok(true) on the first and only key) ---
+    // --- construct -> init -> unseal (single-operator posture, D-05/RESEARCH Pitfall 6:
+    // shares=1, threshold=1 so unseal() returns Ok(true) on the first and only key) ---
     let core = new_core(tmp.path());
-    let init_result = {
-        let mut c = core.write().expect("lock core for init");
-        // CORRECTED vs RESEARCH sketch: `config()` must be called explicitly BEFORE
-        // `init()` — it registers the default modules (including the "kv" logical
-        // backend factory via KvModule) and sets `Core.self_ref`, both required later
-        // by `mount()`/`post_unseal()`. Neither `init()` nor `unseal()` calls it
-        // implicitly.
-        c.config(Arc::clone(&core), None).expect("core.config()");
 
-        let seal_config = SealConfig {
-            secret_shares: 1,
-            secret_threshold: 1,
-        };
-        let init_result = c.init(&seal_config).expect("core.init()");
-        assert_eq!(
-            init_result.secret_shares.len(),
-            1,
-            "shares=1/threshold=1 must yield exactly one key share (no Shamir splitting)"
-        );
-
-        let unsealed = c
-            .unseal(&init_result.secret_shares[0])
-            .expect("core.unseal()");
-        assert!(
-            unsealed,
-            "single-share unseal must return Ok(true) on the first call"
-        );
-
-        init_result
+    let seal_config = SealConfig {
+        secret_shares: 1,
+        secret_threshold: 1,
     };
+    let init_result = core.init(&seal_config).await.expect("core.init()");
+    assert_eq!(
+        init_result.secret_shares.len(),
+        1,
+        "shares=1/threshold=1 must yield exactly one key share (no Shamir splitting)"
+    );
 
-    // --- NO manual mount() call ---
-    // CORRECTED vs RESEARCH sketch: RESEARCH's Code-Examples sketch assumed a mount
-    // step (`MountEntry::new("secret", "secret/", "kv", ...)` then `core.mount(&me)`)
-    // was required before "secret/" was usable. In the REAL crate, `DEFAULT_CORE_MOUNTS`
-    // (`mount.rs`) already seeds a `path: "secret/", logical_type: "kv"` entry the very
-    // first time `mounts.load_or_default()` runs inside `post_unseal()` (i.e. on the
-    // first `init()`/`unseal()`). Calling `core.mount(&me)` again for "secret/" fails
-    // with `ErrMountPathExist` (confirmed by running this spike) — "secret/" -> kv is
-    // ALREADY mounted after unseal, with zero extra code. `MountEntry`/`Core::mount`
-    // are still the right API for a CUSTOM path (Plan 03 may still want a
-    // non-default path), but the default "secret/" prefix RESEARCH/PATTERNS chose for
-    // `secret/providers/<name>` needs no explicit mount call at all.
+    let unsealed = core
+        .unseal(&init_result.secret_shares[0])
+        .await
+        .expect("core.unseal()");
+    assert!(
+        unsealed,
+        "single-share unseal must return Ok(true) on the first call"
+    );
 
-    // --- write + read back a throwaway placeholder secret (D-15: no real credential) ---
+    // --- NO manual mount() call --- "secret/" -> kv is a DEFAULT mount, seeded by
+    // `post_unseal()`'s `mounts_router.load_or_default` on the first successful `unseal()`,
+    // unchanged in shape from 0.2.1 (confirmed again here at 0.3.1: a put against
+    // "secret/providers/..." below succeeds with zero mount setup code).
+
     const SPIKE_PATH: &str = "secret/providers/spike-key";
     const SPIKE_VALUE: &str = "spike-placeholder-value";
-
     let root_token = init_result.root_token.clone();
 
+    // --- put ---
     {
-        let c = core.read().expect("lock core for write");
         let mut req = write_request(SPIKE_PATH, SPIKE_VALUE, &root_token);
-        let resp = c
+        let resp = core
             .handle_request(&mut req)
             .await
             .expect("handle_request(write)");
-        // CORRECTED vs RESEARCH sketch: `kv`'s `handle_write` returns `Ok(None)` (no
-        // response body on write) — mirrors typical vault semantics (204 No Content).
         assert!(resp.is_none(), "kv write returns no response body");
     }
 
+    // --- get ---
     {
-        let c = core.read().expect("lock core for read");
         let mut req = read_request(SPIKE_PATH, &root_token);
-        let resp = c
+        let resp = core
             .handle_request(&mut req)
             .await
             .expect("handle_request(read)")
@@ -183,33 +194,72 @@ async fn init_unseal_mount_put_get_round_trip_and_reload_persists() {
         );
     }
 
-    // --- drop this Core, reconstruct a FRESH Core from the SAME data_dir, unseal
-    // again, and prove the `file`-backend + AES-GCM barrier persisted the secret AND
-    // the mount table across the reload (RESEARCH Open Question 2) ---
+    // --- list (before delete: the spike key must be present) ---
+    {
+        let mut req = list_request("secret/providers/", &root_token);
+        let resp = core
+            .handle_request(&mut req)
+            .await
+            .expect("handle_request(list)")
+            .expect("kv list returns Some(Response) when at least one key exists");
+        let data = resp.data.expect("response.data present");
+        let keys = data
+            .get("keys")
+            .and_then(Value::as_array)
+            .expect("keys field present and an array");
+        assert!(
+            keys.iter().any(|k| k.as_str() == Some("spike-key")),
+            "list must include the just-written key, got {keys:?}"
+        );
+    }
+
+    // --- delete ---
+    {
+        let mut req = delete_request(SPIKE_PATH, &root_token);
+        core.handle_request(&mut req)
+            .await
+            .expect("handle_request(delete)");
+    }
+
+    // --- get after delete: must be absent, not an error ---
+    {
+        let mut req = read_request(SPIKE_PATH, &root_token);
+        let resp = core
+            .handle_request(&mut req)
+            .await
+            .expect("handle_request(read) after delete");
+        assert!(
+            resp.is_none(),
+            "a deleted key must read back as no Response, not an error"
+        );
+    }
+
+    // --- drop this Core, reconstruct a FRESH Core from the SAME data_dir, unseal again, and
+    // prove the `file`-backend + AES-GCM barrier persisted the mount table across the reload
+    // (write a fresh value first since the spike key above was deleted) ---
+    let mut req = write_request(SPIKE_PATH, SPIKE_VALUE, &root_token);
+    core.handle_request(&mut req)
+        .await
+        .expect("handle_request(write) before reload");
     drop(core);
 
     let core2 = new_core(tmp.path());
-    {
-        let mut c = core2.write().expect("lock core2 for config/unseal");
-        // Barrier is already initialized (persisted to disk by the first Core) — do
-        // NOT call init() again, it would return ErrBarrierAlreadyInit. config() is
-        // still required (fresh Core -> fresh, empty ModuleManager/self_ref).
-        c.config(Arc::clone(&core2), None).expect("core2.config()");
-        let unsealed = c
-            .unseal(&init_result.secret_shares[0])
-            .expect("core2.unseal()");
-        assert!(unsealed, "reload must unseal with the same key share");
-    }
+    // Barrier is already initialized (persisted to disk by the first Core) — do NOT call
+    // init() again, it would return ErrBarrierAlreadyInit.
+    let unsealed = core2
+        .unseal(&init_result.secret_shares[0])
+        .await
+        .expect("core2.unseal()");
+    assert!(unsealed, "reload must unseal with the same key share");
 
-    // No re-mount call here: `post_unseal()` -> `setup_mounts()` re-registers every
-    // persisted `MountEntry` (including "secret/" -> kv) automatically on unseal.
+    // No re-mount call here: `post_unseal()` re-registers every persisted `MountEntry`
+    // (including "secret/" -> kv) automatically on unseal.
     {
-        let c = core2.read().expect("lock core2 for read");
-        // The root token itself is stored (via TokenStore's own barrier-backed
-        // storage) in the same file-backed data_dir, so it too survives the reload —
-        // reuse the SAME root_token captured from the original init() above.
+        // The root token itself is stored (via TokenStore's own barrier-backed storage) in the
+        // same file-backed data_dir, so it too survives the reload — reuse the SAME
+        // root_token captured from the original init() above.
         let mut req = read_request(SPIKE_PATH, &root_token);
-        let resp = c
+        let resp = core2
             .handle_request(&mut req)
             .await
             .expect("handle_request(read) on reloaded core")
@@ -224,4 +274,81 @@ async fn init_unseal_mount_put_get_round_trip_and_reload_persists() {
             "value must survive a fresh Core reload from the same data_dir (file-backend persistence)"
         );
     }
+}
+
+/// Assumption A2 — see the module doc's "Observed `Send` outcome" section for the full
+/// analysis and the CHOSEN bridging strategy this result feeds into.
+#[tokio::test]
+async fn handle_request_future_send_outcome() {
+    fn assert_send<T: Send>(_: T) {}
+
+    let tmp = tempfile::tempdir().expect("create temp vault data dir");
+    let core = new_core(tmp.path());
+    let seal_config = SealConfig {
+        secret_shares: 1,
+        secret_threshold: 1,
+    };
+    let init_result = core.init(&seal_config).await.expect("core.init()");
+    core.unseal(&init_result.secret_shares[0])
+        .await
+        .expect("core.unseal()");
+
+    let mut req = read_request("secret/providers/send-check", &init_result.root_token);
+    let fut = core.handle_request(&mut req);
+    // Reaching this line means the future compiles as `Send` — see the module doc for what
+    // this does and does not change about `run_request`'s implementation.
+    assert_send(fut);
+}
+
+/// Assumption A2's sync-to-async bridge, the "no runtime at all" branch: proves
+/// `RustyVaultStore::init` (a plain sync `pub fn`) works correctly when called from a thread
+/// that has never entered any tokio runtime — `Handle::try_current()` must return `Err` here
+/// (this is an ordinary `#[test]` fn, not `#[tokio::test]`), exercising
+/// `block_on_admin_call`'s private-runtime fallback rather than its `spawn_blocking` branch.
+#[test]
+fn init_from_outside_any_runtime() {
+    let tmp = tempfile::tempdir().expect("create temp vault data dir");
+    let cfg = ironhermes_vault::RustyVaultConfig {
+        data_dir: tmp.path().join("vault"),
+        unseal_mode: "keyfile".to_string(),
+    };
+
+    ironhermes_vault::RustyVaultStore::init(&cfg).expect(
+        "RustyVaultStore::init must succeed from a plain non-async #[test] fn with no tokio \
+         runtime on this thread",
+    );
+    let store = ironhermes_vault::RustyVaultStore::open(&cfg)
+        .expect("RustyVaultStore::open must also succeed with no runtime on this thread");
+    assert!(
+        !store.is_sealed().expect("is_sealed"),
+        "keyfile mode auto-unseals"
+    );
+}
+
+/// T-51-SC / T-51-02 — the supply-chain anchor for this migration: the dependency must stay
+/// pinned to the exact audited commit `rev`, never a mutable tag, a branch, or a different
+/// commit. Fails if anyone re-points `crates/ironhermes-vault/Cargo.toml` or if the workspace
+/// `Cargo.lock` ever resolves to a different commit.
+#[test]
+fn rusty_vault_pin_is_the_audited_rev() {
+    const AUDITED_REV: &str = "0922e6d5e6fbe6fd2d909863eca6d583623f4ad7";
+
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    let cargo_toml_path = manifest_dir.join("Cargo.toml");
+    let cargo_toml = std::fs::read_to_string(&cargo_toml_path)
+        .unwrap_or_else(|e| panic!("read {cargo_toml_path:?}: {e}"));
+    assert!(
+        cargo_toml.contains(AUDITED_REV),
+        "crates/ironhermes-vault/Cargo.toml must pin rusty_vault's git dependency to the \
+         audited rev {AUDITED_REV}, not a tag, branch, or different commit"
+    );
+
+    let workspace_lock_path = manifest_dir.join("..").join("..").join("Cargo.lock");
+    let cargo_lock = std::fs::read_to_string(&workspace_lock_path)
+        .unwrap_or_else(|e| panic!("read {workspace_lock_path:?}: {e}"));
+    assert!(
+        cargo_lock.contains(AUDITED_REV),
+        "the workspace Cargo.lock must resolve rusty_vault to the audited rev {AUDITED_REV}"
+    );
 }

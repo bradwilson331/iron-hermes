@@ -12,11 +12,13 @@
 //! Member selection validity ([`member_selection_is_valid`]) and the counter
 //! hint text ([`member_selection_hint`]) are pure, disk/DOM-I/O-free
 //! functions so the UI-SPEC State Matrix's 0/1 (invalid) vs. 2-6 (valid)
-//! behavior is directly unit-testable without a renderer. Selection counts
-//! above 6 are unreachable through the UI itself — the member checkbox's
-//! `onchange` handler refuses to grow the selection set past
-//! `GroupChatSettings::default().max_members` — the "disabled-until-valid"
-//! pattern the plan calls for.
+//! behavior is directly unit-testable without a renderer — the caller now
+//! passes in the resolved `min_members`/`max_members` bound (see the review
+//! fix note on [`CreateRoomModal`] below) rather than these functions
+//! reading a hardcoded default themselves. Selection counts above the
+//! resolved `max_members` are unreachable through the UI itself — the
+//! member checkbox's `onchange` handler refuses to grow the selection set
+//! past it — the "disabled-until-valid" pattern the plan calls for.
 //!
 //! Signal-borrow discipline (clippy.toml): every value read from a signal is
 //! extracted BEFORE the `rsx!` block; the write-lock taken to toggle a
@@ -26,15 +28,30 @@
 //! the `.await` itself (mirrors `bot_roster/chat_window.rs`'s `submit_send`
 //! and `profile_shared/create_dialog.rs`'s `submit_create`).
 
+use crate::components::hermes_app::screens::bot_roster::team_pattern_fields::{
+    parse_cycles_input, reconcile_leader_draft, save_is_blocked_by_missing_leader,
+    seed_leader_prompt_text, seed_worker_prompt_text, team_setup_from_draft, CyclesInput,
+    LeaderRadioCell, TeamPatternFields,
+};
 use crate::components::hermes_app::widgets::bot_face::BotFace;
 use crate::protocol::{BotRosterEntry, CreateGroupRoomRequest, GroupChatSettings};
 use crate::server::group_chat_api::create_group_room;
+use crate::server::group_settings_api::load_group_chat_settings;
 use dioxus::prelude::*;
 use std::collections::BTreeSet;
 
-/// Phase 50.2 Plan 01 (UI-SPEC E5): `true` for a selection count within
-/// `[GroupChatSettings::default().min_members, ...max_members]` — 2..=6 for
-/// this plan's shipped defaults. Pure, disk/DOM-I/O-free.
+/// Phase 50.2 Plan 01 (UI-SPEC E5), updated by the phase 52 review fix
+/// (WR-01): `true` for a selection count within `[min_members,
+/// max_members]` — 2..=6 for the shipped defaults, but the caller now
+/// passes in the OPERATOR-PERSISTED bound (loaded via
+/// [`load_group_chat_settings`], falling back to
+/// `GroupChatSettings::default()` while loading/on error) rather than this
+/// fn reading the hardcoded default itself. This mirrors the server's own
+/// `validate_room_members`/`group_chat_settings_for_drive` fallback policy
+/// (`group_chat_store.rs`), which phase 52's D-18 fix made authoritative —
+/// before that fix client and server both read the hardcoded default, so
+/// they silently agreed; this fn no longer reads a default of its own so it
+/// cannot drift out of sync with the server again. Pure, disk/DOM-I/O-free.
 //
 // Under `--all-features`, `legacy-shell` swaps the reachable root component
 // to `WarpHermes`, leaving `HermesApp` (and therefore `BotRoster`,
@@ -43,34 +60,23 @@ use std::collections::BTreeSet;
 // (non-legacy-shell) build. Same pre-existing pattern as
 // `bot_roster/delete_confirm.rs`'s `confirm_input_matches`.
 #[allow(dead_code)]
-pub(crate) fn member_selection_is_valid(count: usize) -> bool {
-    let settings = GroupChatSettings::default();
-    count >= settings.min_members as usize && count <= settings.max_members as usize
+pub(crate) fn member_selection_is_valid(count: usize, min_members: usize, max_members: usize) -> bool {
+    count >= min_members && count <= max_members
 }
 
-/// Phase 50.2 Plan 01 (UI-SPEC Copywriting Contract): the live counter hint
-/// below the member checklist — `{n} of 6 selected — need at least 2` below
-/// the minimum, `{n} of 6 selected` once valid. Pure, disk/DOM-I/O-free.
+/// Phase 50.2 Plan 01 (UI-SPEC Copywriting Contract), updated by the phase
+/// 52 review fix (WR-01): the live counter hint below the member
+/// checklist — `{n} of {max} selected — need at least {min}` below the
+/// minimum, `{n} of {max} selected` once valid. `min_members`/`max_members`
+/// are the same operator-persisted bound [`member_selection_is_valid`] now
+/// takes — see its doc note above. Pure, disk/DOM-I/O-free.
 #[allow(dead_code)] // see member_selection_is_valid's doc note above
-pub(crate) fn member_selection_hint(count: usize) -> String {
-    let max = GroupChatSettings::default().max_members;
-    if member_selection_is_valid(count) {
-        format!("{count} of {max} selected")
+pub(crate) fn member_selection_hint(count: usize, min_members: usize, max_members: usize) -> String {
+    if member_selection_is_valid(count, min_members, max_members) {
+        format!("{count} of {max_members} selected")
     } else {
-        format!("{count} of {max} selected — need at least 2")
+        format!("{count} of {max_members} selected — need at least {min_members}")
     }
-}
-
-/// Phase 50.2 Plan 17 (G-50.2-2a): the shared selection ceiling — extracted
-/// from this file's own inline `GroupChatSettings::default().max_members`
-/// read so `EditMembersModal` has a bound source that is not a second
-/// `GroupChatSettings` read. `CreateRoomModal`'s toggle guard below now
-/// calls this fn instead of reading the settings record inline; the
-/// observable behavior is unchanged (same default value, same source of
-/// truth). Pure, disk/DOM-I/O-free.
-#[allow(dead_code)] // see member_selection_is_valid's doc note above
-pub(crate) fn member_selection_max() -> usize {
-    GroupChatSettings::default().max_members as usize
 }
 
 /// Phase 50.2 Plan 01: the Create Room modal. `roster_entries` is the SAME
@@ -91,16 +97,44 @@ pub fn CreateRoomModal(
     let mut selected: Signal<BTreeSet<String>> = use_signal(BTreeSet::new);
     let mut creating: Signal<bool> = use_signal(|| false);
     let mut error: Signal<Option<String>> = use_signal(|| None);
+    // Phase 52 (D-09 create half): a brand-new room's team draft — a fresh
+    // room has no persisted leader, so `reconcile_leader_draft`'s
+    // persisted-leader parameter is always `None` at every call site below.
+    let mut team_toggle: Signal<bool> = use_signal(|| false);
+    let mut leader: Signal<Option<String>> = use_signal(|| None);
+    let cycles_text: Signal<String> = use_signal(String::new);
+    let leader_prompt_text: Signal<String> = use_signal(|| seed_leader_prompt_text(None));
+    let worker_prompt_text: Signal<String> = use_signal(|| seed_worker_prompt_text(None));
+    // Phase 52 review fix (WR-01): resolve the operator-persisted
+    // member-count bound the same way `TeamPatternFields` already resolves
+    // `max_cycles` — via `use_resource` + `load_group_chat_settings()`,
+    // falling back to `GroupChatSettings::default()` while loading/on
+    // error, matching the server's own fallback policy in
+    // `validate_room_members`/`group_chat_settings_for_drive`. ALL hooks
+    // register unconditionally on every render (GatewayScopeSelector
+    // discipline).
+    let settings_resource = use_resource(move || async move { load_group_chat_settings().await });
 
     // ---- Derived values (read BEFORE rsx!, clippy.toml discipline). ----
     let name_val = room_name.read().clone();
     let selected_val = selected.read().clone();
     let selected_count = selected_val.len();
     let is_creating = *creating.read();
-    let can_submit = member_selection_is_valid(selected_count) && !is_creating;
-    let hint = member_selection_hint(selected_count);
+    let is_team = *team_toggle.read();
+    let leader_val = leader.read().clone();
+    let cycles_parsed = parse_cycles_input(&cycles_text.read());
+    let resolved_settings = match settings_resource() {
+        Some(Ok(settings)) => settings,
+        _ => GroupChatSettings::default(),
+    };
+    let min_members = resolved_settings.min_members as usize;
+    let max_members = resolved_settings.max_members as usize;
+    let can_submit = member_selection_is_valid(selected_count, min_members, max_members)
+        && !is_creating
+        && !save_is_blocked_by_missing_leader(is_team, leader_val.as_deref())
+        && !matches!(cycles_parsed, CyclesInput::Invalid);
+    let hint = member_selection_hint(selected_count, min_members, max_members);
     let error_val = error.read().clone();
-    let max_members = member_selection_max();
 
     let submit = move |_| {
         if !can_submit {
@@ -108,12 +142,23 @@ pub fn CreateRoomModal(
         }
         let name = room_name.read().clone();
         let members: Vec<String> = selected.read().iter().cloned().collect();
+        let team = team_setup_from_draft(
+            *team_toggle.read(),
+            leader.read().as_deref(),
+            parse_cycles_input(&cycles_text.read()),
+            &leader_prompt_text.read(),
+            &worker_prompt_text.read(),
+        );
         creating.set(true);
         error.set(None);
         let mut creating_sig = creating;
         let mut error_sig = error;
         spawn(async move {
-            let result = create_group_room(CreateGroupRoomRequest { name, members }).await;
+            // Phase 52 (D-09): `team` carries the operator's draft team
+            // setup, or `None` for a plain peer room — TeamPatternFields
+            // (Plan 06) is what fills it in.
+            let result =
+                create_group_room(CreateGroupRoomRequest { name, members, team }).await;
             // Fresh write-lock, acquired only after the await resolves.
             creating_sig.set(false);
             match result {
@@ -148,7 +193,14 @@ pub fn CreateRoomModal(
                         value: "{name_val}",
                         oninput: move |evt| room_name.set(evt.value()),
                     }
-                    label { class: "kn-modal-label", "MEMBERS (2–6)" }
+                    if is_team {
+                        div { style: "display: flex; flex-direction: row; align-items: center; gap: var(--sp-2);",
+                            label { class: "kn-modal-label", style: "flex: 1; margin-top: 0;", "MEMBERS (2–6)" }
+                            label { class: "kn-modal-label", style: "margin-top: 0;", "LEADER" }
+                        }
+                    } else {
+                        label { class: "kn-modal-label", "MEMBERS (2–6)" }
+                    }
                     div { class: "kn-room-member-list",
                         for entry in roster_entries.iter().filter(|e| !e.is_live).cloned() {
                             {
@@ -166,12 +218,31 @@ pub fn CreateRoomModal(
                                             disabled: is_creating,
                                             checked: is_selected,
                                             onchange: move |_| {
-                                                let mut set = selected.write();
-                                                if set.contains(&bot_name_for_toggle) {
-                                                    set.remove(&bot_name_for_toggle);
-                                                } else if set.len() < max_members {
-                                                    set.insert(bot_name_for_toggle.clone());
+                                                {
+                                                    let mut set = selected.write();
+                                                    if set.contains(&bot_name_for_toggle) {
+                                                        set.remove(&bot_name_for_toggle);
+                                                    } else if set.len() < max_members {
+                                                        set.insert(bot_name_for_toggle.clone());
+                                                    }
                                                 }
+                                                // Phase 52 (D-09/Round 1 codex HIGH): a
+                                                // brand-new room has no persisted leader
+                                                // (`None`), so unchecking the draft leader
+                                                // only ever clears the stale pointer — it
+                                                // never turns the toggle off here (that is
+                                                // EditMembersModal's D-07 demotion case).
+                                                let selection_now = selected.read().clone();
+                                                let current_leader = leader.read().clone();
+                                                let current_toggle = *team_toggle.read();
+                                                let (new_leader, new_toggle) = reconcile_leader_draft(
+                                                    None,
+                                                    &selection_now,
+                                                    current_leader.as_deref(),
+                                                    current_toggle,
+                                                );
+                                                leader.set(new_leader);
+                                                team_toggle.set(new_toggle);
                                             },
                                         }
                                         BotFace {
@@ -182,10 +253,23 @@ pub fn CreateRoomModal(
                                             image_id: avatar_image_id,
                                         }
                                         span { class: "kn-room-member-row", "{bot_name}" }
+                                        LeaderRadioCell {
+                                            bot_name: bot_name.clone(),
+                                            leader,
+                                            team_toggle,
+                                            checked: is_selected,
+                                        }
                                     }
                                 }
                             }
                         }
+                    }
+                    TeamPatternFields {
+                        team_toggle,
+                        cycles_text,
+                        leader_prompt_text,
+                        worker_prompt_text,
+                        disabled: is_creating,
                     }
                     div { class: "kn-modal-hint--info", "{hint}" }
                     if let Some(err) = error_val {
@@ -221,27 +305,36 @@ mod tests {
 
     #[test]
     fn member_selection_is_valid_rejects_zero() {
-        assert!(!member_selection_is_valid(0));
+        assert!(!member_selection_is_valid(0, 2, 6));
     }
 
     #[test]
     fn member_selection_is_valid_rejects_one() {
-        assert!(!member_selection_is_valid(1));
+        assert!(!member_selection_is_valid(1, 2, 6));
     }
 
     #[test]
     fn member_selection_is_valid_accepts_two() {
-        assert!(member_selection_is_valid(2));
+        assert!(member_selection_is_valid(2, 2, 6));
     }
 
     #[test]
     fn member_selection_is_valid_accepts_six() {
-        assert!(member_selection_is_valid(6));
+        assert!(member_selection_is_valid(6, 2, 6));
     }
 
     #[test]
     fn member_selection_is_valid_rejects_seven() {
-        assert!(!member_selection_is_valid(7));
+        assert!(!member_selection_is_valid(7, 2, 6));
+    }
+
+    // Phase 52 review fix (WR-01): the bound is now the CALLER's resolved
+    // value, not a hardcoded default — a non-default persisted bound must
+    // be honoured exactly like the server's `validate_room_members` does.
+    #[test]
+    fn member_selection_is_valid_honours_a_non_default_persisted_bound() {
+        assert!(!member_selection_is_valid(4, 2, 3), "4 exceeds a persisted max_members of 3");
+        assert!(member_selection_is_valid(3, 2, 3), "3 is within a persisted max_members of 3");
     }
 
     // -------------------------------------------------------------------
@@ -250,28 +343,30 @@ mod tests {
 
     #[test]
     fn member_selection_hint_below_minimum_states_the_constraint() {
-        assert_eq!(member_selection_hint(0), "0 of 6 selected — need at least 2");
-        assert_eq!(member_selection_hint(1), "1 of 6 selected — need at least 2");
+        assert_eq!(
+            member_selection_hint(0, 2, 6),
+            "0 of 6 selected — need at least 2"
+        );
+        assert_eq!(
+            member_selection_hint(1, 2, 6),
+            "1 of 6 selected — need at least 2"
+        );
     }
 
     #[test]
     fn member_selection_hint_valid_selection_has_no_constraint_suffix() {
-        assert_eq!(member_selection_hint(2), "2 of 6 selected");
-        assert_eq!(member_selection_hint(6), "6 of 6 selected");
+        assert_eq!(member_selection_hint(2, 2, 6), "2 of 6 selected");
+        assert_eq!(member_selection_hint(6, 2, 6), "6 of 6 selected");
     }
 
-    // -------------------------------------------------------------------
-    // member_selection_max — Phase 50.2 Plan 17 (G-50.2-2a): the extracted
-    // bound source. Asserting it equals the settings default's maximum
-    // means a future settings-default change cannot leave this constant
-    // stale.
-    // -------------------------------------------------------------------
-
+    // Phase 52 review fix (WR-01): the hint text reflects the CALLER's
+    // resolved bound, not a hardcoded default.
     #[test]
-    fn member_selection_max_equals_the_settings_defaults_maximum() {
+    fn member_selection_hint_reflects_a_non_default_persisted_bound() {
         assert_eq!(
-            member_selection_max(),
-            GroupChatSettings::default().max_members as usize
+            member_selection_hint(1, 2, 3),
+            "1 of 3 selected — need at least 2"
         );
+        assert_eq!(member_selection_hint(3, 2, 3), "3 of 3 selected");
     }
 }

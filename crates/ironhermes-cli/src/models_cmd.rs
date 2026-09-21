@@ -57,7 +57,7 @@ async fn cmd_list() -> Result<()> {
         format!("fetched {}", latest)
     };
 
-    registry.merge_cache(cache.into_metadata_map());
+    registry.merge_partial_cache(cache.into_partial_metadata_map());
     let models = registry.all_models();
 
     print!("{}", render_model_list(&models, &cache_status));
@@ -142,7 +142,8 @@ async fn cmd_fetch() -> Result<()> {
     println!("{}", "Fetching model metadata...".dimmed());
     println!("{}", "  Querying models.dev...".dimmed());
 
-    let (entries, fetch_result) = fetch_all().await;
+    let config = ironhermes_core::config::Config::load().unwrap_or_default();
+    let (entries, fetch_result) = fetch_all(&config).await;
 
     // Report per-source results
     match fetch_result.models_dev_count {
@@ -173,10 +174,45 @@ async fn cmd_fetch() -> Result<()> {
         }
     }
 
-    // Check for total failure
-    if fetch_result.models_dev_count.is_none() && fetch_result.openrouter_count.is_none() {
+    // Phase 50.5 (D-08): one line per probed provider — model count or
+    // error — plus a drift line per configured id absent from that
+    // provider's served list (D-11).
+    if !fetch_result.provider_probes.is_empty() {
+        println!("{}", "  Querying configured providers...".dimmed());
+    }
+    for probe in &fetch_result.provider_probes {
+        match (probe.model_count, &probe.error) {
+            (Some(n), _) => println!("  {}: {} models received", probe.provider, n),
+            (None, Some(e)) => {
+                println!("  {}", format!("{}: failed - {}", probe.provider, e).yellow())
+            }
+            (None, None) => {}
+        }
+        for drifted in &probe.drifted_ids {
+            println!(
+                "  {}",
+                format!(
+                    "{}: config names \"{}\" but the endpoint serves {} other ids",
+                    probe.provider,
+                    drifted,
+                    probe.model_count.unwrap_or(0)
+                )
+                .yellow()
+            );
+        }
+    }
+
+    // Check for total failure — curated sources AND every provider probe.
+    let every_provider_failed = fetch_result
+        .provider_probes
+        .iter()
+        .all(|p| p.model_count.is_none());
+    if fetch_result.models_dev_count.is_none()
+        && fetch_result.openrouter_count.is_none()
+        && every_provider_failed
+    {
         eprintln!(
-            "{} Fetch failed: both sources returned errors. Check network and OPENROUTER_API_KEY.",
+            "{} Fetch failed: all sources returned errors. Check network and OPENROUTER_API_KEY.",
             "Error:".red().bold()
         );
         return Err(anyhow::anyhow!("All fetch sources failed"));
@@ -198,9 +234,11 @@ async fn cmd_fetch() -> Result<()> {
         }
     }
 
-    // Save to disk
+    // Phase 50.5 (D-08's named trap): load-merge-save, never a whole-file
+    // overwrite — a harvest written by another surface must survive this.
     let entry_count = entries.len();
-    let cache = ModelsCache { entries };
+    let mut cache = ModelsCache::load();
+    cache.merge_entries(entries);
     cache.save()?;
 
     println!("{}", "Fetch Complete".bold().cyan());
@@ -245,7 +283,7 @@ async fn cmd_info(model: &str) -> Result<()> {
         "static table".to_string()
     };
 
-    registry.merge_cache(cache.into_metadata_map());
+    registry.merge_partial_cache(cache.into_partial_metadata_map());
 
     match registry.lookup(model) {
         Some(metadata) => {

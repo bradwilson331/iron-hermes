@@ -16,11 +16,25 @@
 //! This module is the ONE shared resolution point every production call site now routes
 //! through (`ironhermes_core::resolve_vault_config`), plus a pure `_with_home` variant for
 //! unit/integration testing without mutating `std::env`.
+//!
+//! # Phase 51 UAT F-04: the sentinel must resolve against the ROOT home, never a pivoted one
+//!
+//! `resolve_vault_config` originally filled the sentinel with
+//! `get_hermes_home().join("vault")` — the CURRENT `IRONHERMES_HOME`. A kanban worker runs
+//! with `IRONHERMES_HOME` pivoted to its own PROFILE directory (`resolve_and_set_profile`,
+//! `ironhermes-cli/src/main.rs`), so under a worker this silently meant "a vault *inside this
+//! profile*" — an address this system never creates. There is only ever ONE vault, at the
+//! operator's root; profiles have PATHS inside it (`secret/profiles/<slug>/…`), never vaults
+//! of their own. `resolve_vault_config` now fills the sentinel with
+//! `get_root_hermes_home().join("vault")` instead — `get_root_hermes_home` reads
+//! `IRONHERMES_ROOT_HOME` (stashed by `resolve_and_set_profile` before it pivots
+//! `IRONHERMES_HOME`) and falls back to `get_hermes_home` for every unpivoted process, so this
+//! is a no-op change for the gateway, bare CLI, cron-runner, and the embedded UI server.
 
 use std::path::Path;
 
 use crate::config::Config;
-use crate::constants::get_hermes_home;
+use crate::constants::get_root_hermes_home;
 
 /// Resolve `config.vault`, filling the empty-`PathBuf` `rusty_vault.data_dir` sentinel with
 /// `home.join("vault")`. Pure — takes `home` as a parameter instead of reading
@@ -42,12 +56,16 @@ pub fn resolve_vault_config_with_home(
     vault_cfg
 }
 
-/// Resolve `config.vault` against the real runtime home directory
-/// ([`crate::get_hermes_home`] — `IRONHERMES_HOME` or `~/.ironhermes`). Every production
-/// `open_store`/`RustyVaultStore::open` call site (server, cron-runner, CLI) should route
-/// through this so they all agree on the same on-disk vault location as `vault init`.
+/// Resolve `config.vault` against the operator's ROOT runtime home directory
+/// ([`crate::get_root_hermes_home`] — `IRONHERMES_ROOT_HOME` when set by a
+/// `--profile` pivot, else `IRONHERMES_HOME`/`~/.ironhermes`). Every production
+/// `open_store`/`RustyVaultStore::open` call site (server, cron-runner, CLI, and
+/// a profile-pivoted kanban worker) should route through this so they all agree
+/// on the same on-disk vault location as `vault init` — there is only ever ONE
+/// vault, never a per-profile one (Phase 51 UAT F-04; see
+/// [`crate::constants::IRONHERMES_ROOT_HOME_ENV`] for the full mechanism).
 pub fn resolve_vault_config(config: &Config) -> ironhermes_vault::VaultConfig {
-    resolve_vault_config_with_home(config, &get_hermes_home())
+    resolve_vault_config_with_home(config, &get_root_hermes_home())
 }
 
 #[cfg(test)]

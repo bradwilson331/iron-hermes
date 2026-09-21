@@ -1745,6 +1745,7 @@ mod tests {
                 web_config_write_enabled: write_enabled,
                 web_process_control_enabled: false,
                 remote_blueprint_run_enabled: false,
+                remote_loop_enabled: false,
             },
             ..Config::default()
         }
@@ -2368,7 +2369,7 @@ mod tests {
     fn slack_present_entry_carries_its_real_fields_into_the_dto() {
         let cfg = PlatformGatewayConfig {
             enabled: true,
-            token: Some("xoxb-secret-slack-bot-token".to_string()),
+            token: Some("xoxb-secret-slack-bot-token".to_string()), // secret-scan:allow
             app_token: Some("xapp-secret-slack-app-token".to_string()),
             whitelist: vec!["U12345".to_string()],
             home_channel_id: Some("c-slack".to_string()),
@@ -2583,7 +2584,7 @@ mod tests {
         let mut cfg = seeded_config(true);
         let slack = PlatformGatewayConfig {
             enabled: true,
-            token: Some("xoxb-should-never-move".to_string()),
+            token: Some("xoxb-should-never-move".to_string()), // secret-scan:allow
             app_token: Some("xapp-should-never-move".to_string()),
             ..Default::default()
         };
@@ -2611,7 +2612,7 @@ mod tests {
             .expect("slack entry must survive its own write");
         assert_eq!(
             reloaded_slack.token,
-            Some("xoxb-should-never-move".to_string())
+            Some("xoxb-should-never-move".to_string()) // secret-scan:allow
         );
         assert_eq!(
             reloaded_slack.app_token,

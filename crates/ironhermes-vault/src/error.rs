@@ -36,4 +36,24 @@ pub enum VaultError {
     /// caller-supplied identifier (never a secret VALUE, D-08/D-15 safe to format).
     #[error("invalid vault key: {0}")]
     InvalidKey(String),
+
+    /// Phase 51 Task 3 (D-08 layer 2, T-51-51): a request was authenticated against a real
+    /// token, but access was refused — either the presented token is unrecognized
+    /// (`rusty_vault`'s own `TokenStore::check_token`) or a recognized token's policies do
+    /// not grant the requested path (`PolicyStore::post_auth`'s ACL evaluation). Both surface
+    /// as the identical `RvError::ErrPermissionDenied` at the pinned rev, so this one variant
+    /// covers both — the message never reveals which case fired, and never the presented
+    /// token. Distinguishable from [`VaultError::Sealed`]/[`VaultError::NotInitialized`]
+    /// ("unreachable") and from `Ok(None)` (absent leaf, the one legitimately empty outcome).
+    #[error("vault request denied — token unrecognized or policy does not grant this operation")]
+    Denied,
+
+    /// Reserved for Plan 03 (D-15): the caller's profile-scoped token has expired. This plan
+    /// (51-09) never constructs this variant — Plan 03's token-minting/TTL work wires it in on
+    /// top of the same taxonomy, so "unreachable" ([`VaultError::Sealed`] /
+    /// [`VaultError::NotInitialized`]), "denied" ([`VaultError::Denied`]), and "expired"
+    /// (this variant) stay three outcomes distinguishable by variant rather than expiry being
+    /// folded into `Denied`.
+    #[error("vault token expired — request a new profile-scoped token")]
+    TokenExpired,
 }

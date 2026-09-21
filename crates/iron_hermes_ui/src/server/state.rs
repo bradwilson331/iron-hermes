@@ -44,7 +44,13 @@ pub struct PendingApproval {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub config: Arc<Config>,
+    /// Phase 50.4 Plan 01 Task 2 (D-08/D-14): hot-swappable — `AppState::
+    /// apply_config_now` replaces the inner `Arc<Config>` on a live reload so
+    /// every subsequent `AppState::config()` read sees the new config. Same
+    /// `Arc<std::sync::RwLock<Arc<T>>>` shape as `AgentRuntime`'s own
+    /// `config_handle` (Task 1 of this plan) — `std::sync::RwLock`, not
+    /// tokio's, so the accessor stays callable from sync contexts.
+    config_handle: Arc<std::sync::RwLock<Arc<Config>>>,
     pub command_router: Arc<CommandRouter>,
     pub state_store: Arc<std::sync::Mutex<StateStore>>,
     /// Phase 46.6 Plan 03 (D-02/D-03): dedicated `artifacts.db` store for the
@@ -55,7 +61,8 @@ pub struct AppState {
     /// Read by `serve_artifact` (artifact_route.rs) and `list_artifacts`
     /// (api.rs); written by the `artifact` Tool (ironhermes-tools, Plan 02).
     pub artifact_store: Arc<std::sync::Mutex<ArtifactStore>>,
-    pub resolver: Arc<ProviderResolver>,
+    /// Phase 50.4 Plan 01 Task 2 (D-08/D-14): same hot-swap shape as `config_handle`.
+    resolver_handle: Arc<std::sync::RwLock<Arc<ProviderResolver>>>,
     pub runtime: Arc<AgentRuntime>,
     pub memory_manager: Option<Arc<tokio::sync::Mutex<MemoryManager>>>,
     /// Per-session nudge turn counter. Arc<Mutex<HashMap>> mirrors the gateway
@@ -430,13 +437,13 @@ impl AppState {
         let turn_registry = Arc::new(ironhermes_core::TurnRegistry::new());
 
         Ok(Self {
-            config: Arc::new(config),
+            config_handle: Arc::new(std::sync::RwLock::new(Arc::new(config))),
             command_router,
             state_store,
             // Phase 46.6 Plan 03 (D-02/D-03): dedicated artifacts.db store,
             // constructed above alongside state_store.
             artifact_store,
-            resolver: Arc::new(resolver),
+            resolver_handle: Arc::new(std::sync::RwLock::new(Arc::new(resolver))),
             runtime: Arc::new(runtime),
             memory_manager,
             nudge_turns: Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -514,7 +521,7 @@ impl AppState {
                 .create_session(
                     session_id,
                     &Platform::Web.to_string(),
-                    Some(&self.config.model.default),
+                    Some(&self.config().model.default),
                     None,
                     None,
                     None,
@@ -655,12 +662,12 @@ impl AppState {
         // forced-approval-on-remote branch reachable on this surface once an operator
         // selects `terminal.backend: ssh`.
         let terminal_guard = Arc::new(ironhermes_hooks::DangerousCommandGuardrail::from_config(
-            &self.config.dangerous_commands,
+            &self.config().dangerous_commands,
         ));
-        let gated_audit_log = Arc::new(ironhermes_core::AuditLog::load(self.config.audit.clone()));
-        let is_remote_backend = self.config.terminal.backend == "ssh";
-        let forward_env_nonempty = !self.config.terminal.forward_env.is_empty();
-        let yolo = self.config.autonomous.yolo;
+        let gated_audit_log = Arc::new(ironhermes_core::AuditLog::load(self.config().audit.clone()));
+        let is_remote_backend = self.config().terminal.backend == "ssh";
+        let forward_env_nonempty = !self.config().terminal.forward_env.is_empty();
+        let yolo = self.config().autonomous.yolo;
         // This surface has no separate "chat_id" concept distinct from the session —
         // the session id doubles as the audit/prompt chat identifier here.
         let gated_chat_id = session_id.to_string();
@@ -764,8 +771,8 @@ impl AppState {
 
         // Phase 32 LEARN-01: periodic memory nudge (turn-based, post-response).
         // Fires AFTER run_turn() succeeded and AFTER result.appended is persisted.
-        let nudge_interval = self.config.memory.nudge_interval;
-        if nudge_interval > 0 && self.config.memory.memory_enabled {
+        let nudge_interval = self.config().memory.nudge_interval;
+        if nudge_interval > 0 && self.config().memory.memory_enabled {
             let should_fire = {
                 let mut map = self.nudge_turns.lock().unwrap_or_else(|e| e.into_inner());
                 let count = map.entry(session_id.to_string()).or_insert(0);
@@ -782,7 +789,7 @@ impl AppState {
                     let mgr_clone = Arc::clone(mgr);
                     // Source the client from the runtime (no new client build needed).
                     let client_clone = self.runtime.client().clone();
-                    let config_clone = (*self.config).clone();
+                    let config_clone = (*self.config()).clone();
                     tokio::spawn(async move {
                         ironhermes_agent::nudge::spawn_nudge_review(
                             messages_snapshot,
@@ -829,8 +836,8 @@ impl AppState {
         // field.  Personality overlays are not applied on the web surface in the current
         // implementation — cmd_personality is not dispatched from the web WS handler.
         // No snapshot needed; mid-turn /personality is therefore safe by absence.
-        let mut prompt_builder = PromptBuilder::new(&self.config.model.default, "web")
-            .with_provider(&self.config.model.provider)
+        let mut prompt_builder = PromptBuilder::new(&self.config().model.default, "web")
+            .with_provider(&self.config().model.provider)
             .load_context(&std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
         // Phase 28.1 Plan 03: source skill_registry and merged_tools from the runtime.
         prompt_builder.set_skill_registry(self.runtime.skill_registry().clone());
@@ -846,7 +853,7 @@ impl AppState {
         if let Some(ref manager) = self.memory_manager {
             prompt_builder.set_memory_manager(manager.clone());
         }
-        prompt_builder.set_user_profile_enabled(self.config.memory.user_profile_enabled);
+        prompt_builder.set_user_profile_enabled(self.config().memory.user_profile_enabled);
         // Phase 27.1.1-gap-02: populate active_toolsets so the system-prompt skills
         // catalog text reflects the same enabled set as the API tool schemas.
         prompt_builder.set_active_toolsets(self.runtime.merged_tools().enabled_toolset_names());
@@ -859,7 +866,7 @@ impl AppState {
                 .unwrap_or_default(),
         );
         // Phase 38.1 (D-04/D-05): freeze session timezone into PromptBuilder Timestamp slot.
-        prompt_builder.set_timezone(self.config.agent.timezone.clone());
+        prompt_builder.set_timezone(self.config().agent.timezone.clone());
         prompt_builder.load_memory().await;
         prompt_builder.load_skills();
         let mut system_msg = prompt_builder.build_system_message();
@@ -944,6 +951,130 @@ impl AppState {
         attachment_ids: &[String],
     ) -> Vec<ironhermes_gateway::multimodal::LocalAttachment> {
         resolve_local_attachments_from_store(&self.state_store, session_id, attachment_ids)
+    }
+
+    /// The current config. Returns an owned `Arc` rather than a borrow
+    /// because the config is hot-swappable (Phase 50.4 D-08/D-14) — callers
+    /// that cache the returned `Arc` across a reload keep observing the OLD
+    /// config, so read it fresh at each use site instead of holding it in
+    /// long-lived state.
+    pub fn config(&self) -> Arc<Config> {
+        match self.config_handle.read() {
+            Ok(guard) => guard.clone(),
+            // A panic in another reader/writer must not take the config down
+            // with it — the value behind the lock is a plain `Arc` and is
+            // always consistent, so recovering the poisoned inner value is
+            // safe.
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// The current provider resolver. Same hot-swap contract as [`Self::config`].
+    pub fn resolver(&self) -> Arc<ProviderResolver> {
+        match self.resolver_handle.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
+    }
+
+    /// Phase 50.4 Plan 01 (D-08/D-09/D-14): the "APPLY CONFIG NOW" seam.
+    /// Reloads the live `AgentRuntime`'s config/resolver (and rebuilds its
+    /// cached main client) so the NEXT chat turn reads the new
+    /// provider/model/credential all the way through to the outbound LLM
+    /// call — not merely the UI label — and then publishes the SAME pair
+    /// onto `AppState`'s own handles so the UI-facing echoes (the DEFAULT
+    /// marker in `list_models`, the system-prompt header, the Models screen's
+    /// default display) move with it.
+    ///
+    /// Order matters (D-09 across both halves): the runtime reload is the
+    /// fallible step and MUST complete first — `?` propagates its error
+    /// before either write guard here is taken, so a runtime failure leaves
+    /// `AppState` on the OLD pair too, exactly like the runtime itself.
+    pub async fn apply_config_now(
+        &self,
+        config: Arc<Config>,
+        resolver: Arc<ProviderResolver>,
+    ) -> Result<()> {
+        self.runtime
+            .reload_config_and_resolver(config.clone(), resolver.clone())
+            .await?;
+
+        match self.config_handle.write() {
+            Ok(mut guard) => *guard = config,
+            Err(poisoned) => *poisoned.into_inner() = config,
+        }
+        match self.resolver_handle.write() {
+            Ok(mut guard) => *guard = resolver,
+            Err(poisoned) => *poisoned.into_inner() = resolver,
+        }
+
+        Ok(())
+    }
+}
+
+/// Phase 50.4 Plan 01 Task 2 (D-09): pure decision of whether a candidate
+/// config/resolver pair could be PUBLISHED by `apply_config_now` — the SAME
+/// fallibility surface `AgentRuntime::reload_config_and_resolver` gates on
+/// (`build_main_client`), split out so this is unit-testable WITHOUT
+/// `global_app_state()` or the network. Styled after `resolve_provider_or_fallback`
+/// (`server/api.rs`, ~line 505) — a pure fn over already-resolved values, no
+/// I/O of its own. `#[cfg(test)]`-only: unlike `resolve_provider_or_fallback`
+/// (which a real production server fn also calls), this exists purely as a
+/// test seam onto the same fallibility surface — there is no non-test caller.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn config_resolver_pair_is_publishable(resolver: &ProviderResolver) -> bool {
+    ironhermes_agent::build_main_client(resolver).is_ok()
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod plan_50_4_01_apply_config_publishable_tests {
+    use super::config_resolver_pair_is_publishable;
+    use ironhermes_core::config::{Config, ProviderConfig};
+    use ironhermes_core::ProviderResolver;
+
+    /// D-09 buildable case: a provider with a real base_url is publishable.
+    #[test]
+    fn publishable_when_the_main_provider_has_a_real_base_url() {
+        let mut config = Config::default();
+        config.providers.insert(
+            "plan_50_4_ok_provider".to_string(),
+            ProviderConfig {
+                base_url: Some("https://api.example.test".to_string()),
+                default_model: Some("model-x".to_string()),
+                ..ProviderConfig::default()
+            },
+        );
+        config.model.provider = "plan_50_4_ok_provider".to_string();
+        let resolver =
+            ProviderResolver::build(&config).expect("resolver builds with a real base_url");
+
+        assert!(
+            config_resolver_pair_is_publishable(&resolver),
+            "a provider with a real base_url must be publishable"
+        );
+    }
+
+    /// D-09 unbuildable case: `ProviderResolver::build` deliberately lets an
+    /// unrecognized/misconfigured `model.provider` through (its own comment:
+    /// "allow build to succeed... [failure caught at] resolve_for_main()
+    /// time") — a `providers.<name>` entry with no `base_url` is exactly this
+    /// case, and is what `apply_config_now`/`reload_config_and_resolver`
+    /// must refuse to publish.
+    #[test]
+    fn not_publishable_when_the_main_provider_has_no_base_url() {
+        let mut config = Config::default();
+        config.providers.insert(
+            "plan_50_4_broken_provider".to_string(),
+            ProviderConfig::default(),
+        );
+        config.model.provider = "plan_50_4_broken_provider".to_string();
+        let resolver = ProviderResolver::build(&config)
+            .expect("resolver still builds — the failure surfaces later, at client-build time");
+
+        assert!(
+            !config_resolver_pair_is_publishable(&resolver),
+            "a provider with no base_url must NOT be publishable (D-09)"
+        );
     }
 }
 
