@@ -340,4 +340,4 @@ Set `IRONHERMES_PROFILE` in the environment (or in the systemd unit / `Environme
 
 ## License
 
-MIT — Authors: Nous Research.
+MIT — Authors: Wilson Tech.
