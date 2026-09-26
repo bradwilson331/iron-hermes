@@ -620,6 +620,15 @@ fn is_remote_session(lookup: &dyn Fn(&str) -> Option<String>) -> bool {
 /// (`write_native_clipboard`) ignores it. This keeps the truncation and
 /// failure-handling tests independent of a real `pbcopy` binary and of the
 /// test host's OS.
+///
+/// `#[cfg(any(target_os = "macos", test))]` because the only non-test caller
+/// (`write_native_clipboard`) is itself `#[cfg(target_os = "macos")]`-gated:
+/// on a non-macOS BUILD that caller compiles to the stub and this function
+/// has zero callers, so `dead_code` fires and CI's global `-D warnings`
+/// (ci.yml:11, all jobs `ubuntu-latest`) turns it into a hard error. The
+/// `test` arm keeps the OS-independent `cat`-based tests below compiling on
+/// every platform.
+#[cfg(any(target_os = "macos", test))]
 fn run_clipboard_command(binary: &str, text: &str) -> (NativeClipboardOutcome, Vec<u8>) {
     use std::io::{Read, Write};
     use std::process::{Command, Stdio};
