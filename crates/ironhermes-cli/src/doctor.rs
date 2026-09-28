@@ -9,6 +9,9 @@ use colored::Colorize;
 use ironhermes_core::config::{
     Config, WEB_ANSWER_PROVIDERS, WEB_EXTRACT_PROVIDERS, WEB_SEARCH_PROVIDERS,
 };
+use ironhermes_core::provider::{
+    canonical_api_key_env_name, provider_key_guard_allows, ProviderResolver,
+};
 use ironhermes_tools::credentials::ToolCredentials;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
@@ -52,15 +55,13 @@ pub async fn run_doctor_check(browser: bool) -> Result<()> {
     let env_path = Config::env_path();
     print_check(".env file", env_path.exists());
 
-    // Check API keys
-    print_check(
-        "OpenRouter API key",
-        std::env::var("OPENROUTER_API_KEY").is_ok(),
-    );
-    print_check(
-        "Anthropic API key",
-        std::env::var("ANTHROPIC_API_KEY").is_ok(),
-    );
+    // API keys are reported per-provider by the coverage section below, which
+    // resolves through `ProviderResolver` (env -> config -> vault). Two
+    // hardcoded `std::env::var` checks for OPENROUTER/ANTHROPIC used to sit
+    // here; they were removed because they covered only 2 of the configured
+    // providers AND could contradict the section beneath them — a key supplied
+    // via config.yaml or the vault reads as MISSING to `std::env::var` while
+    // the resolver, and the running agent, both see it.
 
     // Phase 41.3 Plan 09 (D-08/D-19): web-tool provider coverage — resolved
     // from the SAME env -> config -> vault snapshot the runtime resolves at
@@ -74,6 +75,20 @@ pub async fn run_doctor_check(browser: bool) -> Result<()> {
     for msg in &vault_failed_checks {
         print_check(msg, false);
     }
+    // Phase 53 follow-up (venice-401 debug): per-provider API-key coverage for
+    // EVERY configured provider, not just the two canonical built-ins checked
+    // above. A `venice.ai` misconfiguration was invisible to `doctor` precisely
+    // because nothing here looked past OPENROUTER/ANTHROPIC — and venice.ai was
+    // the ACTIVE provider.
+    let (provider_resolver, resolver_failed_checks) =
+        resolve_doctor_provider_resolver(&doctor_config).await;
+    for msg in &resolver_failed_checks {
+        print_check(msg, false);
+    }
+    if let Some(resolver) = provider_resolver.as_ref() {
+        print_provider_key_coverage(&doctor_config, resolver);
+    }
+
     let tool_credentials = std::sync::Arc::new(tool_credentials);
     // `register_defaults()` builds `WebSearchTool`/`WebAnswerTool` from
     // whatever snapshot is installed on the registry at call time —
@@ -666,6 +681,159 @@ fn is_vision_capable_model(model: &str) -> bool {
         || (m.contains("qwen") && m.contains("vl"))
 }
 
+// -----------------------------------------------------------------------
+// Per-provider API-key coverage (venice-401 debug follow-up)
+//
+// `doctor` previously checked only OPENROUTER_API_KEY and ANTHROPIC_API_KEY
+// via direct `std::env::var`. Every other provider — including a custom one
+// selected as `model.provider` — was unaudited, so an unusable key on the
+// ACTIVE provider produced a fully green `doctor` run.
+// -----------------------------------------------------------------------
+
+/// Build the resolver `doctor` reports provider coverage from, applying the
+/// vault tier when one is configured.
+///
+/// Mirrors [`resolve_doctor_credentials`]'s discipline exactly: a sealed or
+/// unopenable vault degrades to an env/config-only answer plus a failed check
+/// line, never a panic or a propagated `Err`, and the error value is NEVER
+/// formatted — only the backend name is named, so no wrapped context string
+/// can leak secret material.
+async fn resolve_doctor_provider_resolver(
+    config: &Config,
+) -> (Option<ProviderResolver>, Vec<String>) {
+    let mut resolver = match ProviderResolver::build(config) {
+        Ok(r) => r,
+        Err(_e) => {
+            // Never format `_e`: resolver build errors quote config values.
+            return (
+                None,
+                vec![
+                    "Provider resolver: could not be built from config — \
+                     per-provider key coverage unavailable"
+                        .to_string(),
+                ],
+            );
+        }
+    };
+
+    if !config.vault.enabled {
+        return (Some(resolver), Vec::new());
+    }
+
+    match ironhermes_vault::open_store(&crate::vault_cmd::resolve_vault_config(config)) {
+        Ok(store) => {
+            if resolver.apply_vault_fallback(store.as_ref()).await.is_err() {
+                return (
+                    Some(resolver),
+                    vec![format!(
+                        "Vault ({}): provider keys resolved from env/config tiers only",
+                        config.vault.backend
+                    )],
+                );
+            }
+            (Some(resolver), Vec::new())
+        }
+        Err(_e) => (
+            Some(resolver),
+            vec![format!(
+                "Vault ({}): failed to open the configured backend — provider keys \
+                 resolved from env/config tiers only",
+                config.vault.backend
+            )],
+        ),
+    }
+}
+
+/// Print one line per configured provider saying whether its API key resolved.
+///
+/// Resolution comes from [`ProviderResolver`] — the same env -> config -> vault
+/// snapshot the runtime resolves at startup — so this section cannot disagree
+/// with what the model actually sees. That is the precedent the web-tool
+/// coverage section sets, and the reason this does not read `std::env::var`.
+///
+/// Keylessness is judged by [`provider_key_guard_allows`], the runtime's OWN
+/// guard, so a loopback endpoint (ollama / atomic / a local llama) reports
+/// healthy rather than as a missing key — matching whether the agent will
+/// actually refuse to boot on it. A whitespace-only key counts as absent,
+/// which is what that guard already encodes.
+/// Build the per-provider coverage lines as `(label, ok)` pairs.
+///
+/// Split out from [`print_provider_key_coverage`] so the decision logic is
+/// unit-testable without capturing stdout — the same split this file already
+/// uses for `gateway_log_lines` / `print_gateway_log_status`.
+fn provider_key_coverage_lines(
+    config: &Config,
+    resolver: &ProviderResolver,
+) -> Vec<(String, bool)> {
+    let mut names = resolver.endpoint_names();
+    names.sort();
+    let main = resolver.main_provider().to_string();
+    let mut out = Vec::new();
+
+    for name in names {
+        let Some(endpoint) = resolver.resolve(&name) else {
+            continue;
+        };
+        // Mark the provider an ordinary chat turn will actually use, so a
+        // broken ACTIVE provider cannot be mistaken for a dormant one.
+        let active = if name == main { " [ACTIVE]" } else { "" };
+
+        if provider_key_guard_allows(endpoint.api_key.as_deref(), &endpoint.base_url) {
+            let how = if endpoint
+                .api_key
+                .as_deref()
+                .is_some_and(|k| !k.trim().is_empty())
+            {
+                "key resolved".to_string()
+            } else {
+                // The guard passed with no key, which it only does for a
+                // loopback host.
+                format!("keyless, local endpoint {}", endpoint.base_url)
+            };
+            out.push((format!("provider {name}{active} — {how}"), true));
+        } else {
+            // Name the variable the operator should set. `api_key_env` wins;
+            // otherwise the canonical built-in name; otherwise there is no
+            // name to report and the operator must declare one.
+            let hint = config
+                .providers
+                .get(&name)
+                .and_then(|p| p.api_key_env.clone())
+                .or_else(|| canonical_api_key_env_name(&name).map(str::to_string))
+                .map(|v| format!("set {v}"))
+                .unwrap_or_else(|| format!("set providers.{name}.api_key_env"));
+            out.push((
+                format!("provider {name}{active} — no usable key ({hint})"),
+                false,
+            ));
+        }
+    }
+    out
+}
+
+/// Print one line per configured provider saying whether its API key resolved.
+///
+/// Resolution comes from [`ProviderResolver`] — the same env -> config -> vault
+/// snapshot the runtime resolves at startup — so this section cannot disagree
+/// with what the model actually sees. That is the precedent the web-tool
+/// coverage section sets, and the reason this does not read `std::env::var`.
+///
+/// Keylessness is judged by [`provider_key_guard_allows`], the runtime's OWN
+/// guard, so a loopback endpoint (ollama / atomic / a local llama) reports
+/// healthy rather than as a missing key — matching whether the agent will
+/// actually refuse to boot on it. A whitespace-only key counts as absent,
+/// which is what that guard already encodes.
+fn print_provider_key_coverage(config: &Config, resolver: &ProviderResolver) {
+    let lines = provider_key_coverage_lines(config, resolver);
+    if lines.is_empty() {
+        return;
+    }
+    println!("Provider API-key coverage:");
+    for (label, ok) in lines {
+        print_check(&label, ok);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,6 +842,102 @@ mod tests {
 
     use ironhermes_core::config::Config;
     use secrecy::SecretString;
+
+    // -------------------------------------------------------------------
+    // Per-provider key coverage (venice-401 debug follow-up).
+    //
+    // These assert the DECISION logic, not the formatting: a provider with a
+    // resolvable key is healthy, a keyless LOOPBACK provider is healthy (the
+    // runtime waives the key there), and a keyless remote provider is not —
+    // and names the variable to set.
+    // -------------------------------------------------------------------
+
+    /// Build a `Config` with the given providers, so the resolver has real
+    /// endpoints to report on.
+    fn coverage_config(entries: &[(&str, Option<&str>, &str)], main: &str) -> Config {
+        use ironhermes_core::config::ProviderConfig;
+        let mut config = Config::default();
+        for (name, key_env, base_url) in entries {
+            config.providers.insert(
+                (*name).to_string(),
+                ProviderConfig {
+                    base_url: Some((*base_url).to_string()),
+                    api_key_env: key_env.map(|s| s.to_string()),
+                    ..Default::default()
+                },
+            );
+        }
+        config.model.provider = main.to_string();
+        config
+    }
+
+    fn line_for<'a>(lines: &'a [(String, bool)], provider: &str) -> &'a (String, bool) {
+        lines
+            .iter()
+            .find(|(l, _)| l.contains(&format!("provider {provider} ")))
+            .unwrap_or_else(|| panic!("no coverage line for {provider}: {lines:?}"))
+    }
+
+    #[test]
+    fn keyless_loopback_provider_is_reported_healthy() {
+        // A local endpoint needs no key — the runtime's own guard waives it,
+        // so doctor must not cry MISSING and send the operator hunting for a
+        // variable that should not exist.
+        let config = coverage_config(
+            &[("localllm", None, "http://127.0.0.1:1337/v1")],
+            "localllm",
+        );
+        let resolver = ProviderResolver::build(&config).expect("resolver builds");
+        let lines = provider_key_coverage_lines(&config, &resolver);
+        let (label, ok) = line_for(&lines, "localllm");
+        assert!(ok, "keyless loopback must be healthy: {label}");
+        assert!(
+            label.contains("keyless"),
+            "must say WHY it is healthy: {label}"
+        );
+    }
+
+    #[test]
+    fn keyless_remote_provider_is_flagged_and_names_the_variable() {
+        // The venice-401 case: a remote provider with no resolvable key. The
+        // operator needs the variable NAME, not just a red line.
+        let config = coverage_config(
+            &[("acme", Some("ACME_DOES_NOT_EXIST_IN_ENV"), "https://api.acme.test/v1")],
+            "acme",
+        );
+        let resolver = ProviderResolver::build(&config).expect("resolver builds");
+        let lines = provider_key_coverage_lines(&config, &resolver);
+        let (label, ok) = line_for(&lines, "acme");
+        assert!(!ok, "keyless remote provider must be flagged: {label}");
+        assert!(
+            label.contains("ACME_DOES_NOT_EXIST_IN_ENV"),
+            "must name the env var to set: {label}"
+        );
+    }
+
+    #[test]
+    fn the_active_provider_is_marked() {
+        // A broken ACTIVE provider must be distinguishable from a dormant
+        // one — that distinction is the whole reason the venice failure was
+        // hard to spot.
+        let config = coverage_config(
+            &[
+                ("acme", Some("ACME_ABSENT"), "https://api.acme.test/v1"),
+                ("other", Some("OTHER_ABSENT"), "https://api.other.test/v1"),
+            ],
+            "acme",
+        );
+        let resolver = ProviderResolver::build(&config).expect("resolver builds");
+        let lines = provider_key_coverage_lines(&config, &resolver);
+        assert!(
+            line_for(&lines, "acme").0.contains("[ACTIVE]"),
+            "the main provider must be marked: {lines:?}"
+        );
+        assert!(
+            !line_for(&lines, "other").0.contains("[ACTIVE]"),
+            "a non-main provider must NOT be marked: {lines:?}"
+        );
+    }
 
     #[test]
     fn is_vision_capable_model_true_cases() {

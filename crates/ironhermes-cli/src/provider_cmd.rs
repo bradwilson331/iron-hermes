@@ -13,7 +13,7 @@ use ironhermes_core::{
     commands::provider_display::{
         ProviderRow, render_provider_list, render_provider_list_json, render_provider_show,
     },
-    config_setter, profile,
+    config_setter,
 };
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -35,15 +35,60 @@ pub enum ProviderSubcommand {
     Disable { name: String },
 }
 
-/// T-26-03: validate provider names using the Phase 24/25 slug validator.
+/// Maximum provider-name length, matching the profile validator's bound.
+const PROVIDER_NAME_MAX_LEN: usize = 64;
+
+/// T-26-03: validate a provider name. This is the FIRST call in every
+/// state-changing path — traversal and injection are rejected BEFORE any
+/// config write.
 ///
-/// Reuses `profile::validate_profile_name` which enforces `[a-z0-9][a-z0-9-]*`.
-/// This is the FIRST call in every state-changing path — any path traversal or
-/// invalid character is rejected BEFORE any config write.
+/// This used to delegate to `profile::validate_profile_name`, which enforces
+/// `[a-z0-9][a-z0-9-]*` and therefore forbids dots. But a provider name is a
+/// `providers` MAP KEY, not a profile slug, and dotted keys are legitimate:
+/// `venice.ai` could not be passed to `provider show/test/enable/disable` at
+/// all, even while being the configured `model.provider`. So the rule is now
+/// `[a-z0-9][a-z0-9.-]*` — the profile rule plus `.`.
+///
+/// The security properties that mattered are kept explicitly rather than
+/// inherited:
+/// - `/` and `\` are still excluded by the character allow-list, so a name can
+///   never introduce a path separator.
+/// - `..` is rejected outright. Redundant while separators are excluded, but a
+///   bare `..` is still the parent-directory token if a future caller ever puts
+///   a provider name in a path, and this is the chokepoint where that is cheap
+///   to deny.
+/// - A trailing `.` or `-` is rejected, so a name cannot produce an empty or
+///   dot-only YAML key segment.
 pub fn validate_provider_name(name: &str) -> Result<String> {
-    profile::validate_profile_name(name)
-        .map(|s| s.to_string())
-        .map_err(|e| anyhow::anyhow!("invalid provider name '{}': {}", name, e))
+    let reject = |msg: &str| anyhow::anyhow!("invalid provider name '{}': {}", name, msg);
+
+    if name.is_empty() {
+        return Err(reject("name is empty"));
+    }
+    if name.len() > PROVIDER_NAME_MAX_LEN {
+        return Err(reject(&format!(
+            "exceeds {PROVIDER_NAME_MAX_LEN} characters"
+        )));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+    {
+        return Err(reject(
+            "must match [a-z0-9][a-z0-9.-]* (lowercase alphanumeric, dashes, dots)",
+        ));
+    }
+    let first = name.chars().next().expect("non-empty checked above");
+    if !(first.is_ascii_lowercase() || first.is_ascii_digit()) {
+        return Err(reject("must start with a lowercase letter or digit"));
+    }
+    if name.ends_with('.') || name.ends_with('-') {
+        return Err(reject("must not end with '.' or '-'"));
+    }
+    if name.contains("..") {
+        return Err(reject("must not contain '..'"));
+    }
+    Ok(name.to_string())
 }
 
 pub async fn handle_provider_command(cmd: ProviderSubcommand, _profile_name: &str) -> Result<()> {
@@ -247,9 +292,12 @@ pub async fn cmd_provider_test(hermes_home: &Path, name: &str) -> Result<()> {
 pub async fn cmd_provider_enable(hermes_home: &Path, name: &str) -> Result<()> {
     // T-26-03: validate BEFORE any config write.
     let validated = validate_provider_name(name)?;
-    config_setter::config_set(
+    // Segment API, not the dotted one: a dotted provider name such as
+    // `venice.ai` would make `providers.venice.ai.disabled` split into four
+    // segments and silently write the WRONG nesting.
+    config_setter::config_set_segments(
         hermes_home,
-        &format!("providers.{}.disabled", validated),
+        &["providers", validated.as_str(), "disabled"],
         "false",
     )
     .with_context(|| format!("failed to enable provider {}", validated))?;
@@ -265,9 +313,12 @@ pub async fn cmd_provider_enable(hermes_home: &Path, name: &str) -> Result<()> {
 pub async fn cmd_provider_disable(hermes_home: &Path, name: &str) -> Result<()> {
     // T-26-03: validate BEFORE any config write.
     let validated = validate_provider_name(name)?;
-    config_setter::config_set(
+    // Segment API, not the dotted one: a dotted provider name such as
+    // `venice.ai` would make `providers.venice.ai.disabled` split into four
+    // segments and silently write the WRONG nesting.
+    config_setter::config_set_segments(
         hermes_home,
-        &format!("providers.{}.disabled", validated),
+        &["providers", validated.as_str(), "disabled"],
         "true",
     )
     .with_context(|| format!("failed to disable provider {}", validated))?;
@@ -373,6 +424,75 @@ mod tests {
             yaml.contains("disabled: true"),
             "expected disabled: true in config; got: {}",
             yaml
+        );
+    }
+
+    // Dotted provider names (venice-401 follow-up).
+    //
+    // `venice.ai` is a legitimate `providers` map key and was rejected because
+    // this validator delegated to the PROFILE slug rule. These pin the widened
+    // rule AND the traversal properties that must survive widening.
+
+    #[test]
+    fn validate_provider_name_accepts_dotted_names() {
+        for name in ["venice.ai", "api.example.co", "z-ai.v2"] {
+            assert!(
+                validate_provider_name(name).is_ok(),
+                "dotted provider name '{name}' must be accepted — it is a config \
+                 map key, not a profile slug"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_provider_name_still_rejects_traversal_after_allowing_dots() {
+        // Allowing '.' must not admit the parent-directory token.
+        for bad in ["..", "../etc/passwd", "a..b", "..venice", "venice..ai"] {
+            assert!(
+                validate_provider_name(bad).is_err(),
+                "'{bad}' contains '..' and must be rejected"
+            );
+        }
+        // Separators stay excluded by the character allow-list.
+        for bad in ["a/b", "a\\b"] {
+            assert!(
+                validate_provider_name(bad).is_err(),
+                "'{bad}' contains a path separator and must be rejected"
+            );
+        }
+        // A name may not start with '.' nor end with '.' or '-', so it can
+        // never yield an empty or dot-only YAML key segment.
+        for bad in [".venice", "venice.", "venice-"] {
+            assert!(
+                validate_provider_name(bad).is_err(),
+                "'{bad}' must be rejected"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn enable_writes_a_dotted_provider_under_one_key_not_nested() {
+        // The regression the segment API exists to prevent: via the dotted
+        // config_set, `providers.venice.ai.disabled` would split four ways and
+        // create providers -> venice -> ai -> disabled.
+        let tmp = tempfile::TempDir::new().unwrap();
+        cmd_provider_enable(tmp.path(), "venice.ai")
+            .await
+            .expect("enable venice.ai");
+        let yaml = std::fs::read_to_string(tmp.path().join("config.yaml")).unwrap();
+
+        let doc: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let providers = doc
+            .get("providers")
+            .and_then(|p| p.as_mapping())
+            .expect("providers mapping exists");
+        assert!(
+            providers.contains_key(serde_yaml::Value::String("venice.ai".into())),
+            "the provider must live under the single key 'venice.ai': {yaml}"
+        );
+        assert!(
+            !providers.contains_key(serde_yaml::Value::String("venice".into())),
+            "must NOT have split into a nested 'venice' key: {yaml}"
         );
     }
 

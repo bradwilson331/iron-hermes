@@ -85,9 +85,29 @@ fn get_at(doc: &serde_yaml::Value, keys: &[&str]) -> Option<String> {
 /// Creates the file if it doesn't exist. Creates intermediate mappings as needed.
 /// Returns the old value as a String if the key existed previously, or None if new.
 pub fn config_set(hermes_home: &Path, dotted_path: &str, value: &str) -> Result<Option<String>> {
+    let keys: Vec<&str> = dotted_path.split('.').collect();
+    config_set_segments(hermes_home, &keys, value)
+}
+
+/// Set a config value at an explicit key PATH, bypassing dot-splitting.
+///
+/// Why this exists: [`config_set`] splits its path on `.`, so a key segment
+/// that itself contains a dot cannot be addressed through it. A provider named
+/// `venice.ai` is a legitimate `providers` map key, but
+/// `config_set(.., "providers.venice.ai.disabled", ..)` would create
+/// `providers -> venice -> ai -> disabled` — silently writing the wrong
+/// nesting rather than failing. Callers holding already-validated segments
+/// (`["providers", name, "disabled"]`) use this instead.
+///
+/// [`config_set`] now delegates here after splitting, so both entry points
+/// share one implementation and dotted callers are unaffected.
+pub fn config_set_segments(
+    hermes_home: &Path,
+    keys: &[&str],
+    value: &str,
+) -> Result<Option<String>> {
     let cfg_path = hermes_home.join("config.yaml");
     let mut doc = load_doc(&cfg_path)?;
-    let keys: Vec<&str> = dotted_path.split('.').collect();
     // Coerce common scalar types: bool, integer, otherwise string.
     let leaf = if let Ok(b) = value.parse::<bool>() {
         serde_yaml::Value::Bool(b)
@@ -96,7 +116,7 @@ pub fn config_set(hermes_home: &Path, dotted_path: &str, value: &str) -> Result<
     } else {
         serde_yaml::Value::String(value.to_string())
     };
-    let old = set_at(&mut doc, &keys, leaf)?;
+    let old = set_at(&mut doc, keys, leaf)?;
     save_doc(&cfg_path, &doc)?;
     Ok(old)
 }

@@ -149,8 +149,26 @@ pub fn audit_profiles_at(profiles_root: &Path, root_env_path: &Path) -> Vec<Prof
                 if value.is_empty() {
                     continue; // two empty values matching means nothing
                 }
+                // Same-name match is legitimate inheritance (D-07), not an exploit.
+                //
+                // Checked ONCE, up front, rather than only per-iteration: when the
+                // root .env stores ONE value under TWO names (e.g. OPENAI_API_KEY and
+                // VOICE_TOOLS_OPENAI_KEY holding the same key), a profile that
+                // legitimately inherits `OPENAI_API_KEY` still collides with the OTHER
+                // root name on value. The per-iteration `root_key != key` guard skips
+                // only the same-name entry, so the alias was reported as a cross-name
+                // dereference and every such profile showed as EXPOSED — telling the
+                // operator to rotate credentials on no evidence at all.
+                //
+                // If the value is already explained by same-name inheritance, no
+                // different-name match can be evidence of anything.
+                if root_pairs
+                    .iter()
+                    .any(|(root_key, root_value)| root_key == key && root_value == value)
+                {
+                    continue;
+                }
                 for (root_key, root_value) in &root_pairs {
-                    // Same-name match is legitimate inheritance (D-07), not an exploit.
                     if root_key != key && root_value == value {
                         persisted.push(Exposure::PersistedRootValue {
                             key: key.clone(),
@@ -272,6 +290,54 @@ mod tests {
             audit(&tmp).is_empty(),
             "a single-quoted ${{...}} is literal to dotenvy and must not be flagged"
         );
+    }
+
+    /// Root .env holding ONE value under TWO names (the real-world shape:
+    /// OPENAI_API_KEY and VOICE_TOOLS_OPENAI_KEY carrying the same key).
+    fn setup_aliased_root(profiles: &[(&str, &str)]) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write(
+            &tmp.path().join(".env"),
+            &format!(
+                "OPENAI_API_KEY={ROOT_SECRET}\nVOICE_TOOLS_OPENAI_KEY={ROOT_SECRET}\n"
+            ),
+        );
+        for (name, env) in profiles {
+            write(&tmp.path().join("profiles").join(name).join(".env"), env);
+        }
+        tmp
+    }
+
+    /// Regression: legitimate same-name inheritance must not be reported as a
+    /// cross-name dereference merely because the root aliases that value under a
+    /// second name. This fired on 13 profiles at once and told the operator to
+    /// ROTATE credentials on no evidence whatsoever.
+    #[test]
+    fn an_aliased_root_value_does_not_make_same_name_inheritance_look_exposed() {
+        let tmp =
+            setup_aliased_root(&[("inheritor", &format!("OPENAI_API_KEY='{ROOT_SECRET}'\n"))]);
+        let findings = audit(&tmp);
+        assert!(
+            findings.is_empty(),
+            "same-name inheritance is legitimate (D-07) and must not be flagged just \
+             because the root stores the same value under a second name: {findings:?}"
+        );
+    }
+
+    /// The suppression must be narrow: an alias in the root must NOT blind the
+    /// detector to a value persisted under a name the profile has no business
+    /// holding.
+    #[test]
+    fn an_aliased_root_does_not_blind_the_detector_to_a_real_exposure() {
+        let tmp =
+            setup_aliased_root(&[("victim", &format!("OPENROUTER_API_KEY='{ROOT_SECRET}'\n"))]);
+        let findings = audit(&tmp);
+        assert_eq!(
+            findings.len(),
+            1,
+            "a third-name match is still a real exposure: {findings:?}"
+        );
+        assert_eq!(findings[0].profile, "victim");
     }
 
     /// S2: the dereference already landed — profile value == root value, different name.
